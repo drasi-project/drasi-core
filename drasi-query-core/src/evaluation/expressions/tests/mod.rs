@@ -1,0 +1,157 @@
+use serde_json::json;
+
+use crate::{
+    evaluation::{context::QueryVariables, variable_value::VariableValue, InstantQueryClock},
+    in_memory_index::in_memory_result_index::InMemoryResultIndex,
+};
+
+use super::*;
+
+mod arithmetic;
+mod comparison;
+mod cypher_scalar;
+mod date;
+mod datetime;
+mod duration;
+mod list_construction;
+mod list_indexing;
+mod list_reduce;
+mod list_tail;
+mod logical;
+mod numeric;
+mod time;
+
+#[tokio::test]
+async fn evaluate_property_access() {
+    let expr = "o.Name";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+
+    let function_registry = Arc::new(FunctionRegistry::new());
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+
+    let mut variables = QueryVariables::new();
+
+    variables.insert("o".into(), VariableValue::from(json!({"Name" : "foo"})));
+    {
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::String(String::from("foo"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn evaluate_case() {
+    let expr = "CASE
+    WHEN $param1 = 'a' THEN 1
+    WHEN $param1 = 'b' THEN 2
+    ELSE 3
+  END";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+
+    let function_registry = Arc::new(FunctionRegistry::new());
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+
+    let mut variables = QueryVariables::new();
+
+    variables.insert("param1".into(), VariableValue::String(String::from("a")));
+    {
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::Integer(Integer::from(1))
+        );
+    }
+
+    variables.insert("param1".into(), VariableValue::String(String::from("b")));
+    {
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::Integer(Integer::from(2))
+        );
+    }
+
+    variables.insert("param1".into(), VariableValue::String(String::from("z")));
+    {
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::Integer(Integer::from(3))
+        );
+    }
+}
+
+#[tokio::test]
+async fn evaluate_case_match() {
+    let expr = "CASE $param1
+    WHEN 'a' THEN 1
+    WHEN 'b' THEN 2
+    ELSE 3
+  END";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+
+    let function_registry = Arc::new(FunctionRegistry::new());
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+
+    let mut variables = QueryVariables::new();
+
+    variables.insert("param1".into(), VariableValue::String(String::from("a")));
+    {
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::Integer(Integer::from(1))
+        );
+    }
+
+    variables.insert("param1".into(), VariableValue::String(String::from("b")));
+    {
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::Integer(Integer::from(2))
+        );
+    }
+
+    variables.insert("param1".into(), VariableValue::String(String::from("z")));
+    {
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::Integer(Integer::from(3))
+        );
+    }
+}
