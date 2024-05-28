@@ -24,6 +24,9 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
+    - name: toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+
     - name: Cache Cargo registry
       uses: actions/cache@v4
       with:
@@ -51,4 +54,4 @@ jobs:
     - name: Run tests
       env:
         REDIS_URL: redis://localhost:6379
-      run: cargo test -p shared-tests
+      run: cargo test
