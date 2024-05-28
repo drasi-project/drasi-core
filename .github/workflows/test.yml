@@ -51,4 +51,4 @@ jobs:
     - name: Run tests
       env:
         REDIS_URL: redis://localhost:6379
-      run: cargo test
+      run: cargo test -p shared-tests
