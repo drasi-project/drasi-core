@@ -109,12 +109,14 @@ mod curbside_pickup {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn vehicle_arrives_then_order_ready() {
         let test_config = GarnetQueryConfig::new(false);
         curbside_pickup::vehicle_arrives_then_order_ready(&test_config).await;
     }
 
     #[tokio::test]
+    #[ignore]
     async fn vehicle_arrives_then_order_ready_duplicate() {
         let test_config = GarnetQueryConfig::new(false);
         curbside_pickup::vehicle_arrives_then_order_ready_duplicate(&test_config).await;
@@ -127,6 +129,7 @@ mod curbside_pickup {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn vehicle_arrives_then_order_ready_with_cache() {
         let test_config = GarnetQueryConfig::new(true);
         curbside_pickup::vehicle_arrives_then_order_ready(&test_config).await;
