@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use drasi_query_ast::ast::Query;
-use drasi_query_core::query::QueryBuilder;
+use drasi_core::query::QueryBuilder;
 
 pub mod index;
 pub mod sequence_counter;

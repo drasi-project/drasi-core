@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use drasi_query_ast::ast;
-use drasi_query_core::models::SourceMiddlewareConfig;
+use drasi_core::models::SourceMiddlewareConfig;
 use serde_json::json;
 
 pub fn remap_query() -> ast::Query {

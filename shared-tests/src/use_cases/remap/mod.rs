@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use drasi_query_middleware::map::MapFactory;
+use drasi_middleware::map::MapFactory;
 use serde_json::json;
 
-use drasi_query_core::{
+use drasi_core::{
     evaluation::{context::PhaseEvaluationContext, variable_value::VariableValue},
     middleware::MiddlewareTypeRegistry,
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},

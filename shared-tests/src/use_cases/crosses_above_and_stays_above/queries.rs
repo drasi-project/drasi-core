@@ -1,5 +1,5 @@
 use drasi_query_ast::ast;
-use drasi_query_core::models::{QueryJoin, QueryJoinKey};
+use drasi_core::models::{QueryJoin, QueryJoinKey};
 
 /**
 apiVersion: query.reactive-graph.io/v1

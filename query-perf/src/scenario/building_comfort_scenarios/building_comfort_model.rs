@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use drasi_query_core::{
+use drasi_core::{
     evaluation::variable_value::{float::Float, VariableValue},
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
 };

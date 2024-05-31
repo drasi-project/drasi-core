@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::QueryTestConfig;
 use drasi_query_ast::ast;
-use drasi_query_core::{
+use drasi_core::{
     evaluation::{context::PhaseEvaluationContext, variable_value::VariableValue},
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::QueryBuilder,

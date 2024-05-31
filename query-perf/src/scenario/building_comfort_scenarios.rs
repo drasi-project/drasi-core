@@ -5,7 +5,7 @@ use rand::{
 use rand_pcg::Pcg64;
 use std::sync::Arc;
 
-use drasi_query_core::models::SourceChange;
+use drasi_core::models::SourceChange;
 
 use crate::scenario::SourceChangeGenerator;
 use building_comfort_model::{BuildingComfortModel, Location, RoomProperty};

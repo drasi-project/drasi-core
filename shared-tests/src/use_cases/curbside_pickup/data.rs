@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use serde_json::json;
 
-use drasi_query_core::{
+use drasi_core::{
     evaluation::variable_value::VariableValue,
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
 };

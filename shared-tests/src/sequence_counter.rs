@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use drasi_query_core::interface::{ResultSequence, ResultSequenceCounter};
+use drasi_core::interface::{ResultSequence, ResultSequenceCounter};
 
 pub async fn sequence_counter(subject: &dyn ResultSequenceCounter) {
     let result = subject.get_sequence().await.expect("get_sequence failed");

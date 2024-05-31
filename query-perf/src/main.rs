@@ -3,15 +3,15 @@ use clap::Parser;
 use std::{env, sync::Arc};
 use uuid::Uuid;
 
-use drasi_query_core::{
+use drasi_core::{
     interface::{AccumulatorIndex, ElementIndex},
     path_solver::match_path::MatchPath,
     query::QueryBuilder,
 };
-use drasi_query_index_garnet::{
+use drasi_index_garnet::{
     element_index::GarnetElementIndex, result_index::GarnetResultIndex,
 };
-use drasi_query_index_rocksdb::{
+use drasi_index_rocksdb::{
     element_index::{RocksDbElementIndex, RocksIndexOptions},
     result_index::RocksDbResultIndex,
 };

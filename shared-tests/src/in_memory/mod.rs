@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use drasi_query_ast::ast::Query;
-use drasi_query_core::{
+use drasi_core::{
     in_memory_index::in_memory_element_index::InMemoryElementIndex,
     path_solver::match_path::MatchPath, query::QueryBuilder,
 };
@@ -286,7 +286,7 @@ mod exceeds_one_standard_deviation {
 }
 mod unit_tests {
     use crate::sequence_counter;
-    use drasi_query_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
+    use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
 
     #[tokio::test]
     pub async fn sequence_counter() {
@@ -297,7 +297,7 @@ mod unit_tests {
 
 mod index {
     use crate::index;
-    use drasi_query_core::{
+    use drasi_core::{
         in_memory_index::in_memory_future_queue::InMemoryFutureQueue, interface::FutureQueue,
     };
 

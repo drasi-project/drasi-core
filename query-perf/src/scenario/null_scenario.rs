@@ -1,4 +1,4 @@
-use drasi_query_core::models::SourceChange;
+use drasi_core::models::SourceChange;
 
 use super::{
     PerformanceTestScenario, PerformanceTestScenarioConfig, SourceChangeGenerator,

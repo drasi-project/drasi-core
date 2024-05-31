@@ -1,12 +1,12 @@
 #![allow(dead_code)]
 
 extern crate generational_arena;
-use drasi_query_core::models::ElementPropertyMap;
+use drasi_core::models::ElementPropertyMap;
 use generational_arena::{Arena, Index};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use drasi_query_core::{
+use drasi_core::{
     evaluation::variable_value::VariableValue,
     models::{Element, ElementMetadata, ElementReference},
 };

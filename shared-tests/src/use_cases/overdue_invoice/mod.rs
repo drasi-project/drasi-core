@@ -6,7 +6,7 @@ use std::sync::{
 use chrono::{Date, DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime};
 use serde_json::json;
 
-use drasi_query_core::{
+use drasi_core::{
     evaluation::{context::PhaseEvaluationContext, variable_value::VariableValue},
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{AutoFutureQueueConsumer, QueryBuilder},

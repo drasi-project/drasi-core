@@ -1,4 +1,4 @@
-use drasi_query_core::{
+use drasi_core::{
     interface::{FutureElementRef, FutureQueue, PushType},
     models::ElementReference,
 };

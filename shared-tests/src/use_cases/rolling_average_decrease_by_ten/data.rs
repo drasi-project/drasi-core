@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use drasi_query_core::models::{
+use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
 

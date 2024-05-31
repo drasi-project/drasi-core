@@ -1,6 +1,6 @@
 use drasi_query_ast::ast;
 
-use drasi_query_core::models::{QueryJoin, QueryJoinKey};
+use drasi_core::models::{QueryJoin, QueryJoinKey};
 
 pub fn pickup_order_ready_query() -> ast::Query {
     drasi_query_cypher::parse("

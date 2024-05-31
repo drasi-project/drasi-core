@@ -6,11 +6,11 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-drasi-query-ast = { path = "../drasi-query-ast" }
-drasi-query-core = { path = "../drasi-query-core" }
-drasi-query-cypher = { path = "../drasi-query-cypher" }
-drasi-query-index-garnet = { path = "../drasi-query-index-garnet" }
-drasi-query-index-rocksdb = { path = "../drasi-query-index-rocksdb" }
+drasi-query-ast = { path = "../query-ast" }
+drasi-core = { path = "../core" }
+drasi-query-cypher = { path = "../query-cypher" }
+drasi-index-garnet = { path = "../index-garnet" }
+drasi-index-rocksdb = { path = "../index-rocksdb" }
 serde = "1.0.163"
 serde_json = "1.0.96"
 rand = "0.8.5"

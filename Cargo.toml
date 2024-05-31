@@ -1,16 +1,14 @@
 [workspace]
 
 members = [
-  "drasi-query-core",
-  "drasi-query-ast",
-  "drasi-query-cypher",
-  "drasi-query-index-mongo",
-  "drasi-query-index-rocksdb",
-  "drasi-query-index-garnet",
-  "drasi-query-middleware",
+  "core",
+  "query-ast",
+  "query-cypher",
+  "index-rocksdb",
+  "index-garnet",
+  "middleware",
   "shared-tests",
-  "query-perf"
-, "drasi-query-middleware"]
+  "query-perf"]
 
 [workspace.package]
 version = "0.2.0"

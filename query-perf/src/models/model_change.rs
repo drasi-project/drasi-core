@@ -1,4 +1,4 @@
-use drasi_query_core::models::{Element, SourceChange};
+use drasi_core::models::{Element, SourceChange};
 
 #[derive(Debug)]
 pub enum ModelChangeType {
