@@ -2,7 +2,9 @@ name: Run Tests
 
 on:
   push:
-    branches: [ "main" ]
+    branches: 
+      - main
+      - perf
   pull_request:
     branches: [ "main" ]
 
@@ -51,3 +53,48 @@ jobs:
       env:
         REDIS_URL: redis://localhost:6379
       run: cargo test
+
+
+  perf-test:
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Cache Cargo registry
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-registry-
+
+    - name: Cache Cargo index
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/git
+        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-index-
+
+    - name: Cache Cargo build
+      uses: actions/cache@v4
+      with:
+        path: target
+        key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-build-
+    
+    - name: Perf testing
+      env:
+        REDIS_URL: redis://localhost:6379
+      run: |
+        cd query-perf
+        ./run_perf_tests
