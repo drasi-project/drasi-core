@@ -108,6 +108,7 @@ mod curbside_pickup {
         curbside_pickup::order_ready_then_vehicle_arrives(&test_config).await;
     }
 
+    #[coverage(off)]
     #[tokio::test]
     #[ignore]
     async fn vehicle_arrives_then_order_ready() {
@@ -115,6 +116,7 @@ mod curbside_pickup {
         curbside_pickup::vehicle_arrives_then_order_ready(&test_config).await;
     }
 
+    #[coverage(off)]
     #[tokio::test]
     #[ignore]
     async fn vehicle_arrives_then_order_ready_duplicate() {
@@ -128,6 +130,7 @@ mod curbside_pickup {
         curbside_pickup::order_ready_then_vehicle_arrives(&test_config).await;
     }
 
+    #[coverage(off)]
     #[tokio::test]
     #[ignore]
     async fn vehicle_arrives_then_order_ready_with_cache() {
