@@ -27,4 +27,5 @@ jobs:
         uses: irongut/CodeCoverageSummary@v1.3.0
         with:
           filename: core/coverage.xml
+          badge: true
       
