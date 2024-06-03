@@ -1,7 +1,6 @@
 name: Generate Rust Code Coverage
 
 on:
-  push:
   pull_request:
     branches:
       - "main"
