@@ -1,0 +1,30 @@
+name: Generate Rust Code Coverage
+
+on:
+  push:
+  pull_request:
+    branches:
+      - "main"
+      - "develop"
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  coverage: 
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup update stable
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Generate code coverage
+        run: |
+          cd core
+          cargo llvm-cov --all-features --workspace --lcov --cobertura --output-path coverage.xml
+      - name: Code Coverage Summary Report
+        uses: irongut/CodeCoverageSummary@v1.3.0
+        with:
+          filename: core/coverage.xml
+      
