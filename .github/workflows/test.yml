@@ -105,4 +105,4 @@ jobs:
         FILE_NAME: perf_test_results_100K_${matrix.index}
       run: |
         cd query-perf
-        cargo run -- -s all -e ${matrix.index} -r ${matrix.index} -i 100000 > ${{env.FILE_NAME}}
+        cargo run -- -s all -e ${{matrix.index}} -r ${{matrix.index}} -i 100000 > ${{env.FILE_NAME}}
