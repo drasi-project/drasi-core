@@ -58,6 +58,13 @@ jobs:
   perf-test:
     runs-on: ubuntu-latest
 
+    strategy:
+      matrix:
+        index: 
+          - memory
+          - redis
+          - rocksdb
+
     services:
       redis:
         image: redis:7-alpine
@@ -97,4 +104,4 @@ jobs:
         REDIS_URL: redis://localhost:6379
       run: |
         cd query-perf
-        ./run_perf_tests
+        cargo run -- -s all -e ${matrix.index} -r ${matrix.index} -i 100000 > perf_test_results_100K_${matrix.index} 
