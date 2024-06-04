@@ -2,9 +2,7 @@ name: Run Tests
 
 on:
   push:
-    branches: 
-      - main
-      - perf
+    branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
 
