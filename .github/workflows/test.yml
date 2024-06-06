@@ -58,14 +58,14 @@ jobs:
         REDIS_URL: redis://localhost:6379
       run: |
         cargo install junitify
-        cargo test -- --format=json -Z unstable-options --report-time | junitify --ignore-parse-errors --out ./
+        cargo test -- --format=json -Z unstable-options --report-time | junitify --ignore-parse-errors --out ./test-results
         ls
 
     - name: Publish Test Results
       uses: EnricoMi/publish-unit-test-result-action@v2
       with:
         files: |
-          evaluation-1.xml
+          test-results/evaluation-0.xml
 
   perf-test:
     runs-on: ubuntu-latest
