@@ -1,13 +1,13 @@
 use std::{fmt::Debug, sync::Arc};
 
 use crate::{
-    evaluation::{EvaluationError},
+    evaluation::EvaluationError,
     interface::ResultIndex,
 };
 
 use async_trait::async_trait;
 
-use drasi_query_ast::ast::Expression;
+use drasi_query_ast::ast;
 
 use crate::evaluation::{
     variable_value::duration::Duration, variable_value::float::Float,
@@ -25,8 +25,7 @@ impl AggregatingFunction for Sum {
     fn initialize_accumulator(
         &self,
         _context: &ExpressionEvaluationContext,
-        _args: &Vec<Expression>,
-        _position_in_query: usize,
+        _expression: &ast::FunctionExpression,
         _grouping_keys: &Vec<VariableValue>,
         _index: Arc<dyn ResultIndex>,
     ) -> Accumulator {

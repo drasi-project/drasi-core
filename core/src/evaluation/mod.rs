@@ -33,6 +33,7 @@ pub enum EvaluationError {
         error: Box<EvaluationError>,
     },
     InvalidState,
+    InvalidArgument,
 }
 
 impl From<IndexError> for EvaluationError {

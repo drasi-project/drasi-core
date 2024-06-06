@@ -4,7 +4,7 @@ use crate::{evaluation::EvaluationError, interface::ResultIndex};
 
 use async_trait::async_trait;
 
-use drasi_query_ast::ast::Expression;
+use drasi_query_ast::ast;
 
 use crate::evaluation::{
     variable_value::integer::Integer, variable_value::VariableValue, ExpressionEvaluationContext,
@@ -19,8 +19,7 @@ impl AggregatingFunction for Count {
     fn initialize_accumulator(
         &self,
         _context: &ExpressionEvaluationContext,
-        _args: &Vec<Expression>,
-        _position_in_query: usize,
+        _expression: &ast::FunctionExpression,
         _grouping_keys: &Vec<VariableValue>,
         _index: Arc<dyn ResultIndex>,
     ) -> Accumulator {

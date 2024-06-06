@@ -1454,11 +1454,6 @@ impl ExpressionEvaluator {
                             error: Box::new(e),
                         })?
                 }
-                Function::List(list) => {
-                    let expresson_list = &expression.args;
-                    list.call(context, &(*expresson_list.clone()).to_vec())
-                        .await?
-                }
                 Function::Aggregating(aggregate) => {
                     let mut values = Vec::new();
                     for arg in &expression.args {
@@ -1484,8 +1479,7 @@ impl ExpressionEvaluator {
                         if aggregate.accumulator_is_lazy() {
                             aggregate.initialize_accumulator(
                                 context,
-                                &expression.args,
-                                expression.position_in_query,
+                                &expression,
                                 &grouping_keys,
                                 self.result_index.clone(),
                             )
@@ -1494,8 +1488,7 @@ impl ExpressionEvaluator {
                                 Some(acc) => Accumulator::Value(acc),
                                 None => aggregate.initialize_accumulator(
                                     context,
-                                    &expression.args,
-                                    expression.position_in_query,
+                                    &expression,
                                     &grouping_keys,
                                     self.result_index.clone(),
                                 ),

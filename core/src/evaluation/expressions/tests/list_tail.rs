@@ -1,6 +1,5 @@
 use crate::evaluation::context::QueryVariables;
 use crate::evaluation::functions::FunctionRegistry;
-use crate::evaluation::variable_value::integer::Integer;
 use crate::evaluation::variable_value::VariableValue;
 use crate::evaluation::{
     EvaluationError, ExpressionEvaluationContext, ExpressionEvaluator, InstantQueryClock,

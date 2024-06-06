@@ -2,14 +2,14 @@ use std::{fmt::Debug, sync::Arc};
 
 use crate::{
     evaluation::{
-        temporal_constants, variable_value::zoned_datetime::ZonedDateTime, EvaluationError,
+        temporal_constants, variable_value::zoned_datetime::ZonedDateTime, EvaluationError
     },
     interface::ResultIndex,
 };
 
 use async_trait::async_trait;
 
-use drasi_query_ast::ast::Expression;
+use drasi_query_ast::ast;
 
 use crate::evaluation::{
     variable_value::duration::Duration, variable_value::float::Float,
@@ -28,12 +28,11 @@ impl AggregatingFunction for Min {
     fn initialize_accumulator(
         &self,
         _context: &ExpressionEvaluationContext,
-        _args: &Vec<Expression>,
-        position_in_query: usize,
+        expression: &ast::FunctionExpression,
         grouping_keys: &Vec<VariableValue>,
         index: Arc<dyn ResultIndex>,
     ) -> Accumulator {
-        Accumulator::LazySortedSet(LazySortedSet::new(position_in_query, grouping_keys, index))
+        Accumulator::LazySortedSet(LazySortedSet::new(expression.position_in_query, grouping_keys, index))
     }
 
     fn accumulator_is_lazy(&self) -> bool {
@@ -60,7 +59,10 @@ impl AggregatingFunction for Min {
                 let value = n.as_f64().unwrap();
                 accumulator.insert(value).await;
                 match accumulator.get_head().await? {
-                    Some(head) => Ok(VariableValue::Float(Float::from_f64(head).unwrap())),
+                    Some(head) => match Float::from_f64(head) {
+                        Some(f) => Ok(VariableValue::Float(f)),
+                        None => Err(EvaluationError::InvalidState),
+                    },
                     None => Ok(VariableValue::Null),
                 }
             }
@@ -68,7 +70,10 @@ impl AggregatingFunction for Min {
                 let value = n.as_i64().unwrap();
                 accumulator.insert(value as f64).await;
                 match accumulator.get_head().await? {
-                    Some(head) => Ok(VariableValue::Float(Float::from_f64(head).unwrap())),
+                    Some(head) => match Float::from_f64(head) {
+                        Some(f) => Ok(VariableValue::Float(f)),
+                        None => Err(EvaluationError::InvalidState),
+                    },
                     None => Ok(VariableValue::Null),
                 }
             }

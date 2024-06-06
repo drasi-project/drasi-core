@@ -3,7 +3,7 @@ use std::sync::{
     Arc,
 };
 
-use chrono::{Date, DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime};
 use serde_json::json;
 
 use drasi_core::{

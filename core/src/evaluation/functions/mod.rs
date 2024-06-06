@@ -42,7 +42,6 @@ pub mod text;
 pub enum Function {
     Scalar(Arc<dyn ScalarFunction>),
     Aggregating(Arc<dyn AggregatingFunction>),
-    List(Arc<dyn ListFunction>),
     ContextMutator(Arc<dyn ContextMutatorFunction>),
 }
 
@@ -57,21 +56,11 @@ pub trait ScalarFunction: Send + Sync {
 }
 
 #[async_trait]
-pub trait ListFunction: Send + Sync {
-    async fn call(
-        &self,
-        context: &ExpressionEvaluationContext,
-        args: &Vec<Expression>,
-    ) -> Result<VariableValue, EvaluationError>;
-}
-
-#[async_trait]
 pub trait AggregatingFunction: Debug + Send + Sync {
     fn initialize_accumulator(
         &self,
         context: &ExpressionEvaluationContext,
-        args: &Vec<Expression>,
-        position_in_query: usize,
+        expression: &ast::FunctionExpression,
         grouping_keys: &Vec<VariableValue>,
         index: Arc<dyn ResultIndex>,
     ) -> Accumulator; //todo: switch `dyn ResultIndex` to `dyn LazySortedSetStore` after trait upcasting is stable
