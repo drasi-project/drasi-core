@@ -1,6 +1,4 @@
-
-
-pub fn manager_incident_alert_query() -> &'static str  {
+pub fn manager_incident_alert_query() -> &'static str {
     "
   MATCH
     (e:Employee)-[:ASSIGNED_TO]->(t:Team),
@@ -17,7 +15,7 @@ pub fn manager_incident_alert_query() -> &'static str  {
     "
 }
 
-pub fn employee_incident_alert_query() -> &'static str  {
+pub fn employee_incident_alert_query() -> &'static str {
     "
   MATCH
     (e:Employee)-[:LOCATED_IN]->(:Building)-[:LOCATED_IN]->(r:Region),
@@ -31,7 +29,7 @@ pub fn employee_incident_alert_query() -> &'static str  {
     "
 }
 
-pub fn employees_at_risk_count_query() -> &'static str  {
+pub fn employees_at_risk_count_query() -> &'static str {
     "
   MATCH
     (e:Employee)-[:LOCATED_IN]->(:Building)-[:LOCATED_IN]->(r:Region),

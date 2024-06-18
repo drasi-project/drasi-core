@@ -11,8 +11,7 @@ use std::sync::Arc;
 
 use ordered_float::OrderedFloat;
 
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Default)]
 pub enum ElementValue {
     #[default]
     Null,
@@ -23,8 +22,6 @@ pub enum ElementValue {
     List(Vec<ElementValue>),
     Object(ElementPropertyMap),
 }
-
-
 
 impl From<&ElementPropertyMap> for VariableValue {
     fn from(val: &ElementPropertyMap) -> Self {
@@ -81,9 +78,7 @@ impl From<&ElementValue> for serde_json::Value {
             }
             ElementValue::Integer(i) => serde_json::Value::Number(serde_json::Number::from(*i)),
             ElementValue::String(s) => serde_json::Value::String(s.to_string()),
-            ElementValue::List(l) => {
-                serde_json::Value::Array(l.iter().map(|x| x.into()).collect())
-            }
+            ElementValue::List(l) => serde_json::Value::Array(l.iter().map(|x| x.into()).collect()),
             ElementValue::Object(o) => serde_json::Value::Object(o.into()),
         }
     }
@@ -104,9 +99,7 @@ impl From<&serde_json::Value> for ElementValue {
                 }
             }
             serde_json::Value::String(s) => ElementValue::String(Arc::from(s.as_str())),
-            serde_json::Value::Array(a) => {
-                ElementValue::List(a.iter().map(|x| x.into()).collect())
-            }
+            serde_json::Value::Array(a) => ElementValue::List(a.iter().map(|x| x.into()).collect()),
             serde_json::Value::Object(o) => ElementValue::Object(o.into()),
         }
     }

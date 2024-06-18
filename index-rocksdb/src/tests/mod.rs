@@ -45,9 +45,7 @@ impl QueryTestConfig for RocksDbQueryConfig {
             direct_io: false,
         };
 
-        let element_index =
-            RocksDbElementIndex::new(&query_id, &self.url, options)
-                .unwrap();
+        let element_index = RocksDbElementIndex::new(&query_id, &self.url, options).unwrap();
         let ari = RocksDbResultIndex::new(&query_id, &self.url).unwrap();
         let fqi = RocksDbFutureQueue::new(&query_id, &self.url).unwrap();
 

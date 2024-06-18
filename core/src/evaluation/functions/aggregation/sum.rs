@@ -1,9 +1,6 @@
 use std::{fmt::Debug, sync::Arc};
 
-use crate::{
-    evaluation::EvaluationError,
-    interface::ResultIndex,
-};
+use crate::{evaluation::EvaluationError, interface::ResultIndex};
 
 use async_trait::async_trait;
 

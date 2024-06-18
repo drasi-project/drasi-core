@@ -15,7 +15,7 @@ impl CypherConfiguration for TestCypherConfig {
         set.insert("avg".into());
         set.insert("drasi.linearGradient".into());
         set.insert("drasi.last".into());
-        set    
+        set
     }
 }
 
@@ -23,9 +23,11 @@ static TEST_CONFIG: TestCypherConfig = TestCypherConfig {};
 
 #[test]
 fn return_clause_non_aggregating() {
-    let query =
-        cypher::query("MATCH (a) WHERE a.Field1 = 42 RETURN a.name, a.Field2 as F2, $param", &TEST_CONFIG)
-            .unwrap();
+    let query = cypher::query(
+        "MATCH (a) WHERE a.Field1 = 42 RETURN a.name, a.Field2 as F2, $param",
+        &TEST_CONFIG,
+    )
+    .unwrap();
 
     assert_eq!(
         query.parts[0].return_clause,
@@ -42,8 +44,11 @@ fn return_clause_non_aggregating() {
 
 #[test]
 fn return_clause_aggregating() {
-    let query =
-        cypher::query("MATCH (a) WHERE a.Field1 = 42 RETURN a.name, sum(a.Field2)", &TEST_CONFIG).unwrap();
+    let query = cypher::query(
+        "MATCH (a) WHERE a.Field1 = 42 RETURN a.name, sum(a.Field2)",
+        &TEST_CONFIG,
+    )
+    .unwrap();
 
     assert_eq!(
         query.parts[0].return_clause,
@@ -60,8 +65,11 @@ fn return_clause_aggregating() {
 
 #[test]
 fn namespaced_function() {
-    let query =
-        cypher::query("MATCH (a) WHERE a.Field1 = 42 RETURN namespace.function(a.Field2)", &TEST_CONFIG).unwrap();
+    let query = cypher::query(
+        "MATCH (a) WHERE a.Field1 = 42 RETURN namespace.function(a.Field2)",
+        &TEST_CONFIG,
+    )
+    .unwrap();
 
     assert_eq!(
         query.parts[0].return_clause,
@@ -80,7 +88,8 @@ fn multiline_function() {
             function(
                 a.Field2,
                 a.Field3
-            )", &TEST_CONFIG
+            )",
+        &TEST_CONFIG,
     )
     .unwrap();
 
@@ -100,7 +109,10 @@ fn multiline_function() {
 #[test]
 fn match_clause() {
     assert_eq!(
-        cypher::query("MATCH (t:Thing)-[:AT]->(wh:Warehouse) RETURN t.name", &TEST_CONFIG),
+        cypher::query(
+            "MATCH (t:Thing)-[:AT]->(wh:Warehouse) RETURN t.name",
+            &TEST_CONFIG
+        ),
         Ok(Query {
             parts: vec![QueryPart {
                 match_clauses: vec![MatchClause {
@@ -123,7 +135,10 @@ fn match_clause() {
     );
 
     assert_eq!(
-        cypher::query("MATCH (t:Thing {category: 1})-[:AT*1..5]->(wh:Warehouse) RETURN t.name", &TEST_CONFIG),
+        cypher::query(
+            "MATCH (t:Thing {category: 1})-[:AT*1..5]->(wh:Warehouse) RETURN t.name",
+            &TEST_CONFIG
+        ),
         Ok(Query {
             parts: vec![QueryPart {
                 match_clauses: vec![MatchClause {
@@ -182,7 +197,8 @@ fn match_clause() {
 
     assert_eq!(
         cypher::query(
-            "MATCH (a:Person) <-[e:KNOWS]- (b:Person WHERE b.Age > 10) RETURN e.since, b.name", &TEST_CONFIG
+            "MATCH (a:Person) <-[e:KNOWS]- (b:Person WHERE b.Age > 10) RETURN e.since, b.name",
+            &TEST_CONFIG
         ),
         Ok(Query {
             parts: vec![QueryPart {
@@ -381,8 +397,11 @@ fn where_clause_non_aggregating_with_local_time() {
 
 #[test]
 fn test_reduce_function() {
-    let query =
-        cypher::query("MATCH (a) RETURN reduce(s = 0, x IN [1,2,3] | s + x) AS sum", &TEST_CONFIG).unwrap();
+    let query = cypher::query(
+        "MATCH (a) RETURN reduce(s = 0, x IN [1,2,3] | s + x) AS sum",
+        &TEST_CONFIG,
+    )
+    .unwrap();
     assert_eq!(
         query.parts[0].return_clause,
         ProjectionClause::Item(vec![UnaryExpression::alias(
@@ -429,8 +448,8 @@ fn test_list_construction() {
     [5, 7, 9, foo.bah] as list
   WHERE
     foo.bah IN list
-   RETURN foo, list"
-   , &TEST_CONFIG
+   RETURN foo, list",
+        &TEST_CONFIG,
     )
     .unwrap();
 
@@ -466,7 +485,8 @@ fn test_list_construction_with_comments_in_between_parts() {
     foo.bah IN list
     // This is comment #3
     // This is comment #4
-   RETURN foo, list", &TEST_CONFIG
+   RETURN foo, list",
+        &TEST_CONFIG,
     )
     .unwrap();
 
@@ -499,7 +519,8 @@ fn test_list_construction_with_comments() {
         foo,
         // A comment within a part
         [5, 7, 9, foo.bah] as list // A comment at the end of a part
-    RETURN foo, list // A comment at the end of a query", &TEST_CONFIG
+    RETURN foo, list // A comment at the end of a query",
+        &TEST_CONFIG,
     )
     .unwrap();
 

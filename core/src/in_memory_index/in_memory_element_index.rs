@@ -46,7 +46,6 @@ impl Default for InMemoryElementIndex {
 
 impl InMemoryElementIndex {
     pub fn new() -> Self {
-        
         Self {
             elements: Arc::new(RwLock::new(HashMap::new())),
             slot_affinity: Arc::new(RwLock::new(HashMap::new())),
@@ -530,7 +529,7 @@ impl ElementIndex for InMemoryElementIndex {
     async fn set_joins(&self, match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) {
         let joins_by_label = extract_join_spec_by_label(match_path, joins);
         let mut join_spec_by_label = self.join_spec_by_label.write().await;
-        join_spec_by_label.clone_from(&joins_by_label);        
+        join_spec_by_label.clone_from(&joins_by_label);
     }
 }
 

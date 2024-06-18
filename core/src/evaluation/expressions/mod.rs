@@ -1540,9 +1540,8 @@ impl ExpressionEvaluator {
                         VariableValue::Null
                     } else {
                         let new_context = context_mutator.call(context, expression).await?;
-                        
-                        self
-                            .evaluate_expression(&new_context, &expression.args[0])
+
+                        self.evaluate_expression(&new_context, &expression.args[0])
                             .await?
                     }
                 }

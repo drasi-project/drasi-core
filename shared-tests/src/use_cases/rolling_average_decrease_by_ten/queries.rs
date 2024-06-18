@@ -1,4 +1,3 @@
-
 use drasi_core::models::{QueryJoin, QueryJoinKey};
 
 /**
@@ -62,7 +61,7 @@ pub fn rolling_average_decrease_by_ten_metadata() -> Vec<QueryJoin> {
     ]
 }
 
-pub fn rolling_average_decrease_by_ten_query() -> &'static str  {
+pub fn rolling_average_decrease_by_ten_query() -> &'static str {
     "
   MATCH
     (equip:Equipment {type:'freezer'})-[:HAS_SENSOR]->(:Sensor {type:'temperature'})-[:HAS_VALUE]->(val:SensorValue)

@@ -1,7 +1,5 @@
-
-
 pub fn room_comfort_level_calc_query() -> &'static str {
-        "
+    "
   MATCH
     (r:Room)
   RETURN
@@ -11,11 +9,10 @@ pub fn room_comfort_level_calc_query() -> &'static str {
       CASE WHEN r.co2 > 500 THEN (r.co2 - 500) / 25 ELSE 0 END
     ) AS ComfortLevel
     "
-    
 }
 
 pub fn floor_comfort_level_calc_query() -> &'static str {
-  "
+    "
   MATCH
     (r:Room)-[:PART_OF]->(f:Floor)
     WITH
@@ -30,7 +27,7 @@ pub fn floor_comfort_level_calc_query() -> &'static str {
 }
 
 pub fn building_comfort_level_calc_query() -> &'static str {
-        "
+    "
     MATCH
       (r:Room)-[:PART_OF]->(f:Floor)-[:PART_OF]->(b:Building)
     WITH
@@ -69,7 +66,7 @@ pub fn room_comfort_level_alert_query() -> &'static str {
 }
 
 pub fn floor_comfort_level_alert_query() -> &'static str {
-        "
+    "
     MATCH
       (r:Room)-[:PART_OF]->(f:Floor)
     WITH
@@ -90,7 +87,7 @@ pub fn floor_comfort_level_alert_query() -> &'static str {
 }
 
 pub fn building_comfort_level_alert_query() -> &'static str {
-            "
+    "
     MATCH
       (r:Room)-[:PART_OF]->(f:Floor)-[:PART_OF]->(b:Building)
     WITH
@@ -116,7 +113,7 @@ pub fn building_comfort_level_alert_query() -> &'static str {
 }
 
 pub fn ui_query() -> &'static str {
-        "
+    "
   MATCH
     (r:Room)-[:PART_OF]->(f:Floor)-[:PART_OF]->(b:Building)
   WITH

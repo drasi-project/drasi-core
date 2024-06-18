@@ -38,10 +38,7 @@ pub struct GarnetElementIndex {
 }
 
 impl GarnetElementIndex {
-    pub async fn connect(
-        query_id: &str,
-        url: &str
-    ) -> Result<Self, IndexError> {
+    pub async fn connect(query_id: &str, url: &str) -> Result<Self, IndexError> {
         let client = match redis::Client::open(url) {
             Ok(client) => client,
             Err(e) => return Err(IndexError::connection_failed(e)),
@@ -203,18 +200,10 @@ impl GarnetElementIndex {
                                                         properties: StoredValueMap::new(),
                                                     });
 
-                                                self.set_element_internal(
-                                                    pipeline,
-                                                    in_out,
-                                                    slots,
-                                                )
-                                                .await?;
-                                                self.set_element_internal(
-                                                    pipeline,
-                                                    out_in,
-                                                    slots,
-                                                )
-                                                .await?;
+                                                self.set_element_internal(pipeline, in_out, slots)
+                                                    .await?;
+                                                self.set_element_internal(pipeline, out_in, slots)
+                                                    .await?;
                                             }
                                         }
                                     }
@@ -467,7 +456,9 @@ impl GarnetElementIndex {
         if let Some(prev_slots) = prev_slots {
             for slot in prev_slots.into_iter() {
                 let inbound_key = self.key_formatter.get_stored_inbound_key(element_ref, slot);
-                let outbound_key = self.key_formatter.get_stored_outbound_key(element_ref, slot);
+                let outbound_key = self
+                    .key_formatter
+                    .get_stored_outbound_key(element_ref, slot);
 
                 pipeline.del(&inbound_key).ignore();
                 pipeline.del(&outbound_key).ignore();
@@ -699,7 +690,7 @@ impl ElementIndex for GarnetElementIndex {
     async fn set_joins(&self, match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) {
         let joins_by_label = extract_join_spec_by_label(match_path, joins);
         let mut join_spec_by_label = self.join_spec_by_label.write().await;
-        join_spec_by_label.clone_from(&joins_by_label);        
+        join_spec_by_label.clone_from(&joins_by_label);
     }
 }
 

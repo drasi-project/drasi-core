@@ -8,9 +8,7 @@ use drasi_core::{
     path_solver::match_path::MatchPath,
     query::QueryBuilder,
 };
-use drasi_index_garnet::{
-    element_index::GarnetElementIndex, result_index::GarnetResultIndex,
-};
+use drasi_index_garnet::{element_index::GarnetElementIndex, result_index::GarnetResultIndex};
 use drasi_index_rocksdb::{
     element_index::{RocksDbElementIndex, RocksIndexOptions},
     result_index::RocksDbResultIndex,
@@ -73,10 +71,7 @@ async fn main() {
                     Err(_) => "redis://127.0.0.1:6379".to_string(),
                 };
 
-                let element_index =
-                    GarnetElementIndex::connect(&query_id, &url)
-                        .await
-                        .unwrap();
+                let element_index = GarnetElementIndex::connect(&query_id, &url).await.unwrap();
 
                 builder.with_element_index(Arc::new(element_index))
             }
@@ -91,9 +86,7 @@ async fn main() {
                     Err(_) => "test-data".to_string(),
                 };
 
-                let element_index =
-                    RocksDbElementIndex::new(&query_id, &url, options)
-                        .unwrap();
+                let element_index = RocksDbElementIndex::new(&query_id, &url, options).unwrap();
                 element_index.clear().await.unwrap();
 
                 builder

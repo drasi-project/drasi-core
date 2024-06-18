@@ -68,7 +68,6 @@ impl ElementArchiveIndex for GarnetElementIndex {
         let from_timestamp = match from {
             TimestampBound::Included(from) => from,
             TimestampBound::StartFromPrevious(from) => {
-                
                 match self.get_element_as_at(element_ref, from).await {
                     Ok(Some(element)) => element.get_effective_from(),
                     Ok(None) => 0,

@@ -2,7 +2,7 @@ use std::{fmt::Debug, sync::Arc};
 
 use crate::{
     evaluation::{
-        temporal_constants, variable_value::zoned_datetime::ZonedDateTime, EvaluationError
+        temporal_constants, variable_value::zoned_datetime::ZonedDateTime, EvaluationError,
     },
     interface::ResultIndex,
 };
@@ -32,7 +32,11 @@ impl AggregatingFunction for Min {
         grouping_keys: &Vec<VariableValue>,
         index: Arc<dyn ResultIndex>,
     ) -> Accumulator {
-        Accumulator::LazySortedSet(LazySortedSet::new(expression.position_in_query, grouping_keys, index))
+        Accumulator::LazySortedSet(LazySortedSet::new(
+            expression.position_in_query,
+            grouping_keys,
+            index,
+        ))
     }
 
     fn accumulator_is_lazy(&self) -> bool {

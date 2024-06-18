@@ -183,10 +183,8 @@ impl From<Value> for VariableValue {
             }
             Value::String(s) => VariableValue::String(s),
             Value::Array(arr) => {
-                let variable_values: Vec<VariableValue> = arr
-                    .into_iter()
-                    .map(VariableValue::from)
-                    .collect();
+                let variable_values: Vec<VariableValue> =
+                    arr.into_iter().map(VariableValue::from).collect();
                 VariableValue::List(variable_values)
             }
             Value::Object(obj) => {

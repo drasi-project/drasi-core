@@ -207,7 +207,8 @@ impl PartialOrd for VariableValue {
                 lhs.as_f64().partial_cmp(&rhs.as_f64())
             }
             (VariableValue::Integer(lhs), VariableValue::Float(rhs)) => lhs
-                .as_i64().map(|lhs| lhs as f64)
+                .as_i64()
+                .map(|lhs| lhs as f64)
                 .partial_cmp(&rhs.as_f64()),
             (VariableValue::Float(lhs), VariableValue::Integer(rhs)) => lhs
                 .as_f64()

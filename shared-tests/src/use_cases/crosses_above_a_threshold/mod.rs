@@ -36,7 +36,7 @@ async fn bootstrap_query(query: &ContinuousQuery) {
 // Query identifies when an invoice is overdue by 10 or more days. The output includes
 // the number of days overdue, which results in the result being updated each time the
 // number of days overdue changes.
-pub async fn crosses_above_a_threshold(config: &(impl QueryTestConfig + Send)) {    
+pub async fn crosses_above_a_threshold(config: &(impl QueryTestConfig + Send)) {
     let crosses_above_a_threshold_query = {
         let mut builder = QueryBuilder::new(queries::crosses_above_a_threshold_query())
             .with_joins(queries::crosses_above_a_threshold_metadata());
@@ -232,8 +232,9 @@ pub async fn crosses_above_a_threshold(config: &(impl QueryTestConfig + Send)) {
 // by 10 days and when it is no longer overdue.
 pub async fn crosses_above_a_threshold_with_overdue_days(config: &(impl QueryTestConfig + Send)) {
     let crosses_above_a_threshold_query = {
-        let mut builder = QueryBuilder::new(queries::crosses_above_a_threshold_with_overduedays_query())
-            .with_joins(queries::crosses_above_a_threshold_metadata());
+        let mut builder =
+            QueryBuilder::new(queries::crosses_above_a_threshold_with_overduedays_query())
+                .with_joins(queries::crosses_above_a_threshold_metadata());
         builder = config.config_query(builder).await;
         builder.build().await
     };

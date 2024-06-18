@@ -1,6 +1,4 @@
-
-
-pub fn list_overdue_query() -> &'static str  {
+pub fn list_overdue_query() -> &'static str {
     "
     MATCH 
         (a:Invoice)
@@ -14,7 +12,7 @@ pub fn list_overdue_query() -> &'static str  {
     "
 }
 
-pub fn count_overdue_greater_query() -> &'static str  {
+pub fn count_overdue_greater_query() -> &'static str {
     "
     MATCH 
         (a:Invoice)

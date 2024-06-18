@@ -431,14 +431,12 @@ impl ContinuousQuery {
 
                 let mut aggregation_results = CollapsedAggregationResults::new();
 
-                new_contexts.into_iter().for_each(|ctx| {
-                    match &ctx {
-                        QueryPartEvaluationContext::Aggregation { .. } => {
-                            aggregation_results.insert(ctx)
-                        }
-                        QueryPartEvaluationContext::Noop => (),
-                        _ => result.push((ctx, change_context.clone())),
+                new_contexts.into_iter().for_each(|ctx| match &ctx {
+                    QueryPartEvaluationContext::Aggregation { .. } => {
+                        aggregation_results.insert(ctx)
                     }
+                    QueryPartEvaluationContext::Noop => (),
+                    _ => result.push((ctx, change_context.clone())),
                 });
 
                 for actx in aggregation_results.into_vec_with_context(change_context) {

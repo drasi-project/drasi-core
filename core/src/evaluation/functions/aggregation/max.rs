@@ -2,9 +2,11 @@ use std::{fmt::Debug, sync::Arc};
 
 use crate::{
     evaluation::{
-        temporal_constants, variable_value::{
+        temporal_constants,
+        variable_value::{
             duration::Duration, zoned_datetime::ZonedDateTime, zoned_time::ZonedTime,
-        }, EvaluationError
+        },
+        EvaluationError,
     },
     interface::ResultIndex,
 };
@@ -33,7 +35,11 @@ impl AggregatingFunction for Max {
         grouping_keys: &Vec<VariableValue>,
         index: Arc<dyn ResultIndex>,
     ) -> Accumulator {
-        Accumulator::LazySortedSet(LazySortedSet::new(expression.position_in_query, grouping_keys, index))
+        Accumulator::LazySortedSet(LazySortedSet::new(
+            expression.position_in_query,
+            grouping_keys,
+            index,
+        ))
     }
 
     fn accumulator_is_lazy(&self) -> bool {

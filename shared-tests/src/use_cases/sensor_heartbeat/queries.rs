@@ -1,7 +1,5 @@
-
-
-pub fn not_reported_query() -> &'static str  {
-            "
+pub fn not_reported_query() -> &'static str {
+    "
     MATCH
         (e:Equipment)-[:HAS_SENSOR]->(s:Sensor)-[:HAS_VALUE]->(v:SensorValue)
     WITH
@@ -19,8 +17,8 @@ pub fn not_reported_query() -> &'static str  {
     "
 }
 
-pub fn percent_not_reported_query() -> &'static str  {
-        "
+pub fn percent_not_reported_query() -> &'static str {
+    "
     MATCH
         (e:Equipment)-[:HAS_SENSOR]->(s:Sensor)-[:HAS_VALUE]->(v:SensorValue)
     WITH

@@ -1,9 +1,9 @@
-use std::{sync::Arc};
+use std::sync::Arc;
 
 use serde_json::json;
 
-use drasi_core::{
-    models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
+use drasi_core::models::{
+    Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
 
 // Add 2 Customers each with 4 calls to the initial graph. The calls are on the same day (2023-10-01)

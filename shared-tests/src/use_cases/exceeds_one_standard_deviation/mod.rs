@@ -13,7 +13,6 @@ use crate::QueryTestConfig;
 mod data;
 mod queries;
 
-
 async fn bootstrap_query(query: &ContinuousQuery) {
     let data = get_bootstrap_data();
 

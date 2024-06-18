@@ -42,14 +42,16 @@ impl ScalarFunction for Date {
                 }
             }
             VariableValue::Object(o) => {
-                let valid_keys: HashSet<String> = ["year",
+                let valid_keys: HashSet<String> = [
+                    "year",
                     "month",
                     "week",
                     "day",
                     "ordinalDay",
                     "quarter",
                     "dayOfWeek",
-                    "dayOfQuarter"]
+                    "dayOfQuarter",
+                ]
                 .iter()
                 .map(|s| s.to_string())
                 .collect();
@@ -98,12 +100,14 @@ impl ScalarFunction for LocalTime {
                 }
             }
             VariableValue::Object(o) => {
-                let valid_keys: HashSet<String> = ["hour",
+                let valid_keys: HashSet<String> = [
+                    "hour",
                     "minute",
                     "second",
                     "millisecond",
                     "microsecond",
-                    "nanosecond"]
+                    "nanosecond",
+                ]
                 .iter()
                 .map(|s| s.to_string())
                 .collect();
@@ -223,13 +227,15 @@ impl ScalarFunction for Time {
                 }
             }
             VariableValue::Object(o) => {
-                let valid_keys: HashSet<String> = ["hour",
+                let valid_keys: HashSet<String> = [
+                    "hour",
                     "minute",
                     "second",
                     "millisecond",
                     "microsecond",
                     "nanosecond",
-                    "timezone"]
+                    "timezone",
+                ]
                 .iter()
                 .map(|s| s.to_string())
                 .collect();
@@ -786,16 +792,12 @@ async fn truncate_date(unit: String, date: NaiveDate) -> Result<NaiveDate, Evalu
             let year = year / 10 * 10;
             Ok(NaiveDate::from_ymd_opt(year, 1, 1).unwrap())
         }
-        "year" => {
-            Ok(NaiveDate::from_ymd_opt(year, 1, 1).unwrap())
-        }
+        "year" => Ok(NaiveDate::from_ymd_opt(year, 1, 1).unwrap()),
         "quarter" => {
             let month = month / 3 * 3 + 1;
             Ok(NaiveDate::from_ymd_opt(year, month, 1).unwrap())
         }
-        "month" => {
-            Ok(NaiveDate::from_ymd_opt(year, month, 1).unwrap())
-        }
+        "month" => Ok(NaiveDate::from_ymd_opt(year, month, 1).unwrap()),
         "week" => {
             let weekday = date.weekday();
             let days_to_subtract = match weekday {
@@ -810,9 +812,7 @@ async fn truncate_date(unit: String, date: NaiveDate) -> Result<NaiveDate, Evalu
 
             Ok(date - chrono::Duration::days(days_to_subtract as i64))
         }
-        "day" => {
-            Ok(NaiveDate::from_ymd_opt(year, month, day).unwrap())
-        }
+        "day" => Ok(NaiveDate::from_ymd_opt(year, month, day).unwrap()),
         "weekyear" => {
             // First day of the first week of the year
             let date_string = format!("{}-1-1", year);
@@ -825,9 +825,7 @@ async fn truncate_date(unit: String, date: NaiveDate) -> Result<NaiveDate, Evalu
         "hour" | "minute" | "second" | "millisecond" | "microsecond" => {
             Ok(NaiveDate::from_ymd_opt(year, month, day).unwrap())
         }
-        _ => {
-            Err(EvaluationError::InvalidType)
-        }
+        _ => Err(EvaluationError::InvalidType),
     }
 }
 
@@ -940,62 +938,32 @@ async fn truncate_local_time(unit: String, time: NaiveTime) -> Result<NaiveTime,
     let time_lowercase = unit.to_lowercase();
     let truncation_unit = time_lowercase.as_str();
     match truncation_unit {
-        "millennium" => {
-            Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
-        }
-        "century" => {
-            Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
-        }
-        "decade" => {
-            Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
-        }
-        "year" => {
-            Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
-        }
-        "month" => {
-            Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
-        }
-        "week" => {
-            Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
-        }
-        "quarter" => {
-            Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
-        }
-        "weekyear" => {
-            Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
-        }
-        "day" => {
-            Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
-        }
-        "hour" => {
-            Ok(NaiveTime::from_hms_opt(hour, 0, 0).unwrap())
-        }
-        "minute" => {
-            Ok(NaiveTime::from_hms_opt(hour, minute, 0).unwrap())
-        }
-        "second" => {
-            Ok(NaiveTime::from_hms_opt(hour, minute, second).unwrap())
-        }
+        "millennium" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
+        "century" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
+        "decade" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
+        "year" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
+        "month" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
+        "week" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
+        "quarter" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
+        "weekyear" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
+        "day" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
+        "hour" => Ok(NaiveTime::from_hms_opt(hour, 0, 0).unwrap()),
+        "minute" => Ok(NaiveTime::from_hms_opt(hour, minute, 0).unwrap()),
+        "second" => Ok(NaiveTime::from_hms_opt(hour, minute, second).unwrap()),
         "millisecond" => {
             let divisor = 10u32.pow(6);
 
             let truncated_nanos = (nanosecond / divisor) * divisor;
 
-            Ok(
-                NaiveTime::from_hms_nano_opt(hour, minute, second, truncated_nanos).unwrap(),
-            )
+            Ok(NaiveTime::from_hms_nano_opt(hour, minute, second, truncated_nanos).unwrap())
         }
         "microsecond" => {
             let divisor = 10u32.pow(3);
             let truncated_nanos = (nanosecond / divisor) * divisor;
 
-            Ok(
-                NaiveTime::from_hms_nano_opt(hour, minute, second, truncated_nanos).unwrap(),
-            )
+            Ok(NaiveTime::from_hms_nano_opt(hour, minute, second, truncated_nanos).unwrap())
         }
-        _ => {
-            Err(EvaluationError::InvalidType)
-        }
+        _ => Err(EvaluationError::InvalidType),
     }
 }
 

@@ -3,7 +3,10 @@ use std::{pin::Pin, sync::Arc};
 use async_trait::async_trait;
 use futures::Stream;
 
-use crate::{models::{Element, ElementReference, ElementTimestamp, QueryJoin, TimestampRange}, path_solver::match_path::MatchPath};
+use crate::{
+    models::{Element, ElementReference, ElementTimestamp, QueryJoin, TimestampRange},
+    path_solver::match_path::MatchPath,
+};
 
 use super::IndexError;
 

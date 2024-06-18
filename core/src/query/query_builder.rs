@@ -41,7 +41,7 @@ pub struct QueryBuilder {
     middleware_registry: Option<Arc<MiddlewareTypeRegistry>>,
     source_middleware: Vec<Arc<SourceMiddlewareConfig>>,
     source_pipelines: HashMap<Arc<str>, Vec<Arc<str>>>,
-    
+
     query_source: String,
     query_parser: Option<Arc<dyn QueryParser>>,
 }
@@ -142,8 +142,7 @@ impl QueryBuilder {
         self.try_build().await.unwrap()
     }
 
-    pub async fn try_build(mut self) -> Result<ContinuousQuery, QueryBuilderError> {        
-       
+    pub async fn try_build(mut self) -> Result<ContinuousQuery, QueryBuilderError> {
         let function_registry = match self.function_registry.take() {
             Some(registry) => registry,
             None => Arc::new(FunctionRegistry::new()),
@@ -200,7 +199,7 @@ impl QueryBuilder {
             future_queue.clone(),
             result_index.clone(),
             Arc::downgrade(&expr_evaluator.clone()),
-        );        
+        );
 
         let source_pipelines: SourceMiddlewarePipelineCollection = {
             if self.source_middleware.is_empty() {
@@ -237,4 +236,3 @@ impl QueryBuilder {
         ))
     }
 }
-

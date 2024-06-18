@@ -4,7 +4,9 @@ use super::process_solution;
 
 use crate::{
     evaluation::{
-        context::QueryPartEvaluationContext, functions::FunctionRegistry, parts::tests::build_query, variable_value::VariableValue, ExpressionEvaluator, QueryPartEvaluator
+        context::QueryPartEvaluationContext, functions::FunctionRegistry,
+        parts::tests::build_query, variable_value::VariableValue, ExpressionEvaluator,
+        QueryPartEvaluator,
     },
     in_memory_index::in_memory_result_index::InMemoryResultIndex,
 };
@@ -47,10 +49,7 @@ async fn aggregating_part_to_scalar_part_add_solution() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPartEvaluator::new(
-        expr_evaluator.clone(),
-        ari.clone(),
-    ));
+    let evaluator = Arc::new(QueryPartEvaluator::new(expr_evaluator.clone(), ari.clone()));
 
     let result = process_solution(
         &query,
@@ -165,10 +164,7 @@ async fn aggregating_part_to_scalar_part_update_solution() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPartEvaluator::new(
-        expr_evaluator.clone(),
-        ari.clone(),
-    ));
+    let evaluator = Arc::new(QueryPartEvaluator::new(expr_evaluator.clone(), ari.clone()));
 
     process_solution(
         &query,
@@ -341,10 +337,7 @@ async fn aggregating_part_to_scalar_part_remove_solution() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPartEvaluator::new(
-        expr_evaluator.clone(),
-        ari.clone(),
-    ));
+    let evaluator = Arc::new(QueryPartEvaluator::new(expr_evaluator.clone(), ari.clone()));
 
     process_solution(
         &query,
@@ -452,10 +445,7 @@ async fn aggregating_part_to_aggregating_part_add_solution() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPartEvaluator::new(
-        expr_evaluator.clone(),
-        ari.clone(),
-    ));
+    let evaluator = Arc::new(QueryPartEvaluator::new(expr_evaluator.clone(), ari.clone()));
 
     let result = process_solution(
         &query,
@@ -577,10 +567,7 @@ async fn aggregating_part_to_aggregating_part_update_solution() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPartEvaluator::new(
-        expr_evaluator.clone(),
-        ari.clone(),
-    ));
+    let evaluator = Arc::new(QueryPartEvaluator::new(expr_evaluator.clone(), ari.clone()));
 
     process_solution(
         &query,
@@ -688,10 +675,7 @@ async fn aggregating_part_to_aggregating_part_group_switch() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPartEvaluator::new(
-        expr_evaluator.clone(),
-        ari.clone(),
-    ));
+    let evaluator = Arc::new(QueryPartEvaluator::new(expr_evaluator.clone(), ari.clone()));
 
     process_solution(
         &query,
@@ -802,10 +786,7 @@ async fn test_list_indexing_with_clause() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPartEvaluator::new(
-        expr_evaluator.clone(),
-        ari.clone(),
-    ));
+    let evaluator = Arc::new(QueryPartEvaluator::new(expr_evaluator.clone(), ari.clone()));
 
     let result = process_solution(
         &query,
@@ -879,10 +860,7 @@ async fn aggregating_part_to_aggregating_part_group_switch_with_comments() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPartEvaluator::new(
-        expr_evaluator.clone(),
-        ari.clone(),
-    ));
+    let evaluator = Arc::new(QueryPartEvaluator::new(expr_evaluator.clone(), ari.clone()));
 
     process_solution(
         &query,
@@ -1018,10 +996,7 @@ async fn sequential_aggregations1() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPartEvaluator::new(
-        expr_evaluator.clone(),
-        ari.clone(),
-    ));
+    let evaluator = Arc::new(QueryPartEvaluator::new(expr_evaluator.clone(), ari.clone()));
 
     let result = process_solution(
         &query,
@@ -1177,10 +1152,7 @@ async fn sequential_aggregations2() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPartEvaluator::new(
-        expr_evaluator.clone(),
-        ari.clone(),
-    ));
+    let evaluator = Arc::new(QueryPartEvaluator::new(expr_evaluator.clone(), ari.clone()));
 
     let result = process_solution(
         &query,
@@ -1339,10 +1311,7 @@ async fn aggregating_part_to_scalar_part_add_solution_emit_remove() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPartEvaluator::new(
-        expr_evaluator.clone(),
-        ari.clone(),
-    ));
+    let evaluator = Arc::new(QueryPartEvaluator::new(expr_evaluator.clone(), ari.clone()));
 
     let result = process_solution(
         &query,

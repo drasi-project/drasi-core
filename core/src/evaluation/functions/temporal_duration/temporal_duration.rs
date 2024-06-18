@@ -38,7 +38,8 @@ impl ScalarFunction for DurationFunc {
                 Ok(VariableValue::Duration(duration))
             }
             VariableValue::Object(o) => {
-                let valid_keys: HashSet<String> = ["years",
+                let valid_keys: HashSet<String> = [
+                    "years",
                     "months",
                     "weeks",
                     "days",
@@ -47,7 +48,8 @@ impl ScalarFunction for DurationFunc {
                     "seconds",
                     "milliseconds",
                     "microseconds",
-                    "nanoseconds"]
+                    "nanoseconds",
+                ]
                 .iter()
                 .map(|&s| s.to_string())
                 .collect();
@@ -805,8 +807,8 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, Evaluation
                             if substring.contains('.') {
                                 if let Ok(days) = substring.parse::<f64>() {
                                     duration_result += ChronoDuration::nanoseconds(
-                                            (days * 86400000000000.0) as i64,
-                                        );
+                                        (days * 86400000000000.0) as i64,
+                                    );
                                 } else {
                                     return Err(EvaluationError::ParseError);
                                 }

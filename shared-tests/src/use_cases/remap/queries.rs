@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
-
 use drasi_core::models::SourceMiddlewareConfig;
 use serde_json::json;
 
-pub fn remap_query() -> &'static str  {
-  "
+pub fn remap_query() -> &'static str {
+    "
   MATCH (v:Vehicle)
   RETURN
     v.id,

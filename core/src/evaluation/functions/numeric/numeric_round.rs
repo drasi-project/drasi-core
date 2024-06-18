@@ -87,13 +87,15 @@ impl ScalarFunction for Round {
                         VariableValue::Integer(p),
                         VariableValue::String(m),
                     ) => {
-                        let valid_modes: HashSet<String> = ["UP",
+                        let valid_modes: HashSet<String> = [
+                            "UP",
                             "DOWN",
                             "CEILING",
                             "FLOOR",
                             "HALF_UP",
                             "HALF_DOWN",
-                            "HALF_EVEN"]
+                            "HALF_EVEN",
+                        ]
                         .iter()
                         .map(|s| s.to_string())
                         .collect();

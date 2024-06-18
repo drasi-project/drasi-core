@@ -1,4 +1,3 @@
-
 use drasi_core::models::{QueryJoin, QueryJoinKey};
 
 /**

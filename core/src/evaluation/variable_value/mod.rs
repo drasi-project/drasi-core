@@ -17,8 +17,7 @@ use zoned_time::ZonedTime;
 
 use crate::models::{Element, ElementMetadata, ElementReference};
 
-#[derive(Clone, Hash, Eq)]
-#[derive(Default)]
+#[derive(Clone, Hash, Eq, Default)]
 pub enum VariableValue {
     #[default]
     Null,
@@ -360,8 +359,6 @@ fn parse_index(s: &str) -> Option<usize> {
     }
     s.parse().ok()
 }
-
-
 
 impl Debug for VariableValue {
     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {

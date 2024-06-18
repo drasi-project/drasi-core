@@ -246,7 +246,9 @@ impl QueryPartEvaluator {
                             before: before_out,
                             after: after_out,
                         }]),
-                        None => Ok(vec![QueryPartEvaluationContext::Adding { after: after_out }]),
+                        None => Ok(vec![QueryPartEvaluationContext::Adding {
+                            after: after_out,
+                        }]),
                     },
                 }
             }
@@ -538,7 +540,9 @@ impl QueryPartEvaluator {
                         .await?),
                     _ => {
                         if before_filtered || !should_revert {
-                            Ok(vec![QueryPartEvaluationContext::Adding { after: next_after }])
+                            Ok(vec![QueryPartEvaluationContext::Adding {
+                                after: next_after,
+                            }])
                         } else {
                             Ok(vec![QueryPartEvaluationContext::Updating {
                                 before: next_before.unwrap_or_default(),

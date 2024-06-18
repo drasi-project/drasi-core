@@ -33,8 +33,8 @@ async fn bootstrap_query(query: &ContinuousQuery) {
 // Query identifies a products daily revenue has decreased by $10,000.
 pub async fn decrease_by_ten(config: &(impl QueryTestConfig + Send)) {
     let decrease_by_ten_query = {
-        let mut builder =
-            QueryBuilder::new(queries::decrease_by_ten_query()).with_joins(queries::decrease_by_ten_metadata());
+        let mut builder = QueryBuilder::new(queries::decrease_by_ten_query())
+            .with_joins(queries::decrease_by_ten_metadata());
         builder = config.config_query(builder).await;
         builder.build().await
     };
@@ -228,8 +228,8 @@ pub async fn decrease_by_ten(config: &(impl QueryTestConfig + Send)) {
 
 pub async fn decrease_by_ten_percent(config: &(impl QueryTestConfig + Send)) {
     let decrease_by_ten_query = {
-        let mut builder =
-            QueryBuilder::new(queries::decrease_by_ten_percent_query()).with_joins(queries::decrease_by_ten_metadata());
+        let mut builder = QueryBuilder::new(queries::decrease_by_ten_percent_query())
+            .with_joins(queries::decrease_by_ten_metadata());
         builder = config.config_query(builder).await;
         builder.build().await
     };

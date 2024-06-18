@@ -1,4 +1,3 @@
-
 use drasi_core::models::{QueryJoin, QueryJoinKey};
 
 /**
@@ -62,7 +61,7 @@ pub fn steps_happen_in_any_order_metadata() -> Vec<QueryJoin> {
     ]
 }
 
-pub fn steps_happen_in_any_order_query() -> &'static str  {
+pub fn steps_happen_in_any_order_query() -> &'static str {
     "
   MATCH
     (cust:Customer)-[:COMPLETES_STEP]->(compStepX:CompletedStep)-[:IS_STEP]->(:Step {name:'Step X'}),

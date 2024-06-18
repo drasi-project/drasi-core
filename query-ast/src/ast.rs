@@ -610,5 +610,3 @@ impl ParentExpression for ListExpression {
         children
     }
 }
-
-

@@ -1,4 +1,3 @@
-
 use drasi_core::models::{QueryJoin, QueryJoinKey};
 
 /**
@@ -62,7 +61,7 @@ pub fn exceeds_one_standard_deviation_metadata() -> Vec<QueryJoin> {
     ]
 }
 
-pub fn exceeds_one_standard_deviation_query() -> &'static str  {
+pub fn exceeds_one_standard_deviation_query() -> &'static str {
     "
     MATCH
         (equip:Equipment {type:'freezer'})-[:HAS_SENSOR]->(:Sensor {type:'temperature'})-[:HAS_VALUE]->(val:SensorValue)

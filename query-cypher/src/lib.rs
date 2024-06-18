@@ -1,6 +1,9 @@
 #![allow(clippy::redundant_closure_call)]
 
-use drasi_query_ast::{api::{QueryParseError, QueryParser}, ast::{self, Expression, ParentExpression, ProjectionClause}};
+use drasi_query_ast::{
+    api::{QueryParseError, QueryParser},
+    ast::{self, Expression, ParentExpression, ProjectionClause},
+};
 use peg::{error::ParseError, str::LineCol};
 use std::{collections::HashSet, sync::Arc};
 
@@ -367,7 +370,10 @@ peg::parser! {
     }
 }
 
-pub fn parse(input: &str, config: &dyn CypherConfiguration) -> Result<ast::Query, ParseError<LineCol>> {
+pub fn parse(
+    input: &str,
+    config: &dyn CypherConfiguration,
+) -> Result<ast::Query, ParseError<LineCol>> {
     cypher::query(input, config)
 }
 
@@ -407,7 +413,10 @@ impl IntoProjectionClause for Vec<Expression> {
     }
 }
 
-pub fn contains_aggregating_function(expression: &Expression, config: &dyn CypherConfiguration) -> bool {
+pub fn contains_aggregating_function(
+    expression: &Expression,
+    config: &dyn CypherConfiguration,
+) -> bool {
     let stack = &mut vec![expression];
     let aggr_funcs = config.get_aggregating_function_names();
 

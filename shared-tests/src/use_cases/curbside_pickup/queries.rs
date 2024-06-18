@@ -1,5 +1,3 @@
-
-
 use drasi_core::models::{QueryJoin, QueryJoinKey};
 
 pub fn pickup_order_ready_query() -> &'static str {

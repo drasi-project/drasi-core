@@ -44,10 +44,9 @@ impl QueryTestConfig for GarnetQueryConfig {
         log::info!("using in Garnet indexes");
         let query_id = format!("test-{}", Uuid::new_v4());
 
-        let mut element_index =
-            GarnetElementIndex::connect(&query_id, &self.url)
-                .await
-                .unwrap();
+        let mut element_index = GarnetElementIndex::connect(&query_id, &self.url)
+            .await
+            .unwrap();
         let ari = GarnetResultIndex::connect(&query_id, &self.url)
             .await
             .unwrap();

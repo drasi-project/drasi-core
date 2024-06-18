@@ -1,4 +1,3 @@
-
 use drasi_core::models::{QueryJoin, QueryJoinKey};
 
 /**
@@ -62,7 +61,7 @@ pub fn logical_conditions_metadata() -> Vec<QueryJoin> {
     ]
 }
 
-pub fn logical_conditions_query() -> &'static str  {
+pub fn logical_conditions_query() -> &'static str {
     "
   MATCH
     (equip:Equipment {type:'freezer'})-[:HAS_SENSOR]->(s1:Sensor {type:'temperature'})-[:HAS_VALUE]->(tempSensorValue:SensorValue),

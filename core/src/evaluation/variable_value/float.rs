@@ -4,8 +4,7 @@ use core::hash::{Hash, Hasher};
 use serde::de::{self, Deserialize, Deserializer, Visitor};
 use serde_json::Number;
 
-#[derive(Clone)]
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Float {
     value: f64,
 }
@@ -99,8 +98,6 @@ impl From<Float> for Number {
         Number::from_f64(val.value).unwrap()
     }
 }
-
-
 
 impl Debug for Float {
     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {

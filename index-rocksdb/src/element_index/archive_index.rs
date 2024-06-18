@@ -113,7 +113,7 @@ impl ElementArchiveIndex for RocksDbElementIndex {
                     }
                     Ok(0)
                 });
-                
+
                 match task.await {
                     Ok(Ok(data)) => data,
                     Ok(Err(e)) => return Err(e),

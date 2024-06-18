@@ -1,4 +1,8 @@
-use std::{collections::HashMap, hash::Hash, sync::{Arc, RwLock}};
+use std::{
+    collections::HashMap,
+    hash::Hash,
+    sync::{Arc, RwLock},
+};
 
 use async_stream::stream;
 use async_trait::async_trait;
@@ -51,11 +55,7 @@ const PARTIAL_CF: &str = "partial";
 const ELEMENT_BLOCK_CACHE_SIZE: u64 = 32;
 
 impl RocksDbElementIndex {
-    pub fn new(
-        query_id: &str,
-        path: &str,
-        options: RocksIndexOptions,
-    ) -> Result<Self, IndexError> {
+    pub fn new(query_id: &str, path: &str, options: RocksIndexOptions) -> Result<Self, IndexError> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
@@ -369,7 +369,7 @@ impl ElementIndex for RocksDbElementIndex {
     async fn set_joins(&self, match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) {
         let joins_by_label = extract_join_spec_by_label(match_path, joins);
         let mut join_spec_by_label = self.context.join_spec_by_label.write().unwrap();
-        join_spec_by_label.clone_from(&joins_by_label);        
+        join_spec_by_label.clone_from(&joins_by_label);
     }
 }
 
@@ -888,7 +888,8 @@ fn hash_element_ref(element_ref: &ElementReference) -> ReferenceHash {
         .source_id
         .as_bytes()
         .iter()
-        .chain(element_ref.element_id.as_bytes()).copied()
+        .chain(element_ref.element_id.as_bytes())
+        .copied()
         .collect::<Vec<u8>>();
 
     fastmurmur3::hash(bytes.as_slice()).to_be_bytes()
@@ -899,7 +900,8 @@ fn hash_stored_element_ref(element_ref: &StoredElementReference) -> ReferenceHas
         .source_id
         .as_bytes()
         .iter()
-        .chain(element_ref.element_id.as_bytes()).copied()
+        .chain(element_ref.element_id.as_bytes())
+        .copied()
         .collect::<Vec<u8>>();
 
     fastmurmur3::hash(bytes.as_slice()).to_be_bytes()

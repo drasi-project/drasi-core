@@ -6,12 +6,14 @@ use crate::{
     in_memory_index::{
         in_memory_element_index::InMemoryElementIndex, in_memory_future_queue::InMemoryFutureQueue,
         in_memory_result_index::InMemoryResultIndex,
-    }, interface::{FutureElementRef, FutureQueueConsumer}, query::QueryBuilder
+    },
+    interface::{FutureElementRef, FutureQueueConsumer},
+    query::QueryBuilder,
 };
 
 #[tokio::test]
 async fn dependency_leaks() {
-    let query_str = "MATCH (n:Person) RETURN n";    
+    let query_str = "MATCH (n:Person) RETURN n";
     let mut builder = QueryBuilder::new(query_str);
 
     let element_index = Arc::new(InMemoryElementIndex::new());
