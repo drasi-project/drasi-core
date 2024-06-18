@@ -1,7 +1,5 @@
 mod element_index;
 mod future_queue;
-mod path_solver;
-mod projector;
 mod query_clock;
 mod result_index;
 mod source_middleware;
@@ -18,8 +16,6 @@ pub use future_queue::FutureElementRef;
 pub use future_queue::FutureQueue;
 pub use future_queue::FutureQueueConsumer;
 pub use future_queue::PushType;
-pub use path_solver::PathSolver;
-pub use projector::Projector;
 pub use query_clock::QueryClock;
 pub use result_index::AccumulatorIndex;
 pub use result_index::LazySortedSetStore;

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use drasi_core::{
-    evaluation::{context::PhaseEvaluationContext, variable_value::VariableValue},
+    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{ContinuousQuery, QueryBuilder},
 };
@@ -118,7 +118,7 @@ pub async fn crosses_above_and_stays_above(config: &(impl QueryTestConfig + Send
         // println!("Node Result - Update sensor value ({}): {:?}", timestamp, node_result);
         assert_eq!(node_result.len(), 1);
 
-        assert!(node_result.contains(&PhaseEvaluationContext::Adding {
+        assert!(node_result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "freezerId" => VariableValue::from(json!("equip_01")),
               // "timeRangeStart" => VariableValue::from(json!(1696150860)),
@@ -152,7 +152,7 @@ pub async fn crosses_above_and_stays_above(config: &(impl QueryTestConfig + Send
         // println!("Node Result - Update sensor value ({}): {:?}", timestamp, node_result);
         assert_eq!(node_result.len(), 1);
 
-        assert!(node_result.contains(&PhaseEvaluationContext::Removing {
+        assert!(node_result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!(
               "freezerId" => VariableValue::from(json!("equip_01")),
               // "timeRangeStart" => VariableValue::from(json!(1696150860)),

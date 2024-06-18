@@ -16,22 +16,22 @@ use super::{
     expressions::*,
     EvaluationError, ExpressionEvaluationContext,
 };
-use drasi_query_ast::ast::{ProjectionClause, QueryPhase};
+use drasi_query_ast::ast::{ProjectionClause, QueryPart};
 use hashers::jenkins::spooky_hash::SpookyHasher;
 
-use super::context::{PhaseEvaluationContext, QueryVariables};
+use super::context::{QueryPartEvaluationContext, QueryVariables};
 
-pub struct QueryPhaseEvaluator {
+pub struct QueryPartEvaluator {
     expression_evaluator: Arc<ExpressionEvaluator>,
     result_index: Arc<dyn ResultIndex>,
 }
 
-impl QueryPhaseEvaluator {
+impl QueryPartEvaluator {
     pub fn new(
         expression_evaluator: Arc<ExpressionEvaluator>,
         result_index: Arc<dyn ResultIndex>,
-    ) -> QueryPhaseEvaluator {
-        QueryPhaseEvaluator {
+    ) -> QueryPartEvaluator {
+        QueryPartEvaluator {
             expression_evaluator,
             result_index,
         }
@@ -39,14 +39,14 @@ impl QueryPhaseEvaluator {
 
     pub async fn evaluate(
         &self,
-        context: PhaseEvaluationContext,
-        phase_num: usize,
-        phase: &QueryPhase,
+        context: QueryPartEvaluationContext,
+        part_num: usize,
+        part: &QueryPart,
         change_context: &ChangeContext,
-    ) -> Result<Vec<PhaseEvaluationContext>, EvaluationError> {
+    ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
         // println!("Evaluating : {:#?}", context);
 
-        let is_return_aggreating = match &phase.return_clause {
+        let is_return_aggreating = match &part.return_clause {
             ProjectionClause::GroupBy {
                 grouping: _,
                 aggregates: _,
@@ -55,8 +55,8 @@ impl QueryPhaseEvaluator {
         };
 
         match context {
-            PhaseEvaluationContext::Adding { after } => {
-                let agg_snapshot = match &phase.return_clause {
+            QueryPartEvaluationContext::Adding { after } => {
+                let agg_snapshot = match &part.return_clause {
                     ProjectionClause::GroupBy {
                         grouping: _,
                         aggregates: _,
@@ -70,7 +70,7 @@ impl QueryPhaseEvaluator {
                         Some(
                             self.project(
                                 &snapshot_context,
-                                &phase.return_clause,
+                                &part.return_clause,
                                 &mut grouping_keys,
                             )
                             .await?,
@@ -84,42 +84,42 @@ impl QueryPhaseEvaluator {
 
                 let mut grouping_keys = Vec::new();
 
-                for filter in &phase.where_clauses {
+                for filter in &part.where_clauses {
                     if !self
                         .expression_evaluator
                         .evaluate_predicate(&eval_context, &filter)
                         .await?
                     {
-                        return Ok(vec![PhaseEvaluationContext::Noop]);
+                        return Ok(vec![QueryPartEvaluationContext::Noop]);
                     }
                 }
 
                 let data = self
-                    .project(&eval_context, &phase.return_clause, &mut grouping_keys)
+                    .project(&eval_context, &part.return_clause, &mut grouping_keys)
                     .await?;
 
-                match &phase.return_clause {
+                match &part.return_clause {
                     ProjectionClause::GroupBy {
                         grouping: _,
                         aggregates: _,
-                    } => Ok(vec![PhaseEvaluationContext::Aggregation {
+                    } => Ok(vec![QueryPartEvaluationContext::Aggregation {
                         before: agg_snapshot,
                         after: data,
                         grouping_keys,
                         default_before: true,
                         default_after: false,
                     }]),
-                    _ => Ok(vec![PhaseEvaluationContext::Adding { after: data }]),
+                    _ => Ok(vec![QueryPartEvaluationContext::Adding { after: data }]),
                 }
             }
-            PhaseEvaluationContext::Updating { before, after } => {
+            QueryPartEvaluationContext::Updating { before, after } => {
                 if &before == &after && !change_context.is_future_reprocess {
-                    return Ok(vec![PhaseEvaluationContext::Noop]);
+                    return Ok(vec![QueryPartEvaluationContext::Noop]);
                 };
 
                 let mut grouping_keys = Vec::new();
 
-                let agg_snapshot = match &phase.return_clause {
+                let agg_snapshot = match &part.return_clause {
                     ProjectionClause::GroupBy {
                         grouping: _,
                         aggregates: _,
@@ -132,7 +132,7 @@ impl QueryPhaseEvaluator {
                         Some(
                             self.project(
                                 &snapshot_context,
-                                &phase.return_clause,
+                                &part.return_clause,
                                 &mut grouping_keys,
                             )
                             .await?,
@@ -149,7 +149,7 @@ impl QueryPhaseEvaluator {
                 );
                 let mut before_filtered = false;
 
-                for filter in &phase.where_clauses {
+                for filter in &part.where_clauses {
                     before_filtered = before_filtered
                         || !self
                             .expression_evaluator
@@ -162,7 +162,7 @@ impl QueryPhaseEvaluator {
 
                 if !before_filtered {
                     before_out = Some(
-                        self.project(&before_context, &phase.return_clause, &mut grouping_keys)
+                        self.project(&before_context, &part.return_clause, &mut grouping_keys)
                             .await?,
                     );
 
@@ -175,7 +175,7 @@ impl QueryPhaseEvaluator {
                     agg_after = Some(
                         self.project(
                             &revert_context,
-                            &phase.return_clause,
+                            &part.return_clause,
                             &mut agg_after_grouping_keys,
                         )
                         .await?,
@@ -186,7 +186,7 @@ impl QueryPhaseEvaluator {
                     ExpressionEvaluationContext::from_after_change(&after, change_context);
                 after_context.set_side_effects(context::SideEffects::Apply);
 
-                for filter in &phase.where_clauses {
+                for filter in &part.where_clauses {
                     if !self
                         .expression_evaluator
                         .evaluate_predicate(&after_context, &filter)
@@ -196,7 +196,7 @@ impl QueryPhaseEvaluator {
                             if is_return_aggreating {
                                 return self
                                     .reconile_crossing_agregate(
-                                        phase,
+                                        part,
                                         grouping_keys,
                                         Some(before),
                                         after,
@@ -211,26 +211,26 @@ impl QueryPhaseEvaluator {
 
                         match before_out {
                             Some(before_out) => {
-                                return Ok(vec![PhaseEvaluationContext::Removing {
+                                return Ok(vec![QueryPartEvaluationContext::Removing {
                                     before: before_out,
                                 }])
                             }
-                            None => return Ok(vec![PhaseEvaluationContext::Noop]),
+                            None => return Ok(vec![QueryPartEvaluationContext::Noop]),
                         };
                     }
                 }
 
                 let after_out = self
-                    .project(&after_context, &phase.return_clause, &mut grouping_keys)
+                    .project(&after_context, &part.return_clause, &mut grouping_keys)
                     .await?;
 
-                match &phase.return_clause {
+                match &part.return_clause {
                     ProjectionClause::GroupBy {
                         grouping: _,
                         aggregates: _,
                     } => {
                         self.reconile_crossing_agregate(
-                            phase,
+                            part,
                             grouping_keys,
                             Some(before),
                             after,
@@ -242,16 +242,16 @@ impl QueryPhaseEvaluator {
                         .await
                     }
                     _ => match before_out {
-                        Some(before_out) => Ok(vec![PhaseEvaluationContext::Updating {
+                        Some(before_out) => Ok(vec![QueryPartEvaluationContext::Updating {
                             before: before_out,
                             after: after_out,
                         }]),
-                        None => Ok(vec![PhaseEvaluationContext::Adding { after: after_out }]),
+                        None => Ok(vec![QueryPartEvaluationContext::Adding { after: after_out }]),
                     },
                 }
             }
-            PhaseEvaluationContext::Removing { before } => {
-                let agg_before = match &phase.return_clause {
+            QueryPartEvaluationContext::Removing { before } => {
+                let agg_before = match &part.return_clause {
                     ProjectionClause::GroupBy {
                         grouping: _,
                         aggregates: _,
@@ -263,7 +263,7 @@ impl QueryPhaseEvaluator {
                         );
                         let mut grouping_keys = Vec::new();
                         Some(
-                            self.project(&prev_context, &phase.return_clause, &mut grouping_keys)
+                            self.project(&prev_context, &part.return_clause, &mut grouping_keys)
                                 .await?,
                         )
                     }
@@ -277,35 +277,35 @@ impl QueryPhaseEvaluator {
                 );
                 let mut grouping_keys = Vec::new();
 
-                for filter in &phase.where_clauses {
+                for filter in &part.where_clauses {
                     if !self
                         .expression_evaluator
                         .evaluate_predicate(&eval_context, &filter)
                         .await?
                     {
-                        return Ok(vec![PhaseEvaluationContext::Noop]);
+                        return Ok(vec![QueryPartEvaluationContext::Noop]);
                     }
                 }
 
                 let data = self
-                    .project(&eval_context, &phase.return_clause, &mut grouping_keys)
+                    .project(&eval_context, &part.return_clause, &mut grouping_keys)
                     .await?;
 
-                match &phase.return_clause {
+                match &part.return_clause {
                     ProjectionClause::GroupBy {
                         grouping: _,
                         aggregates: _,
-                    } => Ok(vec![PhaseEvaluationContext::Aggregation {
+                    } => Ok(vec![QueryPartEvaluationContext::Aggregation {
                         before: agg_before,
                         after: data,
                         grouping_keys,
                         default_before: false,
                         default_after: true,
                     }]),
-                    _ => Ok(vec![PhaseEvaluationContext::Removing { before: data }]),
+                    _ => Ok(vec![QueryPartEvaluationContext::Removing { before: data }]),
                 }
             }
-            PhaseEvaluationContext::Aggregation {
+            QueryPartEvaluationContext::Aggregation {
                 before,
                 after,
                 grouping_keys,
@@ -314,7 +314,7 @@ impl QueryPhaseEvaluator {
             } => {
                 if let Some(before) = &before {
                     if before == &after && !change_context.is_future_reprocess && !default_before {
-                        return Ok(vec![PhaseEvaluationContext::Noop]);
+                        return Ok(vec![QueryPartEvaluationContext::Noop]);
                     }
                 };
 
@@ -330,7 +330,7 @@ impl QueryPhaseEvaluator {
                             let before_hash = before_hash.finish();
                             match self
                                 .result_index
-                                .get(&result_key, &ResultOwner::PhaseCurrent(phase_num))
+                                .get(&result_key, &ResultOwner::PartCurrent(part_num))
                                 .await?
                             {
                                 Some(ValueAccumulator::Signature(sig)) => sig == before_hash,
@@ -338,7 +338,7 @@ impl QueryPhaseEvaluator {
                                     self.result_index
                                         .set(
                                             result_key.clone(),
-                                            ResultOwner::PhaseDefault(phase_num),
+                                            ResultOwner::PartDefault(part_num),
                                             Some(ValueAccumulator::Signature(before_hash)),
                                         )
                                         .await?;
@@ -361,7 +361,7 @@ impl QueryPhaseEvaluator {
                     } else {
                         match self
                             .result_index
-                            .get(&result_key, &ResultOwner::PhaseDefault(phase_num))
+                            .get(&result_key, &ResultOwner::PartDefault(part_num))
                             .await?
                         {
                             Some(ValueAccumulator::Signature(sig)) => {
@@ -369,7 +369,7 @@ impl QueryPhaseEvaluator {
                                     self.result_index
                                         .set(
                                             result_key.clone(),
-                                            ResultOwner::PhaseCurrent(phase_num),
+                                            ResultOwner::PartCurrent(part_num),
                                             None,
                                         )
                                         .await?;
@@ -386,13 +386,13 @@ impl QueryPhaseEvaluator {
                     self.result_index
                         .set(
                             result_key,
-                            ResultOwner::PhaseCurrent(phase_num),
+                            ResultOwner::PartCurrent(part_num),
                             Some(ValueAccumulator::Signature(after_hash)),
                         )
                         .await?;
                 }
 
-                let agg_snapshot = match &phase.return_clause {
+                let agg_snapshot = match &part.return_clause {
                     ProjectionClause::GroupBy {
                         grouping: _,
                         aggregates: _,
@@ -406,7 +406,7 @@ impl QueryPhaseEvaluator {
                         Some(
                             self.project(
                                 &snapshot_context,
-                                &phase.return_clause,
+                                &part.return_clause,
                                 &mut grouping_keys,
                             )
                             .await?,
@@ -426,7 +426,7 @@ impl QueryPhaseEvaluator {
                         Some(
                             self.project(
                                 &prev_context,
-                                &phase.return_clause,
+                                &part.return_clause,
                                 &mut next_before_grouping_keys,
                             )
                             .await?,
@@ -446,7 +446,7 @@ impl QueryPhaseEvaluator {
                         change_context,
                     );
 
-                    for filter in &phase.where_clauses {
+                    for filter in &part.where_clauses {
                         before_filtered = before_filtered
                             || !self
                                 .expression_evaluator
@@ -464,7 +464,7 @@ impl QueryPhaseEvaluator {
                         next_after = Some(
                             self.project(
                                 &revert_context,
-                                &phase.return_clause,
+                                &part.return_clause,
                                 &mut next_after_grouping_keys,
                             )
                             .await?,
@@ -479,7 +479,7 @@ impl QueryPhaseEvaluator {
                     after_context.set_side_effects(SideEffects::Snapshot);
                 }
 
-                for filter in &phase.where_clauses {
+                for filter in &part.where_clauses {
                     if !self
                         .expression_evaluator
                         .evaluate_predicate(&after_context, &filter)
@@ -489,7 +489,7 @@ impl QueryPhaseEvaluator {
                             if is_return_aggreating {
                                 return Ok(self
                                     .reconile_crossing_agregate(
-                                        phase,
+                                        part,
                                         next_after_grouping_keys,
                                         before,
                                         after,
@@ -503,11 +503,11 @@ impl QueryPhaseEvaluator {
                         }
 
                         if before.is_some() && !before_filtered {
-                            return Ok(vec![PhaseEvaluationContext::Removing {
+                            return Ok(vec![QueryPartEvaluationContext::Removing {
                                 before: next_before.unwrap_or_default(),
                             }]);
                         } else {
-                            return Ok(vec![PhaseEvaluationContext::Noop]);
+                            return Ok(vec![QueryPartEvaluationContext::Noop]);
                         }
                     }
                 }
@@ -515,18 +515,18 @@ impl QueryPhaseEvaluator {
                 let next_after = self
                     .project(
                         &after_context,
-                        &phase.return_clause,
+                        &part.return_clause,
                         &mut next_after_grouping_keys,
                     )
                     .await?;
 
-                match &phase.return_clause {
+                match &part.return_clause {
                     ProjectionClause::GroupBy {
                         grouping: _,
                         aggregates: _,
                     } => Ok(self
                         .reconile_crossing_agregate(
-                            phase,
+                            part,
                             next_after_grouping_keys,
                             before,
                             after,
@@ -538,9 +538,9 @@ impl QueryPhaseEvaluator {
                         .await?),
                     _ => {
                         if before_filtered || !should_revert {
-                            Ok(vec![PhaseEvaluationContext::Adding { after: next_after }])
+                            Ok(vec![QueryPartEvaluationContext::Adding { after: next_after }])
                         } else {
-                            Ok(vec![PhaseEvaluationContext::Updating {
+                            Ok(vec![QueryPartEvaluationContext::Updating {
                                 before: next_before.unwrap_or_default(),
                                 after: next_after,
                             }])
@@ -548,7 +548,7 @@ impl QueryPhaseEvaluator {
                     }
                 }
             }
-            PhaseEvaluationContext::Noop => Ok(vec![context]),
+            QueryPartEvaluationContext::Noop => Ok(vec![context]),
         }
     }
 
@@ -607,7 +607,7 @@ impl QueryPhaseEvaluator {
     /// Reconciles values crossing from one group to another
     async fn reconile_crossing_agregate(
         &self,
-        phase: &QueryPhase,
+        phase: &QueryPart,
         grouping_keys: Vec<String>,
         before_in: Option<QueryVariables>,
         _after_in: QueryVariables,
@@ -615,9 +615,9 @@ impl QueryPhaseEvaluator {
         after_out: QueryVariables,
         snapshot: Option<QueryVariables>,
         change_context: &ChangeContext,
-    ) -> Result<Vec<PhaseEvaluationContext>, EvaluationError> {
+    ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
         if before_in.is_none() || before_out.is_none() {
-            return Ok(vec![PhaseEvaluationContext::Aggregation {
+            return Ok(vec![QueryPartEvaluationContext::Aggregation {
                 before: before_out,
                 after: after_out,
                 grouping_keys,
@@ -637,7 +637,7 @@ impl QueryPhaseEvaluator {
         }
 
         if grouping_match {
-            return Ok(vec![PhaseEvaluationContext::Aggregation {
+            return Ok(vec![QueryPartEvaluationContext::Aggregation {
                 before: Some(before_out),
                 after: after_out,
                 grouping_keys,
@@ -647,14 +647,14 @@ impl QueryPhaseEvaluator {
         }
 
         Ok(vec![
-            PhaseEvaluationContext::Aggregation {
+            QueryPartEvaluationContext::Aggregation {
                 before: snapshot,
                 after: after_out,
                 grouping_keys: grouping_keys.clone(),
                 default_before: false,
                 default_after: false,
             },
-            PhaseEvaluationContext::Aggregation {
+            QueryPartEvaluationContext::Aggregation {
                 before: Some(before_out),
                 after: {
                     let mut prev_context = ExpressionEvaluationContext::new(

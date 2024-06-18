@@ -4,11 +4,11 @@ use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Query {
-    pub phases: Vec<QueryPhase>,
+    pub parts: Vec<QueryPart>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct QueryPhase {
+pub struct QueryPart {
     pub match_clauses: Vec<MatchClause>,
     pub where_clauses: Vec<Expression>,
     pub return_clause: ProjectionClause,

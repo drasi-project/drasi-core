@@ -3,7 +3,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use drasi_core::{
-    evaluation::{context::PhaseEvaluationContext, variable_value::VariableValue},
+    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{ContinuousQuery, QueryBuilder},
 };
@@ -152,7 +152,7 @@ pub async fn logical_conditions(config: &(impl QueryTestConfig + Send)) {
         );
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "freezerId" => VariableValue::from(json!("equip_01"))
             )
@@ -186,7 +186,7 @@ pub async fn logical_conditions(config: &(impl QueryTestConfig + Send)) {
         );
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&PhaseEvaluationContext::Removing {
+        assert!(result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!(
               "freezerId" => VariableValue::from(json!("equip_01"))
             )

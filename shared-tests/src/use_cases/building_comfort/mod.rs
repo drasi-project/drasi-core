@@ -3,7 +3,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use drasi_core::{
-    evaluation::{context::PhaseEvaluationContext, variable_value::VariableValue},
+    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{ContinuousQuery, QueryBuilder},
 };
@@ -179,7 +179,7 @@ pub async fn building_comfort_use_case(config: &(impl QueryTestConfig + Send)) {
                 .await
                 .unwrap();
             assert_eq!(result.len(), 1);
-            assert!(result.contains(&PhaseEvaluationContext::Updating {
+            assert!(result.contains(&QueryPartEvaluationContext::Updating {
                 before: variablemap!(
                   "RoomId" =>  VariableValue::from(json!("room_01_01_01")),
                   "ComfortLevel" =>  VariableValue::from(json!(50))
@@ -195,7 +195,7 @@ pub async fn building_comfort_use_case(config: &(impl QueryTestConfig + Send)) {
                 .await
                 .unwrap();
             assert_eq!(result.len(), 1);
-            assert!(result.contains(&PhaseEvaluationContext::Aggregation {
+            assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
                 default_before: false,
                 default_after: false,
                 before: Some(variablemap!(
@@ -215,7 +215,7 @@ pub async fn building_comfort_use_case(config: &(impl QueryTestConfig + Send)) {
                 .unwrap();
             assert_eq!(result.len(), 1);
             // println!("res {:?}", result);
-            assert!(result.contains(&PhaseEvaluationContext::Aggregation {
+            assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec!["BuildingId".into()],
                 default_before: false,
                 default_after: false,
@@ -234,7 +234,7 @@ pub async fn building_comfort_use_case(config: &(impl QueryTestConfig + Send)) {
                 .await
                 .unwrap();
             assert_eq!(result.len(), 1);
-            assert!(result.contains(&PhaseEvaluationContext::Adding {
+            assert!(result.contains(&QueryPartEvaluationContext::Adding {
                 after: variablemap!(
                   "RoomId" => VariableValue::from(json!("room_01_01_01")),
                   "ComfortLevel" => VariableValue::from(json!(54))
@@ -246,7 +246,7 @@ pub async fn building_comfort_use_case(config: &(impl QueryTestConfig + Send)) {
                 .await
                 .unwrap();
             assert_eq!(result.len(), 1);
-            assert!(result.contains(&PhaseEvaluationContext::Adding {
+            assert!(result.contains(&QueryPartEvaluationContext::Adding {
                 after: variablemap!(
                   "FloorId" => VariableValue::from(json!("floor_01_01")),
                   "ComfortLevel" => VariableValue::from(json!(51))
@@ -258,7 +258,7 @@ pub async fn building_comfort_use_case(config: &(impl QueryTestConfig + Send)) {
                 .await
                 .unwrap();
             assert_eq!(result.len(), 1);
-            assert!(result.contains(&PhaseEvaluationContext::Adding {
+            assert!(result.contains(&QueryPartEvaluationContext::Adding {
                 after: variablemap!(
                   "BuildingId" => VariableValue::from(json!("building_01")),
                   "ComfortLevel" => VariableValue::from(json!(50.5))
@@ -270,7 +270,7 @@ pub async fn building_comfort_use_case(config: &(impl QueryTestConfig + Send)) {
                 .await
                 .unwrap();
             assert_eq!(result.len(), 1);
-            assert!(result.contains(&PhaseEvaluationContext::Updating {
+            assert!(result.contains(&QueryPartEvaluationContext::Updating {
                 before: variablemap!(
                   "RoomId" => VariableValue::from(json!("room_01_01_01")),
                   "RoomName" => VariableValue::from(json!("Room 01_01_01")),
@@ -321,7 +321,7 @@ pub async fn building_comfort_use_case(config: &(impl QueryTestConfig + Send)) {
                 .await
                 .unwrap();
             assert_eq!(result.len(), 1);
-            assert!(result.contains(&PhaseEvaluationContext::Updating {
+            assert!(result.contains(&QueryPartEvaluationContext::Updating {
                 before: variablemap!(
                   "RoomId" => VariableValue::from(json!("room_01_01_01")),
                   "ComfortLevel" => VariableValue::from(json!(54.0))
@@ -337,7 +337,7 @@ pub async fn building_comfort_use_case(config: &(impl QueryTestConfig + Send)) {
                 .await
                 .unwrap();
             assert_eq!(result.len(), 1);
-            assert!(result.contains(&PhaseEvaluationContext::Aggregation {
+            assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec!["FloorId".into()],
                 default_before: false,
                 default_after: false,
@@ -356,7 +356,7 @@ pub async fn building_comfort_use_case(config: &(impl QueryTestConfig + Send)) {
                 .await
                 .unwrap();
             assert_eq!(result.len(), 1);
-            assert!(result.contains(&PhaseEvaluationContext::Aggregation {
+            assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec!["BuildingId".into()],
                 default_before: false,
                 default_after: false,
@@ -375,7 +375,7 @@ pub async fn building_comfort_use_case(config: &(impl QueryTestConfig + Send)) {
                 .await
                 .unwrap();
             assert_eq!(result.len(), 1);
-            assert!(result.contains(&PhaseEvaluationContext::Removing {
+            assert!(result.contains(&QueryPartEvaluationContext::Removing {
                 before: variablemap!(
                   "RoomId" => VariableValue::from(json!("room_01_01_01")),
                   "ComfortLevel" => VariableValue::from(json!(54))
@@ -387,7 +387,7 @@ pub async fn building_comfort_use_case(config: &(impl QueryTestConfig + Send)) {
                 .await
                 .unwrap();
             assert_eq!(result.len(), 1);
-            assert!(result.contains(&PhaseEvaluationContext::Removing {
+            assert!(result.contains(&QueryPartEvaluationContext::Removing {
                 before: variablemap!(
                   "FloorId" => VariableValue::from(json!("floor_01_01")),
                   "ComfortLevel" => VariableValue::from(json!(51))
@@ -399,7 +399,7 @@ pub async fn building_comfort_use_case(config: &(impl QueryTestConfig + Send)) {
                 .await
                 .unwrap();
             assert_eq!(result.len(), 1);
-            assert!(result.contains(&PhaseEvaluationContext::Removing {
+            assert!(result.contains(&QueryPartEvaluationContext::Removing {
                 before: variablemap!(
                   "BuildingId" => VariableValue::from(json!("building_01")),
                   "ComfortLevel" => VariableValue::from(json!(50.5))
@@ -411,7 +411,7 @@ pub async fn building_comfort_use_case(config: &(impl QueryTestConfig + Send)) {
                 .await
                 .unwrap();
             assert_eq!(result.len(), 1);
-            assert!(result.contains(&PhaseEvaluationContext::Updating {
+            assert!(result.contains(&QueryPartEvaluationContext::Updating {
                 before: variablemap!(
                   "RoomId" => VariableValue::from(json!("room_01_01_01")),
                   "RoomName" => VariableValue::from(json!("Room 01_01_01")),

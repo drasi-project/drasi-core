@@ -3,7 +3,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use drasi_core::{
-    evaluation::{context::PhaseEvaluationContext, variable_value::VariableValue},
+    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{ContinuousQuery, QueryBuilder},
 };
@@ -141,7 +141,7 @@ pub async fn rolling_average_decrease_by_ten(config: &(impl QueryTestConfig + Se
         assert_eq!(node_result.len(), 1);
         assert_eq!(
             node_result[0],
-            PhaseEvaluationContext::Adding {
+            QueryPartEvaluationContext::Adding {
                 after: variablemap! (
                     "currentAverageTemp" => VariableValue::from(json!(37.857142857142854)),
                     "freezerId" => VariableValue::from(json!("equip_01")),

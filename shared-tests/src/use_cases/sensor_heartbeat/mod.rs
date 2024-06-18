@@ -8,7 +8,7 @@ use serde_json::json;
 
 use drasi_core::{
     evaluation::{
-        context::PhaseEvaluationContext,
+        context::QueryPartEvaluationContext,
         variable_value::{zoned_datetime::ZonedDateTime, VariableValue},
     },
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
@@ -111,7 +111,7 @@ pub async fn not_reported(config: &(impl QueryTestConfig + Send)) {
         assert_eq!(fqc.recv(std::time::Duration::from_millis(100)).await, None); // no more results
         assert_eq!(results.len(), 3);
 
-        assert!(results.contains(&PhaseEvaluationContext::Adding {
+        assert!(results.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
                 "equipment" => VariableValue::String("Turbine 1".into()),
                 "sensor" => VariableValue::String("Temp".into()),
@@ -119,7 +119,7 @@ pub async fn not_reported(config: &(impl QueryTestConfig + Send)) {
             ),
         }));
 
-        assert!(results.contains(&PhaseEvaluationContext::Adding {
+        assert!(results.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
                 "equipment" => VariableValue::String("Turbine 2".into()),
                 "sensor" => VariableValue::String("Temp".into()),
@@ -127,7 +127,7 @@ pub async fn not_reported(config: &(impl QueryTestConfig + Send)) {
             ),
         }));
 
-        assert!(results.contains(&PhaseEvaluationContext::Adding {
+        assert!(results.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
                 "equipment" => VariableValue::String("Turbine 2".into()),
                 "sensor" => VariableValue::String("RPM".into()),
@@ -170,7 +170,7 @@ pub async fn not_reported(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&PhaseEvaluationContext::Removing {
+        assert!(result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!(
                 "equipment" => VariableValue::String("Turbine 2".into()),
                 "sensor" => VariableValue::String("RPM".into()),
@@ -186,7 +186,7 @@ pub async fn not_reported(config: &(impl QueryTestConfig + Send)) {
         assert_eq!(fqc.recv(std::time::Duration::from_millis(100)).await, None); // no additional results
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
                 "equipment" => VariableValue::String("Turbine 1".into()),
                 "sensor" => VariableValue::String("RPM".into()),
@@ -350,7 +350,7 @@ pub async fn percent_not_reported(config: &(impl QueryTestConfig + Send)) {
         assert_eq!(
             results,
             vec![
-                PhaseEvaluationContext::Updating {
+                QueryPartEvaluationContext::Updating {
                     before: variablemap!(
                         "percent_not_reporting" => VariableValue::from(json!(0.0))
                     ),
@@ -358,7 +358,7 @@ pub async fn percent_not_reported(config: &(impl QueryTestConfig + Send)) {
                         "percent_not_reporting" => VariableValue::from(json!(50.0))
                     )
                 },
-                PhaseEvaluationContext::Updating {
+                QueryPartEvaluationContext::Updating {
                     before: variablemap!(
                         "percent_not_reporting" => VariableValue::from(json!(50.0))
                     ),
@@ -403,7 +403,7 @@ pub async fn percent_not_reported(config: &(impl QueryTestConfig + Send)) {
         let result = cq.process_source_change(value_rel.clone()).await.unwrap();
 
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&PhaseEvaluationContext::Updating {
+        assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
                 "percent_not_reporting" => VariableValue::from(json!(100.0))
             ),
@@ -490,7 +490,7 @@ pub async fn percent_not_reported(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(
             result,
-            vec![PhaseEvaluationContext::Updating {
+            vec![QueryPartEvaluationContext::Updating {
                 before: variablemap!(
                     "percent_not_reporting" => VariableValue::from(json!(50.0))
                 ),
@@ -509,7 +509,7 @@ pub async fn percent_not_reported(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(
             result,
-            vec![PhaseEvaluationContext::Updating {
+            vec![QueryPartEvaluationContext::Updating {
                 before: variablemap!(
                     "percent_not_reporting" => VariableValue::from(json!(0.0))
                 ),
@@ -528,7 +528,7 @@ pub async fn percent_not_reported(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(
             result,
-            vec![PhaseEvaluationContext::Updating {
+            vec![QueryPartEvaluationContext::Updating {
                 before: variablemap!(
                     "percent_not_reporting" => VariableValue::from(json!(50.0))
                 ),
@@ -607,7 +607,7 @@ pub async fn percent_not_reported(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(
             result,
-            vec![PhaseEvaluationContext::Updating {
+            vec![QueryPartEvaluationContext::Updating {
                 before: variablemap!(
                     "percent_not_reporting" => VariableValue::from(json!(100.0))
                 ),

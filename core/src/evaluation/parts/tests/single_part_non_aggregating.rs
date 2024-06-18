@@ -4,7 +4,7 @@ use super::process_solution;
 
 use crate::{
     evaluation::{
-        context::PhaseEvaluationContext, functions::FunctionRegistry, phases::tests::build_query, variable_value::VariableValue, ExpressionEvaluator, QueryPhaseEvaluator
+        context::QueryPartEvaluationContext, functions::FunctionRegistry, parts::tests::build_query, variable_value::VariableValue, ExpressionEvaluator, QueryPartEvaluator
     },
     in_memory_index::in_memory_result_index::InMemoryResultIndex,
 };
@@ -27,7 +27,7 @@ async fn add_solution() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPhaseEvaluator::new(
+    let evaluator = Arc::new(QueryPartEvaluator::new(
         expr_evaluator.clone(),
         ari.clone(),
     ));
@@ -35,14 +35,14 @@ async fn add_solution() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Adding {
+        vec![QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()]
         }]
     );
@@ -76,7 +76,7 @@ async fn update_solution() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPhaseEvaluator::new(
+    let evaluator = Arc::new(QueryPartEvaluator::new(
         expr_evaluator.clone(),
         ari.clone(),
     ));
@@ -84,7 +84,7 @@ async fn update_solution() {
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
         },
     )
@@ -93,7 +93,7 @@ async fn update_solution() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Updating {
+        QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1.clone()],
             after: variablemap!["a" => node2.clone()],
         },
@@ -101,7 +101,7 @@ async fn update_solution() {
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Updating {
+        vec![QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1.clone()],
             after: variablemap!["a" => node2.clone()]
         }]
@@ -110,7 +110,7 @@ async fn update_solution() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Updating {
+        QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node2.clone()],
             after: variablemap!["a" => node3.clone()],
         },
@@ -118,7 +118,7 @@ async fn update_solution() {
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Removing {
+        vec![QueryPartEvaluationContext::Removing {
             before: variablemap!["a" => node2.clone()],
         }]
     );
@@ -140,7 +140,7 @@ async fn remove_solution() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPhaseEvaluator::new(
+    let evaluator = Arc::new(QueryPartEvaluator::new(
         expr_evaluator.clone(),
         ari.clone(),
     ));
@@ -148,7 +148,7 @@ async fn remove_solution() {
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
         },
     )
@@ -157,14 +157,14 @@ async fn remove_solution() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Removing {
+        QueryPartEvaluationContext::Removing {
             before: variablemap!["a" => node1.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Removing {
+        vec![QueryPartEvaluationContext::Removing {
             before: variablemap!["a" => node1.clone()]
         }]
     );

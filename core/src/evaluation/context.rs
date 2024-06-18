@@ -18,7 +18,7 @@ pub enum SideEffects {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum PhaseEvaluationContext {
+pub enum QueryPartEvaluationContext {
     Adding {
         after: QueryVariables,
     },
@@ -39,7 +39,7 @@ pub enum PhaseEvaluationContext {
     Noop,
 }
 
-impl PhaseEvaluationContext {}
+impl QueryPartEvaluationContext {}
 
 #[derive(Debug, Clone)]
 pub struct ExpressionEvaluationContext<'a> {

@@ -8,7 +8,7 @@ use crate::{
         functions::{
             future::RegisterFutureFunctions, past::RegisterPastFunctions, FunctionRegistry,
         },
-        ExpressionEvaluator, QueryPhaseEvaluator,
+        ExpressionEvaluator, QueryPartEvaluator,
     },
     in_memory_index::{
         in_memory_element_index::InMemoryElementIndex, in_memory_future_queue::InMemoryFutureQueue,
@@ -36,7 +36,7 @@ pub struct QueryBuilder {
     archive_index: Option<Arc<dyn ElementArchiveIndex>>,
     result_index: Option<Arc<dyn ResultIndex>>,
     future_queue: Option<Arc<dyn FutureQueue>>,
-    phase_evaluator: Option<Arc<QueryPhaseEvaluator>>,
+    part_evaluator: Option<Arc<QueryPartEvaluator>>,
     joins: Vec<Arc<QueryJoin>>,
     middleware_registry: Option<Arc<MiddlewareTypeRegistry>>,
     source_middleware: Vec<Arc<SourceMiddlewareConfig>>,
@@ -55,7 +55,7 @@ impl QueryBuilder {
             archive_index: None,
             result_index: None,
             future_queue: None,
-            phase_evaluator: None,
+            part_evaluator: None,
             joins: Vec::new(),
             middleware_registry: None,
             source_middleware: Vec::new(),
@@ -155,7 +155,7 @@ impl QueryBuilder {
         };
 
         let query = query_parser.parse(self.query_source.as_str())?;
-        let match_path = Arc::new(MatchPath::from_query(&query.phases[0])?);
+        let match_path = Arc::new(MatchPath::from_query(&query.parts[0])?);
 
         let element_index = match self.element_index.take() {
             Some(index) => index,
@@ -186,9 +186,9 @@ impl QueryBuilder {
             )),
         };
 
-        let phase_evaluator = match self.phase_evaluator.take() {
+        let part_evaluator = match self.part_evaluator.take() {
             Some(evaluator) => evaluator,
-            None => Arc::new(QueryPhaseEvaluator::new(
+            None => Arc::new(QueryPartEvaluator::new(
                 expr_evaluator.clone(),
                 result_index.clone(),
             )),
@@ -231,7 +231,7 @@ impl QueryBuilder {
             expr_evaluator,
             element_index,
             path_solver,
-            phase_evaluator,
+            part_evaluator,
             future_queue,
             source_pipelines,
         ))

@@ -341,7 +341,7 @@ peg::parser! {
             = w:with_clause() { w }
             / r:return_clause() { r }
 
-        rule phase(config: &dyn CypherConfiguration) -> QueryPhase
+        rule part(config: &dyn CypherConfiguration) -> QueryPart
             = match_clauses:( __* m:(match_clause() ** (__+) )? { m.unwrap_or_else(Vec::new).into_iter().flatten().collect() } )
                 where_clauses:( __* w:(where_clause() ** (__+) )? { w.unwrap_or_else(Vec::new) } )
                 //create_clauses:( __* c:(create_clause() ** (__+) )? { c.unwrap_or_else(Vec::new) } )
@@ -349,7 +349,7 @@ peg::parser! {
                 delete_clauses:( __* d:(delete_clause() ** (__+) )? { d.unwrap_or_else(Vec::new) } )
                 return_clause:( with_or_return() )
                 {
-                    QueryPhase {
+                    QueryPart {
                         match_clauses,
                         where_clauses,
                         return_clause: return_clause.into_projection_clause(config),
@@ -358,10 +358,10 @@ peg::parser! {
 
         pub rule query(config: &dyn CypherConfiguration) -> Query
             = __*
-              phases:(w:( phase(config)+ ) { w } )
+              parts:(w:( part(config)+ ) { w } )
               __* {
                 Query {
-                    phases,
+                    parts,
                 }
             }
     }

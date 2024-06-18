@@ -3,7 +3,7 @@ use std::{sync::Arc, time::SystemTime};
 use serde_json::json;
 
 use drasi_core::{
-    evaluation::{context::PhaseEvaluationContext, variable_value::VariableValue},
+    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{ContinuousQuery, QueryBuilder},
 };
@@ -150,7 +150,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 2);
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "EmployeeName" => VariableValue::from(json!("Claire")),
               "EmployeeEmail" => VariableValue::from(json!("claire@contoso.com")),
@@ -163,7 +163,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             ),
         }));
 
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "EmployeeName" => VariableValue::from(json!("Bob")),
               "EmployeeEmail" => VariableValue::from(json!("bob@contoso.com")),
@@ -181,7 +181,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 3);
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "EmployeeName" => VariableValue::from(json!("Claire")),
               "EmployeeEmail" => VariableValue::from(json!("claire@contoso.com")),
@@ -192,7 +192,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             ),
         }));
 
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "EmployeeName" => VariableValue::from(json!("Bob")),
               "EmployeeEmail" => VariableValue::from(json!("bob@contoso.com")),
@@ -203,7 +203,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             ),
         }));
 
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "EmployeeName" => VariableValue::from(json!("Allen")),
               "EmployeeEmail" => VariableValue::from(json!("allen@contoso.com")),
@@ -219,7 +219,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&PhaseEvaluationContext::Aggregation {
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
             default_before: false,
             default_after: false,
             grouping_keys: vec![
@@ -292,7 +292,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "EmployeeName" => VariableValue::from(json!("Danny")),
               "EmployeeEmail" => VariableValue::from(json!("danny@contoso.com")),
@@ -310,7 +310,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "EmployeeName" => VariableValue::from(json!("Danny")),
               "EmployeeEmail" => VariableValue::from(json!("danny@contoso.com")),
@@ -327,7 +327,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
         println!("getting result {:?}", result);
-        assert!(result.contains(&PhaseEvaluationContext::Aggregation {
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
             default_before: true,
             default_after: false,
             grouping_keys: vec![
@@ -373,7 +373,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 3);
-        assert!(result.contains(&PhaseEvaluationContext::Updating {
+        assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
               "EmployeeName" => VariableValue::from(json!("Claire")),
               "EmployeeEmail" => VariableValue::from(json!("claire@contoso.com")),
@@ -396,7 +396,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             ),
         }));
 
-        assert!(result.contains(&PhaseEvaluationContext::Updating {
+        assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
               "EmployeeName" => VariableValue::from(json!("Bob")),
               "EmployeeEmail" => VariableValue::from(json!("bob@contoso.com")),
@@ -419,7 +419,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             ),
         }));
 
-        assert!(result.contains(&PhaseEvaluationContext::Updating {
+        assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
               "EmployeeName" => VariableValue::from(json!("Danny")),
               "EmployeeEmail" => VariableValue::from(json!("danny@contoso.com")),
@@ -447,7 +447,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 4);
-        assert!(result.contains(&PhaseEvaluationContext::Updating {
+        assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
               "EmployeeName" => VariableValue::from(json!("Claire")),
               "EmployeeEmail" => VariableValue::from(json!("claire@contoso.com")),
@@ -466,7 +466,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             ),
         }));
 
-        assert!(result.contains(&PhaseEvaluationContext::Updating {
+        assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
               "EmployeeName" => VariableValue::from(json!("Bob")),
               "EmployeeEmail" => VariableValue::from(json!("bob@contoso.com")),
@@ -485,7 +485,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             ),
         }));
 
-        assert!(result.contains(&PhaseEvaluationContext::Updating {
+        assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
               "EmployeeName" => VariableValue::from(json!("Danny")),
               "EmployeeEmail" => VariableValue::from(json!("danny@contoso.com")),
@@ -504,7 +504,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             ),
         }));
 
-        assert!(result.contains(&PhaseEvaluationContext::Updating {
+        assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
               "EmployeeName" => VariableValue::from(json!("Allen")),
               "EmployeeEmail" => VariableValue::from(json!("allen@contoso.com")),
@@ -529,7 +529,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 2);
         println!("getting result {:?}", result);
-        assert!(result.contains(&PhaseEvaluationContext::Aggregation {
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
             default_before: false,
             default_after: false,
             grouping_keys: vec![
@@ -553,7 +553,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
               "EmployeeCount" => VariableValue::from(json!(4))
             ),
         }));
-        assert!(result.contains(&PhaseEvaluationContext::Aggregation {
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
             default_before: false,
             default_after: false,
             grouping_keys: vec![
@@ -605,7 +605,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 3);
-        assert!(result.contains(&PhaseEvaluationContext::Removing {
+        assert!(result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!(
               "EmployeeName" => VariableValue::from(json!("Claire")),
               "EmployeeEmail" => VariableValue::from(json!("claire@contoso.com")),
@@ -618,7 +618,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             ),
         }));
 
-        assert!(result.contains(&PhaseEvaluationContext::Removing {
+        assert!(result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!(
               "EmployeeName" => VariableValue::from(json!("Bob")),
               "EmployeeEmail" => VariableValue::from(json!("bob@contoso.com")),
@@ -631,7 +631,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             ),
         }));
 
-        assert!(result.contains(&PhaseEvaluationContext::Removing {
+        assert!(result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!(
               "EmployeeName" => VariableValue::from(json!("Danny")),
               "EmployeeEmail" => VariableValue::from(json!("danny@contoso.com")),
@@ -649,7 +649,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 4);
-        assert!(result.contains(&PhaseEvaluationContext::Removing {
+        assert!(result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!(
               "EmployeeName" => VariableValue::from(json!("Claire")),
               "EmployeeEmail" => VariableValue::from(json!("claire@contoso.com")),
@@ -660,7 +660,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             ),
         }));
 
-        assert!(result.contains(&PhaseEvaluationContext::Removing {
+        assert!(result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!(
               "EmployeeName" => VariableValue::from(json!("Bob")),
               "EmployeeEmail" => VariableValue::from(json!("bob@contoso.com")),
@@ -671,7 +671,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             ),
         }));
 
-        assert!(result.contains(&PhaseEvaluationContext::Removing {
+        assert!(result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!(
               "EmployeeName" => VariableValue::from(json!("Danny")),
               "EmployeeEmail" => VariableValue::from(json!("danny@contoso.com")),
@@ -682,7 +682,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             ),
         }));
 
-        assert!(result.contains(&PhaseEvaluationContext::Removing {
+        assert!(result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!(
               "EmployeeName" => VariableValue::from(json!("Allen")),
               "EmployeeEmail" => VariableValue::from(json!("allen@contoso.com")),
@@ -698,7 +698,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&PhaseEvaluationContext::Aggregation {
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
             default_before: false,
             default_after: false,
             grouping_keys: vec![

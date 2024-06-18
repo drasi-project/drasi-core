@@ -3,7 +3,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use drasi_core::{
-    evaluation::{context::PhaseEvaluationContext, variable_value::VariableValue},
+    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::QueryBuilder,
 };
@@ -46,7 +46,7 @@ pub async fn min_value(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
         //println!("Node Result - Add t1: {:?}", result);
-        assert!(result.contains(&PhaseEvaluationContext::Aggregation {
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
             default_after: false,
@@ -78,7 +78,7 @@ pub async fn min_value(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
         //println!("Node Result - Add t3: {:?}", result);
-        assert!(result.contains(&PhaseEvaluationContext::Aggregation {
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
             default_after: false,
@@ -109,7 +109,7 @@ pub async fn min_value(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&PhaseEvaluationContext::Aggregation {
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: false,
             default_after: false,

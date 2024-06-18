@@ -14,15 +14,15 @@ macro_rules! variablemap {
   }}
 }
 
-mod multi_phase;
-mod single_phase_aggregating;
-mod single_phase_non_aggregating;
+mod multi_part;
+mod single_part_aggregating;
+mod single_part_non_aggregating;
 
 async fn process_solution<'a>(
     query: &Query,
-    evaluator: &'a QueryPhaseEvaluator,
-    context: PhaseEvaluationContext,
-) -> Vec<PhaseEvaluationContext> {
+    evaluator: &'a QueryPartEvaluator,
+    context: QueryPartEvaluationContext,
+) -> Vec<QueryPartEvaluationContext> {
     let mut result = Vec::new();
     let mut contexts = Vec::new();
     contexts.push(context);
@@ -38,15 +38,15 @@ async fn process_solution<'a>(
         after_grouping_hash: 0,
     };
 
-    let mut phase_num = 0;
+    let mut part_num = 0;
 
-    for phase in &query.phases {
-        phase_num += 1;
+    for part in &query.parts {
+        part_num += 1;
         result.clear();
 
         for ctx in &contexts {
             let mut new_contexts = evaluator
-                .evaluate(ctx.clone(), phase_num, phase, &change_context)
+                .evaluate(ctx.clone(), part_num, part, &change_context)
                 .await
                 .unwrap();
             result.append(&mut new_contexts);

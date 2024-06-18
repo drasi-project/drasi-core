@@ -3,7 +3,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use drasi_core::{
-    evaluation::{context::PhaseEvaluationContext, variable_value::VariableValue},
+    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{ContinuousQuery, QueryBuilder},
 };
@@ -141,7 +141,7 @@ pub async fn decrease_by_ten(config: &(impl QueryTestConfig + Send)) {
         // println!("Node Result - Decrease daily revenue amount to $90K ({}): {:?}", timestamp, result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "productId" => VariableValue::from(json!("prod_01")),
               "productManagerId" => VariableValue::from(json!("emp_01")),
@@ -175,7 +175,7 @@ pub async fn decrease_by_ten(config: &(impl QueryTestConfig + Send)) {
         // println!("Node Result - Decrease daily revenue amount to $80k ({}): {:?}", timestamp, result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&PhaseEvaluationContext::Updating {
+        assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
               "productId" => VariableValue::from(json!("prod_01")),
               "productManagerId" => VariableValue::from(json!("emp_01")),
@@ -215,7 +215,7 @@ pub async fn decrease_by_ten(config: &(impl QueryTestConfig + Send)) {
         // println!("Node Result - Update with same daily revenue amount of $80k ({}): {:?}", timestamp, result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&PhaseEvaluationContext::Removing {
+        assert!(result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!(
               "productId" => VariableValue::from(json!("prod_01")),
               "productManagerId" => VariableValue::from(json!("emp_01")),
@@ -336,7 +336,7 @@ pub async fn decrease_by_ten_percent(config: &(impl QueryTestConfig + Send)) {
         // println!("Node Result - Decrease daily revenue amount to $90K ({}): {:?}", timestamp, result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "productId" => VariableValue::from(json!("prod_01")),
               "productManagerId" => VariableValue::from(json!("emp_01")),
@@ -370,7 +370,7 @@ pub async fn decrease_by_ten_percent(config: &(impl QueryTestConfig + Send)) {
         // println!("Node Result - Decrease daily revenue amount to $80k ({}): {:?}", timestamp, result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&PhaseEvaluationContext::Updating {
+        assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
               "productId" => VariableValue::from(json!("prod_01")),
               "productManagerId" => VariableValue::from(json!("emp_01")),
@@ -410,7 +410,7 @@ pub async fn decrease_by_ten_percent(config: &(impl QueryTestConfig + Send)) {
         // println!("Node Result - Update with same daily revenue amount of $80k ({}): {:?}", timestamp, result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&PhaseEvaluationContext::Removing {
+        assert!(result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!(
               "productId" => VariableValue::from(json!("prod_01")),
               "productManagerId" => VariableValue::from(json!("emp_01")),

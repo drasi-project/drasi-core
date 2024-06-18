@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::QueryTestConfig;
 use drasi_core::{
-    evaluation::{context::PhaseEvaluationContext, variable_value::VariableValue},
+    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::QueryBuilder,
 };
@@ -100,7 +100,7 @@ pub async fn get_versions_by_timerange(config: &(impl QueryTestConfig + Send)) {
     assert_eq!(result.len(), 1);
 
     let after = match result[0] {
-        PhaseEvaluationContext::Updating { ref after, .. } => after,
+        QueryPartEvaluationContext::Updating { ref after, .. } => after,
         _ => panic!("Expected Updating"),
     };
 
@@ -211,7 +211,7 @@ pub async fn get_versions_by_timerange_with_initial_value_flag(
     assert_eq!(result.len(), 1);
 
     let after = match result[0] {
-        PhaseEvaluationContext::Updating { ref after, .. } => after,
+        QueryPartEvaluationContext::Updating { ref after, .. } => after,
         _ => panic!("Expected Updating"),
     };
 
@@ -264,7 +264,7 @@ pub async fn get_versions_by_timerange_with_initial_value_flag(
     assert_eq!(result.len(), 1);
 
     let after = match result[0] {
-        PhaseEvaluationContext::Updating { ref after, .. } => after,
+        QueryPartEvaluationContext::Updating { ref after, .. } => after,
         _ => panic!("Expected Updating"),
     };
 

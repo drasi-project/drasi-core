@@ -3,7 +3,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use drasi_core::{
-    evaluation::{context::PhaseEvaluationContext, variable_value::VariableValue},
+    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{ContinuousQuery, QueryBuilder},
 };
@@ -191,7 +191,7 @@ pub async fn crosses_above_three_times_in_an_hour(config: &(impl QueryTestConfig
         // println!("Node Result - Update sensor value ({}): {:?}", timestamp, result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "freezerId" => VariableValue::from(json!("equip_01")),
               "countTempExceededInTimeRange" => VariableValue::from(json!(3))
@@ -226,7 +226,7 @@ pub async fn crosses_above_three_times_in_an_hour(config: &(impl QueryTestConfig
         );
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&PhaseEvaluationContext::Updating {
+        assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
               "freezerId" => VariableValue::from(json!("equip_01")),
               "countTempExceededInTimeRange" => VariableValue::from(json!(3))

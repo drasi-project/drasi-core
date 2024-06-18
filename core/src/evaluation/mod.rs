@@ -3,7 +3,7 @@ mod expressions;
 pub mod context;
 pub mod functions;
 pub mod instant_query_clock;
-pub mod phases;
+pub mod parts;
 pub mod temporal_constants;
 pub mod variable_value;
 
@@ -12,7 +12,7 @@ use std::{error::Error, fmt::Display};
 pub use context::ExpressionEvaluationContext;
 pub use expressions::*;
 pub use instant_query_clock::InstantQueryClock;
-pub use phases::*;
+pub use parts::*;
 
 use crate::interface::{IndexError, MiddlewareError};
 

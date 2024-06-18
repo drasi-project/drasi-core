@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use tokio::sync::{mpsc, Mutex};
 
 use crate::{
-    evaluation::context::PhaseEvaluationContext,
+    evaluation::context::QueryPartEvaluationContext,
     interface::{FutureElementRef, FutureQueueConsumer},
     models::SourceChange,
 };
@@ -16,8 +16,8 @@ use super::ContinuousQuery;
 
 pub struct AutoFutureQueueConsumer {
     continuous_query: Arc<ContinuousQuery>,
-    channel_tx: mpsc::UnboundedSender<Vec<PhaseEvaluationContext>>,
-    channel_rx: Mutex<mpsc::UnboundedReceiver<Vec<PhaseEvaluationContext>>>,
+    channel_tx: mpsc::UnboundedSender<Vec<QueryPartEvaluationContext>>,
+    channel_rx: Mutex<mpsc::UnboundedReceiver<Vec<QueryPartEvaluationContext>>>,
     now_override: Option<Arc<AtomicU64>>,
 }
 
@@ -38,7 +38,7 @@ impl AutoFutureQueueConsumer {
         self
     }
 
-    pub async fn recv(&self, timeout: Duration) -> Option<Vec<PhaseEvaluationContext>> {
+    pub async fn recv(&self, timeout: Duration) -> Option<Vec<QueryPartEvaluationContext>> {
         let mut rx = self.channel_rx.lock().await;
         match tokio::time::timeout(timeout, rx.recv()).await {
             Ok(Some(result)) => Some(result),

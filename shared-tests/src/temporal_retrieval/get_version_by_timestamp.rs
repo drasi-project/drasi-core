@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::QueryTestConfig;
 
 use drasi_core::{
-    evaluation::context::PhaseEvaluationContext,
+    evaluation::context::QueryPartEvaluationContext,
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::QueryBuilder,
 };
@@ -88,7 +88,7 @@ pub async fn get_version_by_timestamp(config: &(impl QueryTestConfig + Send)) {
     assert_eq!(result.len(), 1);
 
     let after = match result[0] {
-        PhaseEvaluationContext::Updating { ref after, .. } => after,
+        QueryPartEvaluationContext::Updating { ref after, .. } => after,
         _ => panic!("Expected Updating"),
     };
 

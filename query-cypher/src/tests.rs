@@ -28,7 +28,7 @@ fn return_clause_non_aggregating() {
             .unwrap();
 
     assert_eq!(
-        query.phases[0].return_clause,
+        query.parts[0].return_clause,
         ProjectionClause::Item(vec![
             UnaryExpression::property("a".into(), "name".into()),
             UnaryExpression::alias(
@@ -46,7 +46,7 @@ fn return_clause_aggregating() {
         cypher::query("MATCH (a) WHERE a.Field1 = 42 RETURN a.name, sum(a.Field2)", &TEST_CONFIG).unwrap();
 
     assert_eq!(
-        query.phases[0].return_clause,
+        query.parts[0].return_clause,
         ProjectionClause::GroupBy {
             grouping: vec![UnaryExpression::property("a".into(), "name".into())],
             aggregates: vec![FunctionExpression::function(
@@ -64,7 +64,7 @@ fn namespaced_function() {
         cypher::query("MATCH (a) WHERE a.Field1 = 42 RETURN namespace.function(a.Field2)", &TEST_CONFIG).unwrap();
 
     assert_eq!(
-        query.phases[0].return_clause,
+        query.parts[0].return_clause,
         ProjectionClause::Item(vec![FunctionExpression::function(
             "namespace.function".into(),
             vec![UnaryExpression::property("a".into(), "Field2".into())],
@@ -85,7 +85,7 @@ fn multiline_function() {
     .unwrap();
 
     assert_eq!(
-        query.phases[0].return_clause,
+        query.parts[0].return_clause,
         ProjectionClause::Item(vec![FunctionExpression::function(
             "function".into(),
             vec![
@@ -102,7 +102,7 @@ fn match_clause() {
     assert_eq!(
         cypher::query("MATCH (t:Thing)-[:AT]->(wh:Warehouse) RETURN t.name", &TEST_CONFIG),
         Ok(Query {
-            phases: vec![QueryPhase {
+            parts: vec![QueryPart {
                 match_clauses: vec![MatchClause {
                     start: NodeMatch::with_annotation(Annotation::new("t".into()), "Thing".into()),
                     path: vec![(
@@ -125,7 +125,7 @@ fn match_clause() {
     assert_eq!(
         cypher::query("MATCH (t:Thing {category: 1})-[:AT*1..5]->(wh:Warehouse) RETURN t.name", &TEST_CONFIG),
         Ok(Query {
-            phases: vec![QueryPhase {
+            parts: vec![QueryPart {
                 match_clauses: vec![MatchClause {
                     start: NodeMatch::new(
                         Annotation::new("t".into()),
@@ -163,7 +163,7 @@ fn match_clause() {
     assert_eq!(
         cypher::query(" MATCH () -> (:LABEL_ONLY) RETURN a.test", &TEST_CONFIG),
         Ok(Query {
-            phases: vec![QueryPhase {
+            parts: vec![QueryPart {
                 match_clauses: vec![MatchClause {
                     start: NodeMatch::empty(),
                     path: vec![(
@@ -185,7 +185,7 @@ fn match_clause() {
             "MATCH (a:Person) <-[e:KNOWS]- (b:Person WHERE b.Age > 10) RETURN e.since, b.name", &TEST_CONFIG
         ),
         Ok(Query {
-            phases: vec![QueryPhase {
+            parts: vec![QueryPart {
                 match_clauses: vec![MatchClause {
                     start: NodeMatch::with_annotation(Annotation::new("a".into()), "Person".into()),
                     path: vec![(
@@ -220,7 +220,7 @@ fn multiple_match_clauses() {
     assert_eq!(
         cypher::query("MATCH (t:Thing)-[:AT]->(wh:Warehouse), (i:Item)-[:CONTAINS]->(c:Component) RETURN t.name", &TEST_CONFIG),
         Ok(Query {
-            phases: vec![QueryPhase {
+            parts: vec![QueryPart {
                 match_clauses: vec![
                   MatchClause {
                     start: NodeMatch::with_annotation(Annotation::new("t".into()), "Thing".into()),
@@ -249,7 +249,7 @@ fn where_clauses() {
     assert_eq!(
       cypher::query("MATCH (a:Person) -[e:KNOWS]-> (b:Person) WHERE a.age > 42 AND b.name = 'Peter Parker' OR NOT e.fake RETURN e.since", &TEST_CONFIG),
         Ok(Query {
-            phases: vec![QueryPhase {
+            parts: vec![QueryPart {
                 match_clauses: vec![
                   MatchClause {
                     start: NodeMatch::with_annotation(Annotation::new("a".into()), "Person".into()),
@@ -280,7 +280,7 @@ fn with_clauses_non_aggregating() {
     assert_eq!(
         cypher::query("MATCH (t:Thing)-[:AT]->(wh:Warehouse) WHERE t.category = 1 WITH wh.name, t RETURN t.name", &TEST_CONFIG),
         Ok(Query {
-            phases: vec![QueryPhase {
+            parts: vec![QueryPart {
                 match_clauses: vec![MatchClause {
                     start: NodeMatch::with_annotation(Annotation::new("t".into()), "Thing".into()),
                     path: vec![(
@@ -294,7 +294,7 @@ fn with_clauses_non_aggregating() {
                 )],
                 return_clause: ProjectionClause::Item(vec![UnaryExpression::property("wh".into(), "name".into()), UnaryExpression::ident("t")]),
             },
-            QueryPhase {
+            QueryPart {
                 match_clauses: vec![],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![UnaryExpression::property("t".into(), "name".into())]),
@@ -310,7 +310,7 @@ fn where_clause_non_aggregating_with_date_yyyy_mm_dd() {
             .unwrap();
 
     assert_eq!(
-        query.phases[0].where_clauses,
+        query.parts[0].where_clauses,
         vec![BinaryExpression::eq(
             UnaryExpression::property("a".into(), "Field1".into()),
             FunctionExpression::function(
@@ -329,7 +329,7 @@ fn where_clause_non_aggregating_with_date_weeks() {
             .unwrap();
 
     assert_eq!(
-        query.phases[0].where_clauses,
+        query.parts[0].where_clauses,
         vec![BinaryExpression::eq(
             UnaryExpression::property("a".into(), "Field1".into()),
             FunctionExpression::function(
@@ -348,7 +348,7 @@ fn where_clause_non_aggregating_with_date_yyyy_quarters() {
             .unwrap();
 
     assert_eq!(
-        query.phases[0].where_clauses,
+        query.parts[0].where_clauses,
         vec![BinaryExpression::eq(
             UnaryExpression::property("a".into(), "Field1".into()),
             FunctionExpression::function(
@@ -367,7 +367,7 @@ fn where_clause_non_aggregating_with_local_time() {
             .unwrap();
 
     assert_eq!(
-        query.phases[0].where_clauses,
+        query.parts[0].where_clauses,
         vec![BinaryExpression::eq(
             UnaryExpression::property("a".into(), "Field1".into()),
             FunctionExpression::function(
@@ -384,7 +384,7 @@ fn test_reduce_function() {
     let query =
         cypher::query("MATCH (a) RETURN reduce(s = 0, x IN [1,2,3] | s + x) AS sum", &TEST_CONFIG).unwrap();
     assert_eq!(
-        query.phases[0].return_clause,
+        query.parts[0].return_clause,
         ProjectionClause::Item(vec![UnaryExpression::alias(
             FunctionExpression::function(
                 "reduce".into(),
@@ -436,7 +436,7 @@ fn test_list_construction() {
 
     assert_eq!(
         //  testing WITH
-        query.phases[0].return_clause,
+        query.parts[0].return_clause,
         ProjectionClause::Item(vec![
             UnaryExpression::ident("foo".into()),
             UnaryExpression::alias(
@@ -453,7 +453,7 @@ fn test_list_construction() {
 }
 
 #[test]
-fn test_list_construction_with_comments_in_between_phases() {
+fn test_list_construction_with_comments_in_between_parts() {
     let query = cypher::query(
         "// This is comment #1
         MATCH
@@ -472,7 +472,7 @@ fn test_list_construction_with_comments_in_between_phases() {
 
     assert_eq!(
         //  testing WITH
-        query.phases[0].return_clause,
+        query.parts[0].return_clause,
         ProjectionClause::Item(vec![
             UnaryExpression::ident("foo".into()),
             UnaryExpression::alias(
@@ -494,18 +494,18 @@ fn test_list_construction_with_comments() {
         "
         MATCH
         (foo:FOO)
-        // A comment in between phases
+        // A comment in between parts
     WITH 
         foo,
-        // A comment within a phase
-        [5, 7, 9, foo.bah] as list // A comment at the end of a phase
+        // A comment within a part
+        [5, 7, 9, foo.bah] as list // A comment at the end of a part
     RETURN foo, list // A comment at the end of a query", &TEST_CONFIG
     )
     .unwrap();
 
     assert_eq!(
         //  testing WITH
-        query.phases[0].return_clause,
+        query.parts[0].return_clause,
         ProjectionClause::Item(vec![
             UnaryExpression::ident("foo".into()),
             UnaryExpression::alias(
@@ -546,7 +546,7 @@ fn test_reflex_query_with_comment() {
     ", &TEST_CONFIG).unwrap();
 
     assert_eq!(
-        query.phases[0].match_clauses[0],
+        query.parts[0].match_clauses[0],
         MatchClause {
             start: NodeMatch::new(
                 Annotation::new("equip".into()),
@@ -591,7 +591,7 @@ fn test_reflex_query_with_comment() {
     );
 
     assert_eq!(
-        query.phases[0].return_clause,
+        query.parts[0].return_clause,
         ProjectionClause::Item(vec![
             UnaryExpression::ident("val".into()),
             UnaryExpression::alias(

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use drasi_core::{
-    evaluation::{context::PhaseEvaluationContext, variable_value::VariableValue},
+    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{ContinuousQuery, QueryBuilder},
 };
@@ -102,7 +102,7 @@ pub async fn order_ready_then_vehicle_arrives(config: &(impl QueryTestConfig + S
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "DriverName" => VariableValue::from(json!("Driver 01")),
               "OrderNumber" => VariableValue::from(json!("order_01")),
@@ -128,7 +128,7 @@ pub async fn order_ready_then_vehicle_arrives(config: &(impl QueryTestConfig + S
 
         let result = query.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&PhaseEvaluationContext::Removing {
+        assert!(result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!(
               "DriverName" => VariableValue::from(json!("Driver 01")),
               "OrderNumber" => VariableValue::from(json!("order_01")),
@@ -208,7 +208,7 @@ pub async fn vehicle_arrives_then_order_ready(config: &(impl QueryTestConfig + S
 
         let result = query.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "DriverName" => VariableValue::from(json!("Driver 02")),
               "OrderNumber" => VariableValue::from(json!("order_02")),
@@ -234,7 +234,7 @@ pub async fn vehicle_arrives_then_order_ready(config: &(impl QueryTestConfig + S
 
         let result = query.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&PhaseEvaluationContext::Removing {
+        assert!(result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!(
               "DriverName" => VariableValue::from(json!("Driver 02")),
               "OrderNumber" => VariableValue::from(json!("order_02")),
@@ -314,7 +314,7 @@ pub async fn vehicle_arrives_then_order_ready_duplicate(config: &(impl QueryTest
         let result = query.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "DriverName" => VariableValue::from(json!("Driver 03")),
               "OrderNumber" => VariableValue::from(json!("order_03")),
@@ -339,7 +339,7 @@ pub async fn vehicle_arrives_then_order_ready_duplicate(config: &(impl QueryTest
 
         let result = query.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&PhaseEvaluationContext::Removing {
+        assert!(result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!(
               "DriverName" => VariableValue::from(json!("Driver 03")),
               "OrderNumber" => VariableValue::from(json!("order_03")),
@@ -417,7 +417,7 @@ pub async fn vehicle_arrives_then_order_ready_duplicate(config: &(impl QueryTest
 
         let result = query.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "DriverName" => VariableValue::from(json!("Driver 04")),
               "OrderNumber" => VariableValue::from(json!("order_04")),

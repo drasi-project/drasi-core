@@ -4,7 +4,7 @@ use super::process_solution;
 
 use crate::{
     evaluation::{
-        context::PhaseEvaluationContext, functions::FunctionRegistry, phases::tests::build_query, variable_value::VariableValue, ExpressionEvaluator, QueryPhaseEvaluator
+        context::QueryPartEvaluationContext, functions::FunctionRegistry, parts::tests::build_query, variable_value::VariableValue, ExpressionEvaluator, QueryPartEvaluator
     },
     in_memory_index::in_memory_result_index::InMemoryResultIndex,
 };
@@ -12,7 +12,7 @@ use crate::{
 use serde_json::json;
 
 #[tokio::test]
-async fn aggregating_phase_to_scalar_phase_add_solution() {
+async fn aggregating_part_to_scalar_part_add_solution() {
     let query = build_query(
         "
     MATCH (a) 
@@ -47,7 +47,7 @@ async fn aggregating_phase_to_scalar_phase_add_solution() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPhaseEvaluator::new(
+    let evaluator = Arc::new(QueryPartEvaluator::new(
         expr_evaluator.clone(),
         ari.clone(),
     ));
@@ -55,24 +55,24 @@ async fn aggregating_phase_to_scalar_phase_add_solution() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
         },
     );
 
-    assert_eq!(result.await, vec![PhaseEvaluationContext::Noop]);
+    assert_eq!(result.await, vec![QueryPartEvaluationContext::Noop]);
 
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Adding {
+        vec![QueryPartEvaluationContext::Adding {
             after: variablemap![
               "key" => json!("foo"),
               "my_sum" => json!(3.0)
@@ -83,14 +83,14 @@ async fn aggregating_phase_to_scalar_phase_add_solution() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Adding {
+        vec![QueryPartEvaluationContext::Adding {
             after: variablemap![
               "key" => json!("bar"),
               "my_sum" => json!(5.0)
@@ -100,7 +100,7 @@ async fn aggregating_phase_to_scalar_phase_add_solution() {
 }
 
 #[tokio::test]
-async fn aggregating_phase_to_scalar_phase_update_solution() {
+async fn aggregating_part_to_scalar_part_update_solution() {
     let query = build_query(
         "
     MATCH (a) 
@@ -165,7 +165,7 @@ async fn aggregating_phase_to_scalar_phase_update_solution() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPhaseEvaluator::new(
+    let evaluator = Arc::new(QueryPartEvaluator::new(
         expr_evaluator.clone(),
         ari.clone(),
     ));
@@ -173,7 +173,7 @@ async fn aggregating_phase_to_scalar_phase_update_solution() {
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
         },
     )
@@ -182,7 +182,7 @@ async fn aggregating_phase_to_scalar_phase_update_solution() {
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
         },
     )
@@ -191,7 +191,7 @@ async fn aggregating_phase_to_scalar_phase_update_solution() {
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
         },
     )
@@ -200,7 +200,7 @@ async fn aggregating_phase_to_scalar_phase_update_solution() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Updating {
+        QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1.clone()],
             after: variablemap!["a" => node1a.clone()],
         },
@@ -208,7 +208,7 @@ async fn aggregating_phase_to_scalar_phase_update_solution() {
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Updating {
+        vec![QueryPartEvaluationContext::Updating {
             before: variablemap![
               "key" => json!("foo"),
               "my_sum" => json!(3.0)
@@ -223,7 +223,7 @@ async fn aggregating_phase_to_scalar_phase_update_solution() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Updating {
+        QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1a.clone()],
             after: variablemap!["a" => node1b.clone()],
         },
@@ -231,7 +231,7 @@ async fn aggregating_phase_to_scalar_phase_update_solution() {
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Updating {
+        vec![QueryPartEvaluationContext::Updating {
             before: variablemap![
               "key" => json!("foo"),
               "my_sum" => json!(4.0)
@@ -246,7 +246,7 @@ async fn aggregating_phase_to_scalar_phase_update_solution() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Updating {
+        QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1b.clone()],
             after: variablemap!["a" => node1c.clone()],
         },
@@ -254,7 +254,7 @@ async fn aggregating_phase_to_scalar_phase_update_solution() {
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Removing {
+        vec![QueryPartEvaluationContext::Removing {
             before: variablemap![
               "key" => json!("foo"),
               "my_sum" => json!(3.0)
@@ -265,7 +265,7 @@ async fn aggregating_phase_to_scalar_phase_update_solution() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Updating {
+        QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1c.clone()],
             after: variablemap!["a" => node1d.clone()],
         },
@@ -273,7 +273,7 @@ async fn aggregating_phase_to_scalar_phase_update_solution() {
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Adding {
+        vec![QueryPartEvaluationContext::Adding {
             after: variablemap![
               "key" => json!("foo"),
               "my_sum" => json!(7.0)
@@ -284,7 +284,7 @@ async fn aggregating_phase_to_scalar_phase_update_solution() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Updating {
+        QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node2.clone()],
             after: variablemap!["a" => node2a.clone()],
         },
@@ -292,7 +292,7 @@ async fn aggregating_phase_to_scalar_phase_update_solution() {
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Updating {
+        vec![QueryPartEvaluationContext::Updating {
             before: variablemap![
               "key" => json!("foo"),
               "my_sum" => json!(7.0)
@@ -306,7 +306,7 @@ async fn aggregating_phase_to_scalar_phase_update_solution() {
 }
 
 #[tokio::test]
-async fn aggregating_phase_to_scalar_phase_remove_solution() {
+async fn aggregating_part_to_scalar_part_remove_solution() {
     let query = build_query(
         "
     MATCH (a) 
@@ -341,7 +341,7 @@ async fn aggregating_phase_to_scalar_phase_remove_solution() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPhaseEvaluator::new(
+    let evaluator = Arc::new(QueryPartEvaluator::new(
         expr_evaluator.clone(),
         ari.clone(),
     ));
@@ -349,7 +349,7 @@ async fn aggregating_phase_to_scalar_phase_remove_solution() {
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
         },
     )
@@ -358,7 +358,7 @@ async fn aggregating_phase_to_scalar_phase_remove_solution() {
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
         },
     )
@@ -367,7 +367,7 @@ async fn aggregating_phase_to_scalar_phase_remove_solution() {
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
         },
     )
@@ -376,14 +376,14 @@ async fn aggregating_phase_to_scalar_phase_remove_solution() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Removing {
+        QueryPartEvaluationContext::Removing {
             before: variablemap!["a" => node2.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Updating {
+        vec![QueryPartEvaluationContext::Updating {
             before: variablemap![
               "key" => json!("foo"),
               "my_sum" => json!(3.0)
@@ -398,14 +398,14 @@ async fn aggregating_phase_to_scalar_phase_remove_solution() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Removing {
+        QueryPartEvaluationContext::Removing {
             before: variablemap!["a" => node1.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Removing {
+        vec![QueryPartEvaluationContext::Removing {
             before: variablemap![
               "key" => json!("foo"),
               "my_sum" => json!(1.0)
@@ -415,7 +415,7 @@ async fn aggregating_phase_to_scalar_phase_remove_solution() {
 }
 
 #[tokio::test]
-async fn aggregating_phase_to_aggregating_phase_add_solution() {
+async fn aggregating_part_to_aggregating_part_add_solution() {
     let query = build_query(
         "
     MATCH (a) 
@@ -452,7 +452,7 @@ async fn aggregating_phase_to_aggregating_phase_add_solution() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPhaseEvaluator::new(
+    let evaluator = Arc::new(QueryPartEvaluator::new(
         expr_evaluator.clone(),
         ari.clone(),
     ));
@@ -460,14 +460,14 @@ async fn aggregating_phase_to_aggregating_phase_add_solution() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             before: Some(variablemap![
               "Category" => json!("A"),
               "my_avg" => json!(0.0)
@@ -485,14 +485,14 @@ async fn aggregating_phase_to_aggregating_phase_add_solution() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             before: Some(variablemap![
               "Category" => json!("B"),
               "my_avg" => json!(0.0)
@@ -510,14 +510,14 @@ async fn aggregating_phase_to_aggregating_phase_add_solution() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             before: Some(variablemap![
               "Category" => json!("A"),
               "my_avg" => json!(1.0)
@@ -534,7 +534,7 @@ async fn aggregating_phase_to_aggregating_phase_add_solution() {
 }
 
 #[tokio::test]
-async fn aggregating_phase_to_aggregating_phase_update_solution() {
+async fn aggregating_part_to_aggregating_part_update_solution() {
     let query = build_query(
         "
     MATCH (a) 
@@ -577,7 +577,7 @@ async fn aggregating_phase_to_aggregating_phase_update_solution() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPhaseEvaluator::new(
+    let evaluator = Arc::new(QueryPartEvaluator::new(
         expr_evaluator.clone(),
         ari.clone(),
     ));
@@ -585,7 +585,7 @@ async fn aggregating_phase_to_aggregating_phase_update_solution() {
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
         },
     )
@@ -594,7 +594,7 @@ async fn aggregating_phase_to_aggregating_phase_update_solution() {
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
         },
     )
@@ -603,7 +603,7 @@ async fn aggregating_phase_to_aggregating_phase_update_solution() {
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
         },
     )
@@ -612,7 +612,7 @@ async fn aggregating_phase_to_aggregating_phase_update_solution() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Updating {
+        QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1.clone()],
             after: variablemap!["a" => node1a.clone()],
         },
@@ -620,7 +620,7 @@ async fn aggregating_phase_to_aggregating_phase_update_solution() {
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             before: Some(variablemap![
               "Category" => json!("A"),
               "my_avg" => json!(3.0)
@@ -637,7 +637,7 @@ async fn aggregating_phase_to_aggregating_phase_update_solution() {
 }
 
 #[tokio::test]
-async fn aggregating_phase_to_aggregating_phase_group_switch() {
+async fn aggregating_part_to_aggregating_part_group_switch() {
     let query = build_query(
         "
     MATCH (a) 
@@ -688,7 +688,7 @@ async fn aggregating_phase_to_aggregating_phase_group_switch() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPhaseEvaluator::new(
+    let evaluator = Arc::new(QueryPartEvaluator::new(
         expr_evaluator.clone(),
         ari.clone(),
     ));
@@ -696,7 +696,7 @@ async fn aggregating_phase_to_aggregating_phase_group_switch() {
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
         },
     )
@@ -705,7 +705,7 @@ async fn aggregating_phase_to_aggregating_phase_group_switch() {
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
         },
     )
@@ -714,7 +714,7 @@ async fn aggregating_phase_to_aggregating_phase_group_switch() {
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
         },
     )
@@ -723,7 +723,7 @@ async fn aggregating_phase_to_aggregating_phase_group_switch() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Updating {
+        QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1.clone()],
             after: variablemap!["a" => node1a.clone()],
         },
@@ -731,7 +731,7 @@ async fn aggregating_phase_to_aggregating_phase_group_switch() {
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             before: Some(variablemap![
               "Category" => json!("A"),
               "my_avg" => json!(3.0)
@@ -749,7 +749,7 @@ async fn aggregating_phase_to_aggregating_phase_group_switch() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Updating {
+        QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1a.clone()],
             after: variablemap!["a" => node1b.clone()],
         },
@@ -758,7 +758,7 @@ async fn aggregating_phase_to_aggregating_phase_group_switch() {
     assert_eq!(
         result.await,
         vec![
-            PhaseEvaluationContext::Aggregation {
+            QueryPartEvaluationContext::Aggregation {
                 before: Some(variablemap![
                   "Category" => json!("B"),
                   "my_avg" => json!(2.0)
@@ -771,7 +771,7 @@ async fn aggregating_phase_to_aggregating_phase_group_switch() {
                 default_before: false,
                 default_after: false,
             },
-            PhaseEvaluationContext::Aggregation {
+            QueryPartEvaluationContext::Aggregation {
                 before: Some(variablemap![
                   "Category" => json!("A"),
                   "my_avg" => json!(3.5)
@@ -802,7 +802,7 @@ async fn test_list_indexing_with_clause() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPhaseEvaluator::new(
+    let evaluator = Arc::new(QueryPartEvaluator::new(
         expr_evaluator.clone(),
         ari.clone(),
     ));
@@ -810,14 +810,14 @@ async fn test_list_indexing_with_clause() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: BTreeMap::new(),
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Adding {
+        vec![QueryPartEvaluationContext::Adding {
             after: variablemap![
               "expression" => json!(7)
             ]
@@ -826,7 +826,7 @@ async fn test_list_indexing_with_clause() {
 }
 
 #[tokio::test]
-async fn aggregating_phase_to_aggregating_phase_group_switch_with_comments() {
+async fn aggregating_part_to_aggregating_part_group_switch_with_comments() {
     let query = build_query(
         "
     MATCH (a) 
@@ -879,7 +879,7 @@ async fn aggregating_phase_to_aggregating_phase_group_switch_with_comments() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPhaseEvaluator::new(
+    let evaluator = Arc::new(QueryPartEvaluator::new(
         expr_evaluator.clone(),
         ari.clone(),
     ));
@@ -887,7 +887,7 @@ async fn aggregating_phase_to_aggregating_phase_group_switch_with_comments() {
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
         },
     )
@@ -896,7 +896,7 @@ async fn aggregating_phase_to_aggregating_phase_group_switch_with_comments() {
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
         },
     )
@@ -905,7 +905,7 @@ async fn aggregating_phase_to_aggregating_phase_group_switch_with_comments() {
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
         },
     )
@@ -914,7 +914,7 @@ async fn aggregating_phase_to_aggregating_phase_group_switch_with_comments() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Updating {
+        QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1.clone()],
             after: variablemap!["a" => node1a.clone()],
         },
@@ -922,7 +922,7 @@ async fn aggregating_phase_to_aggregating_phase_group_switch_with_comments() {
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             before: Some(variablemap![
               "Category" => json!("A"),
               "my_avg" => json!(3.0)
@@ -940,7 +940,7 @@ async fn aggregating_phase_to_aggregating_phase_group_switch_with_comments() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Updating {
+        QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1a.clone()],
             after: variablemap!["a" => node1b.clone()],
         },
@@ -949,7 +949,7 @@ async fn aggregating_phase_to_aggregating_phase_group_switch_with_comments() {
     assert_eq!(
         result.await,
         vec![
-            PhaseEvaluationContext::Aggregation {
+            QueryPartEvaluationContext::Aggregation {
                 before: Some(variablemap![
                   "Category" => json!("B"),
                   "my_avg" => json!(2.0)
@@ -962,7 +962,7 @@ async fn aggregating_phase_to_aggregating_phase_group_switch_with_comments() {
                 default_before: false,
                 default_after: false,
             },
-            PhaseEvaluationContext::Aggregation {
+            QueryPartEvaluationContext::Aggregation {
                 before: Some(variablemap![
                   "Category" => json!("A"),
                   "my_avg" => json!(3.5)
@@ -1018,7 +1018,7 @@ async fn sequential_aggregations1() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPhaseEvaluator::new(
+    let evaluator = Arc::new(QueryPartEvaluator::new(
         expr_evaluator.clone(),
         ari.clone(),
     ));
@@ -1026,14 +1026,14 @@ async fn sequential_aggregations1() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             before: Some(variablemap![
               "total" => json!(0)
             ]),
@@ -1049,14 +1049,14 @@ async fn sequential_aggregations1() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             before: Some(variablemap![
               "total" => json!(1)
             ]),
@@ -1072,14 +1072,14 @@ async fn sequential_aggregations1() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             before: Some(variablemap![
               "total" => json!(2)
             ]),
@@ -1095,14 +1095,14 @@ async fn sequential_aggregations1() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Removing {
+        QueryPartEvaluationContext::Removing {
             before: variablemap!["a" => node2.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             before: Some(variablemap![
               "total" => json!(2)
             ]),
@@ -1118,14 +1118,14 @@ async fn sequential_aggregations1() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Removing {
+        QueryPartEvaluationContext::Removing {
             before: variablemap!["a" => node1.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             before: Some(variablemap![
               "total" => json!(2)
             ]),
@@ -1177,7 +1177,7 @@ async fn sequential_aggregations2() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPhaseEvaluator::new(
+    let evaluator = Arc::new(QueryPartEvaluator::new(
         expr_evaluator.clone(),
         ari.clone(),
     ));
@@ -1185,14 +1185,14 @@ async fn sequential_aggregations2() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             before: Some(variablemap![
               "total" => json!(0)
             ]),
@@ -1208,14 +1208,14 @@ async fn sequential_aggregations2() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             before: Some(variablemap![
               "total" => json!(2)
             ]),
@@ -1231,14 +1231,14 @@ async fn sequential_aggregations2() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             before: Some(variablemap![
               "total" => json!(0)
             ]),
@@ -1254,14 +1254,14 @@ async fn sequential_aggregations2() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Removing {
+        QueryPartEvaluationContext::Removing {
             before: variablemap!["a" => node2.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             before: Some(variablemap![
               "total" => json!(1)
             ]),
@@ -1277,14 +1277,14 @@ async fn sequential_aggregations2() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Removing {
+        QueryPartEvaluationContext::Removing {
             before: variablemap!["a" => node1.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             before: Some(variablemap![
               "total" => json!(3)
             ]),
@@ -1299,7 +1299,7 @@ async fn sequential_aggregations2() {
 }
 
 #[tokio::test]
-async fn aggregating_phase_to_scalar_phase_add_solution_emit_remove() {
+async fn aggregating_part_to_scalar_part_add_solution_emit_remove() {
     let query = build_query(
         "
     MATCH (a) 
@@ -1339,7 +1339,7 @@ async fn aggregating_phase_to_scalar_phase_add_solution_emit_remove() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPhaseEvaluator::new(
+    let evaluator = Arc::new(QueryPartEvaluator::new(
         expr_evaluator.clone(),
         ari.clone(),
     ));
@@ -1347,14 +1347,14 @@ async fn aggregating_phase_to_scalar_phase_add_solution_emit_remove() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Adding {
+        vec![QueryPartEvaluationContext::Adding {
             after: variablemap![
               "key" => json!("foo"),
               "my_sum" => json!(1.0)
@@ -1365,14 +1365,14 @@ async fn aggregating_phase_to_scalar_phase_add_solution_emit_remove() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Updating {
+        vec![QueryPartEvaluationContext::Updating {
             before: variablemap![
               "key" => json!("foo"),
               "my_sum" => json!(1.0)
@@ -1387,14 +1387,14 @@ async fn aggregating_phase_to_scalar_phase_add_solution_emit_remove() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Adding {
+        vec![QueryPartEvaluationContext::Adding {
             after: variablemap![
               "key" => json!("bar"),
               "my_sum" => json!(5.0)
@@ -1405,7 +1405,7 @@ async fn aggregating_phase_to_scalar_phase_add_solution_emit_remove() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node4.clone()],
         },
     )
@@ -1415,7 +1415,7 @@ async fn aggregating_phase_to_scalar_phase_add_solution_emit_remove() {
 
     assert_eq!(
         result,
-        vec![PhaseEvaluationContext::Removing {
+        vec![QueryPartEvaluationContext::Removing {
             before: variablemap![
               "key" => json!("foo"),
               "my_sum" => json!(3.0)

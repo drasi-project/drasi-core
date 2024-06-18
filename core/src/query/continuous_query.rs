@@ -16,9 +16,9 @@ use tokio::{
 
 use crate::{
     evaluation::{
-        context::{ChangeContext, PhaseEvaluationContext, QueryVariables},
+        context::{ChangeContext, QueryPartEvaluationContext, QueryVariables},
         EvaluationError, ExpressionEvaluationContext, ExpressionEvaluator, InstantQueryClock,
-        QueryPhaseEvaluator,
+        QueryPartEvaluator,
     },
     interface::{ElementIndex, FutureQueue, FutureQueueConsumer, MiddlewareError, QueryClock},
     middleware::SourceMiddlewarePipelineCollection,
@@ -32,7 +32,7 @@ use crate::{
 
 pub struct ContinuousQuery {
     expression_evaluator: Arc<ExpressionEvaluator>,
-    phase_evaluator: Arc<QueryPhaseEvaluator>,
+    part_evaluator: Arc<QueryPartEvaluator>,
     element_index: Arc<dyn ElementIndex>,
     path_solver: Arc<MatchPathSolver>,
     match_path: Arc<MatchPath>,
@@ -51,7 +51,7 @@ impl ContinuousQuery {
         expression_evaluator: Arc<ExpressionEvaluator>,
         element_index: Arc<dyn ElementIndex>,
         path_solver: Arc<MatchPathSolver>,
-        phase_evaluator: Arc<QueryPhaseEvaluator>,
+        part_evaluator: Arc<QueryPartEvaluator>,
         future_queue: Arc<dyn FutureQueue>,
         source_pipelines: SourceMiddlewarePipelineCollection,
     ) -> Self {
@@ -60,7 +60,7 @@ impl ContinuousQuery {
             element_index,
             path_solver,
             match_path,
-            phase_evaluator,
+            part_evaluator,
             query,
             future_consumer_shutdown_request: Arc::new(Notify::new()),
             future_queue,
@@ -74,7 +74,7 @@ impl ContinuousQuery {
     pub async fn process_source_change(
         &self,
         change: SourceChange,
-    ) -> Result<Vec<PhaseEvaluationContext>, EvaluationError> {
+    ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
         //println!("-> process_source_change {:?}", change);
         let _lock = self.change_lock.lock().await;
         let mut result = Vec::new();
@@ -95,10 +95,10 @@ impl ContinuousQuery {
 
             let mut aggregation_results = CollapsedAggregationResults::new();
 
-            for (solution_signature, phase_context) in solution_changes.changes {
+            for (solution_signature, part_context) in solution_changes.changes {
                 let change_results = self
                     .project_solution(
-                        phase_context,
+                        part_context,
                         &ChangeContext {
                             solution_signature,
                             before_clock: before_clock.clone(),
@@ -113,7 +113,7 @@ impl ContinuousQuery {
                     .await?;
                 change_results.into_iter().for_each(|ctx| {
                     match &ctx {
-                        PhaseEvaluationContext::Aggregation { before, after, .. } => {
+                        QueryPartEvaluationContext::Aggregation { before, after, .. } => {
                             if let Some(before) = before {
                                 if before == after {
                                     return;
@@ -122,7 +122,7 @@ impl ContinuousQuery {
 
                             aggregation_results.insert(ctx);
                         }
-                        PhaseEvaluationContext::Updating { before, after } => {
+                        QueryPartEvaluationContext::Updating { before, after } => {
                             if before == after {
                                 return;
                             }
@@ -287,14 +287,14 @@ impl ContinuousQuery {
             match after_change_solutions.get(&sig) {
                 Some(after_sol) => result.changes.push((
                     *sig,
-                    PhaseEvaluationContext::Updating {
+                    QueryPartEvaluationContext::Updating {
                         before: before_sol.into_query_variables(&self.match_path, base_variables),
                         after: after_sol.into_query_variables(&self.match_path, base_variables),
                     },
                 )),
                 None => result.changes.push((
                     *sig,
-                    PhaseEvaluationContext::Removing {
+                    QueryPartEvaluationContext::Removing {
                         before: before_sol.into_query_variables(&self.match_path, base_variables),
                     },
                 )),
@@ -305,7 +305,7 @@ impl ContinuousQuery {
             if !before_change_solutions.contains_key(&sig) {
                 result.changes.push((
                     *sig,
-                    PhaseEvaluationContext::Adding {
+                    QueryPartEvaluationContext::Adding {
                         after: after_sol.into_query_variables(&self.match_path, base_variables),
                     },
                 ))
@@ -410,33 +410,33 @@ impl ContinuousQuery {
     #[tracing::instrument(skip_all, err)]
     async fn project_solution(
         &self,
-        phase_context: PhaseEvaluationContext,
+        part_context: QueryPartEvaluationContext,
         change_context: &ChangeContext,
-    ) -> Result<Vec<PhaseEvaluationContext>, EvaluationError> {
+    ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
         let mut result = Vec::new();
         let mut contexts = Vec::new();
-        contexts.push((phase_context, change_context.clone()));
+        contexts.push((part_context, change_context.clone()));
 
-        let mut phase_num = 0;
+        let mut part_num = 0;
 
-        for phase in &self.query.phases {
-            phase_num += 1;
+        for part in &self.query.parts {
+            part_num += 1;
             result.clear();
 
-            for (phase_context, change_context) in &contexts {
+            for (part_context, change_context) in &contexts {
                 let new_contexts = self
-                    .phase_evaluator
-                    .evaluate(phase_context.clone(), phase_num, phase, change_context)
+                    .part_evaluator
+                    .evaluate(part_context.clone(), part_num, part, change_context)
                     .await?;
 
                 let mut aggregation_results = CollapsedAggregationResults::new();
 
                 new_contexts.into_iter().for_each(|ctx| {
                     match &ctx {
-                        PhaseEvaluationContext::Aggregation { .. } => {
+                        QueryPartEvaluationContext::Aggregation { .. } => {
                             aggregation_results.insert(ctx)
                         }
-                        PhaseEvaluationContext::Noop => return,
+                        QueryPartEvaluationContext::Noop => return,
                         _ => result.push((ctx, change_context.clone())),
                     };
                 });
@@ -571,7 +571,7 @@ impl Debug for ContinuousQuery {
 }
 
 struct SolutionChangesResult {
-    pub changes: Vec<(SolutionSignature, PhaseEvaluationContext)>,
+    pub changes: Vec<(SolutionSignature, QueryPartEvaluationContext)>,
     pub anchor_element: Option<Arc<Element>>,
     pub before_clock: Option<Arc<dyn QueryClock>>,
     pub before_anchor_element: Option<Arc<Element>>,
@@ -592,7 +592,7 @@ impl SolutionChangesResult {
 
 struct CollapsedAggregationResults {
     // [hash of after change grouping keys] -> (context, hash of before change grouping keys)
-    data: HashMap<u64, (PhaseEvaluationContext, u64)>,
+    data: HashMap<u64, (QueryPartEvaluationContext, u64)>,
 }
 
 impl CollapsedAggregationResults {
@@ -602,9 +602,9 @@ impl CollapsedAggregationResults {
         }
     }
 
-    fn insert(&mut self, context: PhaseEvaluationContext) {
+    fn insert(&mut self, context: QueryPartEvaluationContext) {
         match context {
-            PhaseEvaluationContext::Aggregation {
+            QueryPartEvaluationContext::Aggregation {
                 before,
                 after,
                 grouping_keys,
@@ -619,14 +619,14 @@ impl CollapsedAggregationResults {
 
                 match self.data.remove(&after_key) {
                     Some((existing, before_key)) => match existing {
-                        PhaseEvaluationContext::Aggregation {
+                        QueryPartEvaluationContext::Aggregation {
                             before: existing_before,
                             ..
                         } => {
                             self.data.insert(
                                 after_key,
                                 (
-                                    PhaseEvaluationContext::Aggregation {
+                                    QueryPartEvaluationContext::Aggregation {
                                         before: existing_before,
                                         default_before,
                                         default_after,
@@ -643,7 +643,7 @@ impl CollapsedAggregationResults {
                         self.data.insert(
                             after_key,
                             (
-                                PhaseEvaluationContext::Aggregation {
+                                QueryPartEvaluationContext::Aggregation {
                                     before,
                                     after,
                                     grouping_keys,
@@ -663,7 +663,7 @@ impl CollapsedAggregationResults {
     fn into_vec_with_context(
         self,
         change_context: &ChangeContext,
-    ) -> Vec<(PhaseEvaluationContext, ChangeContext)> {
+    ) -> Vec<(QueryPartEvaluationContext, ChangeContext)> {
         self.data
             .into_iter()
             .map(|(after_key, (v, before_key))| {
@@ -675,7 +675,7 @@ impl CollapsedAggregationResults {
             .collect()
     }
 
-    fn into_result_vec(self) -> Vec<PhaseEvaluationContext> {
+    fn into_result_vec(self) -> Vec<QueryPartEvaluationContext> {
         self.data.into_iter().map(|(_, (v, _))| v).collect()
     }
 }
