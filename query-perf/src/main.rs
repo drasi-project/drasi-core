@@ -60,10 +60,9 @@ async fn main() {
         println!(" - Scenario Config: \n{:?}\n", scenario_config);
         println!(" - Initializing Scenario...");
 
-        let query = Arc::new(drasi_query_cypher::parse(&scenario_config.query).unwrap());
         let query_id = format!("test-{}", Uuid::new_v4().to_string());
 
-        let mut builder = QueryBuilder::new(query.clone());
+        let mut builder = QueryBuilder::new(&scenario_config.query);
 
         // Configure the correct element index
         builder = match test_run_config.element_index_type {
@@ -74,9 +73,8 @@ async fn main() {
                     Err(_) => "redis://127.0.0.1:6379".to_string(),
                 };
 
-                let mp = MatchPath::from_query(&query.phases[0]).unwrap();
                 let element_index =
-                    GarnetElementIndex::connect(&query_id, &url, &mp, builder.get_joins())
+                    GarnetElementIndex::connect(&query_id, &url)
                         .await
                         .unwrap();
 
@@ -93,9 +91,8 @@ async fn main() {
                     Err(_) => "test-data".to_string(),
                 };
 
-                let mp = MatchPath::from_query(&query.phases[0]).unwrap();
                 let element_index =
-                    RocksDbElementIndex::new(&query_id, &url, &mp, builder.get_joins(), options)
+                    RocksDbElementIndex::new(&query_id, &url, options)
                         .unwrap();
                 element_index.clear().await.unwrap();
 
@@ -129,7 +126,7 @@ async fn main() {
             }
         };
 
-        let cq = builder.build();
+        let cq = builder.build().await;
 
         println!(" - Bootstrapping Scenario...");
         let mut bootstrap_change_stream_iter = scenario.get_bootstrap_source_change_stream();

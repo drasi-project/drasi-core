@@ -41,13 +41,12 @@ impl GarnetQueryConfig {
 
 #[async_trait]
 impl QueryTestConfig for GarnetQueryConfig {
-    async fn config_query(&self, builder: QueryBuilder, query: Arc<Query>) -> QueryBuilder {
+    async fn config_query(&self, builder: QueryBuilder) -> QueryBuilder {
         log::info!("using in Garnet indexes");
-        let mp = MatchPath::from_query(&query.phases[0]).unwrap();
         let query_id = format!("test-{}", Uuid::new_v4().to_string());
 
         let mut element_index =
-            GarnetElementIndex::connect(&query_id, &self.url, &mp, builder.get_joins())
+            GarnetElementIndex::connect(&query_id, &self.url)
                 .await
                 .unwrap();
         let ari = GarnetResultIndex::connect(&query_id, &self.url)

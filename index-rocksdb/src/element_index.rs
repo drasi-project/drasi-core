@@ -1,4 +1,4 @@
-use std::{collections::HashMap, hash::Hash, sync::Arc};
+use std::{collections::HashMap, hash::Hash, sync::{Arc, RwLock}};
 
 use async_stream::stream;
 use async_trait::async_trait;
@@ -34,7 +34,7 @@ pub struct RocksDbElementIndex {
 
 pub struct Context {
     db: OptimisticTransactionDB,
-    join_spec_by_label: JoinSpecByLabel,
+    join_spec_by_label: RwLock<JoinSpecByLabel>,
     options: RocksIndexOptions,
 }
 
@@ -54,12 +54,8 @@ impl RocksDbElementIndex {
     pub fn new(
         query_id: &str,
         path: &str,
-        match_path: &MatchPath,
-        joins: &Vec<Arc<QueryJoin>>,
         options: RocksIndexOptions,
     ) -> Result<Self, IndexError> {
-        let join_spec_by_label = extract_join_spec_by_label(match_path, joins);
-
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
@@ -98,7 +94,7 @@ impl RocksDbElementIndex {
         Ok(RocksDbElementIndex {
             context: Arc::new(Context {
                 db,
-                join_spec_by_label,
+                join_spec_by_label: RwLock::new(HashMap::new()),
                 options,
             }),
         })
@@ -369,6 +365,12 @@ impl ElementIndex for RocksDbElementIndex {
             Err(err) => Err(IndexError::other(err)),
         }
     }
+
+    async fn set_joins(&self, match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) {
+        let joins_by_label = extract_join_spec_by_label(match_path, joins);
+        let mut join_spec_by_label = self.context.join_spec_by_label.write().unwrap();
+        join_spec_by_label.clone_from(&joins_by_label);        
+    }
 }
 
 fn get_partial_cf_options() -> Options {
@@ -625,7 +627,8 @@ fn update_source_joins(
 ) -> Result<(), IndexError> {
     match new_element {
         StoredElement::Node(n) => {
-            for (label, joins) in context.join_spec_by_label.iter() {
+            let join_spec_by_label = context.join_spec_by_label.read().unwrap();
+            for (label, joins) in join_spec_by_label.iter() {
                 if !n.metadata.labels.contains(label) {
                     continue;
                 }
@@ -785,7 +788,8 @@ fn delete_source_joins(
 ) -> Result<(), IndexError> {
     match old_element {
         StoredElement::Node(n) => {
-            for (label, joins) in context.join_spec_by_label.iter() {
+            let join_spec_by_label = context.join_spec_by_label.read().unwrap();
+            for (label, joins) in join_spec_by_label.iter() {
                 if !n.metadata.labels.contains(label) {
                     continue;
                 }
