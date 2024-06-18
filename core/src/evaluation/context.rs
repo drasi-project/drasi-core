@@ -140,7 +140,7 @@ impl<'a> ExpressionEvaluationContext<'a> {
     }
 
     pub fn get_solution_signature(&self) -> Option<SolutionSignature> {
-        self.solution_signature.clone()
+        self.solution_signature
     }
 
     pub fn get_anchor_element(&self) -> Option<Arc<Element>> {

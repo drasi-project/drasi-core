@@ -1,12 +1,11 @@
 use std::{env, sync::Arc};
 
 use async_trait::async_trait;
-use drasi_query_ast::ast::Query;
+
 use drasi_core::{
     index_cache::{
         cached_element_index::CachedElementIndex, cached_result_index::CachedResultIndex,
     },
-    path_solver::match_path::MatchPath,
     query::QueryBuilder,
 };
 use shared_tests::QueryTestConfig;
@@ -43,7 +42,7 @@ impl GarnetQueryConfig {
 impl QueryTestConfig for GarnetQueryConfig {
     async fn config_query(&self, builder: QueryBuilder) -> QueryBuilder {
         log::info!("using in Garnet indexes");
-        let query_id = format!("test-{}", Uuid::new_v4().to_string());
+        let query_id = format!("test-{}", Uuid::new_v4());
 
         let mut element_index =
             GarnetElementIndex::connect(&query_id, &self.url)

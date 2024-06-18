@@ -97,9 +97,9 @@ impl Integer {
     }
 }
 
-impl Into<Number> for Integer {
-    fn into(self) -> Number {
-        match self.n {
+impl From<Integer> for Number {
+    fn from(val: Integer) -> Self {
+        match val.n {
             N::PosInt(u) => Number::from(u),
             N::NegInt(i) => Number::from(i),
         }

@@ -355,13 +355,13 @@ impl ScalarFunction for ToString {
             VariableValue::String(s) => return Ok(VariableValue::String(s.to_string())),
             VariableValue::List(a) => {
                 let mut result = String::new();
-                result.push_str("[");
+                result.push('[');
                 for v in a {
                     result.push_str(&v.to_string());
                     result.push_str(", ");
                 }
                 result.truncate(result.len() - 2);
-                result.push_str("]");
+                result.push(']');
                 return Ok(VariableValue::String(result));
             }
             _ => return Err(EvaluationError::InvalidType),
@@ -391,13 +391,13 @@ impl ScalarFunction for ToStringOrNull {
             VariableValue::String(s) => return Ok(VariableValue::String(s.to_string())),
             VariableValue::List(a) => {
                 let mut result = String::new();
-                result.push_str("[");
+                result.push('[');
                 for v in a {
                     result.push_str(&v.to_string());
                     result.push_str(", ");
                 }
                 result.truncate(result.len() - 2);
-                result.push_str("]");
+                result.push(']');
                 return Ok(VariableValue::String(result));
             }
             VariableValue::Object(_o) => {

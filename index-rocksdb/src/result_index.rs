@@ -184,14 +184,14 @@ impl LazySortedSetStore for RocksDbResultIndex {
 
             match value {
                 Some(value) => {
-                    let mut iter = db.iterator_cf(
+                    let iter = db.iterator_cf(
                         &set_cf,
                         IteratorMode::From(
                             &encode_next_set_value_key(set_id, value),
                             Direction::Forward,
                         ),
                     );
-                    while let Some(item) = iter.next() {
+                    for item in iter {
                         match item {
                             Ok((key, count)) => {
                                 if !key.starts_with(&prefix) {
@@ -210,8 +210,8 @@ impl LazySortedSetStore for RocksDbResultIndex {
                     }
                 }
                 None => {
-                    let mut iter = db.prefix_iterator_cf(&set_cf, &prefix);
-                    while let Some(item) = iter.next() {
+                    let iter = db.prefix_iterator_cf(&set_cf, prefix);
+                    for item in iter {
                         match item {
                             Ok((key, count)) => {
                                 if !key.starts_with(&prefix) {
@@ -249,7 +249,7 @@ impl LazySortedSetStore for RocksDbResultIndex {
         let task = task::spawn_blocking(move || {
             let set_cf = db.cf_handle(SETS_CF).unwrap();
             let key = encode_set_value_key(set_id, value);
-            match db.get_cf(&set_cf, &key) {
+            match db.get_cf(&set_cf, key) {
                 Ok(Some(v)) => decode_count(&v),
                 Ok(None) => Ok(0),
                 Err(e) => Err(IndexError::other(e)),
@@ -274,7 +274,7 @@ impl LazySortedSetStore for RocksDbResultIndex {
         let task = task::spawn_blocking(move || {
             let set_cf = db.cf_handle(SETS_CF).unwrap();
             let key = encode_set_value_key(set_id, value);
-            match db.merge_cf(&set_cf, &key, encode_count(delta)) {
+            match db.merge_cf(&set_cf, key, encode_count(delta)) {
                 Ok(_) => Ok(()),
                 Err(e) => Err(IndexError::other(e)),
             }
@@ -299,7 +299,7 @@ impl ResultSequenceCounter for RocksDbResultIndex {
         let task = task::spawn_blocking(move || {
             let metadata_cf = db.cf_handle(METADATA_CF).unwrap();
             let mut batch = rocksdb::WriteBatchWithTransaction::default();
-            batch.put_cf(&metadata_cf, "sequence", &sequence.to_be_bytes());
+            batch.put_cf(&metadata_cf, "sequence", sequence.to_be_bytes());
             batch.put_cf(
                 &metadata_cf,
                 "source_change_id",

@@ -22,7 +22,7 @@ impl FromRedisValue for StoredElementReference {
             redis::Value::Data(data) => match StoredElementReference::decode(data.as_slice()) {
                 Ok(v) => Ok(v),
                 Err(_e) => {
-                    return Err(RedisError::from((
+                    Err(RedisError::from((
                         redis::ErrorKind::TypeError,
                         "Error decoding element reference",
                     )))

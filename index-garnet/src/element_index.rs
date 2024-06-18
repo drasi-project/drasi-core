@@ -67,7 +67,7 @@ impl GarnetElementIndex {
 
     async fn update_source_joins(
         &self,
-        mut pipeline: &mut Pipeline,
+        pipeline: &mut Pipeline,
         new_element: &StoredElement,
     ) -> Result<(), IndexError> {
         match new_element {
@@ -133,10 +133,10 @@ impl GarnetElementIndex {
                                                     old.properties.get(&qjk.property)
                                                 {
                                                     self.delete_source_join(
-                                                        &mut pipeline,
+                                                        pipeline,
                                                         old_element.get_reference(),
                                                         qj,
-                                                        &qjk,
+                                                        qjk,
                                                         old_value,
                                                     )
                                                     .await?;
@@ -204,15 +204,15 @@ impl GarnetElementIndex {
                                                     });
 
                                                 self.set_element_internal(
-                                                    &mut pipeline,
+                                                    pipeline,
                                                     in_out,
-                                                    &slots,
+                                                    slots,
                                                 )
                                                 .await?;
                                                 self.set_element_internal(
-                                                    &mut pipeline,
+                                                    pipeline,
                                                     out_in,
-                                                    &slots,
+                                                    slots,
                                                 )
                                                 .await?;
                                             }
@@ -233,7 +233,7 @@ impl GarnetElementIndex {
 
     async fn delete_source_joins(
         &self,
-        mut pipeline: &mut Pipeline,
+        pipeline: &mut Pipeline,
         old_element: &StoredElement,
     ) -> Result<(), IndexError> {
         match old_element {
@@ -253,10 +253,10 @@ impl GarnetElementIndex {
                             match n.properties.get(&qjk.property) {
                                 Some(value) => {
                                     self.delete_source_join(
-                                        &mut pipeline,
+                                        pipeline,
                                         old_element.get_reference(),
                                         qj,
-                                        &qjk,
+                                        qjk,
                                         value,
                                     )
                                     .await?;
@@ -275,7 +275,7 @@ impl GarnetElementIndex {
 
     async fn delete_source_join(
         &self,
-        mut pipeline: &mut Pipeline,
+        pipeline: &mut Pipeline,
         old_element: &StoredElementReference,
         query_join: &QueryJoin,
         join_key: &QueryJoinKey,
@@ -323,8 +323,8 @@ impl GarnetElementIndex {
                     let in_out = get_join_virtual_ref(old_element, &other);
                     let out_in = get_join_virtual_ref(&other, old_element);
 
-                    self.delete_element_internal(&mut pipeline, &in_out).await?;
-                    self.delete_element_internal(&mut pipeline, &out_in).await?;
+                    self.delete_element_internal(pipeline, &in_out).await?;
+                    self.delete_element_internal(pipeline, &out_in).await?;
                 }
             }
         }
@@ -335,7 +335,7 @@ impl GarnetElementIndex {
     #[async_recursion]
     async fn set_element_internal(
         &self,
-        mut pipeline: &mut Pipeline,
+        pipeline: &mut Pipeline,
         element: StoredElement,
         slot_affinity: &Vec<usize>,
     ) -> Result<(), IndexError> {
@@ -346,8 +346,8 @@ impl GarnetElementIndex {
         let element = container.element.unwrap();
         let eref = element.get_reference();
 
-        let element_key = self.key_formatter.get_stored_element_key(&eref);
-        let element_ref_string = self.key_formatter.get_stored_element_ref_string(&eref);
+        let element_key = self.key_formatter.get_stored_element_key(eref);
+        let element_ref_string = self.key_formatter.get_stored_element_ref_string(eref);
 
         let prev_slots = match con
             .hget::<&str, &str, Option<Vec<u8>>>(&element_key, "slots")
@@ -411,10 +411,10 @@ impl GarnetElementIndex {
             }
         }
 
-        self.update_source_joins(&mut pipeline, &element).await?;
+        self.update_source_joins(pipeline, &element).await?;
 
         if self.archive_enabled {
-            self.insert_archive(&element.get_metadata(), &element_as_redis_args)
+            self.insert_archive(element.get_metadata(), &element_as_redis_args)
                 .await?;
         }
 

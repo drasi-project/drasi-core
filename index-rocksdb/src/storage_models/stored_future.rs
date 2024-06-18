@@ -15,13 +15,13 @@ pub struct StoredFutureElementRef {
     pub position_in_query: u32,
 }
 
-impl Into<FutureElementRef> for StoredFutureElementRef {
-    fn into(self) -> FutureElementRef {
+impl From<StoredFutureElementRef> for FutureElementRef {
+    fn from(val: StoredFutureElementRef) -> Self {
         FutureElementRef {
-            element_ref: self.element_ref.into(),
-            original_time: self.original_time,
-            due_time: self.due_time,
-            group_signature: self.group_signature,
+            element_ref: val.element_ref.into(),
+            original_time: val.original_time,
+            due_time: val.due_time,
+            group_signature: val.group_signature,
         }
     }
 }

@@ -21,6 +21,12 @@ pub struct InMemoryFutureQueue {
     data: RwLock<FutureQueueState>,
 }
 
+impl Default for InMemoryFutureQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InMemoryFutureQueue {
     pub fn new() -> Self {
         InMemoryFutureQueue {
@@ -83,7 +89,7 @@ impl FutureQueue for InMemoryFutureQueue {
                 group_signature,
             };
             data.queue
-                .push((position_in_query, fut_element_ref), due_time as i64 * -1);
+                .push((position_in_query, fut_element_ref), -(due_time as i64));
 
             data.map
                 .entry((position_in_query, group_signature))
@@ -123,7 +129,7 @@ impl FutureQueue for InMemoryFutureQueue {
         let mut data = self.data.write().await;
         match data.queue.pop() {
             Some((key, due_time)) => {
-                let due_time = (due_time * -1) as u64;
+                let due_time = -due_time as u64;
                 let map_key = (key.0, key.1.group_signature);
                 match data.map.get_mut(&map_key) {
                     Some(map) => {

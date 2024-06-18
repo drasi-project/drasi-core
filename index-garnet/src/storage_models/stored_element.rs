@@ -134,28 +134,28 @@ impl From<&Element> for StoredElement {
     }
 }
 
-impl Into<ElementReference> for StoredElementReference {
-    fn into(self) -> ElementReference {
+impl From<StoredElementReference> for ElementReference {
+    fn from(val: StoredElementReference) -> Self {
         ElementReference {
-            source_id: Arc::from(self.source_id),
-            element_id: Arc::from(self.element_id),
+            source_id: Arc::from(val.source_id),
+            element_id: Arc::from(val.element_id),
         }
     }
 }
 
-impl Into<ElementMetadata> for StoredElementMetadata {
-    fn into(self) -> ElementMetadata {
+impl From<StoredElementMetadata> for ElementMetadata {
+    fn from(val: StoredElementMetadata) -> Self {
         ElementMetadata {
-            reference: self.reference.into(),
-            labels: self.labels.iter().map(|l| Arc::from(l.as_str())).collect(),
-            effective_from: self.effective_from,
+            reference: val.reference.into(),
+            labels: val.labels.iter().map(|l| Arc::from(l.as_str())).collect(),
+            effective_from: val.effective_from,
         }
     }
 }
 
-impl Into<Element> for StoredElement {
-    fn into(self) -> Element {
-        match self {
+impl From<StoredElement> for Element {
+    fn from(val: StoredElement) -> Self {
+        match val {
             StoredElement::Node(e) => Element::Node {
                 metadata: e.metadata.into(),
                 properties: e.properties.into(),

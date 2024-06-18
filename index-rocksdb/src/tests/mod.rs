@@ -1,10 +1,9 @@
 use std::{env, sync::Arc};
 
 use async_trait::async_trait;
-use drasi_query_ast::ast::Query;
+
 use drasi_core::{
     interface::{AccumulatorIndex, ElementIndex, FutureQueue},
-    path_solver::match_path::MatchPath,
     query::QueryBuilder,
 };
 use shared_tests::QueryTestConfig;
@@ -39,7 +38,7 @@ impl RocksDbQueryConfig {
 impl QueryTestConfig for RocksDbQueryConfig {
     async fn config_query(&self, builder: QueryBuilder) -> QueryBuilder {
         log::info!("using in RocksDb indexes");
-        let query_id = format!("test-{}", Uuid::new_v4().to_string());
+        let query_id = format!("test-{}", Uuid::new_v4());
 
         let options = element_index::RocksIndexOptions {
             archive_enabled: true,

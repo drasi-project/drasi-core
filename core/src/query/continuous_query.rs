@@ -156,7 +156,7 @@ impl ContinuousQuery {
             SourceChange::Insert { element } => {
                 let element = Arc::new(element);
                 let solutions = self
-                    .resolve_solutions(&base_variables, element.clone(), clock.clone(), true)
+                    .resolve_solutions(base_variables, element.clone(), clock.clone(), true)
                     .await?;
 
                 for (signature, solution) in solutions {
@@ -168,7 +168,7 @@ impl ContinuousQuery {
             SourceChange::Update { mut element } => {
                 match self
                     .element_index
-                    .get_element(&element.get_reference())
+                    .get_element(element.get_reference())
                     .await?
                 {
                     Some(prev_version) => {
@@ -177,7 +177,7 @@ impl ContinuousQuery {
                             Arc::new(InstantQueryClock::new(prev_timestamp, clock.get_realtime()));
                         let solutions = self
                             .resolve_solutions(
-                                &base_variables,
+                                base_variables,
                                 prev_version.clone(),
                                 before_clock.clone(),
                                 false,
@@ -195,7 +195,7 @@ impl ContinuousQuery {
 
                 let element = Arc::new(element);
                 let solutions = self
-                    .resolve_solutions(&base_variables, element.clone(), clock.clone(), true)
+                    .resolve_solutions(base_variables, element.clone(), clock.clone(), true)
                     .await?;
 
                 for (signature, solution) in solutions {
@@ -212,7 +212,7 @@ impl ContinuousQuery {
                             Arc::new(InstantQueryClock::new(prev_timestamp, clock.get_realtime()));
                         let solutions = self
                             .resolve_solutions(
-                                &base_variables,
+                                base_variables,
                                 element.clone(),
                                 before_clock.clone(),
                                 false,
@@ -251,7 +251,7 @@ impl ContinuousQuery {
 
                         let before_solutions = self
                             .resolve_solutions(
-                                &base_variables,
+                                base_variables,
                                 element.clone(),
                                 before_clock.clone(),
                                 false,
@@ -266,7 +266,7 @@ impl ContinuousQuery {
 
                         let after_solutions = self
                             .resolve_solutions(
-                                &base_variables,
+                                base_variables,
                                 element.clone(),
                                 clock.clone(),
                                 false,
@@ -284,7 +284,7 @@ impl ContinuousQuery {
         }
 
         for (sig, before_sol) in &before_change_solutions {
-            match after_change_solutions.get(&sig) {
+            match after_change_solutions.get(sig) {
                 Some(after_sol) => result.changes.push((
                     *sig,
                     QueryPartEvaluationContext::Updating {
@@ -302,7 +302,7 @@ impl ContinuousQuery {
         }
 
         for (sig, after_sol) in &after_change_solutions {
-            if !before_change_solutions.contains_key(&sig) {
+            if !before_change_solutions.contains_key(sig) {
                 result.changes.push((
                     *sig,
                     QueryPartEvaluationContext::Adding {
@@ -436,9 +436,9 @@ impl ContinuousQuery {
                         QueryPartEvaluationContext::Aggregation { .. } => {
                             aggregation_results.insert(ctx)
                         }
-                        QueryPartEvaluationContext::Noop => return,
+                        QueryPartEvaluationContext::Noop => (),
                         _ => result.push((ctx, change_context.clone())),
-                    };
+                    }
                 });
 
                 for actx in aggregation_results.into_vec_with_context(change_context) {

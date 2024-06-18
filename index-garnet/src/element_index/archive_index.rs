@@ -68,21 +68,18 @@ impl ElementArchiveIndex for GarnetElementIndex {
         let from_timestamp = match from {
             TimestampBound::Included(from) => from,
             TimestampBound::StartFromPrevious(from) => {
-                let first_element_result = match self.get_element_as_at(element_ref, from).await {
+                
+                match self.get_element_as_at(element_ref, from).await {
                     Ok(Some(element)) => element.get_effective_from(),
                     Ok(None) => 0,
                     Err(_e) => return Err(IndexError::CorruptedData),
-                };
-                first_element_result
+                }
             }
         };
         let stream = stream! {
-            let result = match con
+            let result = con
                 .zrangebyscore::<String, u64, u64, Vec<Vec<u8>>>(key, from_timestamp, to)
-                .await {
-                    Ok(v) => Ok(v),
-                    Err(e) => Err(e),
-                };
+                .await;
 
             match result {
                 Ok(result) => {

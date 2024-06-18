@@ -18,7 +18,9 @@ use zoned_time::ZonedTime;
 use crate::models::{Element, ElementMetadata, ElementReference};
 
 #[derive(Clone, Hash, Eq)]
+#[derive(Default)]
 pub enum VariableValue {
+    #[default]
     Null,
     Bool(bool),
     Float(Float),
@@ -41,9 +43,9 @@ pub enum VariableValue {
     Awaiting,
 }
 
-impl Into<Value> for VariableValue {
-    fn into(self) -> Value {
-        match self {
+impl From<VariableValue> for Value {
+    fn from(val: VariableValue) -> Self {
+        match val {
             VariableValue::Null => Value::Null,
             VariableValue::Bool(b) => Value::Bool(b),
             VariableValue::Float(f) => Value::Number(f.into()),
@@ -227,7 +229,7 @@ impl VariableValue {
 
     pub fn as_date(&self) -> Option<NaiveDate> {
         match *self {
-            VariableValue::Date(d) => Some(d.clone()),
+            VariableValue::Date(d) => Some(d),
             _ => None,
         }
     }
@@ -238,7 +240,7 @@ impl VariableValue {
 
     pub fn as_local_time(&self) -> Option<NaiveTime> {
         match *self {
-            VariableValue::LocalTime(t) => Some(t.clone()),
+            VariableValue::LocalTime(t) => Some(t),
             _ => None,
         }
     }
@@ -249,7 +251,7 @@ impl VariableValue {
 
     pub fn as_time(&self) -> Option<ZonedTime> {
         match self {
-            VariableValue::ZonedTime(t) => Some(t.clone()),
+            VariableValue::ZonedTime(t) => Some(*t),
             _ => None,
         }
     }
@@ -260,7 +262,7 @@ impl VariableValue {
 
     pub fn as_local_date_time(&self) -> Option<NaiveDateTime> {
         match *self {
-            VariableValue::LocalDateTime(t) => Some(t.clone()),
+            VariableValue::LocalDateTime(t) => Some(t),
             _ => None,
         }
     }
@@ -359,11 +361,7 @@ fn parse_index(s: &str) -> Option<usize> {
     s.parse().ok()
 }
 
-impl Default for VariableValue {
-    fn default() -> VariableValue {
-        VariableValue::Null
-    }
-}
+
 
 impl Debug for VariableValue {
     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {

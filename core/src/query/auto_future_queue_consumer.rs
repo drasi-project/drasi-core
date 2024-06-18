@@ -81,11 +81,11 @@ impl FutureQueueConsumer for AutoFutureQueueConsumer {
             return now_override.load(std::sync::atomic::Ordering::Relaxed);
         }
 
-        let now = SystemTime::now()
+        
+        SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_secs()
-            * 1000;
-        now
+            * 1000
     }
 }

@@ -91,9 +91,9 @@ impl From<ValueAccumulator> for StoredValueAccumulator {
     }
 }
 
-impl Into<ValueAccumulator> for StoredValueAccumulator {
-    fn into(self) -> ValueAccumulator {
-        match self {
+impl From<StoredValueAccumulator> for ValueAccumulator {
+    fn from(val: StoredValueAccumulator) -> Self {
+        match val {
             StoredValueAccumulator::Sum(value) => ValueAccumulator::Sum { value },
             StoredValueAccumulator::Avg(avg) => ValueAccumulator::Avg {
                 sum: avg.sum,

@@ -50,7 +50,7 @@ pub enum IndexError {
 
 impl Display for IndexError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Ok(format!("{:?}", self).fmt(f)?)
+        format!("{:?}", self).fmt(f)
     }
 }
 

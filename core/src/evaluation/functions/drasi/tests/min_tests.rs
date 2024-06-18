@@ -47,7 +47,7 @@ async fn test_drasi_min_multiple_types() {
         VariableValue::Integer(1.into()),
         VariableValue::Float((3.1415).into()),
         VariableValue::String("test".into()),
-        VariableValue::Bool(true.into()),
+        VariableValue::Bool(true),
     ])];
 
     let result = min

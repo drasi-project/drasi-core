@@ -50,13 +50,13 @@ async fn test_list_tail_multiple_arguments() {
         .await
         .unwrap_err();
 
-    let err = Box::new(EvaluationError::InvalidArgumentCount("tail".to_string()));
+    let _err = Box::new(EvaluationError::InvalidArgumentCount("tail".to_string()));
 
     assert!(matches!(
         result,
         EvaluationError::FunctionError {
-            function_name: name,
-            error: err
+            function_name: _name,
+            error: _err
         }
     ));
 }

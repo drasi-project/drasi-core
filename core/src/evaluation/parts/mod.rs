@@ -87,7 +87,7 @@ impl QueryPartEvaluator {
                 for filter in &part.where_clauses {
                     if !self
                         .expression_evaluator
-                        .evaluate_predicate(&eval_context, &filter)
+                        .evaluate_predicate(&eval_context, filter)
                         .await?
                     {
                         return Ok(vec![QueryPartEvaluationContext::Noop]);
@@ -153,7 +153,7 @@ impl QueryPartEvaluator {
                     before_filtered = before_filtered
                         || !self
                             .expression_evaluator
-                            .evaluate_predicate(&before_context, &filter)
+                            .evaluate_predicate(&before_context, filter)
                             .await?;
                 }
 
@@ -189,7 +189,7 @@ impl QueryPartEvaluator {
                 for filter in &part.where_clauses {
                     if !self
                         .expression_evaluator
-                        .evaluate_predicate(&after_context, &filter)
+                        .evaluate_predicate(&after_context, filter)
                         .await?
                     {
                         if let Some(agg_after) = agg_after {
@@ -280,7 +280,7 @@ impl QueryPartEvaluator {
                 for filter in &part.where_clauses {
                     if !self
                         .expression_evaluator
-                        .evaluate_predicate(&eval_context, &filter)
+                        .evaluate_predicate(&eval_context, filter)
                         .await?
                     {
                         return Ok(vec![QueryPartEvaluationContext::Noop]);
@@ -419,7 +419,7 @@ impl QueryPartEvaluator {
                 let next_before = match &before {
                     Some(before) => {
                         let prev_context = ExpressionEvaluationContext::from_before_change(
-                            &before,
+                            before,
                             SideEffects::Snapshot,
                             change_context,
                         );
@@ -441,7 +441,7 @@ impl QueryPartEvaluator {
 
                 if let Some(before) = &before {
                     let before_context = ExpressionEvaluationContext::from_before_change(
-                        &before,
+                        before,
                         SideEffects::Snapshot,
                         change_context,
                     );
@@ -450,17 +450,17 @@ impl QueryPartEvaluator {
                         before_filtered = before_filtered
                             || !self
                                 .expression_evaluator
-                                .evaluate_predicate(&before_context, &filter)
+                                .evaluate_predicate(&before_context, filter)
                                 .await?;
                     }
 
                     if !before_filtered && should_revert {
                         let mut revert_context = ExpressionEvaluationContext::from_before_change(
-                            &before,
+                            before,
                             SideEffects::RevertForUpdate,
                             change_context,
                         );
-                        revert_context.replace_variables(&before);
+                        revert_context.replace_variables(before);
                         next_after = Some(
                             self.project(
                                 &revert_context,
@@ -482,12 +482,12 @@ impl QueryPartEvaluator {
                 for filter in &part.where_clauses {
                     if !self
                         .expression_evaluator
-                        .evaluate_predicate(&after_context, &filter)
+                        .evaluate_predicate(&after_context, filter)
                         .await?
                     {
                         if let Some(next_after) = next_after {
                             if is_return_aggreating {
-                                return Ok(self
+                                return self
                                     .reconile_crossing_agregate(
                                         part,
                                         next_after_grouping_keys,
@@ -498,7 +498,7 @@ impl QueryPartEvaluator {
                                         agg_snapshot,
                                         change_context,
                                     )
-                                    .await?);
+                                    .await;
                             }
                         }
 

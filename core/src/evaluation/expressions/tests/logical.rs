@@ -24,12 +24,11 @@ async fn evaluate_logical_predicate() {
     {
         let context =
             ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-        assert_eq!(
+        assert!(
             evaluator
                 .evaluate_predicate(&context, &predicate)
                 .await
-                .unwrap(),
-            true
+                .unwrap()
         );
     }
 
@@ -37,12 +36,11 @@ async fn evaluate_logical_predicate() {
     {
         let context =
             ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-        assert_eq!(
+        assert!(
             evaluator
                 .evaluate_predicate(&context, &predicate)
                 .await
-                .unwrap(),
-            true
+                .unwrap()
         );
     }
 
@@ -50,12 +48,11 @@ async fn evaluate_logical_predicate() {
     {
         let context =
             ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-        assert_eq!(
-            evaluator
+        assert!(
+            !evaluator
                 .evaluate_predicate(&context, &predicate)
                 .await
-                .unwrap(),
-            false
+                .unwrap()
         );
     }
 
@@ -65,12 +62,11 @@ async fn evaluate_logical_predicate() {
     {
         let context =
             ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-        assert_eq!(
-            evaluator
+        assert!(
+            !evaluator
                 .evaluate_predicate(&context, &predicate)
                 .await
-                .unwrap(),
-            false
+                .unwrap()
         );
     }
 }

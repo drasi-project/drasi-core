@@ -80,7 +80,7 @@ impl ScalarFunction for Reduce {
                 }
 
                 Ok(query_variables
-                    .get(accumulator_name.as_str().into())
+                    .get(accumulator_name.as_str())
                     .unwrap()
                     .clone())
             }

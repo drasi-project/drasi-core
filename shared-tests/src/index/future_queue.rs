@@ -93,7 +93,7 @@ pub async fn push_not_exists(subject: &impl FutureQueue) {
         .push(PushType::IfNotExists, func1, group1, &element1, 10, 30)
         .await
         .expect("push failed");
-    assert_eq!(push2, false);
+    assert!(!push2);
 
     let push3 = subject
         .push(PushType::IfNotExists, func1, group2, &element1, 10, 15)

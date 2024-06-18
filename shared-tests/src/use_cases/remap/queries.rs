@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use drasi_query_ast::ast;
+
 use drasi_core::models::SourceMiddlewareConfig;
 use serde_json::json;
 

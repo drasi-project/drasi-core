@@ -107,7 +107,7 @@ impl LazySortedSet {
     pub async fn commit(&mut self) -> Result<(), IndexError> {
         for (value, entry) in &self.change_log {
             self.store
-                .increment_value_count(self.set_id, value.clone(), entry.delta)
+                .increment_value_count(self.set_id, *value, entry.delta)
                 .await?;
         }
         self.change_log.clear();

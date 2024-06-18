@@ -71,7 +71,7 @@ async fn evaluate_reduce_func_sensor_value() {
         VariableValue::Object({
             let mut map = BTreeMap::new();
             map.insert(
-                "value".to_string().into(),
+                "value".to_string(),
                 VariableValue::Integer(Integer::from(11)),
             );
             map
@@ -79,7 +79,7 @@ async fn evaluate_reduce_func_sensor_value() {
         VariableValue::Object({
             let mut map = BTreeMap::new();
             map.insert(
-                "value".to_string().into(),
+                "value".to_string(),
                 VariableValue::Integer(Integer::from(86)),
             );
             map
@@ -87,7 +87,7 @@ async fn evaluate_reduce_func_sensor_value() {
         VariableValue::Object({
             let mut map = BTreeMap::new();
             map.insert(
-                "value".to_string().into(),
+                "value".to_string(),
                 VariableValue::Integer(Integer::from(3)),
             );
             map
@@ -95,7 +95,7 @@ async fn evaluate_reduce_func_sensor_value() {
         VariableValue::Object({
             let mut map = BTreeMap::new();
             map.insert(
-                "value".to_string().into(),
+                "value".to_string(),
                 VariableValue::Integer(Integer::from(121)),
             );
             map
@@ -103,7 +103,7 @@ async fn evaluate_reduce_func_sensor_value() {
         VariableValue::Object({
             let mut map = BTreeMap::new();
             map.insert(
-                "value".to_string().into(),
+                "value".to_string(),
                 VariableValue::Integer(Integer::from(-45)),
             );
             map
@@ -141,7 +141,7 @@ async fn evaluate_reduce_func_sensor_value_count() {
         VariableValue::Object({
             let mut map = BTreeMap::new();
             map.insert(
-                "value".to_string().into(),
+                "value".to_string(),
                 VariableValue::Integer(Integer::from(11)),
             );
             map
@@ -149,7 +149,7 @@ async fn evaluate_reduce_func_sensor_value_count() {
         VariableValue::Object({
             let mut map = BTreeMap::new();
             map.insert(
-                "value".to_string().into(),
+                "value".to_string(),
                 VariableValue::Integer(Integer::from(86)),
             );
             map
@@ -157,7 +157,7 @@ async fn evaluate_reduce_func_sensor_value_count() {
         VariableValue::Object({
             let mut map = BTreeMap::new();
             map.insert(
-                "value".to_string().into(),
+                "value".to_string(),
                 VariableValue::Integer(Integer::from(3)),
             );
             map
@@ -165,7 +165,7 @@ async fn evaluate_reduce_func_sensor_value_count() {
         VariableValue::Object({
             let mut map = BTreeMap::new();
             map.insert(
-                "value".to_string().into(),
+                "value".to_string(),
                 VariableValue::Integer(Integer::from(121)),
             );
             map
@@ -173,7 +173,7 @@ async fn evaluate_reduce_func_sensor_value_count() {
         VariableValue::Object({
             let mut map = BTreeMap::new();
             map.insert(
-                "value".to_string().into(),
+                "value".to_string(),
                 VariableValue::Integer(Integer::from(-45)),
             );
             map

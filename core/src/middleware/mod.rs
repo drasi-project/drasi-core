@@ -9,6 +9,12 @@ pub struct MiddlewareTypeRegistry {
     source_middleware_types: HashMap<String, Arc<dyn SourceMiddlewareFactory>>,
 }
 
+impl Default for MiddlewareTypeRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MiddlewareTypeRegistry {
     pub fn new() -> Self {
         MiddlewareTypeRegistry {
@@ -21,7 +27,7 @@ impl MiddlewareTypeRegistry {
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn SourceMiddlewareFactory>> {
-        self.source_middleware_types.get(name).map(|f| f.clone())
+        self.source_middleware_types.get(name).cloned()
     }
 }
 
@@ -44,14 +50,14 @@ impl MiddlewareContainer {
                         config.kind
                     )))?;
             let instance = factory.create(&config)?;
-            source_instances.insert(Arc::from(config.name.clone()), instance);
+            source_instances.insert(config.name.clone(), instance);
         }
 
         Ok(MiddlewareContainer { source_instances })
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn SourceMiddleware>> {
-        self.source_instances.get(name).map(|f| f.clone())
+        self.source_instances.get(name).cloned()
     }
 }
 
@@ -102,6 +108,12 @@ pub struct SourceMiddlewarePipelineCollection {
     items: HashMap<Arc<str>, Arc<SourceMiddlewarePipeline>>,
 }
 
+impl Default for SourceMiddlewarePipelineCollection {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SourceMiddlewarePipelineCollection {
     pub fn new() -> Self {
         SourceMiddlewarePipelineCollection {
@@ -114,6 +126,6 @@ impl SourceMiddlewarePipelineCollection {
     }
 
     pub fn get(&self, source_id: Arc<str>) -> Option<Arc<SourceMiddlewarePipeline>> {
-        self.items.get(&source_id).map(|p| p.clone())
+        self.items.get(&source_id).cloned()
     }
 }

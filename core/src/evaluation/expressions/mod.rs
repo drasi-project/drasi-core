@@ -189,7 +189,7 @@ impl ExpressionEvaluator {
             ast::UnaryExpression::Property { name, key } => {
                 match context.get_variable(name.clone()) {
                     Some(v) => match v {
-                        VariableValue::Element(e) => e.get_property(&key).into(),
+                        VariableValue::Element(e) => e.get_property(key).into(),
 
                         //type of object
                         VariableValue::Object(o) => match o.get(&key.to_string()) {
@@ -1479,7 +1479,7 @@ impl ExpressionEvaluator {
                         if aggregate.accumulator_is_lazy() {
                             aggregate.initialize_accumulator(
                                 context,
-                                &expression,
+                                expression,
                                 &grouping_keys,
                                 self.result_index.clone(),
                             )
@@ -1488,7 +1488,7 @@ impl ExpressionEvaluator {
                                 Some(acc) => Accumulator::Value(acc),
                                 None => aggregate.initialize_accumulator(
                                     context,
-                                    &expression,
+                                    expression,
                                     &grouping_keys,
                                     self.result_index.clone(),
                                 ),
@@ -1536,14 +1536,14 @@ impl ExpressionEvaluator {
                     result
                 }
                 Function::ContextMutator(context_mutator) => {
-                    if expression.args.len() == 0 {
+                    if expression.args.is_empty() {
                         VariableValue::Null
                     } else {
                         let new_context = context_mutator.call(context, expression).await?;
-                        let result = self
+                        
+                        self
                             .evaluate_expression(&new_context, &expression.args[0])
-                            .await?;
-                        result
+                            .await?
                     }
                 }
             },
@@ -1572,13 +1572,13 @@ impl ExpressionEvaluator {
                 Some(ref match_) => {
                     let condition = self.evaluate_expression(context, &when.0).await?;
                     if condition == *match_ {
-                        return Ok(self.evaluate_expression(context, &when.1).await?);
+                        return self.evaluate_expression(context, &when.1).await;
                     }
                 }
                 None => {
                     let condition = self.evaluate_predicate(context, &when.0).await?;
                     if condition {
-                        return Ok(self.evaluate_expression(context, &when.1).await?);
+                        return self.evaluate_expression(context, &when.1).await;
                     }
                 }
             }
@@ -1695,7 +1695,7 @@ async fn get_date_property(date: NaiveDate, property: String) -> Option<u32> {
                 Weekday::Sat => 6,
                 Weekday::Sun => 7,
             };
-            return Some(day_of_week_num);
+            Some(day_of_week_num)
         }
         "weekDay" => {
             let day_of_week = date.weekday();
@@ -1708,7 +1708,7 @@ async fn get_date_property(date: NaiveDate, property: String) -> Option<u32> {
                 Weekday::Sat => 6,
                 Weekday::Sun => 7,
             };
-            return Some(day_of_week_num);
+            Some(day_of_week_num)
         }
         "ordinalDay" => Some(date.ordinal()),
         "weekYear" => Some(date.iso_week().year().try_into().unwrap()),
@@ -1718,7 +1718,7 @@ async fn get_date_property(date: NaiveDate, property: String) -> Option<u32> {
                 NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1).unwrap();
             let duration = date - start_date;
             let num_days = duration.num_days();
-            return Some((num_days + 1).try_into().unwrap());
+            Some((num_days + 1).try_into().unwrap())
         }
         "quarterDay" => {
             let quarter = (date.month() - 1) / 3 + 1;
@@ -1726,7 +1726,7 @@ async fn get_date_property(date: NaiveDate, property: String) -> Option<u32> {
                 NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1).unwrap();
             let duration = date - start_date;
             let num_days = duration.num_days();
-            return Some((num_days + 1).try_into().unwrap());
+            Some((num_days + 1).try_into().unwrap())
         }
         _ => None,
     }
@@ -1757,12 +1757,12 @@ async fn get_time_property(zoned_time: ZonedTime, property: String) -> Option<St
         "offset" => Some(offset.to_string()),
         "timezone" => Some(offset.to_string()),
         "offsetSeconds" => {
-            let seconds = offset.local_minus_utc() as i32;
-            return Some(seconds.to_string());
+            let seconds = offset.local_minus_utc();
+            Some(seconds.to_string())
         }
         "offsetMinutes" => {
-            let minutes = offset.local_minus_utc() as i32 / 60;
-            return Some(minutes.to_string());
+            let minutes = offset.local_minus_utc() / 60;
+            Some(minutes.to_string())
         }
         _ => None,
     }
@@ -1788,7 +1788,7 @@ async fn get_local_datetime_property(datetime: NaiveDateTime, property: String) 
                 Weekday::Sat => 6,
                 Weekday::Sun => 7,
             };
-            return Some(day_of_week_num);
+            Some(day_of_week_num)
         }
         "weekDay" => {
             let day_of_week = date.weekday();
@@ -1801,7 +1801,7 @@ async fn get_local_datetime_property(datetime: NaiveDateTime, property: String) 
                 Weekday::Sat => 6,
                 Weekday::Sun => 7,
             };
-            return Some(day_of_week_num);
+            Some(day_of_week_num)
         }
         "ordinalDay" => Some(date.ordinal()),
         "weekYear" => Some(date.iso_week().year().try_into().unwrap()),
@@ -1811,7 +1811,7 @@ async fn get_local_datetime_property(datetime: NaiveDateTime, property: String) 
                 NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1).unwrap();
             let duration = date - start_date;
             let num_days = duration.num_days();
-            return Some((num_days + 1).try_into().unwrap());
+            Some((num_days + 1).try_into().unwrap())
         }
         "quarterDay" => {
             let quarter = (date.month() - 1) / 3 + 1;
@@ -1819,7 +1819,7 @@ async fn get_local_datetime_property(datetime: NaiveDateTime, property: String) 
                 NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1).unwrap();
             let duration = date - start_date;
             let num_days = duration.num_days();
-            return Some((num_days + 1).try_into().unwrap());
+            Some((num_days + 1).try_into().unwrap())
         }
         "hour" => Some(time.hour()),
         "minute" => Some(time.minute()),
@@ -1856,7 +1856,7 @@ async fn get_datetime_property(zoned_datetime: ZonedDateTime, property: String) 
                 Weekday::Sat => "6",
                 Weekday::Sun => "7",
             };
-            return Some(day_of_week_num.to_string());
+            Some(day_of_week_num.to_string())
         }
         "weekDay" => {
             let day_of_week = date.weekday();
@@ -1869,7 +1869,7 @@ async fn get_datetime_property(zoned_datetime: ZonedDateTime, property: String) 
                 Weekday::Sat => "6",
                 Weekday::Sun => "7",
             };
-            return Some(day_of_week_num.to_string());
+            Some(day_of_week_num.to_string())
         }
         "ordinalDay" => Some(date.ordinal().to_string()),
         "weekYear" => Some(date.iso_week().year().to_string()),
@@ -1879,7 +1879,7 @@ async fn get_datetime_property(zoned_datetime: ZonedDateTime, property: String) 
                 NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1).unwrap();
             let duration = date - start_date;
             let num_days = duration.num_days();
-            return Some((num_days + 1).to_string());
+            Some((num_days + 1).to_string())
         }
         "quarterDay" => {
             let quarter = (date.month() - 1) / 3 + 1;
@@ -1887,7 +1887,7 @@ async fn get_datetime_property(zoned_datetime: ZonedDateTime, property: String) 
                 NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1).unwrap();
             let duration = date - start_date;
             let num_days = duration.num_days();
-            return Some((num_days + 1).to_string());
+            Some((num_days + 1).to_string())
         }
         "hour" => Some(time.hour().to_string()),
         "minute" => Some(time.minute().to_string()),
@@ -1901,12 +1901,12 @@ async fn get_datetime_property(zoned_datetime: ZonedDateTime, property: String) 
         },
         "offset" => Some(offset.to_string()),
         "offsetSeconds" => {
-            let seconds = offset.local_minus_utc() as i32;
-            return Some(seconds.to_string());
+            let seconds = offset.local_minus_utc();
+            Some(seconds.to_string())
         }
         "offsetMinutes" => {
-            let minutes = offset.local_minus_utc() as i32 / 60;
-            return Some(minutes.to_string());
+            let minutes = offset.local_minus_utc() / 60;
+            Some(minutes.to_string())
         }
         "epochMillis" => {
             let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)
@@ -1915,7 +1915,7 @@ async fn get_datetime_property(zoned_datetime: ZonedDateTime, property: String) 
                 .unwrap();
             let duration = datetime.naive_utc() - epoch;
             let millis = duration.num_milliseconds();
-            return Some(millis.to_string());
+            Some(millis.to_string())
         }
         "epochSeconds" => {
             let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)
@@ -1924,7 +1924,7 @@ async fn get_datetime_property(zoned_datetime: ZonedDateTime, property: String) 
                 .unwrap();
             let duration = datetime.naive_utc() - epoch;
             let seconds = duration.num_seconds();
-            return Some(seconds.to_string());
+            Some(seconds.to_string())
         }
         _ => None,
     }
@@ -1949,48 +1949,48 @@ async fn get_duration_property(duration_struct: DurationStruct, property: String
         "nanoseconds" => Some(duration.num_nanoseconds().unwrap()),
         "quartersOfYear" => {
             let quarters = month / 3 + 1;
-            return Some(quarters);
+            Some(quarters)
         }
         "monthsOfYear" => {
             if month % 12 == 0 {
                 return Some(12);
             }
             let months = month % 12;
-            return Some(months);
+            Some(months)
         }
         "monthsOfQuarter" => {
             if month % 3 == 0 {
                 return Some(3);
             }
             let months = month % 3;
-            return Some(months);
+            Some(months)
         }
         "daysOfWeek" => {
             if duration.num_days() % 7 == 0 {
                 return Some(7);
             }
             let days = duration.num_days() % 7;
-            return Some(days);
+            Some(days)
         }
         "minutesOfHour" => {
             let mins = duration.num_minutes() % 60;
-            return Some(mins);
+            Some(mins)
         }
         "secondsOfMinute" => {
             let secs = duration.num_seconds() % 60;
-            return Some(secs);
+            Some(secs)
         }
         "millisecondsOfSecond" => {
             let millis = duration.num_milliseconds() % 1000;
-            return Some(millis);
+            Some(millis)
         }
         "microsecondsOfSecond" => {
             let micros = duration.num_microseconds().unwrap() % 1000000;
-            return Some(micros);
+            Some(micros)
         }
         "nanosecondsOfSecond" => {
             let nanos = duration.num_nanoseconds().unwrap() % 1000000000;
-            return Some(nanos);
+            Some(nanos)
         }
         _ => None,
     }
