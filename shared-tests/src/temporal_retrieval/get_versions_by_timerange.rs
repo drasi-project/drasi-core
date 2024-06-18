@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use crate::QueryTestConfig;
-use drasi_query_ast::ast;
 use drasi_core::{
     evaluation::{context::PhaseEvaluationContext, variable_value::VariableValue},
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
@@ -17,25 +16,20 @@ macro_rules! variablemap {
     }}
   }
 
-pub fn test_query() -> ast::Query {
-    drasi_query_cypher::parse(
-        "
-    MATCH 
+pub fn test_query() -> &'static str {
+    "MATCH 
         (t:Thing)
     RETURN
         t,
         drasi.getVersionsByTimeRange(t, 1000, 2001) as range
-    ",
-    )
-    .unwrap()
+    "
 }
 
 pub async fn get_versions_by_timerange(config: &(impl QueryTestConfig + Send)) {
-    let mq = Arc::new(test_query());
     let query = {
-        let mut builder = QueryBuilder::new(mq.clone());
-        builder = config.config_query(builder, mq).await;
-        builder.build()
+        let mut builder = QueryBuilder::new(test_query());
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     let v0 = Element::Node {
@@ -122,40 +116,31 @@ pub async fn get_versions_by_timerange(config: &(impl QueryTestConfig + Send)) {
     );
 }
 
-pub fn test_query_with_initial_value_flag() -> ast::Query {
-    drasi_query_cypher::parse(
-        "
-    MATCH 
+pub fn test_query_with_initial_value_flag() -> &'static str {
+    "MATCH 
         (t:Thing)
     RETURN
         t,
         drasi.getVersionsByTimeRange(t,1111, 2001, true) as range
-    ",
-    )
-    .unwrap()
+    "
 }
 
-pub fn test_query_with_initial_value_flag_test_2() -> ast::Query {
-    drasi_query_cypher::parse(
-        "
-    MATCH 
+pub fn test_query_with_initial_value_flag_test_2() -> &'static str {
+    "MATCH 
         (t:Thing)
     RETURN
         t,
         drasi.getVersionsByTimeRange(t,1750,2000, true) as range
-    ",
-    )
-    .unwrap()
+    "
 }
 
 pub async fn get_versions_by_timerange_with_initial_value_flag(
     config: &(impl QueryTestConfig + Send),
 ) {
-    let mq = Arc::new(test_query_with_initial_value_flag());
     let query = {
-        let mut builder = QueryBuilder::new(mq.clone());
-        builder = config.config_query(builder, mq).await;
-        builder.build()
+        let mut builder = QueryBuilder::new(test_query_with_initial_value_flag());
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     let v0 = Element::Node {
@@ -241,11 +226,10 @@ pub async fn get_versions_by_timerange_with_initial_value_flag(
         )
     );
 
-    let mq = Arc::new(test_query_with_initial_value_flag_test_2());
     let query = {
-        let mut builder = QueryBuilder::new(mq.clone());
-        builder = config.config_query(builder, mq).await;
-        builder.build()
+        let mut builder = QueryBuilder::new(test_query_with_initial_value_flag_test_2());
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     // bootstrap

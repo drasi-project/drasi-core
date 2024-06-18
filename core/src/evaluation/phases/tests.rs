@@ -1,6 +1,8 @@
 use drasi_query_ast::ast::Query;
+use drasi_query_ast::api::QueryParser;
+use drasi_query_cypher::CypherParser;
 
-use crate::evaluation::InstantQueryClock;
+use crate::evaluation::{functions::FunctionRegistry, InstantQueryClock};
 
 use super::*;
 
@@ -11,13 +13,6 @@ macro_rules! variablemap {
        map
   }}
 }
-// macro_rules! variablemap {
-//   ($( $key: expr => $val: expr ),*) => {{
-//        let mut map = ::std::collections::BTreeMap::new();
-//        $( map.insert($key.to_string().into_boxed_str(), $val); )*
-//        map
-//   }}
-// }
 
 mod multi_phase;
 mod single_phase_aggregating;
@@ -60,4 +55,9 @@ async fn process_solution<'a>(
     }
 
     result
+}
+
+fn build_query(query: &str) -> Query {
+    let parser = CypherParser::new(Arc::new(FunctionRegistry::new()));
+    parser.parse(query).unwrap()
 }

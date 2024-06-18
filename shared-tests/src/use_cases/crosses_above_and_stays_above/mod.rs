@@ -32,12 +32,11 @@ async fn bootstrap_query(query: &ContinuousQuery) {
 
 // Query identifies when a sensor value has been above 32 for the last 15 minutes.
 pub async fn crosses_above_and_stays_above(config: &(impl QueryTestConfig + Send)) {
-    let cypher_query = Arc::new(queries::crosses_above_and_stays_above_query());
     let greater_than_a_threshold_query = {
-        let mut builder = QueryBuilder::new(cypher_query.clone())
+        let mut builder = QueryBuilder::new(queries::crosses_above_and_stays_above_query())
             .with_joins(queries::crosses_above_and_stays_above_metadata());
-        builder = config.config_query(builder, cypher_query).await;
-        builder.build()
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     // Add initial values

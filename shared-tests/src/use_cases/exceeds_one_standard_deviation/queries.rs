@@ -62,8 +62,8 @@ pub fn exceeds_one_standard_deviation_metadata() -> Vec<QueryJoin> {
     ]
 }
 
-pub fn exceeds_one_standard_deviation_query() -> ast::Query {
-    drasi_query_cypher::parse("
+pub fn exceeds_one_standard_deviation_query() -> &'static str  {
+    "
     MATCH
         (equip:Equipment {type:'freezer'})-[:HAS_SENSOR]->(:Sensor {type:'temperature'})-[:HAS_VALUE]->(val:SensorValue)
     WITH
@@ -88,5 +88,5 @@ pub fn exceeds_one_standard_deviation_query() -> ast::Query {
     WHERE
         (currentTemp < (averageTemp - stdevTemp)) OR (currentTemp > (averageTemp + stdevTemp))
     RETURN
-        freezerId, currentTemp, averageTemp, stdevTemp").unwrap()
+        freezerId, currentTemp, averageTemp, stdevTemp"
 }

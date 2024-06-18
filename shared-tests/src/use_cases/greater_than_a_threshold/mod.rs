@@ -32,12 +32,11 @@ async fn bootstrap_query(query: &ContinuousQuery) {
 
 // Query identifies when the total number of support calls on any day exceeds 10.
 pub async fn greater_than_a_threshold(config: &(impl QueryTestConfig + Send)) {
-    let cypher_query = Arc::new(queries::greater_than_a_threshold_query());
     let greater_than_a_threshold_query = {
-        let mut builder = QueryBuilder::new(cypher_query.clone())
+        let mut builder = QueryBuilder::new(queries::greater_than_a_threshold_query())
             .with_joins(queries::greater_than_a_threshold_metadata());
-        builder = config.config_query(builder, cypher_query).await;
-        builder.build()
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     // Add initial values
@@ -124,12 +123,11 @@ pub async fn greater_than_a_threshold(config: &(impl QueryTestConfig + Send)) {
 
 // Query identifies when the total number of support calls for a customer on any day exceeds 5.
 pub async fn greater_than_a_threshold_by_customer(config: &(impl QueryTestConfig + Send)) {
-    let cypher_query = Arc::new(queries::greater_than_a_threshold_by_customer_query());
     let greater_than_a_threshold_query = {
-        let mut builder = QueryBuilder::new(cypher_query.clone())
+        let mut builder = QueryBuilder::new(queries::greater_than_a_threshold_by_customer_query())
             .with_joins(queries::greater_than_a_threshold_metadata());
-        builder = config.config_query(builder, cypher_query).await;
-        builder.build()
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     // Add initial values

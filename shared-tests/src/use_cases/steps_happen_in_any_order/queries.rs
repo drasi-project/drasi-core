@@ -62,8 +62,8 @@ pub fn steps_happen_in_any_order_metadata() -> Vec<QueryJoin> {
     ]
 }
 
-pub fn steps_happen_in_any_order_query() -> ast::Query {
-    drasi_query_cypher::parse("
+pub fn steps_happen_in_any_order_query() -> &'static str  {
+    "
   MATCH
     (cust:Customer)-[:COMPLETES_STEP]->(compStepX:CompletedStep)-[:IS_STEP]->(:Step {name:'Step X'}),
     (cust:Customer)-[:COMPLETES_STEP]->(compStepY:CompletedStep)-[:IS_STEP]->(:Step {name:'Step Y'}),
@@ -82,5 +82,5 @@ pub fn steps_happen_in_any_order_query() -> ast::Query {
   WHERE
     maxTimestamp - minTimestamp < 30 * 24 * 60 * 60
   RETURN
-    elementId(cust) AS customerId, cust.email as customerEmail").unwrap()
+    elementId(cust) AS customerId, cust.email as customerEmail"
 }

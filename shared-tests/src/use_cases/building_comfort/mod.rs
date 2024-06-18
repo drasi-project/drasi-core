@@ -32,53 +32,53 @@ async fn bootstrap_query(query: &ContinuousQuery) {
 }
 
 pub async fn building_comfort_use_case(config: &(impl QueryTestConfig + Send)) {
-    let rclq = Arc::new(queries::room_comfort_level_calc_query());
+    let rclq = queries::room_comfort_level_calc_query();
     let room_comfort_level_calc_query = {
-        let mut builder = QueryBuilder::new(rclq.clone());
-        builder = config.config_query(builder, rclq.clone()).await;
-        builder.build()
+        let mut builder = QueryBuilder::new(rclq);
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
-    let fclq = Arc::new(queries::floor_comfort_level_calc_query());
+    let fclq = queries::floor_comfort_level_calc_query();
     let floor_comfort_level_calc_query = {
-        let mut builder = QueryBuilder::new(fclq.clone());
-        builder = config.config_query(builder, fclq.clone()).await;
-        builder.build()
+        let mut builder = QueryBuilder::new(fclq);
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
-    let bclq = Arc::new(queries::building_comfort_level_calc_query());
+    let bclq = queries::building_comfort_level_calc_query();
     let building_comfort_level_calc_query = {
-        let mut builder = QueryBuilder::new(bclq.clone());
-        builder = config.config_query(builder, bclq.clone()).await;
-        builder.build()
+        let mut builder = QueryBuilder::new(bclq);
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
-    let rcaq = Arc::new(queries::room_comfort_level_alert_query());
+    let rcaq = queries::room_comfort_level_alert_query();
     let room_comfort_level_alert_query = {
-        let mut builder = QueryBuilder::new(rcaq.clone());
-        builder = config.config_query(builder, rcaq.clone()).await;
-        builder.build()
+        let mut builder = QueryBuilder::new(rcaq);
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
-    let fcaq = Arc::new(queries::floor_comfort_level_alert_query());
+    let fcaq = queries::floor_comfort_level_alert_query();
     let floor_comfort_level_alert_query = {
-        let mut builder = QueryBuilder::new(fcaq.clone());
-        builder = config.config_query(builder, fcaq.clone()).await;
-        builder.build()
+        let mut builder = QueryBuilder::new(fcaq);
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
-    let bcaq = Arc::new(queries::building_comfort_level_alert_query());
+    let bcaq = queries::building_comfort_level_alert_query();
     let building_comfort_level_alert_query = {
-        let mut builder = QueryBuilder::new(bcaq.clone());
-        builder = config.config_query(builder, bcaq.clone()).await;
-        builder.build()
+        let mut builder = QueryBuilder::new(bcaq);
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
-    let uiq = Arc::new(queries::ui_query());
+    let uiq = queries::ui_query();
     let ui_query = {
-        let mut builder = QueryBuilder::new(uiq.clone());
-        builder = config.config_query(builder, uiq.clone()).await;
-        builder.build()
+        let mut builder = QueryBuilder::new(uiq);
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     bootstrap_query(&room_comfort_level_calc_query).await;

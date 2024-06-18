@@ -6,20 +6,15 @@ use crate::{
     in_memory_index::{
         in_memory_element_index::InMemoryElementIndex, in_memory_future_queue::InMemoryFutureQueue,
         in_memory_result_index::InMemoryResultIndex,
-    },
-    interface::{FutureElementRef, FutureQueueConsumer},
-    path_solver::match_path::MatchPath,
-    query::QueryBuilder,
+    }, interface::{FutureElementRef, FutureQueueConsumer}, query::QueryBuilder
 };
 
 #[tokio::test]
 async fn dependency_leaks() {
-    let query_str = "MATCH (n:Person) RETURN n";
-    let query_ast = drasi_query_cypher::parse(query_str).unwrap();
-    let match_path = MatchPath::from_query(&query_ast.phases[0]).unwrap();
-    let mut builder = QueryBuilder::new(Arc::new(query_ast));
+    let query_str = "MATCH (n:Person) RETURN n";    
+    let mut builder = QueryBuilder::new(query_str);
 
-    let element_index = Arc::new(InMemoryElementIndex::new(&match_path, &vec![]));
+    let element_index = Arc::new(InMemoryElementIndex::new());
     let result_index = Arc::new(InMemoryResultIndex::new());
     let future_queue = Arc::new(InMemoryFutureQueue::new());
 
@@ -28,7 +23,7 @@ async fn dependency_leaks() {
     builder = builder.with_result_index(result_index.clone());
     builder = builder.with_future_queue(future_queue.clone());
 
-    let query = builder.build();
+    let query = builder.build().await;
     let fq = Arc::new(TestFutureConsumer {});
     query.set_future_consumer(fq).await;
 

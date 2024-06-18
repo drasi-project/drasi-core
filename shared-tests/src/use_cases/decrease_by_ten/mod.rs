@@ -32,12 +32,11 @@ async fn bootstrap_query(query: &ContinuousQuery) {
 
 // Query identifies a products daily revenue has decreased by $10,000.
 pub async fn decrease_by_ten(config: &(impl QueryTestConfig + Send)) {
-    let cypher_query = Arc::new(queries::decrease_by_ten_query());
     let decrease_by_ten_query = {
         let mut builder =
-            QueryBuilder::new(cypher_query.clone()).with_joins(queries::decrease_by_ten_metadata());
-        builder = config.config_query(builder, cypher_query).await;
-        builder.build()
+            QueryBuilder::new(queries::decrease_by_ten_query()).with_joins(queries::decrease_by_ten_metadata());
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     // Add initial values
@@ -228,12 +227,11 @@ pub async fn decrease_by_ten(config: &(impl QueryTestConfig + Send)) {
 }
 
 pub async fn decrease_by_ten_percent(config: &(impl QueryTestConfig + Send)) {
-    let cypher_query = Arc::new(queries::decrease_by_ten_percent_query());
     let decrease_by_ten_query = {
         let mut builder =
-            QueryBuilder::new(cypher_query.clone()).with_joins(queries::decrease_by_ten_metadata());
-        builder = config.config_query(builder, cypher_query).await;
-        builder.build()
+            QueryBuilder::new(queries::decrease_by_ten_percent_query()).with_joins(queries::decrease_by_ten_metadata());
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     // Add initial values

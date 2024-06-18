@@ -1,8 +1,7 @@
 use drasi_query_ast::ast;
 
-pub fn not_reported_query() -> ast::Query {
-    drasi_query_cypher::parse(
-        "
+pub fn not_reported_query() -> &'static str  {
+            "
     MATCH
         (e:Equipment)-[:HAS_SENSOR]->(s:Sensor)-[:HAS_VALUE]->(v:SensorValue)
     WITH
@@ -17,13 +16,10 @@ pub fn not_reported_query() -> ast::Query {
         e.name AS equipment,
         s.type AS sensor,
         last_ts AS last_ts
-    ",
-    )
-    .unwrap()
+    "
 }
 
-pub fn percent_not_reported_query() -> ast::Query {
-    drasi_query_cypher::parse(
+pub fn percent_not_reported_query() -> &'static str  {
         "
     MATCH
         (e:Equipment)-[:HAS_SENSOR]->(s:Sensor)-[:HAS_VALUE]->(v:SensorValue)
@@ -41,7 +37,5 @@ pub fn percent_not_reported_query() -> ast::Query {
         ) as not_reporting
     RETURN        
         (not_reporting / total) * 100 AS percent_not_reporting
-    ",
-    )
-    .unwrap()
+    "
 }

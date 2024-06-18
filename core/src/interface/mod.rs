@@ -9,6 +9,7 @@ mod source_middleware;
 use std::error::Error;
 use std::fmt::Display;
 
+use drasi_query_ast::api::QueryParseError;
 pub use element_index::ElementArchiveIndex;
 pub use element_index::ElementIndex;
 pub use element_index::ElementResult;
@@ -32,6 +33,8 @@ pub use source_middleware::MiddlewareSetupError;
 pub use source_middleware::SourceMiddleware;
 pub use source_middleware::SourceMiddlewareFactory;
 use thiserror::Error;
+
+use crate::evaluation::EvaluationError;
 
 #[derive(Debug)]
 pub enum IndexError {
@@ -75,13 +78,31 @@ impl IndexError {
 }
 
 #[derive(Error, Debug)]
-pub enum QueryBuidlerError {
+pub enum QueryBuilderError {
     #[error("Middleware setup error: {0}")]
     MiddlewareSetupError(MiddlewareSetupError),
+
+    #[error("Parser error: {0}")]
+    ParserError(QueryParseError),
+
+    #[error("Evaluation error: {0}")]
+    EvaluationError(EvaluationError),
 }
 
-impl From<MiddlewareSetupError> for QueryBuidlerError {
+impl From<MiddlewareSetupError> for QueryBuilderError {
     fn from(e: MiddlewareSetupError) -> Self {
-        QueryBuidlerError::MiddlewareSetupError(e)
+        QueryBuilderError::MiddlewareSetupError(e)
+    }
+}
+
+impl From<QueryParseError> for QueryBuilderError {
+    fn from(e: QueryParseError) -> Self {
+        QueryBuilderError::ParserError(e)
+    }
+}
+
+impl From<EvaluationError> for QueryBuilderError {
+    fn from(e: EvaluationError) -> Self {
+        QueryBuilderError::EvaluationError(e)
     }
 }

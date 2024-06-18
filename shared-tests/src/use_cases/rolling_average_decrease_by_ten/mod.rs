@@ -31,12 +31,11 @@ async fn bootstrap_query(query: &ContinuousQuery) {
 }
 
 pub async fn rolling_average_decrease_by_ten(config: &(impl QueryTestConfig + Send)) {
-    let cypher_query = Arc::new(queries::rolling_average_decrease_by_ten_query());
     let rolling_average_decrease_by_ten_query = {
-        let mut builder = QueryBuilder::new(cypher_query.clone())
+        let mut builder = QueryBuilder::new(queries::rolling_average_decrease_by_ten_query())
             .with_joins(queries::rolling_average_decrease_by_ten_metadata());
-        builder = config.config_query(builder, cypher_query).await;
-        builder.build()
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     // Add initial values

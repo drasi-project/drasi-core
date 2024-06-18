@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use drasi_query_ast::ast::Query;
+
 use drasi_core::{
-    in_memory_index::in_memory_element_index::InMemoryElementIndex,
-    path_solver::match_path::MatchPath, query::QueryBuilder,
+    in_memory_index::in_memory_element_index::InMemoryElementIndex, query::QueryBuilder,
 };
 
 use crate::QueryTestConfig;
@@ -19,10 +18,9 @@ impl InMemoryQueryConfig {
 
 #[async_trait]
 impl QueryTestConfig for InMemoryQueryConfig {
-    async fn config_query(&self, builder: QueryBuilder, query: Arc<Query>) -> QueryBuilder {
+    async fn config_query(&self, builder: QueryBuilder) -> QueryBuilder {
         log::info!("using in memory indexes");
-        let mp = MatchPath::from_query(&query.phases[0]).unwrap();
-        let mut element_index = InMemoryElementIndex::new(&mp, builder.get_joins());
+        let mut element_index = InMemoryElementIndex::new();
         element_index.enable_archive();
         let element_index = Arc::new(element_index);
 

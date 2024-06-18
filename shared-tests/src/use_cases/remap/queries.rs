@@ -4,16 +4,13 @@ use drasi_query_ast::ast;
 use drasi_core::models::SourceMiddlewareConfig;
 use serde_json::json;
 
-pub fn remap_query() -> ast::Query {
-    drasi_query_cypher::parse(
-        "
+pub fn remap_query() -> &'static str  {
+  "
   MATCH (v:Vehicle)
   RETURN
     v.id,
     v.currentSpeed
-    ",
-    )
-    .unwrap()
+    "
 }
 
 pub fn middlewares() -> Vec<Arc<SourceMiddlewareConfig>> {

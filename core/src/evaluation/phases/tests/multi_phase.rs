@@ -4,8 +4,7 @@ use super::process_solution;
 
 use crate::{
     evaluation::{
-        context::PhaseEvaluationContext, functions::FunctionRegistry,
-        variable_value::VariableValue, ExpressionEvaluator, QueryPhaseEvaluator,
+        context::PhaseEvaluationContext, functions::FunctionRegistry, phases::tests::build_query, variable_value::VariableValue, ExpressionEvaluator, QueryPhaseEvaluator
     },
     in_memory_index::in_memory_result_index::InMemoryResultIndex,
 };
@@ -14,7 +13,7 @@ use serde_json::json;
 
 #[tokio::test]
 async fn aggregating_phase_to_scalar_phase_add_solution() {
-    let query = drasi_query_cypher::parse(
+    let query = build_query(
         "
     MATCH (a) 
     WHERE a.Value1 < 10 
@@ -22,8 +21,7 @@ async fn aggregating_phase_to_scalar_phase_add_solution() {
     WHERE my_sum > 2
     RETURN key, my_sum
     ",
-    )
-    .unwrap();
+    );
 
     let node1 = json!({
       "id": 1,
@@ -103,7 +101,7 @@ async fn aggregating_phase_to_scalar_phase_add_solution() {
 
 #[tokio::test]
 async fn aggregating_phase_to_scalar_phase_update_solution() {
-    let query = drasi_query_cypher::parse(
+    let query = build_query(
         "
     MATCH (a) 
     WHERE a.Value1 < 10 
@@ -111,8 +109,7 @@ async fn aggregating_phase_to_scalar_phase_update_solution() {
     WHERE interim_sum > 2
     RETURN interim_key as key, interim_sum as my_sum
     ",
-    )
-    .unwrap();
+    );
 
     let node1 = json!({
       "id": 1,
@@ -310,7 +307,7 @@ async fn aggregating_phase_to_scalar_phase_update_solution() {
 
 #[tokio::test]
 async fn aggregating_phase_to_scalar_phase_remove_solution() {
-    let query = drasi_query_cypher::parse(
+    let query = build_query(
         "
     MATCH (a) 
     WHERE a.Value1 < 10 
@@ -318,8 +315,7 @@ async fn aggregating_phase_to_scalar_phase_remove_solution() {
     WHERE my_sum > 0
     RETURN key, my_sum
     ",
-    )
-    .unwrap();
+    );
 
     let node1 = json!({
       "id": 1,
@@ -420,15 +416,14 @@ async fn aggregating_phase_to_scalar_phase_remove_solution() {
 
 #[tokio::test]
 async fn aggregating_phase_to_aggregating_phase_add_solution() {
-    let query = drasi_query_cypher::parse(
+    let query = build_query(
         "
     MATCH (a) 
     WHERE a.Value1 < 10 
     WITH a.Name, a.Category, sum(a.Value1) as my_sum
     RETURN Category, avg(my_sum) as my_avg
     ",
-    )
-    .unwrap();
+    );
 
     let node1 = json!({
       "id": 1,
@@ -540,14 +535,13 @@ async fn aggregating_phase_to_aggregating_phase_add_solution() {
 
 #[tokio::test]
 async fn aggregating_phase_to_aggregating_phase_update_solution() {
-    let query = drasi_query_cypher::parse(
+    let query = build_query(
         "
     MATCH (a) 
     WITH a.Name, a.Category, sum(a.Value1) as my_sum
     RETURN Category, avg(my_sum) as my_avg
     ",
-    )
-    .unwrap();
+    );
 
     let node1 = json!({
       "id": 1,
@@ -644,15 +638,14 @@ async fn aggregating_phase_to_aggregating_phase_update_solution() {
 
 #[tokio::test]
 async fn aggregating_phase_to_aggregating_phase_group_switch() {
-    let query = drasi_query_cypher::parse(
+    let query = build_query(
         "
     MATCH (a) 
     WITH a.Name, a.Category, sum(a.Value1) as my_sum
     WHERE my_sum > 0
     RETURN Category, avg(my_sum) as my_avg
     ",
-    )
-    .unwrap();
+    );
 
     let node1 = json!({
       "id": 1,
@@ -797,12 +790,11 @@ async fn aggregating_phase_to_aggregating_phase_group_switch() {
 
 #[tokio::test]
 async fn test_list_indexing_with_clause() {
-    let query = drasi_query_cypher::parse(
+    let query = build_query(
         "
         WITH [5,1,7] AS list
         RETURN list[2]",
-    )
-    .unwrap();
+    );
 
     let function_registry = Arc::new(FunctionRegistry::new());
     let ari = Arc::new(InMemoryResultIndex::new());
@@ -835,7 +827,7 @@ async fn test_list_indexing_with_clause() {
 
 #[tokio::test]
 async fn aggregating_phase_to_aggregating_phase_group_switch_with_comments() {
-    let query = drasi_query_cypher::parse(
+    let query = build_query(
         "
     MATCH (a) 
     WITH a.Name, a.Category, sum(a.Value1) as my_sum
@@ -844,8 +836,7 @@ async fn aggregating_phase_to_aggregating_phase_group_switch_with_comments() {
     RETURN Category, avg(my_sum) as my_avg
     // DRASI COMMENT: This is another comment
     ",
-    )
-    .unwrap();
+    );
 
     let node1 = json!({
       "id": 1,
@@ -990,7 +981,7 @@ async fn aggregating_phase_to_aggregating_phase_group_switch_with_comments() {
 
 #[tokio::test]
 async fn sequential_aggregations1() {
-    let query = drasi_query_cypher::parse(
+    let query = build_query(
         "
     MATCH
         (a)
@@ -1004,8 +995,7 @@ async fn sequential_aggregations1() {
                 END
             ) AS total
     ",
-    )
-    .unwrap();
+    );
 
     let node1 = json!({
       "id": 1,
@@ -1151,7 +1141,7 @@ async fn sequential_aggregations1() {
 
 #[tokio::test]
 async fn sequential_aggregations2() {
-    let query = drasi_query_cypher::parse(
+    let query = build_query(
         "
     MATCH
         (a)
@@ -1161,8 +1151,7 @@ async fn sequential_aggregations2() {
       RETURN
           sum(s) AS total
     ",
-    )
-    .unwrap();
+    );
 
     let node1 = json!({
       "id": 1,
@@ -1311,15 +1300,14 @@ async fn sequential_aggregations2() {
 
 #[tokio::test]
 async fn aggregating_phase_to_scalar_phase_add_solution_emit_remove() {
-    let query = drasi_query_cypher::parse(
+    let query = build_query(
         "
     MATCH (a) 
     WITH a.Name as key, sum(a.Value1) as my_sum
     WHERE my_sum < 10
     RETURN key, my_sum
     ",
-    )
-    .unwrap();
+    );
 
     let node1 = json!({
       "id": 1,

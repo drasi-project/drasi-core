@@ -24,11 +24,10 @@ macro_rules! variablemap {
 }
 
 pub async fn linear_gradient(config: &(impl QueryTestConfig + Send)) {
-    let mq = Arc::new(queries::gradient_query());
     let lg_query = {
-        let mut builder = QueryBuilder::new(mq.clone());
-        builder = config.config_query(builder, mq.clone()).await;
-        builder.build()
+        let mut builder = QueryBuilder::new(queries::gradient_query());
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     //Add initial values

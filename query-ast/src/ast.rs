@@ -1,4 +1,3 @@
-use crate::utils::contains_aggregating_function;
 use std::collections::BTreeMap;
 use std::hash::Hasher;
 use std::sync::Arc;
@@ -612,26 +611,4 @@ impl ParentExpression for ListExpression {
     }
 }
 
-impl Into<ProjectionClause> for Vec<Expression> {
-    fn into(self) -> ProjectionClause {
-        let mut keys = Vec::new();
-        let mut aggs = Vec::new();
 
-        for expr in self {
-            if contains_aggregating_function(&expr) {
-                aggs.push(expr);
-            } else {
-                keys.push(expr);
-            }
-        }
-
-        if aggs.is_empty() {
-            ProjectionClause::Item(keys)
-        } else {
-            ProjectionClause::GroupBy {
-                grouping: keys,
-                aggregates: aggs,
-            }
-        }
-    }
-}

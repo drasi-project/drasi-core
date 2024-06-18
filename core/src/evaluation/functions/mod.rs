@@ -6,7 +6,8 @@ use std::{
 
 use async_trait::async_trait;
 
-use drasi_query_ast::ast::{self, Expression};
+use drasi_query_ast::ast;
+use drasi_query_cypher::CypherConfiguration;
 
 use crate::evaluation::variable_value::VariableValue;
 use crate::interface::ResultIndex;
@@ -129,5 +130,17 @@ impl FunctionRegistry {
             Some(f) => Some(f.clone()),
             None => None,
         }
+    }
+}
+
+impl CypherConfiguration for FunctionRegistry {
+    fn get_aggregating_function_names(&self) -> std::collections::HashSet<String> {
+        let lock = self.functions.read().unwrap();
+        lock.iter()
+            .filter_map(|(name, function)| match function.as_ref() {
+                Function::Aggregating(_) => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
     }
 }

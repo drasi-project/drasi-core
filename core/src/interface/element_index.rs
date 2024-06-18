@@ -3,7 +3,7 @@ use std::{pin::Pin, sync::Arc};
 use async_trait::async_trait;
 use futures::Stream;
 
-use crate::models::{Element, ElementReference, ElementTimestamp, TimestampRange};
+use crate::{models::{Element, ElementReference, ElementTimestamp, QueryJoin, TimestampRange}, path_solver::match_path::MatchPath};
 
 use super::IndexError;
 
@@ -38,6 +38,8 @@ pub trait ElementIndex: Send + Sync {
         outbound_ref: &ElementReference,
     ) -> Result<ElementStream, IndexError>;
     async fn clear(&self) -> Result<(), IndexError>;
+
+    async fn set_joins(&self, match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>);
 }
 
 #[async_trait]

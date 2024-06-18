@@ -1,10 +1,30 @@
+use std::collections::HashSet;
+
 use super::*;
 use ast::*;
+
+struct TestCypherConfig {}
+
+impl CypherConfiguration for TestCypherConfig {
+    fn get_aggregating_function_names(&self) -> HashSet<String> {
+        let mut set = HashSet::new();
+        set.insert("count".into());
+        set.insert("sum".into());
+        set.insert("min".into());
+        set.insert("max".into());
+        set.insert("avg".into());
+        set.insert("drasi.linearGradient".into());
+        set.insert("drasi.last".into());
+        set    
+    }
+}
+
+static TEST_CONFIG: TestCypherConfig = TestCypherConfig {};
 
 #[test]
 fn return_clause_non_aggregating() {
     let query =
-        cypher::query("MATCH (a) WHERE a.Field1 = 42 RETURN a.name, a.Field2 as F2, $param")
+        cypher::query("MATCH (a) WHERE a.Field1 = 42 RETURN a.name, a.Field2 as F2, $param", &TEST_CONFIG)
             .unwrap();
 
     assert_eq!(
@@ -23,7 +43,7 @@ fn return_clause_non_aggregating() {
 #[test]
 fn return_clause_aggregating() {
     let query =
-        cypher::query("MATCH (a) WHERE a.Field1 = 42 RETURN a.name, sum(a.Field2)").unwrap();
+        cypher::query("MATCH (a) WHERE a.Field1 = 42 RETURN a.name, sum(a.Field2)", &TEST_CONFIG).unwrap();
 
     assert_eq!(
         query.phases[0].return_clause,
@@ -41,7 +61,7 @@ fn return_clause_aggregating() {
 #[test]
 fn namespaced_function() {
     let query =
-        cypher::query("MATCH (a) WHERE a.Field1 = 42 RETURN namespace.function(a.Field2)").unwrap();
+        cypher::query("MATCH (a) WHERE a.Field1 = 42 RETURN namespace.function(a.Field2)", &TEST_CONFIG).unwrap();
 
     assert_eq!(
         query.phases[0].return_clause,
@@ -60,7 +80,7 @@ fn multiline_function() {
             function(
                 a.Field2,
                 a.Field3
-            )",
+            )", &TEST_CONFIG
     )
     .unwrap();
 
@@ -80,7 +100,7 @@ fn multiline_function() {
 #[test]
 fn match_clause() {
     assert_eq!(
-        cypher::query("MATCH (t:Thing)-[:AT]->(wh:Warehouse) RETURN t.name"),
+        cypher::query("MATCH (t:Thing)-[:AT]->(wh:Warehouse) RETURN t.name", &TEST_CONFIG),
         Ok(Query {
             phases: vec![QueryPhase {
                 match_clauses: vec![MatchClause {
@@ -103,7 +123,7 @@ fn match_clause() {
     );
 
     assert_eq!(
-        cypher::query("MATCH (t:Thing {category: 1})-[:AT*1..5]->(wh:Warehouse) RETURN t.name"),
+        cypher::query("MATCH (t:Thing {category: 1})-[:AT*1..5]->(wh:Warehouse) RETURN t.name", &TEST_CONFIG),
         Ok(Query {
             phases: vec![QueryPhase {
                 match_clauses: vec![MatchClause {
@@ -141,7 +161,7 @@ fn match_clause() {
     );
 
     assert_eq!(
-        cypher::query(" MATCH () -> (:LABEL_ONLY) RETURN a.test"),
+        cypher::query(" MATCH () -> (:LABEL_ONLY) RETURN a.test", &TEST_CONFIG),
         Ok(Query {
             phases: vec![QueryPhase {
                 match_clauses: vec![MatchClause {
@@ -162,7 +182,7 @@ fn match_clause() {
 
     assert_eq!(
         cypher::query(
-            "MATCH (a:Person) <-[e:KNOWS]- (b:Person WHERE b.Age > 10) RETURN e.since, b.name"
+            "MATCH (a:Person) <-[e:KNOWS]- (b:Person WHERE b.Age > 10) RETURN e.since, b.name", &TEST_CONFIG
         ),
         Ok(Query {
             phases: vec![QueryPhase {
@@ -198,7 +218,7 @@ fn match_clause() {
 #[test]
 fn multiple_match_clauses() {
     assert_eq!(
-        cypher::query("MATCH (t:Thing)-[:AT]->(wh:Warehouse), (i:Item)-[:CONTAINS]->(c:Component) RETURN t.name"),
+        cypher::query("MATCH (t:Thing)-[:AT]->(wh:Warehouse), (i:Item)-[:CONTAINS]->(c:Component) RETURN t.name", &TEST_CONFIG),
         Ok(Query {
             phases: vec![QueryPhase {
                 match_clauses: vec![
@@ -227,7 +247,7 @@ fn multiple_match_clauses() {
 #[test]
 fn where_clauses() {
     assert_eq!(
-      cypher::query("MATCH (a:Person) -[e:KNOWS]-> (b:Person) WHERE a.age > 42 AND b.name = 'Peter Parker' OR NOT e.fake RETURN e.since"),
+      cypher::query("MATCH (a:Person) -[e:KNOWS]-> (b:Person) WHERE a.age > 42 AND b.name = 'Peter Parker' OR NOT e.fake RETURN e.since", &TEST_CONFIG),
         Ok(Query {
             phases: vec![QueryPhase {
                 match_clauses: vec![
@@ -258,7 +278,7 @@ fn where_clauses() {
 #[test]
 fn with_clauses_non_aggregating() {
     assert_eq!(
-        cypher::query("MATCH (t:Thing)-[:AT]->(wh:Warehouse) WHERE t.category = 1 WITH wh.name, t RETURN t.name"),
+        cypher::query("MATCH (t:Thing)-[:AT]->(wh:Warehouse) WHERE t.category = 1 WITH wh.name, t RETURN t.name", &TEST_CONFIG),
         Ok(Query {
             phases: vec![QueryPhase {
                 match_clauses: vec![MatchClause {
@@ -286,7 +306,7 @@ fn with_clauses_non_aggregating() {
 #[test]
 fn where_clause_non_aggregating_with_date_yyyy_mm_dd() {
     let query =
-        cypher::query("MATCH (a) WHERE a.Field1 = date('2023-09-05') RETURN a.name, a.Field2 as F2, a.Field1, $param")
+        cypher::query("MATCH (a) WHERE a.Field1 = date('2023-09-05') RETURN a.name, a.Field2 as F2, a.Field1, $param", &TEST_CONFIG)
             .unwrap();
 
     assert_eq!(
@@ -305,7 +325,7 @@ fn where_clause_non_aggregating_with_date_yyyy_mm_dd() {
 #[test]
 fn where_clause_non_aggregating_with_date_weeks() {
     let query =
-        cypher::query("MATCH (a) WHERE a.Field1 = date('2015-W30-2') RETURN a.name, a.Field2 as F2, a.Field1, $param")
+        cypher::query("MATCH (a) WHERE a.Field1 = date('2015-W30-2') RETURN a.name, a.Field2 as F2, a.Field1, $param", &TEST_CONFIG)
             .unwrap();
 
     assert_eq!(
@@ -324,7 +344,7 @@ fn where_clause_non_aggregating_with_date_weeks() {
 #[test]
 fn where_clause_non_aggregating_with_date_yyyy_quarters() {
     let query =
-        cypher::query("MATCH (a) WHERE a.Field1 = date('2015-Q2-02') RETURN a.name, a.Field2 as F2, a.Field1, $param")
+        cypher::query("MATCH (a) WHERE a.Field1 = date('2015-Q2-02') RETURN a.name, a.Field2 as F2, a.Field1, $param", &TEST_CONFIG)
             .unwrap();
 
     assert_eq!(
@@ -343,7 +363,7 @@ fn where_clause_non_aggregating_with_date_yyyy_quarters() {
 #[test]
 fn where_clause_non_aggregating_with_local_time() {
     let query =
-        cypher::query("MATCH (a) WHERE a.Field1 = localtime('12:58:04') RETURN a.name, a.Field2 as F2, a.Field1, $param")
+        cypher::query("MATCH (a) WHERE a.Field1 = localtime('12:58:04') RETURN a.name, a.Field2 as F2, a.Field1, $param", &TEST_CONFIG)
             .unwrap();
 
     assert_eq!(
@@ -362,7 +382,7 @@ fn where_clause_non_aggregating_with_local_time() {
 #[test]
 fn test_reduce_function() {
     let query =
-        cypher::query("MATCH (a) RETURN reduce(s = 0, x IN [1,2,3] | s + x) AS sum").unwrap();
+        cypher::query("MATCH (a) RETURN reduce(s = 0, x IN [1,2,3] | s + x) AS sum", &TEST_CONFIG).unwrap();
     assert_eq!(
         query.phases[0].return_clause,
         ProjectionClause::Item(vec![UnaryExpression::alias(
@@ -409,7 +429,8 @@ fn test_list_construction() {
     [5, 7, 9, foo.bah] as list
   WHERE
     foo.bah IN list
-   RETURN foo, list",
+   RETURN foo, list"
+   , &TEST_CONFIG
     )
     .unwrap();
 
@@ -445,7 +466,7 @@ fn test_list_construction_with_comments_in_between_phases() {
     foo.bah IN list
     // This is comment #3
     // This is comment #4
-   RETURN foo, list",
+   RETURN foo, list", &TEST_CONFIG
     )
     .unwrap();
 
@@ -478,7 +499,7 @@ fn test_list_construction_with_comments() {
         foo,
         // A comment within a phase
         [5, 7, 9, foo.bah] as list // A comment at the end of a phase
-    RETURN foo, list // A comment at the end of a query",
+    RETURN foo, list // A comment at the end of a query", &TEST_CONFIG
     )
     .unwrap();
 
@@ -522,7 +543,7 @@ fn test_reflex_query_with_comment() {
   RETURN
     // A comment in the return clause
     freezerId, minTempInTimeRange
-    ").unwrap();
+    ", &TEST_CONFIG).unwrap();
 
     assert_eq!(
         query.phases[0].match_clauses[0],

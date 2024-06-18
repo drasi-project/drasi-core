@@ -1,6 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
-use drasi_query_ast::ast::Query;
+use drasi_query_ast::api::QueryParser;
+use drasi_query_cypher::CypherParser;
 
 use crate::{
     evaluation::{
@@ -15,7 +16,7 @@ use crate::{
     },
     index_cache::shadowed_future_queue::ShadowedFutureQueue,
     interface::{
-        ElementArchiveIndex, ElementIndex, FutureQueue, MiddlewareSetupError, QueryBuidlerError,
+        ElementArchiveIndex, ElementIndex, FutureQueue, MiddlewareSetupError, QueryBuilderError,
         ResultIndex,
     },
     middleware::{
@@ -40,11 +41,13 @@ pub struct QueryBuilder {
     middleware_registry: Option<Arc<MiddlewareTypeRegistry>>,
     source_middleware: Vec<Arc<SourceMiddlewareConfig>>,
     source_pipelines: HashMap<Arc<str>, Vec<Arc<str>>>,
-    query: Arc<Query>,
+    
+    query_source: String,
+    query_parser: Option<Arc<dyn QueryParser>>,
 }
 
 impl QueryBuilder {
-    pub fn new(query: Arc<Query>) -> Self {
+    pub fn new(query: impl Into<String>) -> Self {
         QueryBuilder {
             function_registry: None,
             expr_evaluator: None,
@@ -57,8 +60,14 @@ impl QueryBuilder {
             middleware_registry: None,
             source_middleware: Vec::new(),
             source_pipelines: HashMap::new(),
-            query,
+            query_source: query.into(),
+            query_parser: None,
         }
+    }
+
+    pub fn with_query_parser(mut self, query_parser: Arc<dyn QueryParser>) -> Self {
+        self.query_parser = Some(query_parser);
+        self
     }
 
     pub fn with_middleware_registry(
@@ -129,21 +138,28 @@ impl QueryBuilder {
         &self.joins
     }
 
-    pub fn build(self) -> ContinuousQuery {
-        self.try_build().unwrap()
+    pub async fn build(self) -> ContinuousQuery {
+        self.try_build().await.unwrap()
     }
 
-    pub fn try_build(mut self) -> Result<ContinuousQuery, QueryBuidlerError> {
-        let match_path = Arc::new(MatchPath::from_query(&self.query.phases[0]).unwrap()); //todo: handle error
-
+    pub async fn try_build(mut self) -> Result<ContinuousQuery, QueryBuilderError> {        
+       
         let function_registry = match self.function_registry.take() {
             Some(registry) => registry,
             None => Arc::new(FunctionRegistry::new()),
         };
 
+        let query_parser = match self.query_parser.take() {
+            Some(index) => index,
+            None => Arc::new(CypherParser::new(function_registry.clone())),
+        };
+
+        let query = query_parser.parse(self.query_source.as_str())?;
+        let match_path = Arc::new(MatchPath::from_query(&query.phases[0])?);
+
         let element_index = match self.element_index.take() {
             Some(index) => index,
-            None => Arc::new(InMemoryElementIndex::new(&match_path, &self.joins)),
+            None => Arc::new(InMemoryElementIndex::new()),
         };
 
         if let Some(archive_index) = self.archive_index.take() {
@@ -184,7 +200,7 @@ impl QueryBuilder {
             future_queue.clone(),
             result_index.clone(),
             Arc::downgrade(&expr_evaluator.clone()),
-        );
+        );        
 
         let source_pipelines: SourceMiddlewarePipelineCollection = {
             if self.source_middleware.is_empty() {
@@ -207,8 +223,10 @@ impl QueryBuilder {
             }
         }?;
 
+        element_index.set_joins(&match_path, &self.joins).await;
+
         Ok(ContinuousQuery::new(
-            self.query,
+            Arc::new(query),
             match_path,
             expr_evaluator,
             element_index,
@@ -219,3 +237,4 @@ impl QueryBuilder {
         ))
     }
 }
+

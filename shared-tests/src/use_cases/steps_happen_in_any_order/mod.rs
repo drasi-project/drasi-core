@@ -31,12 +31,11 @@ async fn bootstrap_query(query: &ContinuousQuery) {
 }
 
 pub async fn steps_happen_in_any_order(config: &(impl QueryTestConfig + Send)) {
-    let cypher_query = Arc::new(queries::steps_happen_in_any_order_query());
     let steps_happen_in_any_order_query = {
-        let mut builder = QueryBuilder::new(cypher_query.clone())
+        let mut builder = QueryBuilder::new(queries::steps_happen_in_any_order_query())
             .with_joins(queries::steps_happen_in_any_order_metadata());
-        builder = config.config_query(builder, cypher_query).await;
-        builder.build()
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     // Add initial values

@@ -27,16 +27,15 @@ pub async fn remap(config: &(impl QueryTestConfig + Send)) {
     middleware_registry.register(Arc::new(MapFactory::new()));
     let middleware_registry = Arc::new(middleware_registry);
 
-    let mq = Arc::new(queries::remap_query());
     let rm_query = {
-        let mut builder = QueryBuilder::new(mq.clone());
-        builder = config.config_query(builder, mq.clone()).await;
+        let mut builder = QueryBuilder::new(queries::remap_query());
+        builder = config.config_query(builder).await;
         builder = builder.with_middleware_registry(middleware_registry);
         for mw in queries::middlewares() {
             builder = builder.with_source_middleware(mw);
         }
         builder = builder.with_source_pipeline("test", &queries::source_pipeline());
-        builder.build()
+        builder.build().await
     };
 
     //Add initial value

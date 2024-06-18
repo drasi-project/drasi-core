@@ -31,12 +31,11 @@ async fn bootstrap_query(query: &ContinuousQuery) {
 }
 
 pub async fn logical_conditions(config: &(impl QueryTestConfig + Send)) {
-    let cypher_query = Arc::new(queries::logical_conditions_query());
     let logical_conditions_query = {
-        let mut builder = QueryBuilder::new(cypher_query.clone())
+        let mut builder = QueryBuilder::new(queries::logical_conditions_query())
             .with_joins(queries::logical_conditions_metadata());
-        builder = config.config_query(builder, cypher_query).await;
-        builder.build()
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     // Add initial values

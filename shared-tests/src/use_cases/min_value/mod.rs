@@ -21,11 +21,10 @@ macro_rules! variablemap {
 }
 
 pub async fn min_value(config: &(impl QueryTestConfig + Send)) {
-    let mq = Arc::new(queries::min_query());
     let min_query = {
-        let mut builder = QueryBuilder::new(mq.clone());
-        builder = config.config_query(builder, mq.clone()).await;
-        builder.build()
+        let mut builder = QueryBuilder::new(queries::min_query());
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     //Add initial value

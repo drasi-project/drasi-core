@@ -4,8 +4,7 @@ use super::process_solution;
 
 use crate::{
     evaluation::{
-        context::PhaseEvaluationContext, functions::FunctionRegistry,
-        variable_value::VariableValue, ExpressionEvaluator, QueryPhaseEvaluator,
+        context::PhaseEvaluationContext, functions::FunctionRegistry, phases::tests::build_query, variable_value::VariableValue, ExpressionEvaluator, QueryPhaseEvaluator
     },
     in_memory_index::in_memory_result_index::InMemoryResultIndex,
 };
@@ -14,7 +13,7 @@ use serde_json::json;
 
 #[tokio::test]
 async fn add_solution() {
-    let query = drasi_query_cypher::parse("MATCH (a) WHERE a.Value1 = 1 RETURN a").unwrap();
+    let query = build_query("MATCH (a) WHERE a.Value1 = 1 RETURN a");
 
     let node1 = VariableValue::from(json!({
       "id": 1,
@@ -51,7 +50,7 @@ async fn add_solution() {
 
 #[tokio::test]
 async fn update_solution() {
-    let query = drasi_query_cypher::parse("MATCH (a) WHERE a.Value1 < 10 RETURN a").unwrap();
+    let query = build_query("MATCH (a) WHERE a.Value1 < 10 RETURN a");
 
     let node1 = VariableValue::from(json!({
       "id": 1,
@@ -127,7 +126,7 @@ async fn update_solution() {
 
 #[tokio::test]
 async fn remove_solution() {
-    let query = drasi_query_cypher::parse("MATCH (a) WHERE a.Value1 = 1 RETURN a").unwrap();
+    let query = build_query("MATCH (a) WHERE a.Value1 = 1 RETURN a");
 
     let node1 = VariableValue::from(json!({
       "id": 1,

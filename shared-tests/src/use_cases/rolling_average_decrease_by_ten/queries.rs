@@ -62,8 +62,8 @@ pub fn rolling_average_decrease_by_ten_metadata() -> Vec<QueryJoin> {
     ]
 }
 
-pub fn rolling_average_decrease_by_ten_query() -> ast::Query {
-    let parse_result = drasi_query_cypher::parse("
+pub fn rolling_average_decrease_by_ten_query() -> &'static str  {
+    "
   MATCH
     (equip:Equipment {type:'freezer'})-[:HAS_SENSOR]->(:Sensor {type:'temperature'})-[:HAS_VALUE]->(val:SensorValue)
     WITH
@@ -87,8 +87,7 @@ pub fn rolling_average_decrease_by_ten_query() -> ast::Query {
     WHERE
         currentAverageTemp < previousAverageTemp * 0.9
     RETURN
-        freezerId, previousAverageTemp, currentAverageTemp").unwrap();
-    parse_result
+        freezerId, previousAverageTemp, currentAverageTemp"
 
     //   let parse_result = drasi_query_cypher::parse("
     // MATCH

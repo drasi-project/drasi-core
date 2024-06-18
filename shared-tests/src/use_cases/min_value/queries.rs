@@ -1,12 +1,7 @@
-use drasi_query_ast::ast;
-
-pub fn min_query() -> ast::Query {
-    drasi_query_cypher::parse(
-        "
+pub fn min_query() -> &'static str  {
+            "
   MATCH (t:Thing)
   RETURN
     min(t.Value) as min_value
-    ",
-    )
-    .unwrap()
+    "
 }

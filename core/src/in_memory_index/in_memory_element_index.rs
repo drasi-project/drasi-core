@@ -31,7 +31,7 @@ pub struct InMemoryElementIndex {
     element_archive: Arc<RwLock<HashMap<ElementReference, ElementArchive>>>,
     archive_enabled: bool,
 
-    join_spec_by_label: Arc<HashMap<Arc<str>, Vec<(Arc<QueryJoin>, Vec<usize>)>>>,
+    join_spec_by_label: Arc<RwLock<HashMap<Arc<str>, Vec<(Arc<QueryJoin>, Vec<usize>)>>>>,
 
     // [(join_label, field_value)] => [QueryJoinKey] => ElementReference[]
     partial_joins:
@@ -39,9 +39,8 @@ pub struct InMemoryElementIndex {
 }
 
 impl InMemoryElementIndex {
-    pub fn new(match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) -> Self {
-        let joins_by_label = extract_join_spec_by_label(match_path, joins);
-
+    pub fn new() -> Self {
+        
         Self {
             elements: Arc::new(RwLock::new(HashMap::new())),
             slot_affinity: Arc::new(RwLock::new(HashMap::new())),
@@ -49,7 +48,7 @@ impl InMemoryElementIndex {
             element_by_slot_in: Arc::new(RwLock::new(HashMap::new())),
             element_by_slot_out: Arc::new(RwLock::new(HashMap::new())),
             element_archive: Arc::new(RwLock::new(HashMap::new())),
-            join_spec_by_label: Arc::new(joins_by_label),
+            join_spec_by_label: Arc::new(RwLock::new(HashMap::new())),
             partial_joins: Arc::new(RwLock::new(HashMap::new())),
             archive_enabled: false,
         }
@@ -156,7 +155,8 @@ impl InMemoryElementIndex {
                 metadata,
                 properties,
             } => {
-                for (label, joins) in self.join_spec_by_label.iter() {
+                let join_spec_by_label = self.join_spec_by_label.read().await;
+                for (label, joins) in join_spec_by_label.iter() {
                     if !metadata.labels.contains(label) {
                         continue;
                     }
@@ -302,7 +302,8 @@ impl InMemoryElementIndex {
                 metadata,
                 properties,
             } => {
-                for (label, joins) in self.join_spec_by_label.iter() {
+                let join_spec_by_label = self.join_spec_by_label.read().await;
+                for (label, joins) in join_spec_by_label.iter() {
                     if !metadata.labels.contains(label) {
                         continue;
                     }
@@ -518,6 +519,12 @@ impl ElementIndex for InMemoryElementIndex {
         guard.clear();
 
         Ok(())
+    }
+
+    async fn set_joins(&self, match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) {
+        let joins_by_label = extract_join_spec_by_label(match_path, joins);
+        let mut join_spec_by_label = self.join_spec_by_label.write().await;
+        join_spec_by_label.clone_from(&joins_by_label);        
     }
 }
 

@@ -62,9 +62,8 @@ pub fn greater_than_a_threshold_metadata() -> Vec<QueryJoin> {
     ]
 }
 
-pub fn greater_than_a_threshold_query() -> ast::Query {
-    drasi_query_cypher::parse(
-        "
+pub fn greater_than_a_threshold_query() -> &'static str  {
+            "
     MATCH
       (:Organization)-[:HAS_CUSTOMER]->(:Customer)-[:MADE_CALL]->(call:Call {type:'support'})
     WITH
@@ -77,14 +76,11 @@ pub fn greater_than_a_threshold_query() -> ast::Query {
     WHERE
       callCount > 10
     RETURN
-      callYear, callDayOfYear, callCount",
-    )
-    .unwrap()
+      callYear, callDayOfYear, callCount"
 }
 
-pub fn greater_than_a_threshold_by_customer_query() -> ast::Query {
-    drasi_query_cypher::parse(
-        "
+pub fn greater_than_a_threshold_by_customer_query() -> &'static str  {
+            "
   MATCH
     (:Organization)-[:HAS_CUSTOMER]->(cust:Customer)-[:MADE_CALL]->(call:Call {type:'support'})
   WITH
@@ -100,7 +96,5 @@ pub fn greater_than_a_threshold_by_customer_query() -> ast::Query {
   WHERE
     callCount > 5
   RETURN
-    customerId, customerName, callYear, callDayOfYear, callCount",
-    )
-    .unwrap()
+    customerId, customerName, callYear, callDayOfYear, callCount"
 }

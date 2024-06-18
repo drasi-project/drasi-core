@@ -31,12 +31,11 @@ async fn bootstrap_query(query: &ContinuousQuery) {
 }
 
 pub async fn order_ready_then_vehicle_arrives(config: &(impl QueryTestConfig + Send)) {
-    let query_source = Arc::new(queries::pickup_order_ready_query());
     let query = {
-        let mut builder = QueryBuilder::new(query_source.clone())
+        let mut builder = QueryBuilder::new(queries::pickup_order_ready_query())
             .with_joins(queries::pickup_order_ready_metadata());
-        builder = config.config_query(builder, query_source).await;
-        builder.build()
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     bootstrap_query(&query).await;
@@ -140,12 +139,11 @@ pub async fn order_ready_then_vehicle_arrives(config: &(impl QueryTestConfig + S
 }
 
 pub async fn vehicle_arrives_then_order_ready(config: &(impl QueryTestConfig + Send)) {
-    let query_source = Arc::new(queries::pickup_order_ready_query());
     let query = {
-        let mut builder = QueryBuilder::new(query_source.clone())
+        let mut builder = QueryBuilder::new(queries::pickup_order_ready_query())
             .with_joins(queries::pickup_order_ready_metadata());
-        builder = config.config_query(builder, query_source).await;
-        builder.build()
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     bootstrap_query(&query).await;
@@ -247,12 +245,11 @@ pub async fn vehicle_arrives_then_order_ready(config: &(impl QueryTestConfig + S
 }
 
 pub async fn vehicle_arrives_then_order_ready_duplicate(config: &(impl QueryTestConfig + Send)) {
-    let query_source = Arc::new(queries::pickup_order_ready_query());
     let query = {
-        let mut builder = QueryBuilder::new(query_source.clone())
+        let mut builder = QueryBuilder::new(queries::pickup_order_ready_query())
             .with_joins(queries::pickup_order_ready_metadata());
-        builder = config.config_query(builder, query_source).await;
-        builder.build()
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     bootstrap_query(&query).await;

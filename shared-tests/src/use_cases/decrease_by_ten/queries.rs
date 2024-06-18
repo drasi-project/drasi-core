@@ -62,9 +62,8 @@ pub fn decrease_by_ten_metadata() -> Vec<QueryJoin> {
     ]
 }
 
-pub fn decrease_by_ten_query() -> ast::Query {
-    drasi_query_cypher::parse(
-        "
+pub fn decrease_by_ten_query() -> &'static str {
+            "
     MATCH
       (product:Product)-[:HAS_DAILY_REVENUE]->(dailyRevenue:DailyRevenue),
       (product:Product)-[:HAS_PRODUCT_MANAGER]->(productManager:Employee)
@@ -79,13 +78,10 @@ pub fn decrease_by_ten_query() -> ast::Query {
       product.id AS productId, 
       productManager.id AS productManagerId,
       previousDailyRevenue.amount AS previousDailyRevenue,
-      dailyRevenue.amount AS dailyRevenue",
-    )
-    .unwrap()
+      dailyRevenue.amount AS dailyRevenue"
 }
 
-pub fn decrease_by_ten_percent_query() -> ast::Query {
-    drasi_query_cypher::parse(
+pub fn decrease_by_ten_percent_query() -> &'static str  {
         "
     MATCH
       (product:Product)-[:HAS_DAILY_REVENUE]->(dailyRevenue:DailyRevenue),
@@ -101,7 +97,5 @@ pub fn decrease_by_ten_percent_query() -> ast::Query {
       product.id AS productId, 
       productManager.id AS productManagerId,
       previousDailyRevenue.amount AS previousDailyRevenue,
-      dailyRevenue.amount AS dailyRevenue",
-    )
-    .unwrap()
+      dailyRevenue.amount AS dailyRevenue"
 }

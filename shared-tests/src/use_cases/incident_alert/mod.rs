@@ -20,8 +20,6 @@ macro_rules! variablemap {
        let mut map = ::std::collections::BTreeMap::new();
        $( map.insert($key.to_string().into(), $val); )*
        map
-      // VariableValue::Object(map)
-      // VariableValue::from(map)
   }}
 }
 
@@ -34,25 +32,22 @@ async fn bootstrap_query(query: &ContinuousQuery) {
 }
 
 pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
-    let miaq = Arc::new(queries::manager_incident_alert_query());
     let manager_incident_alert_query = {
-        let mut builder = QueryBuilder::new(miaq.clone());
-        builder = config.config_query(builder, miaq.clone()).await;
-        builder.build()
+        let mut builder = QueryBuilder::new(queries::manager_incident_alert_query());
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
-    let eiaq = Arc::new(queries::employee_incident_alert_query());
     let employee_incident_alert_query = {
-        let mut builder = QueryBuilder::new(eiaq.clone());
-        builder = config.config_query(builder, eiaq.clone()).await;
-        builder.build()
+        let mut builder = QueryBuilder::new(queries::employee_incident_alert_query());
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
-    let ercq = Arc::new(queries::employees_at_risk_count_query());
     let employees_at_risk_count_query = {
-        let mut builder = QueryBuilder::new(ercq.clone());
-        builder = config.config_query(builder, ercq.clone()).await;
-        builder.build()
+        let mut builder = QueryBuilder::new(queries::employees_at_risk_count_query());
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     bootstrap_query(&manager_incident_alert_query).await;

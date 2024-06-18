@@ -25,11 +25,10 @@ macro_rules! variablemap {
 }
 
 pub async fn overdue_invoice(config: &(impl QueryTestConfig + Send)) {
-    let query = Arc::new(queries::list_overdue_query());
     let cq = {
-        let mut builder = QueryBuilder::new(query.clone());
-        builder = config.config_query(builder, query.clone()).await;
-        Arc::new(builder.build())
+        let mut builder = QueryBuilder::new(queries::list_overdue_query());
+        builder = config.config_query(builder).await;
+        Arc::new(builder.build().await)
     };
 
     let now_override = Arc::new(AtomicU64::new(0));
@@ -108,11 +107,10 @@ pub async fn overdue_invoice(config: &(impl QueryTestConfig + Send)) {
 }
 
 pub async fn overdue_count_persistent(config: &(impl QueryTestConfig + Send)) {
-    let query = Arc::new(queries::count_overdue_greater_query());
     let cq = {
-        let mut builder = QueryBuilder::new(query.clone());
-        builder = config.config_query(builder, query.clone()).await;
-        Arc::new(builder.build())
+        let mut builder = QueryBuilder::new(queries::count_overdue_greater_query());
+        builder = config.config_query(builder).await;
+        Arc::new(builder.build().await)
     };
 
     let now_override = Arc::new(AtomicU64::new(0));

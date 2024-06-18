@@ -4,11 +4,7 @@ use super::process_solution;
 
 use crate::{
     evaluation::{
-        context::PhaseEvaluationContext,
-        functions::{aggregation::ValueAccumulator, FunctionRegistry},
-        variable_value::duration::Duration,
-        variable_value::VariableValue,
-        ExpressionEvaluator, QueryPhaseEvaluator,
+        context::PhaseEvaluationContext, functions::{aggregation::ValueAccumulator, FunctionRegistry}, phases::tests::build_query, variable_value::{duration::Duration, VariableValue}, ExpressionEvaluator, QueryPhaseEvaluator
     },
     in_memory_index::in_memory_result_index::InMemoryResultIndex,
     interface::{AccumulatorIndex, ResultKey, ResultOwner},
@@ -19,7 +15,7 @@ use serde_json::json;
 
 #[tokio::test]
 async fn aggregating_query_add_solution() {
-    let query = drasi_query_cypher::parse("MATCH (a) WHERE a.Value1 < 10 RETURN a.Name as key, sum(a.Value1) as my_sum, min(a.Value1) as my_min").unwrap();
+    let query = build_query("MATCH (a) WHERE a.Value1 < 10 RETURN a.Name as key, sum(a.Value1) as my_sum, min(a.Value1) as my_min");
 
     let node1 = json!({
       "id": 1,
@@ -134,7 +130,7 @@ async fn aggregating_query_add_solution() {
 
 #[tokio::test]
 async fn aggregating_query_update_solution() {
-    let query = drasi_query_cypher::parse("MATCH (a) WHERE a.Value1 < 10 RETURN a.Name as key, sum(a.Value1) as my_sum, min(a.Value1) as my_min").unwrap();
+    let query = build_query("MATCH (a) WHERE a.Value1 < 10 RETURN a.Name as key, sum(a.Value1) as my_sum, min(a.Value1) as my_min");
 
     let node1 = json!({
       "id": 1,
@@ -327,7 +323,7 @@ async fn aggregating_query_update_solution() {
 
 #[tokio::test]
 async fn aggregating_query_remove_solution() {
-    let query = drasi_query_cypher::parse("MATCH (a) WHERE a.Value1 < 10 RETURN a.Name as key, sum(a.Value1) as my_sum, min(a.Value1) as my_min").unwrap();
+    let query = build_query("MATCH (a) WHERE a.Value1 < 10 RETURN a.Name as key, sum(a.Value1) as my_sum, min(a.Value1) as my_min");
 
     let node1 = json!({
       "id": 1,
@@ -469,9 +465,7 @@ async fn aggregating_query_remove_solution() {
 
 #[tokio::test]
 async fn group_switch() {
-    let query =
-        drasi_query_cypher::parse("MATCH (a) RETURN a.Name as key, sum(a.Value1) as my_sum")
-            .unwrap();
+    let query = build_query("MATCH (a) RETURN a.Name as key, sum(a.Value1) as my_sum");
 
     let node1 = json!({
       "id": 1,
@@ -608,9 +602,7 @@ async fn group_switch() {
 
 #[tokio::test]
 async fn group_switch_complex_accumulator() {
-    let query =
-        drasi_query_cypher::parse("MATCH (a) RETURN a.Name as key, avg(a.Value1) as my_avg")
-            .unwrap();
+    let query = build_query("MATCH (a) RETURN a.Name as key, avg(a.Value1) as my_avg");
 
     let node1 = json!({
       "id": 1,
@@ -747,7 +739,7 @@ async fn group_switch_complex_accumulator() {
 
 #[tokio::test]
 async fn test_aggregating_function_sum_duration() {
-    let query = drasi_query_cypher::parse("MATCH (a) RETURN sum(a.Duration) as my_sum").unwrap();
+    let query = build_query("MATCH (a) RETURN sum(a.Duration) as my_sum");
 
     let mut node1 = VariableValue::from(json!({
       "id": 1,
@@ -833,8 +825,7 @@ async fn test_aggregating_function_sum_duration() {
 
 #[tokio::test]
 async fn test_aggregating_function_max_duration() {
-    let query =
-        drasi_query_cypher::parse("MATCH (a) RETURN max(a.Duration) as max_result").unwrap();
+    let query = build_query("MATCH (a) RETURN max(a.Duration) as max_result");
     let mut node1 = VariableValue::from(json!({
         "id": 1,
     }));
@@ -959,10 +950,9 @@ async fn test_aggregating_function_max_duration() {
 
 #[tokio::test]
 async fn test_aggregating_function_max_temporal_instant() {
-    let query = drasi_query_cypher::parse(
+    let query = build_query(
         "MATCH (a) RETURN max(a.Date) as max_date, max(a.LocalDateTime) as max_localdatetime",
-    )
-    .unwrap();
+    );
     let mut node1 = VariableValue::from(json!({
         "id": 1,
     }));
@@ -1106,8 +1096,7 @@ async fn test_aggregating_function_max_temporal_instant() {
 
 #[tokio::test]
 async fn test_aggregating_function_min_temporal_duration() {
-    let query =
-        drasi_query_cypher::parse("MATCH (a) RETURN min(a.Duration) as min_result").unwrap();
+    let query = build_query("MATCH (a) RETURN min(a.Duration) as min_result");
     let mut node1 = VariableValue::from(json!({
         "id": 1,
     }));
@@ -1232,10 +1221,9 @@ async fn test_aggregating_function_min_temporal_duration() {
 
 #[tokio::test]
 async fn test_aggregating_function_min_temporal_instant() {
-    let query = drasi_query_cypher::parse(
+    let query = build_query(
         "MATCH (a) RETURN min(a.LocalTime) as min_time, min(a.LocalDateTime) as min_localdatetime",
-    )
-    .unwrap();
+    );
     let mut node1 = VariableValue::from(json!({
         "id": 1,
     }));

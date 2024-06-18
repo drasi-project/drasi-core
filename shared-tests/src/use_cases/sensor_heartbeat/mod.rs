@@ -39,11 +39,10 @@ async fn bootstrap_query(query: &ContinuousQuery, effective_from: u64) {
 }
 
 pub async fn not_reported(config: &(impl QueryTestConfig + Send)) {
-    let query = Arc::new(queries::not_reported_query());
     let cq = {
-        let mut builder = QueryBuilder::new(query.clone());
-        builder = config.config_query(builder, query.clone()).await;
-        Arc::new(builder.build())
+        let mut builder = QueryBuilder::new(queries::not_reported_query());
+        builder = config.config_query(builder).await;
+        Arc::new(builder.build().await)
     };
 
     let now_override = Arc::new(AtomicU64::new(0));
@@ -311,11 +310,10 @@ pub async fn not_reported(config: &(impl QueryTestConfig + Send)) {
 }
 
 pub async fn percent_not_reported(config: &(impl QueryTestConfig + Send)) {
-    let query = Arc::new(queries::percent_not_reported_query());
     let cq = {
-        let mut builder = QueryBuilder::new(query.clone());
-        builder = config.config_query(builder, query.clone()).await;
-        Arc::new(builder.build())
+        let mut builder = QueryBuilder::new(queries::percent_not_reported_query());
+        builder = config.config_query(builder).await;
+        Arc::new(builder.build().await)
     };
 
     let now_override = Arc::new(AtomicU64::new(0));
