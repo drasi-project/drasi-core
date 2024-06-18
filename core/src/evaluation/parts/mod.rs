@@ -607,7 +607,7 @@ impl QueryPartEvaluator {
     /// Reconciles values crossing from one group to another
     async fn reconile_crossing_agregate(
         &self,
-        phase: &QueryPart,
+        part: &QueryPart,
         grouping_keys: Vec<String>,
         before_in: Option<QueryVariables>,
         _after_in: QueryVariables,
@@ -663,7 +663,7 @@ impl QueryPartEvaluator {
                     );
                     prev_context.set_side_effects(context::SideEffects::Snapshot);
                     let mut grouping_keys = Vec::new();
-                    self.project(&prev_context, &phase.return_clause, &mut grouping_keys)
+                    self.project(&prev_context, &part.return_clause, &mut grouping_keys)
                         .await?
                 },
                 grouping_keys: grouping_keys.clone(),
