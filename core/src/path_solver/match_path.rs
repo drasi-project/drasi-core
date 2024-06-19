@@ -16,12 +16,12 @@ pub struct MatchPath {
 }
 
 impl MatchPath {
-    pub fn from_query(query_phase: &ast::QueryPhase) -> Result<Self, EvaluationError> {
+    pub fn from_query(query_part: &ast::QueryPart) -> Result<Self, EvaluationError> {
         let mut slots = Vec::new();
 
         let mut alias_map = HashMap::new();
 
-        for mc in &query_phase.match_clauses {
+        for mc in &query_part.match_clauses {
             let slot_num = merge_node_match(&mc.start, &mut slots, &mut alias_map)?;
             let mut prev_slot_num = slot_num;
 

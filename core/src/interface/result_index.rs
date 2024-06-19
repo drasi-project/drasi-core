@@ -71,8 +71,8 @@ pub trait ResultSequenceCounter: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Hash)]
 pub enum ResultOwner {
     Function(usize),
-    PhaseCurrent(usize),
-    PhaseDefault(usize),
+    PartCurrent(usize),
+    PartDefault(usize),
 }
 
 #[derive(Debug, Clone, PartialEq)]

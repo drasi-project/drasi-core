@@ -4,7 +4,7 @@ use serde_json::json;
 
 use drasi_core::{
     evaluation::{
-        context::PhaseEvaluationContext,
+        context::QueryPartEvaluationContext,
         variable_value::{float::Float, VariableValue},
     },
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
@@ -24,11 +24,10 @@ macro_rules! variablemap {
 }
 
 pub async fn linear_gradient(config: &(impl QueryTestConfig + Send)) {
-    let mq = Arc::new(queries::gradient_query());
     let lg_query = {
-        let mut builder = QueryBuilder::new(mq.clone());
-        builder = config.config_query(builder, mq.clone()).await;
-        builder.build()
+        let mut builder = QueryBuilder::new(queries::gradient_query());
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     //Add initial values
@@ -119,7 +118,7 @@ pub async fn linear_gradient(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
         println!("Node Result - Add p6: {:?}", result);
-        assert!(result.contains(&PhaseEvaluationContext::Aggregation {
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
             default_after: false,
@@ -147,7 +146,7 @@ pub async fn linear_gradient(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
         println!("Node Result - Remove p2: {:?}", result);
-        assert!(result.contains(&PhaseEvaluationContext::Aggregation {
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: false,
             default_after: true,
@@ -175,7 +174,7 @@ pub async fn linear_gradient(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
         println!("Node Result - Remove p6: {:?}", result);
-        assert!(result.contains(&PhaseEvaluationContext::Aggregation {
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: false,
             default_after: true,
@@ -327,7 +326,7 @@ pub async fn linear_gradient(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
         println!("Node Result - Add p6: {:?}", result);
-        assert!(result.contains(&PhaseEvaluationContext::Aggregation {
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
             default_after: false,

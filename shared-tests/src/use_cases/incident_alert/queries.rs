@@ -1,7 +1,5 @@
-use drasi_query_ast::ast;
-
-pub fn manager_incident_alert_query() -> ast::Query {
-    drasi_query_cypher::parse("
+pub fn manager_incident_alert_query() -> &'static str {
+    "
   MATCH
     (e:Employee)-[:ASSIGNED_TO]->(t:Team),
     (m:Employee)-[:MANAGES]->(t:Team),
@@ -14,11 +12,11 @@ pub fn manager_incident_alert_query() -> ast::Query {
     e.name AS EmployeeName, e.email AS EmployeeEmail,
     r.name AS RegionName,
     elementId(i)  AS IncidentId, i.severity AS IncidentSeverity, i.description AS IncidentDescription
-    ").unwrap()
+    "
 }
 
-pub fn employee_incident_alert_query() -> ast::Query {
-    drasi_query_cypher::parse("
+pub fn employee_incident_alert_query() -> &'static str {
+    "
   MATCH
     (e:Employee)-[:LOCATED_IN]->(:Building)-[:LOCATED_IN]->(r:Region),
     (i:Incident)-[:OCCURS_IN]->(r:Region)
@@ -28,11 +26,11 @@ pub fn employee_incident_alert_query() -> ast::Query {
     e.name AS EmployeeName, e.email AS EmployeeEmail,
     r.name AS RegionName,
     elementId(i)  AS IncidentId, i.severity AS IncidentSeverity, i.description AS IncidentDescription
-    ").unwrap()
+    "
 }
 
-pub fn employees_at_risk_count_query() -> ast::Query {
-    drasi_query_cypher::parse("
+pub fn employees_at_risk_count_query() -> &'static str {
+    "
   MATCH
     (e:Employee)-[:LOCATED_IN]->(:Building)-[:LOCATED_IN]->(r:Region),
     (i:Incident)-[:OCCURS_IN]->(r:Region)
@@ -42,5 +40,5 @@ pub fn employees_at_risk_count_query() -> ast::Query {
     r.name AS RegionName,
     elementId(i)  AS IncidentId, i.severity AS IncidentSeverity, i.description AS IncidentDescription,
     count(e.name) AS EmployeeCount
-    ").unwrap()
+    "
 }

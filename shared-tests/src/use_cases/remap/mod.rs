@@ -4,7 +4,7 @@ use drasi_middleware::map::MapFactory;
 use serde_json::json;
 
 use drasi_core::{
-    evaluation::{context::PhaseEvaluationContext, variable_value::VariableValue},
+    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
     middleware::MiddlewareTypeRegistry,
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::QueryBuilder,
@@ -27,16 +27,15 @@ pub async fn remap(config: &(impl QueryTestConfig + Send)) {
     middleware_registry.register(Arc::new(MapFactory::new()));
     let middleware_registry = Arc::new(middleware_registry);
 
-    let mq = Arc::new(queries::remap_query());
     let rm_query = {
-        let mut builder = QueryBuilder::new(mq.clone());
-        builder = config.config_query(builder, mq.clone()).await;
+        let mut builder = QueryBuilder::new(queries::remap_query());
+        builder = config.config_query(builder).await;
         builder = builder.with_middleware_registry(middleware_registry);
         for mw in queries::middlewares() {
             builder = builder.with_source_middleware(mw);
         }
         builder = builder.with_source_pipeline("test", &queries::source_pipeline());
-        builder.build()
+        builder.build().await
     };
 
     //Add initial value
@@ -78,7 +77,7 @@ pub async fn remap(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
         println!("Node Result - Add t1: {:?}", result);
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
                 "id" => VariableValue::from(json!("v1")),
                 "currentSpeed" => VariableValue::from(json!("119"))
@@ -125,7 +124,7 @@ pub async fn remap(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
         println!("Node Result - Add t2: {:?}", result);
-        assert!(result.contains(&PhaseEvaluationContext::Updating {
+        assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
                 "id" => VariableValue::from(json!("v1")),
                 "currentSpeed" => VariableValue::from(json!("119"))
@@ -176,7 +175,7 @@ pub async fn remap(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
         println!("Node Result - Add t3: {:?}", result);
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
                 "id" => VariableValue::from(json!("v2")),
                 "currentSpeed" => VariableValue::from(json!("110"))

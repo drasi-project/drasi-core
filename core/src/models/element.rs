@@ -149,9 +149,9 @@ impl Element {
     }
 }
 
-impl Into<serde_json::Value> for &Element {
-    fn into(self) -> serde_json::Value {
-        match self {
+impl From<&Element> for serde_json::Value {
+    fn from(val: &Element) -> Self {
+        match val {
             Element::Node {
                 metadata,
                 properties,

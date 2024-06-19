@@ -1,15 +1,14 @@
-use crate::utils::contains_aggregating_function;
 use std::collections::BTreeMap;
 use std::hash::Hasher;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Query {
-    pub phases: Vec<QueryPhase>,
+    pub parts: Vec<QueryPart>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct QueryPhase {
+pub struct QueryPart {
     pub match_clauses: Vec<MatchClause>,
     pub where_clauses: Vec<Expression>,
     pub return_clause: ProjectionClause,
@@ -609,29 +608,5 @@ impl ParentExpression for ListExpression {
         }
 
         children
-    }
-}
-
-impl Into<ProjectionClause> for Vec<Expression> {
-    fn into(self) -> ProjectionClause {
-        let mut keys = Vec::new();
-        let mut aggs = Vec::new();
-
-        for expr in self {
-            if contains_aggregating_function(&expr) {
-                aggs.push(expr);
-            } else {
-                keys.push(expr);
-            }
-        }
-
-        if aggs.is_empty() {
-            ProjectionClause::Item(keys)
-        } else {
-            ProjectionClause::GroupBy {
-                grouping: keys,
-                aggregates: aggs,
-            }
-        }
     }
 }

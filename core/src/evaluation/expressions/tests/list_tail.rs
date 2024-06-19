@@ -1,6 +1,5 @@
 use crate::evaluation::context::QueryVariables;
 use crate::evaluation::functions::FunctionRegistry;
-use crate::evaluation::variable_value::integer::Integer;
 use crate::evaluation::variable_value::VariableValue;
 use crate::evaluation::{
     EvaluationError, ExpressionEvaluationContext, ExpressionEvaluator, InstantQueryClock,
@@ -51,13 +50,13 @@ async fn test_list_tail_multiple_arguments() {
         .await
         .unwrap_err();
 
-    let err = Box::new(EvaluationError::InvalidArgumentCount("tail".to_string()));
+    let _err = Box::new(EvaluationError::InvalidArgumentCount("tail".to_string()));
 
     assert!(matches!(
         result,
         EvaluationError::FunctionError {
-            function_name: name,
-            error: err
+            function_name: _name,
+            error: _err
         }
     ));
 }

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use drasi_core::{
-    evaluation::{context::PhaseEvaluationContext, variable_value::VariableValue},
+    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{ContinuousQuery, QueryBuilder},
 };
@@ -31,12 +31,11 @@ async fn bootstrap_query(query: &ContinuousQuery) {
 }
 
 pub async fn logical_conditions(config: &(impl QueryTestConfig + Send)) {
-    let cypher_query = Arc::new(queries::logical_conditions_query());
     let logical_conditions_query = {
-        let mut builder = QueryBuilder::new(cypher_query.clone())
+        let mut builder = QueryBuilder::new(queries::logical_conditions_query())
             .with_joins(queries::logical_conditions_metadata());
-        builder = config.config_query(builder, cypher_query).await;
-        builder.build()
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     // Add initial values
@@ -153,7 +152,7 @@ pub async fn logical_conditions(config: &(impl QueryTestConfig + Send)) {
         );
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "freezerId" => VariableValue::from(json!("equip_01"))
             )
@@ -187,7 +186,7 @@ pub async fn logical_conditions(config: &(impl QueryTestConfig + Send)) {
         );
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&PhaseEvaluationContext::Removing {
+        assert!(result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!(
               "freezerId" => VariableValue::from(json!("equip_01"))
             )

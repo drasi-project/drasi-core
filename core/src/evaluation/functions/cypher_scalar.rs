@@ -15,7 +15,6 @@ use std::sync::Arc;
 use char_length::CharLength;
 use coalesce::Coalesce;
 
-
 use size::Size;
 use to_boolean::{ToBoolean, ToBooleanOrNull};
 use to_float::{ToFloat, ToFloatOrNull};

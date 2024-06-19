@@ -158,7 +158,7 @@ impl ScalarFunction for GetVersionsByTimeRange {
                         let mut metadata = e.get_metadata().clone();
                         metadata.effective_from = from;
                         let _result_element = Element::Node {
-                            metadata: metadata,
+                            metadata,
                             properties: e.get_properties().clone(),
                         };
                         result.push(e.to_expression_variable())

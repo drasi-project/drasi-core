@@ -3,7 +3,6 @@ use std::sync::Arc;
 use serde_json::json;
 
 use drasi_core::{
-    evaluation::{context::PhaseEvaluationContext, variable_value::VariableValue},
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{ContinuousQuery, QueryBuilder},
 };
@@ -14,14 +13,6 @@ use crate::QueryTestConfig;
 mod data;
 mod queries;
 
-macro_rules! variablemap {
-  ($( $key: expr => $val: expr ),*) => {{
-       let mut map = ::std::collections::BTreeMap::new();
-       $( map.insert($key.to_string().into(), $val); )*
-       map
-  }}
-}
-
 async fn bootstrap_query(query: &ContinuousQuery) {
     let data = get_bootstrap_data();
 
@@ -31,12 +22,11 @@ async fn bootstrap_query(query: &ContinuousQuery) {
 }
 
 pub async fn exceeds_one_standard_deviation(config: &(impl QueryTestConfig + Send)) {
-    let cypher_query = Arc::new(queries::exceeds_one_standard_deviation_query());
     let exceeds_one_standard_deviation_query = {
-        let mut builder = QueryBuilder::new(cypher_query.clone())
+        let mut builder = QueryBuilder::new(queries::exceeds_one_standard_deviation_query())
             .with_joins(queries::exceeds_one_standard_deviation_metadata());
-        builder = config.config_query(builder, cypher_query).await;
-        builder.build()
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     bootstrap_query(&exceeds_one_standard_deviation_query).await;

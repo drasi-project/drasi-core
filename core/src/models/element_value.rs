@@ -11,8 +11,9 @@ use std::sync::Arc;
 
 use ordered_float::OrderedFloat;
 
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Default)]
 pub enum ElementValue {
+    #[default]
     Null,
     Bool(bool),
     Float(OrderedFloat<f64>),
@@ -22,25 +23,19 @@ pub enum ElementValue {
     Object(ElementPropertyMap),
 }
 
-impl Default for ElementValue {
-    fn default() -> Self {
-        ElementValue::Null
-    }
-}
-
-impl Into<VariableValue> for &ElementPropertyMap {
-    fn into(self) -> VariableValue {
+impl From<&ElementPropertyMap> for VariableValue {
+    fn from(val: &ElementPropertyMap) -> Self {
         let mut map = BTreeMap::new();
-        for (key, value) in self.values.iter() {
+        for (key, value) in val.values.iter() {
             map.insert(key.to_string(), value.into());
         }
         VariableValue::Object(map)
     }
 }
 
-impl Into<VariableValue> for &ElementValue {
-    fn into(self) -> VariableValue {
-        match self {
+impl From<&ElementValue> for VariableValue {
+    fn from(val: &ElementValue) -> Self {
+        match val {
             ElementValue::Null => VariableValue::Null,
             ElementValue::Bool(b) => VariableValue::Bool(*b),
             ElementValue::Float(f) => VariableValue::Float(Float::from(f.0)),
@@ -73,9 +68,9 @@ impl TryInto<ElementValue> for &VariableValue {
     }
 }
 
-impl Into<serde_json::Value> for &ElementValue {
-    fn into(self) -> serde_json::Value {
-        match self {
+impl From<&ElementValue> for serde_json::Value {
+    fn from(val: &ElementValue) -> Self {
+        match val {
             ElementValue::Null => serde_json::Value::Null,
             ElementValue::Bool(b) => serde_json::Value::Bool(*b),
             ElementValue::Float(f) => {
@@ -83,9 +78,7 @@ impl Into<serde_json::Value> for &ElementValue {
             }
             ElementValue::Integer(i) => serde_json::Value::Number(serde_json::Number::from(*i)),
             ElementValue::String(s) => serde_json::Value::String(s.to_string()),
-            ElementValue::List(l) => {
-                serde_json::Value::Array(l.into_iter().map(|x| x.into()).collect())
-            }
+            ElementValue::List(l) => serde_json::Value::Array(l.iter().map(|x| x.into()).collect()),
             ElementValue::Object(o) => serde_json::Value::Object(o.into()),
         }
     }
@@ -106,9 +99,7 @@ impl From<&serde_json::Value> for ElementValue {
                 }
             }
             serde_json::Value::String(s) => ElementValue::String(Arc::from(s.as_str())),
-            serde_json::Value::Array(a) => {
-                ElementValue::List(a.into_iter().map(|x| x.into()).collect())
-            }
+            serde_json::Value::Array(a) => ElementValue::List(a.iter().map(|x| x.into()).collect()),
             serde_json::Value::Object(o) => ElementValue::Object(o.into()),
         }
     }
@@ -134,6 +125,12 @@ impl TryInto<ElementPropertyMap> for &VariableValue {
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct ElementPropertyMap {
     values: BTreeMap<Arc<str>, ElementValue>,
+}
+
+impl Default for ElementPropertyMap {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ElementPropertyMap {
@@ -197,9 +194,9 @@ impl From<&BTreeMap<String, VariableValue>> for ElementPropertyMap {
     }
 }
 
-impl Into<serde_json::Map<String, serde_json::Value>> for &ElementPropertyMap {
-    fn into(self) -> serde_json::Map<String, serde_json::Value> {
-        self.values
+impl From<&ElementPropertyMap> for serde_json::Map<String, serde_json::Value> {
+    fn from(val: &ElementPropertyMap) -> Self {
+        val.values
             .iter()
             .map(|(k, v)| (k.to_string(), v.into()))
             .collect()

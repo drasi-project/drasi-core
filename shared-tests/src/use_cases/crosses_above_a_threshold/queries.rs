@@ -1,4 +1,3 @@
-use drasi_query_ast::ast;
 use drasi_core::models::{QueryJoin, QueryJoinKey};
 
 /**
@@ -83,8 +82,8 @@ pub fn crosses_above_a_threshold_metadata() -> Vec<QueryJoin> {
     ]
 }
 
-pub fn crosses_above_a_threshold_query() -> ast::Query {
-    drasi_query_cypher::parse("
+pub fn crosses_above_a_threshold_query() -> &'static str {
+    "
   MATCH
     (cust:Customer)-[:HAS_INVOICE]->(invoice:Invoice)-[:HAS_STATUS]->(status:InvoiceStatus {status:'overdue'}),
     (cust:Customer)-[:HAS_ACCOUNT_MANAGER]->(employee:Employee)
@@ -97,11 +96,11 @@ pub fn crosses_above_a_threshold_query() -> ast::Query {
   WHERE
     overdueDays.days >= 10
   RETURN
-    accountManagerName, accountManagerEmail, customerName, invoiceNumber").unwrap()
+    accountManagerName, accountManagerEmail, customerName, invoiceNumber"
 }
 
-pub fn crosses_above_a_threshold_with_overduedays_query() -> ast::Query {
-    drasi_query_cypher::parse("
+pub fn crosses_above_a_threshold_with_overduedays_query() -> &'static str {
+    "
   MATCH
     (cust:Customer)-[:HAS_INVOICE]->(invoice:Invoice)-[:HAS_STATUS]->(status:InvoiceStatus {status:'overdue'}),
     (cust:Customer)-[:HAS_ACCOUNT_MANAGER]->(employee:Employee)
@@ -114,5 +113,5 @@ pub fn crosses_above_a_threshold_with_overduedays_query() -> ast::Query {
   WHERE
     overdueDays.days >= 10
   RETURN
-    accountManagerName, accountManagerEmail, customerName, invoiceNumber, overdueDays").unwrap()
+    accountManagerName, accountManagerEmail, customerName, invoiceNumber, overdueDays"
 }

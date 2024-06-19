@@ -1,4 +1,8 @@
-use std::{collections::HashMap, hash::Hash, sync::Arc};
+use std::{
+    collections::HashMap,
+    hash::Hash,
+    sync::{Arc, RwLock},
+};
 
 use async_stream::stream;
 use async_trait::async_trait;
@@ -34,7 +38,7 @@ pub struct RocksDbElementIndex {
 
 pub struct Context {
     db: OptimisticTransactionDB,
-    join_spec_by_label: JoinSpecByLabel,
+    join_spec_by_label: RwLock<JoinSpecByLabel>,
     options: RocksIndexOptions,
 }
 
@@ -51,15 +55,7 @@ const PARTIAL_CF: &str = "partial";
 const ELEMENT_BLOCK_CACHE_SIZE: u64 = 32;
 
 impl RocksDbElementIndex {
-    pub fn new(
-        query_id: &str,
-        path: &str,
-        match_path: &MatchPath,
-        joins: &Vec<Arc<QueryJoin>>,
-        options: RocksIndexOptions,
-    ) -> Result<Self, IndexError> {
-        let join_spec_by_label = extract_join_spec_by_label(match_path, joins);
-
+    pub fn new(query_id: &str, path: &str, options: RocksIndexOptions) -> Result<Self, IndexError> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
@@ -98,7 +94,7 @@ impl RocksDbElementIndex {
         Ok(RocksDbElementIndex {
             context: Arc::new(Context {
                 db,
-                join_spec_by_label,
+                join_spec_by_label: RwLock::new(HashMap::new()),
                 options,
             }),
         })
@@ -189,7 +185,7 @@ impl ElementIndex for RocksDbElementIndex {
         let task = task::spawn_blocking(move || {
             let slot_cf = context.db.cf_handle(SLOT_CF).unwrap();
 
-            let prev_slots = match context.db.get_cf(&slot_cf, &element_key) {
+            let prev_slots = match context.db.get_cf(&slot_cf, element_key) {
                 Ok(Some(prev_slots)) => BitSet::from_bytes(&prev_slots),
                 Ok(None) => return Ok(None),
                 Err(e) => return Err(IndexError::other(e)),
@@ -229,7 +225,7 @@ impl ElementIndex for RocksDbElementIndex {
             let inbound_cf = context.db.cf_handle(INBOUND_CF).unwrap();
             let prefix = encode_inout_prefix(&element_key, slot);
 
-            for item in context.db.prefix_iterator_cf(&inbound_cf, &prefix) {
+            for item in context.db.prefix_iterator_cf(&inbound_cf, prefix) {
                 match item {
                     Ok((key, _)) => {
                         if !key.starts_with(&prefix) {
@@ -278,7 +274,7 @@ impl ElementIndex for RocksDbElementIndex {
             let outbound_cf = context.db.cf_handle(OUTBOUND_CF).unwrap();
             let prefix = encode_inout_prefix(&element_key, slot);
 
-            for item in context.db.prefix_iterator_cf(&outbound_cf, &prefix) {
+            for item in context.db.prefix_iterator_cf(&outbound_cf, prefix) {
                 match item {
                     Ok((key, _)) => {
                         if !key.starts_with(&prefix) {
@@ -369,6 +365,12 @@ impl ElementIndex for RocksDbElementIndex {
             Err(err) => Err(IndexError::other(err)),
         }
     }
+
+    async fn set_joins(&self, match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) {
+        let joins_by_label = extract_join_spec_by_label(match_path, joins);
+        let mut join_spec_by_label = self.context.join_spec_by_label.write().unwrap();
+        join_spec_by_label.clone_from(&joins_by_label);
+    }
 }
 
 fn get_partial_cf_options() -> Options {
@@ -445,7 +447,7 @@ fn delete_element_internal(
         for slot in prev_slots.into_iter() {
             let prefix = encode_inout_prefix(element_key, slot);
 
-            for item in txn.prefix_iterator_cf(&inbound_cf, &prefix) {
+            for item in txn.prefix_iterator_cf(&inbound_cf, prefix) {
                 match item {
                     Ok((key, _)) => {
                         if !key.starts_with(&prefix) {
@@ -464,7 +466,7 @@ fn delete_element_internal(
                 }
             }
 
-            for item in txn.prefix_iterator_cf(&outbound_cf, &prefix) {
+            for item in txn.prefix_iterator_cf(&outbound_cf, prefix) {
                 match item {
                     Ok((key, _)) => {
                         if !key.starts_with(&prefix) {
@@ -501,7 +503,7 @@ fn set_element_internal(
     let inbound_cf = context.db.cf_handle(INBOUND_CF).unwrap();
     let outbound_cf = context.db.cf_handle(OUTBOUND_CF).unwrap();
 
-    let prev_slots = match txn.get_cf(&slot_cf, &key_hash) {
+    let prev_slots = match txn.get_cf(&slot_cf, key_hash) {
         Ok(Some(prev_slots)) => Some(BitSet::from_bytes(&prev_slots)),
         Ok(None) => None,
         Err(e) => return Err(IndexError::other(e)),
@@ -525,14 +527,14 @@ fn set_element_internal(
         (container.element.unwrap(), buf.freeze())
     };
 
-    match txn.put_cf(&element_cf, &key_hash, &encoded_element) {
+    match txn.put_cf(&element_cf, key_hash, &encoded_element) {
         Ok(_) => log::debug!("Stored element {:?}", key_hash),
         Err(e) => return Err(IndexError::other(e)),
     };
 
     match txn.put_cf(
         &slot_cf,
-        &key_hash,
+        key_hash,
         new_slots.clone().into_bit_vec().to_bytes(),
     ) {
         Ok(_) => log::debug!("Stored element slots {:?}", key_hash),
@@ -552,7 +554,7 @@ fn set_element_internal(
                     let inbound_key = encode_inout_key(&in_node, slot, &key_hash);
                     let outbound_key = encode_inout_key(&out_node, slot, &key_hash);
 
-                    if let Err(err) = txn.delete_cf(&inbound_cf, &inbound_key) {
+                    if let Err(err) = txn.delete_cf(&inbound_cf, inbound_key) {
                         log::error!(
                             "Failed to delete inbound index {:?} for element {:?}: {:?}",
                             inbound_key,
@@ -562,7 +564,7 @@ fn set_element_internal(
                         return Err(IndexError::other(err));
                     }
 
-                    if let Err(err) = txn.delete_cf(&outbound_cf, &outbound_key) {
+                    if let Err(err) = txn.delete_cf(&outbound_cf, outbound_key) {
                         log::error!(
                             "Failed to delete outbound index {:?} for element {:?}: {:?}",
                             outbound_key,
@@ -580,7 +582,7 @@ fn set_element_internal(
                 let inbound_key = encode_inout_key(&in_node, *slot, &key_hash);
                 let outbound_key = encode_inout_key(&out_node, *slot, &key_hash);
 
-                if let Err(err) = txn.put_cf(&inbound_cf, &inbound_key, &[]) {
+                if let Err(err) = txn.put_cf(&inbound_cf, inbound_key, []) {
                     log::error!(
                         "Failed to store inbound index {:?} for element {:?}: {:?}",
                         inbound_key,
@@ -590,7 +592,7 @@ fn set_element_internal(
                     return Err(IndexError::other(err));
                 }
 
-                if let Err(err) = txn.put_cf(&outbound_cf, &outbound_key, &[]) {
+                if let Err(err) = txn.put_cf(&outbound_cf, outbound_key, []) {
                     log::error!(
                         "Failed to store outbound index {:?} for element {:?}: {:?}",
                         outbound_key,
@@ -625,7 +627,8 @@ fn update_source_joins(
 ) -> Result<(), IndexError> {
     match new_element {
         StoredElement::Node(n) => {
-            for (label, joins) in context.join_spec_by_label.iter() {
+            let join_spec_by_label = context.join_spec_by_label.read().unwrap();
+            for (label, joins) in join_spec_by_label.iter() {
                 if !n.metadata.labels.contains(label) {
                     continue;
                 }
@@ -656,7 +659,7 @@ fn update_source_joins(
 
                                 let pj_prefix = encode_partial_join_prefix(
                                     &qj.id,
-                                    &new_value,
+                                    new_value,
                                     &qjk.label,
                                     &qjk.property,
                                 );
@@ -666,7 +669,7 @@ fn update_source_joins(
                                 let did_insert = match txn.get_cf(&partial_cf, &pj_key) {
                                     Ok(Some(_)) => false,
                                     Ok(None) => {
-                                        if let Err(err) = txn.put_cf(&partial_cf, &pj_key, &[]) {
+                                        if let Err(err) = txn.put_cf(&partial_cf, &pj_key, []) {
                                             log::error!("Failed to store partial join {:?} for element {:?}: {:?}", pj_key, &n.metadata.reference, err);
                                             return Err(IndexError::other(err));
                                         }
@@ -687,7 +690,7 @@ fn update_source_joins(
                                                     txn,
                                                     old_element.get_reference(),
                                                     qj,
-                                                    &qjk,
+                                                    qjk,
                                                     old_value,
                                                 )?;
                                             }
@@ -708,10 +711,10 @@ fn update_source_joins(
                                             &qjk2.label,
                                             &qjk2.property,
                                         );
-                                        let mut others =
-                                            txn.prefix_iterator_cf(&partial_cf, &other_pj_prefix);
+                                        let others =
+                                            txn.prefix_iterator_cf(&partial_cf, other_pj_prefix);
 
-                                        while let Some(other) = others.next() {
+                                        for other in others {
                                             let other = match other {
                                                 Ok((k, _)) => {
                                                     if !k.starts_with(&other_pj_prefix) {
@@ -754,13 +757,13 @@ fn update_source_joins(
                                                 context.clone(),
                                                 txn,
                                                 in_out,
-                                                &slots,
+                                                slots,
                                             )?;
                                             set_element_internal(
                                                 context.clone(),
                                                 txn,
                                                 out_in,
-                                                &slots,
+                                                slots,
                                             )?;
                                         }
                                     }
@@ -785,7 +788,8 @@ fn delete_source_joins(
 ) -> Result<(), IndexError> {
     match old_element {
         StoredElement::Node(n) => {
-            for (label, joins) in context.join_spec_by_label.iter() {
+            let join_spec_by_label = context.join_spec_by_label.read().unwrap();
+            for (label, joins) in join_spec_by_label.iter() {
                 if !n.metadata.labels.contains(label) {
                     continue;
                 }
@@ -803,7 +807,7 @@ fn delete_source_joins(
                                     txn,
                                     old_element.get_reference(),
                                     qj,
-                                    &qjk,
+                                    qjk,
                                     value,
                                 )?;
                             }
@@ -852,9 +856,9 @@ fn delete_source_join(
 
             let other_pj_prefix =
                 encode_partial_join_prefix(&query_join.id, value, &qjk2.label, &qjk2.property);
-            let mut others = txn.prefix_iterator_cf(&partial_cf, &other_pj_prefix);
+            let others = txn.prefix_iterator_cf(&partial_cf, other_pj_prefix);
 
-            while let Some(other) = others.next() {
+            for other in others {
                 let other = match other {
                     Ok((k, _)) => {
                         if !k.starts_with(&other_pj_prefix) {
@@ -885,7 +889,7 @@ fn hash_element_ref(element_ref: &ElementReference) -> ReferenceHash {
         .as_bytes()
         .iter()
         .chain(element_ref.element_id.as_bytes())
-        .map(|b| *b)
+        .copied()
         .collect::<Vec<u8>>();
 
     fastmurmur3::hash(bytes.as_slice()).to_be_bytes()
@@ -897,7 +901,7 @@ fn hash_stored_element_ref(element_ref: &StoredElementReference) -> ReferenceHas
         .as_bytes()
         .iter()
         .chain(element_ref.element_id.as_bytes())
-        .map(|b| *b)
+        .copied()
         .collect::<Vec<u8>>();
 
     fastmurmur3::hash(bytes.as_slice()).to_be_bytes()
@@ -996,7 +1000,7 @@ fn encode_partial_join_key(prefix: &[u8; 16], element_ref: &StoredElementReferen
     data.extend_from_slice(prefix);
     data.push(source_id_size);
     data.extend_from_slice(source_id);
-    data.extend_from_slice(&element_ref.element_id.as_bytes());
+    data.extend_from_slice(element_ref.element_id.as_bytes());
     data
 }
 

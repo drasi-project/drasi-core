@@ -31,17 +31,21 @@ pub struct InMemoryElementIndex {
     element_archive: Arc<RwLock<HashMap<ElementReference, ElementArchive>>>,
     archive_enabled: bool,
 
-    join_spec_by_label: Arc<HashMap<Arc<str>, Vec<(Arc<QueryJoin>, Vec<usize>)>>>,
+    join_spec_by_label: Arc<RwLock<HashMap<Arc<str>, Vec<(Arc<QueryJoin>, Vec<usize>)>>>>,
 
     // [(join_label, field_value)] => [QueryJoinKey] => ElementReference[]
     partial_joins:
         Arc<RwLock<HashMap<(String, u64), HashMap<QueryJoinKey, HashSet<ElementReference>>>>>,
 }
 
-impl InMemoryElementIndex {
-    pub fn new(match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) -> Self {
-        let joins_by_label = extract_join_spec_by_label(match_path, joins);
+impl Default for InMemoryElementIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
+impl InMemoryElementIndex {
+    pub fn new() -> Self {
         Self {
             elements: Arc::new(RwLock::new(HashMap::new())),
             slot_affinity: Arc::new(RwLock::new(HashMap::new())),
@@ -49,7 +53,7 @@ impl InMemoryElementIndex {
             element_by_slot_in: Arc::new(RwLock::new(HashMap::new())),
             element_by_slot_out: Arc::new(RwLock::new(HashMap::new())),
             element_archive: Arc::new(RwLock::new(HashMap::new())),
-            join_spec_by_label: Arc::new(joins_by_label),
+            join_spec_by_label: Arc::new(RwLock::new(HashMap::new())),
             partial_joins: Arc::new(RwLock::new(HashMap::new())),
             archive_enabled: false,
         }
@@ -156,7 +160,8 @@ impl InMemoryElementIndex {
                 metadata,
                 properties,
             } => {
-                for (label, joins) in self.join_spec_by_label.iter() {
+                let join_spec_by_label = self.join_spec_by_label.read().await;
+                for (label, joins) in join_spec_by_label.iter() {
                     if !metadata.labels.contains(label) {
                         continue;
                     }
@@ -219,13 +224,13 @@ impl InMemoryElementIndex {
                                                 continue;
                                             }
 
-                                            if let Some(others) = partial_joins.get(&qjk2) {
+                                            if let Some(others) = partial_joins.get(qjk2) {
                                                 for other in others {
                                                     let in_out = Element::Relation {
                                                         metadata: ElementMetadata {
                                                             reference: get_join_virtual_ref(
                                                                 new_element.get_reference(),
-                                                                &other,
+                                                                other,
                                                             ),
                                                             labels: Arc::from([Arc::from(
                                                                 qj.id.clone(),
@@ -243,7 +248,7 @@ impl InMemoryElementIndex {
                                                     let out_in = Element::Relation {
                                                         metadata: ElementMetadata {
                                                             reference: get_join_virtual_ref(
-                                                                &other,
+                                                                other,
                                                                 new_element.get_reference(),
                                                             ),
                                                             labels: Arc::from([Arc::from(
@@ -273,7 +278,7 @@ impl InMemoryElementIndex {
                                             self.delete_source_join(
                                                 old_element.get_reference(),
                                                 qj,
-                                                &qjk,
+                                                qjk,
                                                 val_to_delete,
                                             )
                                             .await?;
@@ -302,7 +307,8 @@ impl InMemoryElementIndex {
                 metadata,
                 properties,
             } => {
-                for (label, joins) in self.join_spec_by_label.iter() {
+                let join_spec_by_label = self.join_spec_by_label.read().await;
+                for (label, joins) in join_spec_by_label.iter() {
                     if !metadata.labels.contains(label) {
                         continue;
                     }
@@ -318,7 +324,7 @@ impl InMemoryElementIndex {
                                     self.delete_source_join(
                                         old_element.get_reference(),
                                         qj,
-                                        &qjk,
+                                        qjk,
                                         p,
                                     )
                                     .await?;
@@ -359,8 +365,8 @@ impl InMemoryElementIndex {
 
                 if let Some(others) = partial_joins.get(qjk2) {
                     for other in others {
-                        let in_out = get_join_virtual_ref(old_element, &other);
-                        let out_in = get_join_virtual_ref(&other, old_element);
+                        let in_out = get_join_virtual_ref(old_element, other);
+                        let out_in = get_join_virtual_ref(other, old_element);
 
                         elements_to_delete.push(in_out);
                         elements_to_delete.push(out_in);
@@ -477,7 +483,7 @@ impl ElementIndex for InMemoryElementIndex {
             let mut guard = self.element_archive.write().await;
             let archive = guard
                 .entry(new_element.get_reference().clone())
-                .or_insert_with(|| ElementArchive::new());
+                .or_insert_with(ElementArchive::new);
 
             archive.insert(new_element.clone());
         }
@@ -518,6 +524,12 @@ impl ElementIndex for InMemoryElementIndex {
         guard.clear();
 
         Ok(())
+    }
+
+    async fn set_joins(&self, match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) {
+        let joins_by_label = extract_join_spec_by_label(match_path, joins);
+        let mut join_spec_by_label = self.join_spec_by_label.write().await;
+        join_spec_by_label.clone_from(&joins_by_label);
     }
 }
 
@@ -599,7 +611,7 @@ impl ElementArchive {
         match self
             .data
             .range((Bound::Included(&0), Bound::Included(&time)))
-            .map(|x| x.0.clone())
+            .map(|x| *x.0)
             .last()
         {
             None => Some(0),

@@ -3,11 +3,11 @@ use std::sync::{
     Arc,
 };
 
-use chrono::{Date, DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime};
 use serde_json::json;
 
 use drasi_core::{
-    evaluation::{context::PhaseEvaluationContext, variable_value::VariableValue},
+    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{AutoFutureQueueConsumer, QueryBuilder},
 };
@@ -25,11 +25,10 @@ macro_rules! variablemap {
 }
 
 pub async fn overdue_invoice(config: &(impl QueryTestConfig + Send)) {
-    let query = Arc::new(queries::list_overdue_query());
     let cq = {
-        let mut builder = QueryBuilder::new(query.clone());
-        builder = config.config_query(builder, query.clone()).await;
-        Arc::new(builder.build())
+        let mut builder = QueryBuilder::new(queries::list_overdue_query());
+        builder = config.config_query(builder).await;
+        Arc::new(builder.build().await)
     };
 
     let now_override = Arc::new(AtomicU64::new(0));
@@ -72,7 +71,7 @@ pub async fn overdue_invoice(config: &(impl QueryTestConfig + Send)) {
         let result = fqc.recv(std::time::Duration::from_secs(5)).await.unwrap();
 
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
                 "invoiceNumber" => VariableValue::String("INV1".into()),
                 "invoiceDate" => VariableValue::String("2020-01-01".into())
@@ -98,7 +97,7 @@ pub async fn overdue_invoice(config: &(impl QueryTestConfig + Send)) {
         let result = cq.process_source_change(change.clone()).await.unwrap();
 
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&PhaseEvaluationContext::Removing {
+        assert!(result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!(
                 "invoiceNumber" => VariableValue::String("INV1".into()),
                 "invoiceDate" => VariableValue::String("2020-01-01".into())
@@ -108,11 +107,10 @@ pub async fn overdue_invoice(config: &(impl QueryTestConfig + Send)) {
 }
 
 pub async fn overdue_count_persistent(config: &(impl QueryTestConfig + Send)) {
-    let query = Arc::new(queries::count_overdue_greater_query());
     let cq = {
-        let mut builder = QueryBuilder::new(query.clone());
-        builder = config.config_query(builder, query.clone()).await;
-        Arc::new(builder.build())
+        let mut builder = QueryBuilder::new(queries::count_overdue_greater_query());
+        builder = config.config_query(builder).await;
+        Arc::new(builder.build().await)
     };
 
     let now_override = Arc::new(AtomicU64::new(0));
@@ -196,7 +194,7 @@ pub async fn overdue_count_persistent(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
         println!("later: {:?}", result);
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
                 "count" => VariableValue::Integer(3.into())
             ),
@@ -221,7 +219,7 @@ pub async fn overdue_count_persistent(config: &(impl QueryTestConfig + Send)) {
         let result = cq.process_source_change(change.clone()).await.unwrap();
 
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&PhaseEvaluationContext::Removing {
+        assert!(result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!(
                 "count" => VariableValue::Integer(3.into())
             ),

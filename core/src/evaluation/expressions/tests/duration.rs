@@ -357,7 +357,7 @@ async fn test_duration_property_microseconds() {
                 .evaluate_expression(&context, &expr)
                 .await
                 .unwrap(),
-            VariableValue::Integer((21776000000 as i64).into())
+            VariableValue::Integer(21776000000_i64.into())
         );
     }
 }

@@ -62,7 +62,7 @@ impl From<String> for VariableValue {
 
 impl<'a> From<&'a str> for VariableValue {
     fn from(s: &'a str) -> Self {
-        if let Ok(date) = NaiveDate::parse_from_str(&s, "%F") {
+        if let Ok(date) = NaiveDate::parse_from_str(s, "%F") {
             // %Y-%m-%d
             VariableValue::Date(date)
         } else {
@@ -183,10 +183,8 @@ impl From<Value> for VariableValue {
             }
             Value::String(s) => VariableValue::String(s),
             Value::Array(arr) => {
-                let variable_values: Vec<VariableValue> = arr
-                    .into_iter()
-                    .map(|elem| VariableValue::from(elem))
-                    .collect();
+                let variable_values: Vec<VariableValue> =
+                    arr.into_iter().map(VariableValue::from).collect();
                 VariableValue::List(variable_values)
             }
             Value::Object(obj) => {

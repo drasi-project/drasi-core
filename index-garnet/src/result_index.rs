@@ -137,7 +137,7 @@ impl LazySortedSetStore for GarnetResultIndex {
                     .await
                 {
                     Ok(v) => {
-                        if v.len() == 0 {
+                        if v.is_empty() {
                             return Ok(None);
                         }
                         (v[0].0.clone(), v[0].1)
@@ -151,7 +151,7 @@ impl LazySortedSetStore for GarnetResultIndex {
                     .await
                 {
                     Ok(v) => {
-                        if v.len() == 0 {
+                        if v.is_empty() {
                             return Ok(None);
                         }
                         (v[0].0.clone(), v[0].1)
@@ -165,10 +165,7 @@ impl LazySortedSetStore for GarnetResultIndex {
             .get::<String, Option<isize>>(format!("{}:{}", set_key, next_value.0))
             .await
         {
-            Ok(v) => match v {
-                Some(v) => v,
-                None => 0,
-            },
+            Ok(v) => v.unwrap_or(0),
             Err(e) => return Err(IndexError::other(e)),
         };
 
@@ -202,10 +199,7 @@ impl LazySortedSetStore for GarnetResultIndex {
         let val_key = format!("{}:{}", set_key, value.0);
 
         let current_count = match con.get::<&str, Option<isize>>(&val_key).await {
-            Ok(v) => match v {
-                Some(v) => v,
-                None => 0,
-            },
+            Ok(v) => v.unwrap_or(0),
             Err(e) => return Err(IndexError::other(e)),
         };
 
@@ -267,10 +261,7 @@ impl ResultSequenceCounter for GarnetResultIndex {
             .get::<String, Option<u64>>(format!("metadata:{}:sequence", self.query_id))
             .await
         {
-            Ok(v) => match v {
-                Some(v) => v,
-                None => 0,
-            },
+            Ok(v) => v.unwrap_or(0),
             Err(e) => return Err(IndexError::other(e)),
         };
 

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use drasi_core::{
-    evaluation::{context::PhaseEvaluationContext, variable_value::VariableValue},
+    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{ContinuousQuery, QueryBuilder},
 };
@@ -32,12 +32,11 @@ async fn bootstrap_query(query: &ContinuousQuery) {
 
 // Query identifies when the total number of support calls on any day exceeds 10.
 pub async fn greater_than_a_threshold(config: &(impl QueryTestConfig + Send)) {
-    let cypher_query = Arc::new(queries::greater_than_a_threshold_query());
     let greater_than_a_threshold_query = {
-        let mut builder = QueryBuilder::new(cypher_query.clone())
+        let mut builder = QueryBuilder::new(queries::greater_than_a_threshold_query())
             .with_joins(queries::greater_than_a_threshold_metadata());
-        builder = config.config_query(builder, cypher_query).await;
-        builder.build()
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     // Add initial values
@@ -112,7 +111,7 @@ pub async fn greater_than_a_threshold(config: &(impl QueryTestConfig + Send)) {
         // println!("Node Result - Add call 11: {:?}", result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "callYear" => VariableValue::from(json!(2023)),
               "callDayOfYear" => VariableValue::from(json!(274)),
@@ -124,12 +123,11 @@ pub async fn greater_than_a_threshold(config: &(impl QueryTestConfig + Send)) {
 
 // Query identifies when the total number of support calls for a customer on any day exceeds 5.
 pub async fn greater_than_a_threshold_by_customer(config: &(impl QueryTestConfig + Send)) {
-    let cypher_query = Arc::new(queries::greater_than_a_threshold_by_customer_query());
     let greater_than_a_threshold_query = {
-        let mut builder = QueryBuilder::new(cypher_query.clone())
+        let mut builder = QueryBuilder::new(queries::greater_than_a_threshold_by_customer_query())
             .with_joins(queries::greater_than_a_threshold_metadata());
-        builder = config.config_query(builder, cypher_query).await;
-        builder.build()
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     // Add initial values
@@ -204,7 +202,7 @@ pub async fn greater_than_a_threshold_by_customer(config: &(impl QueryTestConfig
         // println!("Rel Result - Add call 11: {:?}", result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "customerId" => VariableValue::from(json!("customer_01")),
               "customerName" => VariableValue::from(json!("Customer 01")),
@@ -238,7 +236,7 @@ pub async fn greater_than_a_threshold_by_customer(config: &(impl QueryTestConfig
         // println!("Rel Result - Add call 11: {:?}", result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "customerId" => VariableValue::from(json!("customer_02")),
               "customerName" => VariableValue::from(json!("Customer 02")),

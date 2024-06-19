@@ -16,7 +16,7 @@ impl ScalarFunction for DrasiMax {
         _expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
     ) -> Result<VariableValue, EvaluationError> {
-        if args.len() < 1 || args.len() > 2 {
+        if args.is_empty() || args.len() > 2 {
             return Err(EvaluationError::InvalidArgumentCount(
                 "drasi.max".to_string(),
             ));
@@ -39,12 +39,12 @@ impl ScalarFunction for DrasiMax {
                 VariableValue::String(s) => Ok(VariableValue::String(s.clone())),
                 VariableValue::Float(f) => Ok(VariableValue::Float(f.clone())),
                 VariableValue::Integer(i) => Ok(VariableValue::Integer(i.clone())),
-                VariableValue::Bool(b) => Ok(VariableValue::Bool(b.clone())),
+                VariableValue::Bool(b) => Ok(VariableValue::Bool(*b)),
                 VariableValue::Object(o) => Ok(VariableValue::Object(o.clone())),
-                VariableValue::Date(d) => Ok(VariableValue::Date(d.clone())),
-                VariableValue::LocalTime(t) => Ok(VariableValue::LocalTime(t.clone())),
-                VariableValue::LocalDateTime(dt) => Ok(VariableValue::LocalDateTime(dt.clone())),
-                VariableValue::ZonedTime(t) => Ok(VariableValue::ZonedTime(t.clone())),
+                VariableValue::Date(d) => Ok(VariableValue::Date(*d)),
+                VariableValue::LocalTime(t) => Ok(VariableValue::LocalTime(*t)),
+                VariableValue::LocalDateTime(dt) => Ok(VariableValue::LocalDateTime(*dt)),
+                VariableValue::ZonedTime(t) => Ok(VariableValue::ZonedTime(*t)),
                 VariableValue::ZonedDateTime(dt) => Ok(VariableValue::ZonedDateTime(dt.clone())),
                 VariableValue::Duration(d) => Ok(VariableValue::Duration(d.clone())),
                 _ => Ok(VariableValue::Null),

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use drasi_core::{
-    evaluation::{context::PhaseEvaluationContext, variable_value::VariableValue},
+    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{ContinuousQuery, QueryBuilder},
 };
@@ -31,12 +31,11 @@ async fn bootstrap_query(query: &ContinuousQuery) {
 }
 
 pub async fn rolling_average_decrease_by_ten(config: &(impl QueryTestConfig + Send)) {
-    let cypher_query = Arc::new(queries::rolling_average_decrease_by_ten_query());
     let rolling_average_decrease_by_ten_query = {
-        let mut builder = QueryBuilder::new(cypher_query.clone())
+        let mut builder = QueryBuilder::new(queries::rolling_average_decrease_by_ten_query())
             .with_joins(queries::rolling_average_decrease_by_ten_metadata());
-        builder = config.config_query(builder, cypher_query).await;
-        builder.build()
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     // Add initial values
@@ -142,7 +141,7 @@ pub async fn rolling_average_decrease_by_ten(config: &(impl QueryTestConfig + Se
         assert_eq!(node_result.len(), 1);
         assert_eq!(
             node_result[0],
-            PhaseEvaluationContext::Adding {
+            QueryPartEvaluationContext::Adding {
                 after: variablemap! (
                     "currentAverageTemp" => VariableValue::from(json!(37.857142857142854)),
                     "freezerId" => VariableValue::from(json!("equip_01")),

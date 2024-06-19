@@ -18,7 +18,7 @@ impl ScalarFunction for Rand {
         _expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
     ) -> Result<VariableValue, EvaluationError> {
-        if args.len() != 0 {
+        if !args.is_empty() {
             return Err(EvaluationError::InvalidArgumentCount("rand".to_string()));
         }
         let mut rng = rand::thread_rng();

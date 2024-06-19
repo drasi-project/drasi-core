@@ -8,7 +8,8 @@ use tokio_stream::StreamExt;
 
 use crate::{
     interface::{ElementIndex, ElementStream, IndexError},
-    models::{Element, ElementReference},
+    models::{Element, ElementReference, QueryJoin},
+    path_solver::match_path::MatchPath,
 };
 
 pub struct CachedElementIndex {
@@ -273,6 +274,10 @@ impl ElementIndex for CachedElementIndex {
         outbound_cache.purge();
 
         Ok(())
+    }
+
+    async fn set_joins(&self, match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) {
+        self.element_index.set_joins(match_path, joins).await;
     }
 }
 

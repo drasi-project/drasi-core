@@ -4,7 +4,7 @@ use core::hash::{Hash, Hasher};
 use serde::de::{self, Deserialize, Deserializer, Visitor};
 use serde_json::Number;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Float {
     value: f64,
 }
@@ -93,17 +93,9 @@ impl Float {
     }
 }
 
-impl Into<Number> for Float {
-    fn into(self) -> Number {
-        Number::from_f64(self.value).unwrap()
-    }
-}
-
-impl Default for Float {
-    fn default() -> Self {
-        Self {
-            value: Default::default(),
-        }
+impl From<Float> for Number {
+    fn from(val: Float) -> Self {
+        Number::from_f64(val.value).unwrap()
     }
 }
 

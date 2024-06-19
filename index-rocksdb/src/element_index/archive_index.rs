@@ -113,12 +113,12 @@ impl ElementArchiveIndex for RocksDbElementIndex {
                     }
                     Ok(0)
                 });
-                let element_timestamp = match task.await {
+
+                match task.await {
                     Ok(Ok(data)) => data,
                     Ok(Err(e)) => return Err(e),
                     Err(e) => return Err(IndexError::other(e)),
-                };
-                element_timestamp
+                }
             }
         };
         let to = range.to;

@@ -1,4 +1,3 @@
-use drasi_query_ast::ast;
 use drasi_core::models::{QueryJoin, QueryJoinKey};
 
 /**
@@ -62,8 +61,8 @@ pub fn crosses_above_three_times_in_an_hour_metadata() -> Vec<QueryJoin> {
     ]
 }
 
-pub fn crosses_above_three_times_in_an_hour_query() -> ast::Query {
-    drasi_query_cypher::parse("
+pub fn crosses_above_three_times_in_an_hour_query() -> &'static str {
+    "
   MATCH
     (equip:Equipment {type:'freezer'})-[:HAS_SENSOR]->(:Sensor {type:'temperature'})-[:HAS_VALUE]->(val:SensorValue)
   WITH
@@ -80,7 +79,7 @@ pub fn crosses_above_three_times_in_an_hour_query() -> ast::Query {
   WHERE 
     countTempExceededInTimeRange >= 3
   RETURN
-    freezerId, countTempExceededInTimeRange").unwrap()
+    freezerId, countTempExceededInTimeRange"
 }
 
 // A version of the query that includes the time ranges for the sensor values

@@ -24,39 +24,30 @@ async fn evaluate_logical_predicate() {
     {
         let context =
             ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-        assert_eq!(
-            evaluator
-                .evaluate_predicate(&context, &predicate)
-                .await
-                .unwrap(),
-            true
-        );
+        assert!(evaluator
+            .evaluate_predicate(&context, &predicate)
+            .await
+            .unwrap());
     }
 
     variables.insert("param3".into(), VariableValue::Integer(Integer::from(4)));
     {
         let context =
             ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-        assert_eq!(
-            evaluator
-                .evaluate_predicate(&context, &predicate)
-                .await
-                .unwrap(),
-            true
-        );
+        assert!(evaluator
+            .evaluate_predicate(&context, &predicate)
+            .await
+            .unwrap());
     }
 
     variables.insert("param2".into(), VariableValue::Integer(Integer::from(3)));
     {
         let context =
             ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-        assert_eq!(
-            evaluator
-                .evaluate_predicate(&context, &predicate)
-                .await
-                .unwrap(),
-            false
-        );
+        assert!(!evaluator
+            .evaluate_predicate(&context, &predicate)
+            .await
+            .unwrap());
     }
 
     variables.insert("param1".into(), VariableValue::Integer(Integer::from(2)));
@@ -65,13 +56,10 @@ async fn evaluate_logical_predicate() {
     {
         let context =
             ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-        assert_eq!(
-            evaluator
-                .evaluate_predicate(&context, &predicate)
-                .await
-                .unwrap(),
-            false
-        );
+        assert!(!evaluator
+            .evaluate_predicate(&context, &predicate)
+            .await
+            .unwrap());
     }
 }
 

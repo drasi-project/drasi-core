@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use crate::QueryTestConfig;
-use drasi_query_ast::ast;
+
 use drasi_core::{
-    evaluation::{context::PhaseEvaluationContext, variable_value::VariableValue},
+    evaluation::context::QueryPartEvaluationContext,
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::QueryBuilder,
 };
@@ -17,10 +17,8 @@ macro_rules! variablemap {
     }}
   }
 
-pub fn test_query() -> ast::Query {
-    drasi_query_cypher::parse(
-        "
-    MATCH 
+pub fn test_query() -> &'static str {
+    "MATCH 
         (t:Thing)
     RETURN
         t as now,
@@ -28,17 +26,14 @@ pub fn test_query() -> ast::Query {
         drasi.getVersionByTimestamp(t, 1000) as v1,
         drasi.getVersionByTimestamp(t, 1001) as v1_1,
         drasi.getVersionByTimestamp(t, 2001) as v2
-    ",
-    )
-    .unwrap()
+    "
 }
 
 pub async fn get_version_by_timestamp(config: &(impl QueryTestConfig + Send)) {
-    let mq = Arc::new(test_query());
     let query = {
-        let mut builder = QueryBuilder::new(mq.clone());
-        builder = config.config_query(builder, mq).await;
-        builder.build()
+        let mut builder = QueryBuilder::new(test_query());
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     let v0 = Element::Node {
@@ -93,7 +88,7 @@ pub async fn get_version_by_timestamp(config: &(impl QueryTestConfig + Send)) {
     assert_eq!(result.len(), 1);
 
     let after = match result[0] {
-        PhaseEvaluationContext::Updating { ref after, .. } => after,
+        QueryPartEvaluationContext::Updating { ref after, .. } => after,
         _ => panic!("Expected Updating"),
     };
 

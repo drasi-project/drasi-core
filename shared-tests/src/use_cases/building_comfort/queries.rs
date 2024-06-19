@@ -1,8 +1,5 @@
-use drasi_query_ast::ast;
-
-pub fn room_comfort_level_calc_query() -> ast::Query {
-    drasi_query_cypher::parse(
-        "
+pub fn room_comfort_level_calc_query() -> &'static str {
+    "
   MATCH
     (r:Room)
   RETURN
@@ -11,14 +8,11 @@ pub fn room_comfort_level_calc_query() -> ast::Query {
       50 + (r.temp - 72) + (r.humidity - 42) +
       CASE WHEN r.co2 > 500 THEN (r.co2 - 500) / 25 ELSE 0 END
     ) AS ComfortLevel
-    ",
-    )
-    .unwrap()
+    "
 }
 
-pub fn floor_comfort_level_calc_query() -> ast::Query {
-    drasi_query_cypher::parse(
-        "
+pub fn floor_comfort_level_calc_query() -> &'static str {
+    "
   MATCH
     (r:Room)-[:PART_OF]->(f:Floor)
     WITH
@@ -29,14 +23,11 @@ pub fn floor_comfort_level_calc_query() -> ast::Query {
   RETURN 
     elementId(f) AS FloorId, 
     avg(RoomComfortLevel) AS ComfortLevel
-    ",
-    )
-    .unwrap()
+    "
 }
 
-pub fn building_comfort_level_calc_query() -> ast::Query {
-    drasi_query_cypher::parse(
-        "
+pub fn building_comfort_level_calc_query() -> &'static str {
+    "
     MATCH
       (r:Room)-[:PART_OF]->(f:Floor)-[:PART_OF]->(b:Building)
     WITH
@@ -53,14 +44,11 @@ pub fn building_comfort_level_calc_query() -> ast::Query {
     RETURN
       elementId(b) AS BuildingId,
       avg(FloorComfortLevel) AS ComfortLevel
-    ",
-    )
-    .unwrap()
+    "
 }
 
-pub fn room_comfort_level_alert_query() -> ast::Query {
-    drasi_query_cypher::parse(
-        "
+pub fn room_comfort_level_alert_query() -> &'static str {
+    "
     MATCH
       (r:Room)
     WITH
@@ -74,14 +62,11 @@ pub fn room_comfort_level_alert_query() -> ast::Query {
     RETURN
       RoomId,
       ComfortLevel
-    ",
-    )
-    .unwrap()
+    "
 }
 
-pub fn floor_comfort_level_alert_query() -> ast::Query {
-    drasi_query_cypher::parse(
-        "
+pub fn floor_comfort_level_alert_query() -> &'static str {
+    "
     MATCH
       (r:Room)-[:PART_OF]->(f:Floor)
     WITH
@@ -98,14 +83,11 @@ pub fn floor_comfort_level_alert_query() -> ast::Query {
     RETURN
       FloorId,
       ComfortLevel
-    ",
-    )
-    .unwrap()
+    "
 }
 
-pub fn building_comfort_level_alert_query() -> ast::Query {
-    drasi_query_cypher::parse(
-        "
+pub fn building_comfort_level_alert_query() -> &'static str {
+    "
     MATCH
       (r:Room)-[:PART_OF]->(f:Floor)-[:PART_OF]->(b:Building)
     WITH
@@ -127,14 +109,11 @@ pub fn building_comfort_level_alert_query() -> ast::Query {
     RETURN
       BuildingId,
       ComfortLevel
-    ",
-    )
-    .unwrap()
+    "
 }
 
-pub fn ui_query() -> ast::Query {
-    drasi_query_cypher::parse(
-        "
+pub fn ui_query() -> &'static str {
+    "
   MATCH
     (r:Room)-[:PART_OF]->(f:Floor)-[:PART_OF]->(b:Building)
   WITH
@@ -156,7 +135,5 @@ pub fn ui_query() -> ast::Query {
     r.humidity AS Humidity,
     r.co2 AS CO2,
     RoomComfortLevel AS ComfortLevel
-    ",
-    )
-    .unwrap()
+    "
 }

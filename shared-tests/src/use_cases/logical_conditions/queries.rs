@@ -1,4 +1,3 @@
-use drasi_query_ast::ast;
 use drasi_core::models::{QueryJoin, QueryJoinKey};
 
 /**
@@ -62,8 +61,8 @@ pub fn logical_conditions_metadata() -> Vec<QueryJoin> {
     ]
 }
 
-pub fn logical_conditions_query() -> ast::Query {
-    drasi_query_cypher::parse("
+pub fn logical_conditions_query() -> &'static str {
+    "
   MATCH
     (equip:Equipment {type:'freezer'})-[:HAS_SENSOR]->(s1:Sensor {type:'temperature'})-[:HAS_VALUE]->(tempSensorValue:SensorValue),
     (equip:Equipment {type:'freezer'})-[:HAS_SENSOR]->(s2:Sensor {type:'door'})-[:HAS_VALUE]->(doorSensorValue:SensorValue)
@@ -71,5 +70,5 @@ pub fn logical_conditions_query() -> ast::Query {
     tempSensorValue.value > 32 AND
     doorSensorValue.value = 1
   RETURN
-    elementId(equip) AS freezerId").unwrap()
+    elementId(equip) AS freezerId"
 }

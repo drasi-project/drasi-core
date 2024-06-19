@@ -11,6 +11,7 @@ use drasi_core::{
 };
 use hashers::jenkins::spooky_hash::SpookyHasher;
 use prost::Message;
+use tokio::sync::RwLock;
 
 use crate::storage_models::{
     StoredElement, StoredElementContainer, StoredElementMetadata, StoredElementReference,
@@ -30,24 +31,14 @@ mod archive_index;
 /// ei:{query_id}:$partial:{join_label}:{field_value}:{node_label}:{property} -> [element_ref] # Partial join index to track source joins
 pub struct GarnetElementIndex {
     query_id: Arc<str>,
-    slot_count: usize,
     key_formatter: Arc<KeyFormatter>,
     connection: MultiplexedConnection,
-    join_spec_by_label: HashMap<String, Vec<(Arc<QueryJoin>, Vec<usize>)>>,
+    join_spec_by_label: Arc<RwLock<HashMap<String, Vec<(Arc<QueryJoin>, Vec<usize>)>>>>,
     archive_enabled: bool,
 }
 
 impl GarnetElementIndex {
-    pub async fn connect(
-        query_id: &str,
-        url: &str,
-        match_path: &MatchPath,
-        joins: &Vec<Arc<QueryJoin>>,
-    ) -> Result<Self, IndexError> {
-        let slot_count = match_path.slots.len();
-
-        let join_spec_by_label = extract_join_spec_by_label(match_path, joins);
-
+    pub async fn connect(query_id: &str, url: &str) -> Result<Self, IndexError> {
         let client = match redis::Client::open(url) {
             Ok(client) => client,
             Err(e) => return Err(IndexError::connection_failed(e)),
@@ -62,8 +53,7 @@ impl GarnetElementIndex {
             key_formatter: Arc::new(KeyFormatter::new(Arc::from(query_id))),
             query_id: Arc::from(query_id),
             connection,
-            slot_count,
-            join_spec_by_label,
+            join_spec_by_label: Arc::new(RwLock::new(HashMap::new())),
             archive_enabled: false,
         })
     }
@@ -74,12 +64,13 @@ impl GarnetElementIndex {
 
     async fn update_source_joins(
         &self,
-        mut pipeline: &mut Pipeline,
+        pipeline: &mut Pipeline,
         new_element: &StoredElement,
     ) -> Result<(), IndexError> {
         match new_element {
             StoredElement::Node(n) => {
-                for (label, joins) in self.join_spec_by_label.iter() {
+                let join_spec_by_label = self.join_spec_by_label.read().await;
+                for (label, joins) in join_spec_by_label.iter() {
                     if !n.metadata.labels.contains(label) {
                         continue;
                     }
@@ -139,10 +130,10 @@ impl GarnetElementIndex {
                                                     old.properties.get(&qjk.property)
                                                 {
                                                     self.delete_source_join(
-                                                        &mut pipeline,
+                                                        pipeline,
                                                         old_element.get_reference(),
                                                         qj,
-                                                        &qjk,
+                                                        qjk,
                                                         old_value,
                                                     )
                                                     .await?;
@@ -209,18 +200,10 @@ impl GarnetElementIndex {
                                                         properties: StoredValueMap::new(),
                                                     });
 
-                                                self.set_element_internal(
-                                                    &mut pipeline,
-                                                    in_out,
-                                                    &slots,
-                                                )
-                                                .await?;
-                                                self.set_element_internal(
-                                                    &mut pipeline,
-                                                    out_in,
-                                                    &slots,
-                                                )
-                                                .await?;
+                                                self.set_element_internal(pipeline, in_out, slots)
+                                                    .await?;
+                                                self.set_element_internal(pipeline, out_in, slots)
+                                                    .await?;
                                             }
                                         }
                                     }
@@ -239,12 +222,13 @@ impl GarnetElementIndex {
 
     async fn delete_source_joins(
         &self,
-        mut pipeline: &mut Pipeline,
+        pipeline: &mut Pipeline,
         old_element: &StoredElement,
     ) -> Result<(), IndexError> {
         match old_element {
             StoredElement::Node(n) => {
-                for (label, joins) in self.join_spec_by_label.iter() {
+                let join_spec_by_label = self.join_spec_by_label.read().await;
+                for (label, joins) in join_spec_by_label.iter() {
                     if !n.metadata.labels.contains(label) {
                         continue;
                     }
@@ -258,10 +242,10 @@ impl GarnetElementIndex {
                             match n.properties.get(&qjk.property) {
                                 Some(value) => {
                                     self.delete_source_join(
-                                        &mut pipeline,
+                                        pipeline,
                                         old_element.get_reference(),
                                         qj,
-                                        &qjk,
+                                        qjk,
                                         value,
                                     )
                                     .await?;
@@ -280,7 +264,7 @@ impl GarnetElementIndex {
 
     async fn delete_source_join(
         &self,
-        mut pipeline: &mut Pipeline,
+        pipeline: &mut Pipeline,
         old_element: &StoredElementReference,
         query_join: &QueryJoin,
         join_key: &QueryJoinKey,
@@ -328,8 +312,8 @@ impl GarnetElementIndex {
                     let in_out = get_join_virtual_ref(old_element, &other);
                     let out_in = get_join_virtual_ref(&other, old_element);
 
-                    self.delete_element_internal(&mut pipeline, &in_out).await?;
-                    self.delete_element_internal(&mut pipeline, &out_in).await?;
+                    self.delete_element_internal(pipeline, &in_out).await?;
+                    self.delete_element_internal(pipeline, &out_in).await?;
                 }
             }
         }
@@ -340,7 +324,7 @@ impl GarnetElementIndex {
     #[async_recursion]
     async fn set_element_internal(
         &self,
-        mut pipeline: &mut Pipeline,
+        pipeline: &mut Pipeline,
         element: StoredElement,
         slot_affinity: &Vec<usize>,
     ) -> Result<(), IndexError> {
@@ -351,8 +335,8 @@ impl GarnetElementIndex {
         let element = container.element.unwrap();
         let eref = element.get_reference();
 
-        let element_key = self.key_formatter.get_stored_element_key(&eref);
-        let element_ref_string = self.key_formatter.get_stored_element_ref_string(&eref);
+        let element_key = self.key_formatter.get_stored_element_key(eref);
+        let element_ref_string = self.key_formatter.get_stored_element_ref_string(eref);
 
         let prev_slots = match con
             .hget::<&str, &str, Option<Vec<u8>>>(&element_key, "slots")
@@ -416,10 +400,10 @@ impl GarnetElementIndex {
             }
         }
 
-        self.update_source_joins(&mut pipeline, &element).await?;
+        self.update_source_joins(pipeline, &element).await?;
 
         if self.archive_enabled {
-            self.insert_archive(&element.get_metadata(), &element_as_redis_args)
+            self.insert_archive(element.get_metadata(), &element_as_redis_args)
                 .await?;
         }
 
@@ -457,15 +441,28 @@ impl GarnetElementIndex {
         element_ref: &StoredElementReference,
     ) -> Result<(), IndexError> {
         let element_key = self.key_formatter.get_stored_element_key(element_ref);
+        let mut con = self.connection.clone();
+        let prev_slots = match con
+            .hget::<&str, &str, Option<Vec<u8>>>(&element_key, "slots")
+            .await
+        {
+            Ok(Some(prev)) => Some(BitSet::from_bytes(prev.as_slice())),
+            Ok(None) => None,
+            Err(e) => return Err(IndexError::other(e)),
+        };
 
         pipeline.del(&element_key).ignore();
 
-        for i in 0..self.slot_count {
-            let inbound_key = self.key_formatter.get_stored_inbound_key(element_ref, i);
-            let outbound_key = self.key_formatter.get_stored_outbound_key(element_ref, i);
+        if let Some(prev_slots) = prev_slots {
+            for slot in prev_slots.into_iter() {
+                let inbound_key = self.key_formatter.get_stored_inbound_key(element_ref, slot);
+                let outbound_key = self
+                    .key_formatter
+                    .get_stored_outbound_key(element_ref, slot);
 
-            pipeline.del(&inbound_key).ignore();
-            pipeline.del(&outbound_key).ignore();
+                pipeline.del(&inbound_key).ignore();
+                pipeline.del(&outbound_key).ignore();
+            }
         }
 
         match self.get_element_internal(element_key.as_str()).await? {
@@ -688,6 +685,12 @@ impl ElementIndex for GarnetElementIndex {
             }
         }
         Ok(())
+    }
+
+    async fn set_joins(&self, match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) {
+        let joins_by_label = extract_join_spec_by_label(match_path, joins);
+        let mut join_spec_by_label = self.join_spec_by_label.write().await;
+        join_spec_by_label.clone_from(&joins_by_label);
     }
 }
 

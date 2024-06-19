@@ -66,7 +66,7 @@ impl ScalarFunction for TrueFor {
         };
 
         let duration = match &args[1] {
-            VariableValue::Duration(d) => d.duration().clone(),
+            VariableValue::Duration(d) => *d.duration(),
             VariableValue::Integer(n) => match n.as_i64() {
                 Some(ms) => Duration::milliseconds(ms),
                 None => return Err(EvaluationError::InvalidType),

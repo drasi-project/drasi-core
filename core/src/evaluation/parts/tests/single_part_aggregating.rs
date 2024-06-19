@@ -4,11 +4,11 @@ use super::process_solution;
 
 use crate::{
     evaluation::{
-        context::PhaseEvaluationContext,
+        context::QueryPartEvaluationContext,
         functions::{aggregation::ValueAccumulator, FunctionRegistry},
-        variable_value::duration::Duration,
-        variable_value::VariableValue,
-        ExpressionEvaluator, QueryPhaseEvaluator,
+        parts::tests::build_query,
+        variable_value::{duration::Duration, VariableValue},
+        ExpressionEvaluator, QueryPartEvaluator,
     },
     in_memory_index::in_memory_result_index::InMemoryResultIndex,
     interface::{AccumulatorIndex, ResultKey, ResultOwner},
@@ -19,7 +19,7 @@ use serde_json::json;
 
 #[tokio::test]
 async fn aggregating_query_add_solution() {
-    let query = drasi_query_cypher::parse("MATCH (a) WHERE a.Value1 < 10 RETURN a.Name as key, sum(a.Value1) as my_sum, min(a.Value1) as my_min").unwrap();
+    let query = build_query("MATCH (a) WHERE a.Value1 < 10 RETURN a.Name as key, sum(a.Value1) as my_sum, min(a.Value1) as my_min");
 
     let node1 = json!({
       "id": 1,
@@ -45,22 +45,19 @@ async fn aggregating_query_add_solution() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPhaseEvaluator::new(
-        expr_evaluator.clone(),
-        ari.clone(),
-    ));
+    let evaluator = Arc::new(QueryPartEvaluator::new(expr_evaluator.clone(), ari.clone()));
 
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec!["key".to_string()],
             default_before: true,
             default_after: false,
@@ -80,14 +77,14 @@ async fn aggregating_query_add_solution() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec!["key".to_string()],
             default_before: true,
             default_after: false,
@@ -107,14 +104,14 @@ async fn aggregating_query_add_solution() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec!["key".to_string()],
             default_before: true,
             default_after: false,
@@ -134,7 +131,7 @@ async fn aggregating_query_add_solution() {
 
 #[tokio::test]
 async fn aggregating_query_update_solution() {
-    let query = drasi_query_cypher::parse("MATCH (a) WHERE a.Value1 < 10 RETURN a.Name as key, sum(a.Value1) as my_sum, min(a.Value1) as my_min").unwrap();
+    let query = build_query("MATCH (a) WHERE a.Value1 < 10 RETURN a.Name as key, sum(a.Value1) as my_sum, min(a.Value1) as my_min");
 
     let node1 = json!({
       "id": 1,
@@ -184,15 +181,12 @@ async fn aggregating_query_update_solution() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPhaseEvaluator::new(
-        expr_evaluator.clone(),
-        ari.clone(),
-    ));
+    let evaluator = Arc::new(QueryPartEvaluator::new(expr_evaluator.clone(), ari.clone()));
 
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
         },
     )
@@ -201,7 +195,7 @@ async fn aggregating_query_update_solution() {
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
         },
     )
@@ -210,7 +204,7 @@ async fn aggregating_query_update_solution() {
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
         },
     )
@@ -219,7 +213,7 @@ async fn aggregating_query_update_solution() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Updating {
+        QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1.clone()],
             after: variablemap!["a" => node1a.clone()],
         },
@@ -227,7 +221,7 @@ async fn aggregating_query_update_solution() {
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec!["key".to_string()],
             default_before: false,
             default_after: false,
@@ -247,7 +241,7 @@ async fn aggregating_query_update_solution() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Updating {
+        QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1a.clone()],
             after: variablemap!["a" => node1b.clone()],
         },
@@ -255,7 +249,7 @@ async fn aggregating_query_update_solution() {
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec!["key".to_string()],
             default_before: false,
             default_after: false,
@@ -275,7 +269,7 @@ async fn aggregating_query_update_solution() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Updating {
+        QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1b.clone()],
             after: variablemap!["a" => node1c.clone()],
         },
@@ -283,7 +277,7 @@ async fn aggregating_query_update_solution() {
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec!["key".to_string()],
             default_before: false,
             default_after: false,
@@ -303,7 +297,7 @@ async fn aggregating_query_update_solution() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Updating {
+        QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1c.clone()],
             after: variablemap!["a" => node1d.clone()],
         },
@@ -311,7 +305,7 @@ async fn aggregating_query_update_solution() {
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec!["key".to_string()],
             default_before: false,
             default_after: false,
@@ -327,7 +321,7 @@ async fn aggregating_query_update_solution() {
 
 #[tokio::test]
 async fn aggregating_query_remove_solution() {
-    let query = drasi_query_cypher::parse("MATCH (a) WHERE a.Value1 < 10 RETURN a.Name as key, sum(a.Value1) as my_sum, min(a.Value1) as my_min").unwrap();
+    let query = build_query("MATCH (a) WHERE a.Value1 < 10 RETURN a.Name as key, sum(a.Value1) as my_sum, min(a.Value1) as my_min");
 
     let node1 = json!({
       "id": 1,
@@ -353,15 +347,12 @@ async fn aggregating_query_remove_solution() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPhaseEvaluator::new(
-        expr_evaluator.clone(),
-        ari.clone(),
-    ));
+    let evaluator = Arc::new(QueryPartEvaluator::new(expr_evaluator.clone(), ari.clone()));
 
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
         },
     )
@@ -370,7 +361,7 @@ async fn aggregating_query_remove_solution() {
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
         },
     )
@@ -379,7 +370,7 @@ async fn aggregating_query_remove_solution() {
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
         },
     )
@@ -388,14 +379,14 @@ async fn aggregating_query_remove_solution() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Removing {
+        QueryPartEvaluationContext::Removing {
             before: variablemap!["a" => node2.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec!["key".to_string()],
             default_before: false,
             default_after: true,
@@ -415,14 +406,14 @@ async fn aggregating_query_remove_solution() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec!["key".to_string()],
             default_before: true,
             default_after: false,
@@ -442,14 +433,14 @@ async fn aggregating_query_remove_solution() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Removing {
+        QueryPartEvaluationContext::Removing {
             before: variablemap!["a" => node1.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec!["key".to_string()],
             default_before: false,
             default_after: true,
@@ -469,9 +460,7 @@ async fn aggregating_query_remove_solution() {
 
 #[tokio::test]
 async fn group_switch() {
-    let query =
-        drasi_query_cypher::parse("MATCH (a) RETURN a.Name as key, sum(a.Value1) as my_sum")
-            .unwrap();
+    let query = build_query("MATCH (a) RETURN a.Name as key, sum(a.Value1) as my_sum");
 
     let node1 = json!({
       "id": 1,
@@ -503,15 +492,12 @@ async fn group_switch() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPhaseEvaluator::new(
-        expr_evaluator.clone(),
-        ari.clone(),
-    ));
+    let evaluator = Arc::new(QueryPartEvaluator::new(expr_evaluator.clone(), ari.clone()));
 
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
         },
     )
@@ -520,7 +506,7 @@ async fn group_switch() {
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
         },
     )
@@ -529,7 +515,7 @@ async fn group_switch() {
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
         },
     )
@@ -538,7 +524,7 @@ async fn group_switch() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Updating {
+        QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1.clone()],
             after: variablemap!["a" => node1a.clone()],
         },
@@ -547,7 +533,7 @@ async fn group_switch() {
     assert_eq!(
         result.await,
         vec![
-            PhaseEvaluationContext::Aggregation {
+            QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec!["key".to_string()],
                 default_before: false,
                 default_after: false,
@@ -560,7 +546,7 @@ async fn group_switch() {
                   "my_sum" => json!(6.0)
                 ]
             },
-            PhaseEvaluationContext::Aggregation {
+            QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec!["key".to_string()],
                 default_before: false,
                 default_after: false,
@@ -608,9 +594,7 @@ async fn group_switch() {
 
 #[tokio::test]
 async fn group_switch_complex_accumulator() {
-    let query =
-        drasi_query_cypher::parse("MATCH (a) RETURN a.Name as key, avg(a.Value1) as my_avg")
-            .unwrap();
+    let query = build_query("MATCH (a) RETURN a.Name as key, avg(a.Value1) as my_avg");
 
     let node1 = json!({
       "id": 1,
@@ -642,15 +626,12 @@ async fn group_switch_complex_accumulator() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPhaseEvaluator::new(
-        expr_evaluator.clone(),
-        ari.clone(),
-    ));
+    let evaluator = Arc::new(QueryPartEvaluator::new(expr_evaluator.clone(), ari.clone()));
 
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
         },
     )
@@ -659,7 +640,7 @@ async fn group_switch_complex_accumulator() {
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
         },
     )
@@ -668,7 +649,7 @@ async fn group_switch_complex_accumulator() {
     process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
         },
     )
@@ -677,7 +658,7 @@ async fn group_switch_complex_accumulator() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Updating {
+        QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1.clone()],
             after: variablemap!["a" => node1a.clone()],
         },
@@ -686,7 +667,7 @@ async fn group_switch_complex_accumulator() {
     assert_eq!(
         result.await,
         vec![
-            PhaseEvaluationContext::Aggregation {
+            QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec!["key".to_string()],
                 default_before: false,
                 default_after: false,
@@ -699,7 +680,7 @@ async fn group_switch_complex_accumulator() {
                   "my_avg" => json!(3.0)
                 ]
             },
-            PhaseEvaluationContext::Aggregation {
+            QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec!["key".to_string()],
                 default_before: false,
                 default_after: false,
@@ -747,7 +728,7 @@ async fn group_switch_complex_accumulator() {
 
 #[tokio::test]
 async fn test_aggregating_function_sum_duration() {
-    let query = drasi_query_cypher::parse("MATCH (a) RETURN sum(a.Duration) as my_sum").unwrap();
+    let query = build_query("MATCH (a) RETURN sum(a.Duration) as my_sum");
 
     let mut node1 = VariableValue::from(json!({
       "id": 1,
@@ -779,22 +760,19 @@ async fn test_aggregating_function_sum_duration() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPhaseEvaluator::new(
-        expr_evaluator.clone(),
-        ari.clone(),
-    ));
+    let evaluator = Arc::new(QueryPartEvaluator::new(expr_evaluator.clone(), ari.clone()));
 
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
             default_after: false,
@@ -810,14 +788,14 @@ async fn test_aggregating_function_sum_duration() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
         },
     );
 
     assert_eq!(
         result.await,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
             default_after: false,
@@ -833,8 +811,7 @@ async fn test_aggregating_function_sum_duration() {
 
 #[tokio::test]
 async fn test_aggregating_function_max_duration() {
-    let query =
-        drasi_query_cypher::parse("MATCH (a) RETURN max(a.Duration) as max_result").unwrap();
+    let query = build_query("MATCH (a) RETURN max(a.Duration) as max_result");
     let mut node1 = VariableValue::from(json!({
         "id": 1,
     }));
@@ -879,15 +856,12 @@ async fn test_aggregating_function_max_duration() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPhaseEvaluator::new(
-        expr_evaluator.clone(),
-        ari.clone(),
-    ));
+    let evaluator = Arc::new(QueryPartEvaluator::new(expr_evaluator.clone(), ari.clone()));
 
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
         },
     )
@@ -895,7 +869,7 @@ async fn test_aggregating_function_max_duration() {
 
     assert_eq!(
         result,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
             default_after: false,
@@ -911,7 +885,7 @@ async fn test_aggregating_function_max_duration() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
         },
     )
@@ -919,7 +893,7 @@ async fn test_aggregating_function_max_duration() {
 
     assert_eq!(
         result,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
             default_after: false,
@@ -935,7 +909,7 @@ async fn test_aggregating_function_max_duration() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
         },
     )
@@ -943,7 +917,7 @@ async fn test_aggregating_function_max_duration() {
 
     assert_eq!(
         result,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
             default_after: false,
@@ -959,10 +933,9 @@ async fn test_aggregating_function_max_duration() {
 
 #[tokio::test]
 async fn test_aggregating_function_max_temporal_instant() {
-    let query = drasi_query_cypher::parse(
+    let query = build_query(
         "MATCH (a) RETURN max(a.Date) as max_date, max(a.LocalDateTime) as max_localdatetime",
-    )
-    .unwrap();
+    );
     let mut node1 = VariableValue::from(json!({
         "id": 1,
     }));
@@ -1020,15 +993,12 @@ async fn test_aggregating_function_max_temporal_instant() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPhaseEvaluator::new(
-        expr_evaluator.clone(),
-        ari.clone(),
-    ));
+    let evaluator = Arc::new(QueryPartEvaluator::new(expr_evaluator.clone(), ari.clone()));
 
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
         },
     )
@@ -1036,7 +1006,7 @@ async fn test_aggregating_function_max_temporal_instant() {
 
     assert_eq!(
         result,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
             default_after: false,
@@ -1054,7 +1024,7 @@ async fn test_aggregating_function_max_temporal_instant() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
         },
     )
@@ -1062,7 +1032,7 @@ async fn test_aggregating_function_max_temporal_instant() {
 
     assert_eq!(
         result,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
             default_after: false,
@@ -1080,7 +1050,7 @@ async fn test_aggregating_function_max_temporal_instant() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
         },
     )
@@ -1088,7 +1058,7 @@ async fn test_aggregating_function_max_temporal_instant() {
 
     assert_eq!(
         result,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
             default_after: false,
@@ -1106,8 +1076,7 @@ async fn test_aggregating_function_max_temporal_instant() {
 
 #[tokio::test]
 async fn test_aggregating_function_min_temporal_duration() {
-    let query =
-        drasi_query_cypher::parse("MATCH (a) RETURN min(a.Duration) as min_result").unwrap();
+    let query = build_query("MATCH (a) RETURN min(a.Duration) as min_result");
     let mut node1 = VariableValue::from(json!({
         "id": 1,
     }));
@@ -1152,15 +1121,12 @@ async fn test_aggregating_function_min_temporal_duration() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPhaseEvaluator::new(
-        expr_evaluator.clone(),
-        ari.clone(),
-    ));
+    let evaluator = Arc::new(QueryPartEvaluator::new(expr_evaluator.clone(), ari.clone()));
 
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
         },
     )
@@ -1168,7 +1134,7 @@ async fn test_aggregating_function_min_temporal_duration() {
 
     assert_eq!(
         result,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
             default_after: false,
@@ -1184,7 +1150,7 @@ async fn test_aggregating_function_min_temporal_duration() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
         },
     )
@@ -1192,7 +1158,7 @@ async fn test_aggregating_function_min_temporal_duration() {
 
     assert_eq!(
         result,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
             default_after: false,
@@ -1208,7 +1174,7 @@ async fn test_aggregating_function_min_temporal_duration() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
         },
     )
@@ -1216,7 +1182,7 @@ async fn test_aggregating_function_min_temporal_duration() {
 
     assert_eq!(
         result,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
             default_after: false,
@@ -1232,10 +1198,9 @@ async fn test_aggregating_function_min_temporal_duration() {
 
 #[tokio::test]
 async fn test_aggregating_function_min_temporal_instant() {
-    let query = drasi_query_cypher::parse(
+    let query = build_query(
         "MATCH (a) RETURN min(a.LocalTime) as min_time, min(a.LocalDateTime) as min_localdatetime",
-    )
-    .unwrap();
+    );
     let mut node1 = VariableValue::from(json!({
         "id": 1,
     }));
@@ -1292,15 +1257,12 @@ async fn test_aggregating_function_min_temporal_instant() {
         function_registry.clone(),
         ari.clone(),
     ));
-    let evaluator = Arc::new(QueryPhaseEvaluator::new(
-        expr_evaluator.clone(),
-        ari.clone(),
-    ));
+    let evaluator = Arc::new(QueryPartEvaluator::new(expr_evaluator.clone(), ari.clone()));
 
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
         },
     )
@@ -1308,7 +1270,7 @@ async fn test_aggregating_function_min_temporal_instant() {
 
     assert_eq!(
         result,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
             default_after: false,
@@ -1326,7 +1288,7 @@ async fn test_aggregating_function_min_temporal_instant() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap![
                 "a" => node2.clone()
             ],
@@ -1336,7 +1298,7 @@ async fn test_aggregating_function_min_temporal_instant() {
 
     assert_eq!(
         result,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
             default_after: false,
@@ -1354,7 +1316,7 @@ async fn test_aggregating_function_min_temporal_instant() {
     let result = process_solution(
         &query,
         &evaluator,
-        PhaseEvaluationContext::Adding {
+        QueryPartEvaluationContext::Adding {
             after: variablemap![
                 "a" => node1.clone()
             ],
@@ -1364,7 +1326,7 @@ async fn test_aggregating_function_min_temporal_instant() {
 
     assert_eq!(
         result,
-        vec![PhaseEvaluationContext::Aggregation {
+        vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
             default_after: false,

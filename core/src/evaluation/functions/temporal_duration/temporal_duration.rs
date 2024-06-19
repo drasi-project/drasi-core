@@ -38,7 +38,7 @@ impl ScalarFunction for DurationFunc {
                 Ok(VariableValue::Duration(duration))
             }
             VariableValue::Object(o) => {
-                let valid_keys: HashSet<String> = vec![
+                let valid_keys: HashSet<String> = [
                     "years",
                     "months",
                     "weeks",
@@ -797,28 +797,25 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, Evaluation
                         if matched_value.contains('W') {
                             let substring = &matched_value[..(matched_value.len() - 1)];
                             if let Ok(weeks) = substring.parse::<i64>() {
-                                duration_result = duration_result + ChronoDuration::weeks(weeks);
+                                duration_result += ChronoDuration::weeks(weeks);
                             } else {
                                 return Err(EvaluationError::ParseError);
                             }
                         }
                         if matched_value.contains('D') {
                             let substring = &matched_value[..(matched_value.len() - 1)];
-                            if substring.contains(".") {
+                            if substring.contains('.') {
                                 if let Ok(days) = substring.parse::<f64>() {
-                                    duration_result = duration_result
-                                        + ChronoDuration::nanoseconds(
-                                            (days * 86400000000000.0) as i64,
-                                        );
+                                    duration_result += ChronoDuration::nanoseconds(
+                                        (days * 86400000000000.0) as i64,
+                                    );
                                 } else {
                                     return Err(EvaluationError::ParseError);
                                 }
+                            } else if let Ok(days) = substring.parse::<i64>() {
+                                duration_result += ChronoDuration::days(days);
                             } else {
-                                if let Ok(days) = substring.parse::<i64>() {
-                                    duration_result = duration_result + ChronoDuration::days(days);
-                                } else {
-                                    return Err(EvaluationError::ParseError);
-                                }
+                                return Err(EvaluationError::ParseError);
                             }
                         }
                     }
@@ -841,7 +838,7 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, Evaluation
                 None => return Err(EvaluationError::ParseError),
             };
 
-            if time_duration_string.contains(".") {
+            if time_duration_string.contains('.') {
                 let mut fract_string = match time_duration_string.split('.').last() {
                     Some(fract_string) => fract_string,
                     None => return Err(EvaluationError::ParseError),
@@ -851,14 +848,13 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, Evaluation
                     Ok(nanoseconds) => nanoseconds,
                     Err(_) => return Err(EvaluationError::ParseError),
                 };
-                duration_result =
-                    duration_result + ChronoDuration::nanoseconds(nanoseconds * 100_000_000 as i64);
+                duration_result += ChronoDuration::nanoseconds(nanoseconds * 100_000_000_i64);
             }
-            duration_result = duration_result + ChronoDuration::seconds(seconds.trunc() as i64);
+            duration_result += ChronoDuration::seconds(seconds.trunc() as i64);
         }
         None => {}
     }
 
     let result = Duration::new(duration_result, duration_years, duration_months);
-    return Ok(result);
+    Ok(result)
 }

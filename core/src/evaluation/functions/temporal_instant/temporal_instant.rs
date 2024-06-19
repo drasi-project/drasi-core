@@ -42,7 +42,7 @@ impl ScalarFunction for Date {
                 }
             }
             VariableValue::Object(o) => {
-                let valid_keys: HashSet<String> = vec![
+                let valid_keys: HashSet<String> = [
                     "year",
                     "month",
                     "week",
@@ -100,7 +100,7 @@ impl ScalarFunction for LocalTime {
                 }
             }
             VariableValue::Object(o) => {
-                let valid_keys: HashSet<String> = vec![
+                let valid_keys: HashSet<String> = [
                     "hour",
                     "minute",
                     "second",
@@ -227,7 +227,7 @@ impl ScalarFunction for Time {
                 }
             }
             VariableValue::Object(o) => {
-                let valid_keys: HashSet<String> = vec![
+                let valid_keys: HashSet<String> = [
                     "hour",
                     "minute",
                     "second",
@@ -279,7 +279,7 @@ impl ScalarFunction for Time {
                             VariableValue::String(s) => s.as_str(),
                             _ => "UTC",
                         };
-                        if timezone_str.contains("+") || timezone_str.contains("-") {
+                        if timezone_str.contains('+') || timezone_str.contains('-') {
                             let offset = match FixedOffset::from_str(timezone_str) {
                                 Ok(offset) => offset,
                                 Err(_) => return Err(EvaluationError::ParseError),
@@ -391,7 +391,7 @@ impl ScalarFunction for DateTime {
                             Some(VariableValue::String(s)) => s.as_str(),
                             _ => "UTC",
                         };
-                        if timezone_str.contains("+") || timezone_str.contains("-") {
+                        if timezone_str.contains('+') || timezone_str.contains('-') {
                             let offset = match FixedOffset::from_str(timezone_str) {
                                 Ok(offset) => offset,
                                 Err(_) => return Err(EvaluationError::InvalidType),
@@ -473,23 +473,17 @@ async fn create_date_from_componet(o: BTreeMap<String, VariableValue>) -> Option
         None => 0,
     };
     let date = NaiveDate::from_ymd_opt(year as i32, month as u32, day as u32).unwrap();
-    return Some(VariableValue::Date(date));
+    Some(VariableValue::Date(date))
 }
 
 async fn create_date_time_from_epoch(o: BTreeMap<String, VariableValue>) -> Option<VariableValue> {
     let nanoseconds = match o.get("nanosecond") {
-        Some(nanoseconds) => match nanoseconds.as_i64() {
-            Some(nanoseconds) => nanoseconds,
-            None => 0,
-        },
+        Some(nanoseconds) => nanoseconds.as_i64().unwrap_or(0),
         None => 0,
     };
     if o.contains_key("epochSeconds") {
         let epoch_seconds = match o.get("epochSeconds") {
-            Some(epoch_seconds) => match epoch_seconds.as_i64() {
-                Some(epoch_seconds) => epoch_seconds,
-                None => 0,
-            },
+            Some(epoch_seconds) => epoch_seconds.as_i64().unwrap_or(0),
             None => 0,
         };
         let datetime =
@@ -504,10 +498,7 @@ async fn create_date_time_from_epoch(o: BTreeMap<String, VariableValue>) -> Opti
         )));
     } else if o.contains_key("epochMillis") {
         let epoch_millis = match o.get("epochMillis") {
-            Some(epoch_millis) => match epoch_millis.as_i64() {
-                Some(epoch_millis) => epoch_millis,
-                None => 0,
-            },
+            Some(epoch_millis) => epoch_millis.as_i64().unwrap_or(0),
             None => 0,
         };
         let datetime_epoch = match NaiveDateTime::from_timestamp_millis(epoch_millis) {
@@ -525,50 +516,32 @@ async fn create_date_time_from_epoch(o: BTreeMap<String, VariableValue>) -> Opti
         )));
     }
 
-    return None;
+    None
 }
 
 async fn create_time_from_componet(o: BTreeMap<String, VariableValue>) -> Option<VariableValue> {
     let hour = match o.get("hour") {
-        Some(hour) => match hour.as_i64() {
-            Some(hour) => hour,
-            None => 0,
-        },
+        Some(hour) => hour.as_i64().unwrap_or(0),
         None => 0,
     };
     let minute = match o.get("minute") {
-        Some(minute) => match minute.as_i64() {
-            Some(minute) => minute,
-            None => 0,
-        },
+        Some(minute) => minute.as_i64().unwrap_or(0),
         None => 0,
     };
     let second = match o.get("second") {
-        Some(second) => match second.as_i64() {
-            Some(second) => second,
-            None => 0,
-        },
+        Some(second) => second.as_i64().unwrap_or(0),
         None => 0,
     };
     let millisecond = match o.get("millisecond") {
-        Some(millisecond) => match millisecond.as_i64() {
-            Some(millisecond) => millisecond,
-            None => 0,
-        },
+        Some(millisecond) => millisecond.as_i64().unwrap_or(0),
         None => 0,
     };
     let microsecond = match o.get("microsecond") {
-        Some(microsecond) => match microsecond.as_i64() {
-            Some(microsecond) => microsecond,
-            None => 0,
-        },
+        Some(microsecond) => microsecond.as_i64().unwrap_or(0),
         None => 0,
     };
     let nanosecond = match o.get("nanosecond") {
-        Some(nanosecond) => match nanosecond.as_i64() {
-            Some(nanosecond) => nanosecond,
-            None => 0,
-        },
+        Some(nanosecond) => nanosecond.as_i64().unwrap_or(0),
         None => 0,
     };
 
@@ -577,7 +550,7 @@ async fn create_time_from_componet(o: BTreeMap<String, VariableValue>) -> Option
         + Duration::nanoseconds(nanosecond)
         + Duration::microseconds(microsecond)
         + Duration::milliseconds(millisecond);
-    return Some(VariableValue::LocalTime(time));
+    Some(VariableValue::LocalTime(time))
 }
 
 #[derive(Debug, PartialEq)]
@@ -662,8 +635,8 @@ impl ScalarFunction for Truncate {
                 Ok(VariableValue::LocalDateTime(truncated_date_time))
             }
             (VariableValue::String(s), VariableValue::ZonedTime(t), None) => {
-                let naive_time = t.time().clone();
-                let offset = t.offset().clone();
+                let naive_time = *t.time();
+                let offset = *t.offset();
                 let truncated_time = match truncate_local_time(s.to_string(), naive_time).await {
                     Ok(time) => time,
                     Err(_) => return Err(EvaluationError::InvalidType),
@@ -676,8 +649,8 @@ impl ScalarFunction for Truncate {
                 VariableValue::ZonedTime(t),
                 Some(VariableValue::Object(m)),
             ) => {
-                let naive_time = t.time().clone();
-                let offset = t.offset().clone();
+                let naive_time = *t.time();
+                let offset = *t.offset();
                 let truncated_time = match truncate_local_time_with_map(
                     s.to_string(),
                     naive_time,
@@ -692,7 +665,7 @@ impl ScalarFunction for Truncate {
                 Ok(VariableValue::ZonedTime(zoned_time_result))
             }
             (VariableValue::String(s), VariableValue::ZonedDateTime(dt), None) => {
-                let datetime = dt.datetime().clone();
+                let datetime = *dt.datetime();
                 let timezone = dt.timezone().clone();
                 let naive_date = datetime.date_naive();
                 let naive_time = datetime.time();
@@ -758,7 +731,7 @@ impl ScalarFunction for ClockFunction {
             Clock::Transaction => context.get_transaction_time(),
         };
 
-        if args.len() == 0 {
+        if args.is_empty() {
             let zdt = ZonedDateTime::from_epoch_millis(timestamp);
             return Ok(match self.result {
                 ClockResult::Date => VariableValue::Date(zdt.datetime().date_naive()),
@@ -809,26 +782,22 @@ async fn truncate_date(unit: String, date: NaiveDate) -> Result<NaiveDate, Evalu
     match truncation_unit {
         "millenium" => {
             let year = year / 1000 * 1000;
-            return Ok(NaiveDate::from_ymd_opt(year, 1, 1).unwrap());
+            Ok(NaiveDate::from_ymd_opt(year, 1, 1).unwrap())
         }
         "century" => {
             let year = year / 100 * 100;
-            return Ok(NaiveDate::from_ymd_opt(year, 1, 1).unwrap());
+            Ok(NaiveDate::from_ymd_opt(year, 1, 1).unwrap())
         }
         "decade" => {
             let year = year / 10 * 10;
-            return Ok(NaiveDate::from_ymd_opt(year, 1, 1).unwrap());
+            Ok(NaiveDate::from_ymd_opt(year, 1, 1).unwrap())
         }
-        "year" => {
-            return Ok(NaiveDate::from_ymd_opt(year, 1, 1).unwrap());
-        }
+        "year" => Ok(NaiveDate::from_ymd_opt(year, 1, 1).unwrap()),
         "quarter" => {
             let month = month / 3 * 3 + 1;
-            return Ok(NaiveDate::from_ymd_opt(year, month, 1).unwrap());
+            Ok(NaiveDate::from_ymd_opt(year, month, 1).unwrap())
         }
-        "month" => {
-            return Ok(NaiveDate::from_ymd_opt(year, month, 1).unwrap());
-        }
+        "month" => Ok(NaiveDate::from_ymd_opt(year, month, 1).unwrap()),
         "week" => {
             let weekday = date.weekday();
             let days_to_subtract = match weekday {
@@ -841,11 +810,9 @@ async fn truncate_date(unit: String, date: NaiveDate) -> Result<NaiveDate, Evalu
                 Weekday::Sun => 6,
             };
 
-            return Ok(date - chrono::Duration::days(days_to_subtract as i64));
+            Ok(date - chrono::Duration::days(days_to_subtract as i64))
         }
-        "day" => {
-            return Ok(NaiveDate::from_ymd_opt(year, month, day).unwrap());
-        }
+        "day" => Ok(NaiveDate::from_ymd_opt(year, month, day).unwrap()),
         "weekyear" => {
             // First day of the first week of the year
             let date_string = format!("{}-1-1", year);
@@ -853,14 +820,12 @@ async fn truncate_date(unit: String, date: NaiveDate) -> Result<NaiveDate, Evalu
                 Ok(date) => date,
                 Err(_) => return Err(EvaluationError::InvalidType),
             };
-            return Ok(date);
+            Ok(date)
         }
         "hour" | "minute" | "second" | "millisecond" | "microsecond" => {
-            return Ok(NaiveDate::from_ymd_opt(year, month, day).unwrap());
+            Ok(NaiveDate::from_ymd_opt(year, month, day).unwrap())
         }
-        _ => {
-            return Err(EvaluationError::InvalidType);
-        }
+        _ => Err(EvaluationError::InvalidType),
     }
 }
 
@@ -958,10 +923,10 @@ async fn truncate_date_with_map(
     )
     .unwrap();
     if truncation_unit == "week" || truncation_unit == "weekyear" {
-        truncated_date = truncated_date + chrono::Duration::days(days_of_week_to_add);
+        truncated_date += chrono::Duration::days(days_of_week_to_add);
     }
 
-    return Ok(truncated_date);
+    Ok(truncated_date)
 }
 
 async fn truncate_local_time(unit: String, time: NaiveTime) -> Result<NaiveTime, EvaluationError> {
@@ -973,62 +938,32 @@ async fn truncate_local_time(unit: String, time: NaiveTime) -> Result<NaiveTime,
     let time_lowercase = unit.to_lowercase();
     let truncation_unit = time_lowercase.as_str();
     match truncation_unit {
-        "millennium" => {
-            return Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap());
-        }
-        "century" => {
-            return Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap());
-        }
-        "decade" => {
-            return Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap());
-        }
-        "year" => {
-            return Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap());
-        }
-        "month" => {
-            return Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap());
-        }
-        "week" => {
-            return Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap());
-        }
-        "quarter" => {
-            return Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap());
-        }
-        "weekyear" => {
-            return Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap());
-        }
-        "day" => {
-            return Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap());
-        }
-        "hour" => {
-            return Ok(NaiveTime::from_hms_opt(hour, 0, 0).unwrap());
-        }
-        "minute" => {
-            return Ok(NaiveTime::from_hms_opt(hour, minute, 0).unwrap());
-        }
-        "second" => {
-            return Ok(NaiveTime::from_hms_opt(hour, minute, second).unwrap());
-        }
+        "millennium" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
+        "century" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
+        "decade" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
+        "year" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
+        "month" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
+        "week" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
+        "quarter" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
+        "weekyear" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
+        "day" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
+        "hour" => Ok(NaiveTime::from_hms_opt(hour, 0, 0).unwrap()),
+        "minute" => Ok(NaiveTime::from_hms_opt(hour, minute, 0).unwrap()),
+        "second" => Ok(NaiveTime::from_hms_opt(hour, minute, second).unwrap()),
         "millisecond" => {
             let divisor = 10u32.pow(6);
 
             let truncated_nanos = (nanosecond / divisor) * divisor;
 
-            return Ok(
-                NaiveTime::from_hms_nano_opt(hour, minute, second, truncated_nanos).unwrap(),
-            );
+            Ok(NaiveTime::from_hms_nano_opt(hour, minute, second, truncated_nanos).unwrap())
         }
         "microsecond" => {
             let divisor = 10u32.pow(3);
             let truncated_nanos = (nanosecond / divisor) * divisor;
 
-            return Ok(
-                NaiveTime::from_hms_nano_opt(hour, minute, second, truncated_nanos).unwrap(),
-            );
+            Ok(NaiveTime::from_hms_nano_opt(hour, minute, second, truncated_nanos).unwrap())
         }
-        _ => {
-            return Err(EvaluationError::InvalidType);
-        }
+        _ => Err(EvaluationError::InvalidType),
     }
 }
 
@@ -1133,19 +1068,19 @@ async fn truncate_local_time_with_map(
             + microseconds_to_add as u32 * 1_000,
     )
     .unwrap();
-    return Ok(truncated_time);
+    Ok(truncated_time)
 }
 
 async fn handle_iana_timezone(input: &str) -> Option<Tz> {
-    let timezone_str = input.replace(" ", "_").replace("[", "").replace("]", "");
-    if timezone_str == "Z" || timezone_str.contains("+") || timezone_str.contains("-") {
+    let timezone_str = input.replace(' ', "_").replace(['[', ']'], "");
+    if timezone_str == "Z" || timezone_str.contains('+') || timezone_str.contains('-') {
         return Some(Tz::UTC);
     }
     let tz: Tz = match timezone_str.parse() {
         Ok(tz) => tz,
         Err(_) => return None,
     };
-    return Some(tz);
+    Some(tz)
 }
 
 async fn parse_date_string(date_str: &str) -> Result<NaiveDate, EvaluationError> {
@@ -1171,12 +1106,12 @@ async fn parse_date_string(date_str: &str) -> Result<NaiveDate, EvaluationError>
             return Ok(date);
         }
     }
-    return Err(EvaluationError::ParseError);
+    Err(EvaluationError::ParseError)
 }
 
 async fn date_str_formatter(input: &str) -> String {
     // Removes dash
-    let temp = input.replace("-", "");
+    let temp = input.replace('-', "");
     let date_str = temp.as_str();
 
     // NaiveDate parser does not support date in the format of YYYYMM
@@ -1215,7 +1150,7 @@ async fn date_str_formatter(input: &str) -> String {
     if date_str.contains('Q') {
         // Attempt to parse as a quarter-based date
         if let Ok(date) = parse_quarter_date(input).await {
-            return date.replace("-", "");
+            return date.replace('-', "");
         }
     }
 
@@ -1225,7 +1160,7 @@ async fn date_str_formatter(input: &str) -> String {
         return formatted_input;
     }
 
-    return date_str.to_string();
+    date_str.to_string()
 }
 
 async fn parse_quarter_date(date_str: &str) -> Result<String, EvaluationError> {
@@ -1240,7 +1175,7 @@ async fn parse_quarter_date(date_str: &str) -> Result<String, EvaluationError> {
     };
     let quarter = match parts[1].chars().nth(1) {
         Some(q) => {
-            if q.is_digit(10) {
+            if q.is_ascii_digit() {
                 match q.to_digit(10) {
                     Some(q) => q as i32,
                     None => return Err(EvaluationError::ParseError),
@@ -1252,7 +1187,7 @@ async fn parse_quarter_date(date_str: &str) -> Result<String, EvaluationError> {
         None => return Err(EvaluationError::ParseError),
     };
 
-    if quarter < 1 || quarter > 4 {
+    if !(1..=4).contains(&quarter) {
         return Err(EvaluationError::ParseError);
     }
 
@@ -1261,7 +1196,7 @@ async fn parse_quarter_date(date_str: &str) -> Result<String, EvaluationError> {
         Err(_) => return Err(EvaluationError::ParseError),
     };
 
-    if day_of_quarter < 1 || day_of_quarter > 92 {
+    if !(1..=92).contains(&day_of_quarter) {
         return Err(EvaluationError::ParseError);
     }
 
@@ -1281,13 +1216,13 @@ async fn parse_quarter_date(date_str: &str) -> Result<String, EvaluationError> {
     };
 
     let date_format = date.to_string();
-    return Ok(date_format);
+    Ok(date_format)
 }
 
 async fn parse_local_time_input(input: &str) -> Result<chrono::NaiveTime, EvaluationError> {
-    let mut input_string = input.to_string().replace(":", "");
+    let mut input_string = input.to_string().replace(':', "");
 
-    let contains_fractional_seconds = input_string.contains(".");
+    let contains_fractional_seconds = input_string.contains('.');
     if contains_fractional_seconds {
         let time = match NaiveTime::parse_from_str(&input_string, "%H%M%S%.f") {
             Ok(t) => t,
@@ -1306,11 +1241,11 @@ async fn parse_local_time_input(input: &str) -> Result<chrono::NaiveTime, Evalua
         Ok(t) => t,
         Err(_) => return Err(EvaluationError::ParseError),
     };
-    return Ok(time);
+    Ok(time)
 }
 
 async fn parse_local_date_time_input(input: &str) -> Result<NaiveDateTime, EvaluationError> {
-    let input_string = input.to_string().replace(":", "").replace("-", "");
+    let input_string = input.to_string().replace([':', '-'], "");
 
     let date_string = match input_string.split('T').next() {
         Some(date) => date,
@@ -1339,13 +1274,13 @@ async fn parse_local_date_time_input(input: &str) -> Result<NaiveDateTime, Evalu
         return Err(EvaluationError::ParseError);
     }
 
-    return Ok(NaiveDateTime::new(naive_date, naive_time));
+    Ok(NaiveDateTime::new(naive_date, naive_time))
 }
 
 async fn parse_zoned_time_input(input: &str) -> Result<ZonedTime, EvaluationError> {
-    let input_string = input.to_string().replace(":", "");
-    let contains_frac = input.contains(".");
-    let is_utc = input.contains("Z");
+    let input_string = input.to_string().replace(':', "");
+    let contains_frac = input.contains('.');
+    let is_utc = input.contains('Z');
 
     let time_string = match input_string
         .split(|c| c == 'Z' || c == '+' || c == '-')
@@ -1363,13 +1298,13 @@ async fn parse_zoned_time_input(input: &str) -> Result<ZonedTime, EvaluationErro
     if is_utc {
         let offset = FixedOffset::east_opt(0).unwrap();
         if contains_frac {
-            let naive_time = match NaiveTime::parse_from_str(&time_string, "%H%M%S%.f") {
+            let naive_time = match NaiveTime::parse_from_str(time_string, "%H%M%S%.f") {
                 Ok(t) => t,
                 Err(_) => return Err(EvaluationError::ParseError),
             };
             return Ok(ZonedTime::new(naive_time, offset));
         }
-        let naive_time = match NaiveTime::parse_from_str(&time_string, "%H%M%S") {
+        let naive_time = match NaiveTime::parse_from_str(time_string, "%H%M%S") {
             Ok(t) => t,
             Err(_) => return Err(EvaluationError::ParseError),
         };
@@ -1391,7 +1326,7 @@ async fn parse_zoned_time_input(input: &str) -> Result<ZonedTime, EvaluationErro
     };
 
     if contains_frac {
-        let naive_time = match NaiveTime::parse_from_str(&time_string, "%H%M%S%.f") {
+        let naive_time = match NaiveTime::parse_from_str(time_string, "%H%M%S%.f") {
             Ok(t) => t,
             Err(_) => return Err(EvaluationError::ParseError),
         };
@@ -1400,7 +1335,7 @@ async fn parse_zoned_time_input(input: &str) -> Result<ZonedTime, EvaluationErro
     }
 
     let zoned_time = ZonedTime::new(naive_time, offset);
-    return Ok(zoned_time);
+    Ok(zoned_time)
 }
 
 async fn extract_timezone(input: &str) -> Option<&str> {
@@ -1414,16 +1349,16 @@ async fn extract_timezone(input: &str) -> Option<&str> {
 }
 
 async fn parse_zoned_date_time_input(input: &str) -> Result<ZonedDateTime, EvaluationError> {
-    let is_utc = input.contains("Z");
+    let is_utc = input.contains('Z');
 
     let date_part = match input.split('T').next() {
-        Some(date) => date.replace("-", ""),
+        Some(date) => date.replace('-', ""),
         None => return Err(EvaluationError::ParseError),
     };
     let date_string = date_part.as_str();
 
     let timezone_part = match input.split('T').last() {
-        Some(timezone) => timezone.replace(":", ""),
+        Some(timezone) => timezone.replace(':', ""),
         None => return Err(EvaluationError::ParseError),
     };
     let timezone_string = timezone_part.as_str();
@@ -1498,5 +1433,5 @@ async fn parse_zoned_date_time_input(input: &str) -> Result<ZonedDateTime, Evalu
         _ => return Err(EvaluationError::ParseError),
     };
     let zoned_date_time = ZonedDateTime::new(date_time, None);
-    return Ok(zoned_date_time);
+    Ok(zoned_date_time)
 }

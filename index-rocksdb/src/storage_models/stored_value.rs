@@ -81,10 +81,7 @@ impl StoredValueMap {
 
     pub fn get(&self, key: &str) -> Option<&StoredValue> {
         match self.values.get(key) {
-            Some(v) => match v.value {
-                Some(ref value) => Some(value),
-                None => None,
-            },
+            Some(v) => v.value.as_ref(),
             None => None,
         }
     }
@@ -112,11 +109,11 @@ impl From<&ElementPropertyMap> for StoredValueMap {
     }
 }
 
-impl Into<ElementPropertyMap> for StoredValueMap {
-    fn into(self) -> ElementPropertyMap {
+impl From<StoredValueMap> for ElementPropertyMap {
+    fn from(val: StoredValueMap) -> Self {
         let mut map = ElementPropertyMap::new();
 
-        for (key, value) in self.values {
+        for (key, value) in val.values {
             map.insert(&key, value.into());
         }
 
@@ -152,9 +149,9 @@ impl From<&ElementValue> for StoredValueContainer {
     }
 }
 
-impl Into<ElementValue> for StoredValueContainer {
-    fn into(self) -> ElementValue {
-        match self.value {
+impl From<StoredValueContainer> for ElementValue {
+    fn from(val: StoredValueContainer) -> Self {
+        match val.value {
             None => ElementValue::Null,
             Some(StoredValue::Bool(b)) => ElementValue::Bool(b),
             Some(StoredValue::Float(f)) => ElementValue::Float(f.into()),

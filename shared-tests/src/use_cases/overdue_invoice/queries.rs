@@ -1,8 +1,5 @@
-use drasi_query_ast::ast;
-
-pub fn list_overdue_query() -> ast::Query {
-    drasi_query_cypher::parse(
-        "
+pub fn list_overdue_query() -> &'static str {
+    "
     MATCH 
         (a:Invoice)
     WHERE drasi.trueUntil(
@@ -12,14 +9,11 @@ pub fn list_overdue_query() -> ast::Query {
     RETURN
         a.invoiceNumber as invoiceNumber,
         a.invoiceDate as invoiceDate
-    ",
-    )
-    .unwrap()
+    "
 }
 
-pub fn count_overdue_greater_query() -> ast::Query {
-    drasi_query_cypher::parse(
-        "
+pub fn count_overdue_greater_query() -> &'static str {
+    "
     MATCH 
         (a:Invoice)
     WHERE a.status = 'unpaid'
@@ -28,7 +22,5 @@ pub fn count_overdue_greater_query() -> ast::Query {
     WHERE drasi.trueUntil(count > 2, date.transaction() + duration({days: 3}))
     RETURN
         count
-    ",
-    )
-    .unwrap()
+    "
 }

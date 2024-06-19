@@ -4,7 +4,7 @@ use serde_json::json;
 
 use drasi_core::{
     evaluation::{
-        context::PhaseEvaluationContext,
+        context::QueryPartEvaluationContext,
         variable_value::{duration::Duration, VariableValue},
     },
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
@@ -37,12 +37,11 @@ async fn bootstrap_query(query: &ContinuousQuery) {
 // the number of days overdue, which results in the result being updated each time the
 // number of days overdue changes.
 pub async fn crosses_above_a_threshold(config: &(impl QueryTestConfig + Send)) {
-    let cypher_query = Arc::new(queries::crosses_above_a_threshold_query());
     let crosses_above_a_threshold_query = {
-        let mut builder = QueryBuilder::new(cypher_query.clone())
+        let mut builder = QueryBuilder::new(queries::crosses_above_a_threshold_query())
             .with_joins(queries::crosses_above_a_threshold_metadata());
-        builder = config.config_query(builder, cypher_query).await;
-        builder.build()
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     // Add initial values
@@ -139,7 +138,7 @@ pub async fn crosses_above_a_threshold(config: &(impl QueryTestConfig + Send)) {
         // println!("Result - Invoice Status 10 days overdue: {:?}", result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "accountManagerName" => VariableValue::from(json!("Employee 01")),
               "accountManagerEmail" => VariableValue::from(json!("emp_01@reflex.com")),
@@ -217,7 +216,7 @@ pub async fn crosses_above_a_threshold(config: &(impl QueryTestConfig + Send)) {
         // println!("Result - Invoice Status PAID after 16 days: {:?}", result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&PhaseEvaluationContext::Removing {
+        assert!(result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!(
               "accountManagerName" => VariableValue::from(json!("Employee 01")),
               "accountManagerEmail" => VariableValue::from(json!("emp_01@reflex.com")),
@@ -232,12 +231,12 @@ pub async fn crosses_above_a_threshold(config: &(impl QueryTestConfig + Send)) {
 // the number of days overdue, so the result is only updated when the invoice first becomes overdue
 // by 10 days and when it is no longer overdue.
 pub async fn crosses_above_a_threshold_with_overdue_days(config: &(impl QueryTestConfig + Send)) {
-    let cypher_query = Arc::new(queries::crosses_above_a_threshold_with_overduedays_query());
     let crosses_above_a_threshold_query = {
-        let mut builder = QueryBuilder::new(cypher_query.clone())
-            .with_joins(queries::crosses_above_a_threshold_metadata());
-        builder = config.config_query(builder, cypher_query).await;
-        builder.build()
+        let mut builder =
+            QueryBuilder::new(queries::crosses_above_a_threshold_with_overduedays_query())
+                .with_joins(queries::crosses_above_a_threshold_metadata());
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     // Add initial values
@@ -334,7 +333,7 @@ pub async fn crosses_above_a_threshold_with_overdue_days(config: &(impl QueryTes
         // println!("Result - Invoice Status 10 days overdue: {:?}", result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&PhaseEvaluationContext::Adding { after: variablemap!(
+        assert!(result.contains(&QueryPartEvaluationContext::Adding { after: variablemap!(
         "accountManagerName" => VariableValue::from(json!("Employee 01")),
         "accountManagerEmail" => VariableValue::from(json!("emp_01@reflex.com")),
         "customerName" => VariableValue::from(json!("Customer 01")),
@@ -365,7 +364,7 @@ pub async fn crosses_above_a_threshold_with_overdue_days(config: &(impl QueryTes
         // println!("Result - Invoice Status 11 days overdue: {:?}", result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&PhaseEvaluationContext::Updating { before: variablemap!(
+        assert!(result.contains(&QueryPartEvaluationContext::Updating { before: variablemap!(
         "accountManagerName" => VariableValue::from(json!("Employee 01")),
         "accountManagerEmail" => VariableValue::from(json!("emp_01@reflex.com")),
         "customerName" => VariableValue::from(json!("Customer 01")),
@@ -403,7 +402,7 @@ pub async fn crosses_above_a_threshold_with_overdue_days(config: &(impl QueryTes
         // println!("Result - Invoice Status 15 days overdue: {:?}", result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&PhaseEvaluationContext::Updating { before: variablemap!(
+        assert!(result.contains(&QueryPartEvaluationContext::Updating { before: variablemap!(
       "accountManagerName" => VariableValue::from(json!("Employee 01")),
       "accountManagerEmail" => VariableValue::from(json!("emp_01@reflex.com")),
       "customerName" => VariableValue::from(json!("Customer 01")),
@@ -441,7 +440,7 @@ pub async fn crosses_above_a_threshold_with_overdue_days(config: &(impl QueryTes
         // println!("Result - Invoice Status PAID after 16 days: {:?}", result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&PhaseEvaluationContext::Removing { before: variablemap!(
+        assert!(result.contains(&QueryPartEvaluationContext::Removing { before: variablemap!(
       "accountManagerName" => VariableValue::from(json!("Employee 01")),
       "accountManagerEmail" => VariableValue::from(json!("emp_01@reflex.com")),
       "customerName" => VariableValue::from(json!("Customer 01")),

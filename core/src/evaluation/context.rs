@@ -18,7 +18,7 @@ pub enum SideEffects {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum PhaseEvaluationContext {
+pub enum QueryPartEvaluationContext {
     Adding {
         after: QueryVariables,
     },
@@ -39,7 +39,7 @@ pub enum PhaseEvaluationContext {
     Noop,
 }
 
-impl PhaseEvaluationContext {}
+impl QueryPartEvaluationContext {}
 
 #[derive(Debug, Clone)]
 pub struct ExpressionEvaluationContext<'a> {
@@ -140,7 +140,7 @@ impl<'a> ExpressionEvaluationContext<'a> {
     }
 
     pub fn get_solution_signature(&self) -> Option<SolutionSignature> {
-        self.solution_signature.clone()
+        self.solution_signature
     }
 
     pub fn get_anchor_element(&self) -> Option<Arc<Element>> {

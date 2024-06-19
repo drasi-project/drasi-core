@@ -1,10 +1,9 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use serde_json::json;
 
-use drasi_core::{
-    evaluation::variable_value::VariableValue,
-    models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
+use drasi_core::models::{
+    Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
 
 pub fn get_bootstrap_data() -> Vec<SourceChange> {

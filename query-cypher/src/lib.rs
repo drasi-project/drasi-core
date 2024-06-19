@@ -1,8 +1,11 @@
 #![allow(clippy::redundant_closure_call)]
 
-use drasi_query_ast::ast;
+use drasi_query_ast::{
+    api::{QueryParseError, QueryParser},
+    ast::{self, Expression, ParentExpression, ProjectionClause},
+};
 use peg::{error::ParseError, str::LineCol};
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 #[cfg(test)]
 mod tests;
@@ -341,7 +344,7 @@ peg::parser! {
             = w:with_clause() { w }
             / r:return_clause() { r }
 
-        rule phase() -> QueryPhase
+        rule part(config: &dyn CypherConfiguration) -> QueryPart
             = match_clauses:( __* m:(match_clause() ** (__+) )? { m.unwrap_or_else(Vec::new).into_iter().flatten().collect() } )
                 where_clauses:( __* w:(where_clause() ** (__+) )? { w.unwrap_or_else(Vec::new) } )
                 //create_clauses:( __* c:(create_clause() ** (__+) )? { c.unwrap_or_else(Vec::new) } )
@@ -349,28 +352,104 @@ peg::parser! {
                 delete_clauses:( __* d:(delete_clause() ** (__+) )? { d.unwrap_or_else(Vec::new) } )
                 return_clause:( with_or_return() )
                 {
-                    QueryPhase {
+                    QueryPart {
                         match_clauses,
                         where_clauses,
-                        return_clause: return_clause.into(),
+                        return_clause: return_clause.into_projection_clause(config),
                     }
                 }
 
-        pub rule query() -> Query
+        pub rule query(config: &dyn CypherConfiguration) -> Query
             = __*
-              phases:(w:( phase()+ ) { w } )
+              parts:(w:( part(config)+ ) { w } )
               __* {
                 Query {
-                    phases,
+                    parts,
                 }
             }
     }
 }
 
-pub fn parse(input: &str) -> Result<ast::Query, ParseError<LineCol>> {
-    cypher::query(input)
+pub fn parse(
+    input: &str,
+    config: &dyn CypherConfiguration,
+) -> Result<ast::Query, ParseError<LineCol>> {
+    cypher::query(input, config)
 }
 
 pub fn parse_expression(input: &str) -> Result<ast::Expression, ParseError<LineCol>> {
     cypher::expression(input)
+}
+
+pub trait CypherConfiguration: Send + Sync {
+    fn get_aggregating_function_names(&self) -> HashSet<String>;
+}
+
+pub trait IntoProjectionClause {
+    fn into_projection_clause(self, config: &dyn CypherConfiguration) -> ProjectionClause;
+}
+
+impl IntoProjectionClause for Vec<Expression> {
+    fn into_projection_clause(self, config: &dyn CypherConfiguration) -> ProjectionClause {
+        let mut keys = Vec::new();
+        let mut aggs = Vec::new();
+
+        for expr in self {
+            if contains_aggregating_function(&expr, config) {
+                aggs.push(expr);
+            } else {
+                keys.push(expr);
+            }
+        }
+
+        if aggs.is_empty() {
+            ProjectionClause::Item(keys)
+        } else {
+            ProjectionClause::GroupBy {
+                grouping: keys,
+                aggregates: aggs,
+            }
+        }
+    }
+}
+
+pub fn contains_aggregating_function(
+    expression: &Expression,
+    config: &dyn CypherConfiguration,
+) -> bool {
+    let stack = &mut vec![expression];
+    let aggr_funcs = config.get_aggregating_function_names();
+
+    while let Some(expr) = stack.pop() {
+        if let Expression::FunctionExpression(ref function) = expr {
+            if aggr_funcs.contains(&function.name.to_string()) {
+                return true;
+            }
+        }
+
+        for c in expr.get_children() {
+            stack.push(c);
+        }
+    }
+
+    false
+}
+
+pub struct CypherParser {
+    config: Arc<dyn CypherConfiguration>,
+}
+
+impl CypherParser {
+    pub fn new(config: Arc<dyn CypherConfiguration>) -> Self {
+        CypherParser { config }
+    }
+}
+
+impl QueryParser for CypherParser {
+    fn parse(&self, input: &str) -> Result<ast::Query, QueryParseError> {
+        match parse(input, &*self.config) {
+            Ok(query) => Ok(query),
+            Err(e) => Err(QueryParseError::ParserError(Box::new(e))),
+        }
+    }
 }

@@ -24,6 +24,12 @@ pub struct InMemoryResultIndex {
     sequence: Arc<RwLock<ResultSequence>>,
 }
 
+impl Default for InMemoryResultIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InMemoryResultIndex {
     pub fn new() -> Self {
         InMemoryResultIndex {

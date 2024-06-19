@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use drasi_core::{
-    evaluation::{context::PhaseEvaluationContext, variable_value::VariableValue},
+    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{ContinuousQuery, QueryBuilder},
 };
@@ -31,12 +31,11 @@ async fn bootstrap_query(query: &ContinuousQuery) {
 }
 
 pub async fn order_ready_then_vehicle_arrives(config: &(impl QueryTestConfig + Send)) {
-    let query_source = Arc::new(queries::pickup_order_ready_query());
     let query = {
-        let mut builder = QueryBuilder::new(query_source.clone())
+        let mut builder = QueryBuilder::new(queries::pickup_order_ready_query())
             .with_joins(queries::pickup_order_ready_metadata());
-        builder = config.config_query(builder, query_source).await;
-        builder.build()
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     bootstrap_query(&query).await;
@@ -103,7 +102,7 @@ pub async fn order_ready_then_vehicle_arrives(config: &(impl QueryTestConfig + S
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "DriverName" => VariableValue::from(json!("Driver 01")),
               "OrderNumber" => VariableValue::from(json!("order_01")),
@@ -129,7 +128,7 @@ pub async fn order_ready_then_vehicle_arrives(config: &(impl QueryTestConfig + S
 
         let result = query.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&PhaseEvaluationContext::Removing {
+        assert!(result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!(
               "DriverName" => VariableValue::from(json!("Driver 01")),
               "OrderNumber" => VariableValue::from(json!("order_01")),
@@ -140,12 +139,11 @@ pub async fn order_ready_then_vehicle_arrives(config: &(impl QueryTestConfig + S
 }
 
 pub async fn vehicle_arrives_then_order_ready(config: &(impl QueryTestConfig + Send)) {
-    let query_source = Arc::new(queries::pickup_order_ready_query());
     let query = {
-        let mut builder = QueryBuilder::new(query_source.clone())
+        let mut builder = QueryBuilder::new(queries::pickup_order_ready_query())
             .with_joins(queries::pickup_order_ready_metadata());
-        builder = config.config_query(builder, query_source).await;
-        builder.build()
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     bootstrap_query(&query).await;
@@ -210,7 +208,7 @@ pub async fn vehicle_arrives_then_order_ready(config: &(impl QueryTestConfig + S
 
         let result = query.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "DriverName" => VariableValue::from(json!("Driver 02")),
               "OrderNumber" => VariableValue::from(json!("order_02")),
@@ -236,7 +234,7 @@ pub async fn vehicle_arrives_then_order_ready(config: &(impl QueryTestConfig + S
 
         let result = query.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&PhaseEvaluationContext::Removing {
+        assert!(result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!(
               "DriverName" => VariableValue::from(json!("Driver 02")),
               "OrderNumber" => VariableValue::from(json!("order_02")),
@@ -247,12 +245,11 @@ pub async fn vehicle_arrives_then_order_ready(config: &(impl QueryTestConfig + S
 }
 
 pub async fn vehicle_arrives_then_order_ready_duplicate(config: &(impl QueryTestConfig + Send)) {
-    let query_source = Arc::new(queries::pickup_order_ready_query());
     let query = {
-        let mut builder = QueryBuilder::new(query_source.clone())
+        let mut builder = QueryBuilder::new(queries::pickup_order_ready_query())
             .with_joins(queries::pickup_order_ready_metadata());
-        builder = config.config_query(builder, query_source).await;
-        builder.build()
+        builder = config.config_query(builder).await;
+        builder.build().await
     };
 
     bootstrap_query(&query).await;
@@ -317,7 +314,7 @@ pub async fn vehicle_arrives_then_order_ready_duplicate(config: &(impl QueryTest
         let result = query.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "DriverName" => VariableValue::from(json!("Driver 03")),
               "OrderNumber" => VariableValue::from(json!("order_03")),
@@ -342,7 +339,7 @@ pub async fn vehicle_arrives_then_order_ready_duplicate(config: &(impl QueryTest
 
         let result = query.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&PhaseEvaluationContext::Removing {
+        assert!(result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!(
               "DriverName" => VariableValue::from(json!("Driver 03")),
               "OrderNumber" => VariableValue::from(json!("order_03")),
@@ -420,7 +417,7 @@ pub async fn vehicle_arrives_then_order_ready_duplicate(config: &(impl QueryTest
 
         let result = query.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&PhaseEvaluationContext::Adding {
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "DriverName" => VariableValue::from(json!("Driver 04")),
               "OrderNumber" => VariableValue::from(json!("order_04")),

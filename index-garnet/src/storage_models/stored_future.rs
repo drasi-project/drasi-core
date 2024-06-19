@@ -44,13 +44,13 @@ impl From<(FutureElementRef, u32)> for StoredFutureElementRefWithContext {
     }
 }
 
-impl Into<FutureElementRef> for &StoredFutureElementRefWithContext {
-    fn into(self) -> FutureElementRef {
+impl From<&StoredFutureElementRefWithContext> for FutureElementRef {
+    fn from(val: &StoredFutureElementRefWithContext) -> Self {
         FutureElementRef {
-            element_ref: self.future_ref.element_ref.clone().into(),
-            original_time: self.future_ref.original_time,
-            due_time: self.future_ref.due_time,
-            group_signature: self.group_signature,
+            element_ref: val.future_ref.element_ref.clone().into(),
+            original_time: val.future_ref.original_time,
+            due_time: val.future_ref.due_time,
+            group_signature: val.group_signature,
         }
     }
 }

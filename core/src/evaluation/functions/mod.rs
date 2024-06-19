@@ -6,7 +6,8 @@ use std::{
 
 use async_trait::async_trait;
 
-use drasi_query_ast::ast::{self, Expression};
+use drasi_query_ast::ast;
+use drasi_query_cypher::CypherConfiguration;
 
 use crate::evaluation::variable_value::VariableValue;
 use crate::interface::ResultIndex;
@@ -42,7 +43,6 @@ pub mod text;
 pub enum Function {
     Scalar(Arc<dyn ScalarFunction>),
     Aggregating(Arc<dyn AggregatingFunction>),
-    List(Arc<dyn ListFunction>),
     ContextMutator(Arc<dyn ContextMutatorFunction>),
 }
 
@@ -57,21 +57,11 @@ pub trait ScalarFunction: Send + Sync {
 }
 
 #[async_trait]
-pub trait ListFunction: Send + Sync {
-    async fn call(
-        &self,
-        context: &ExpressionEvaluationContext,
-        args: &Vec<Expression>,
-    ) -> Result<VariableValue, EvaluationError>;
-}
-
-#[async_trait]
 pub trait AggregatingFunction: Debug + Send + Sync {
     fn initialize_accumulator(
         &self,
         context: &ExpressionEvaluationContext,
-        args: &Vec<Expression>,
-        position_in_query: usize,
+        expression: &ast::FunctionExpression,
         grouping_keys: &Vec<VariableValue>,
         index: Arc<dyn ResultIndex>,
     ) -> Accumulator; //todo: switch `dyn ResultIndex` to `dyn LazySortedSetStore` after trait upcasting is stable
@@ -109,6 +99,12 @@ pub struct FunctionRegistry {
     functions: Arc<RwLock<HashMap<String, Arc<Function>>>>,
 }
 
+impl Default for FunctionRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FunctionRegistry {
     pub fn new() -> FunctionRegistry {
         let result = FunctionRegistry {
@@ -136,9 +132,18 @@ impl FunctionRegistry {
 
     pub fn get_function(&self, name: &str) -> Option<Arc<Function>> {
         let lock = self.functions.read().unwrap();
-        match lock.get(name) {
-            Some(f) => Some(f.clone()),
-            None => None,
-        }
+        lock.get(name).cloned()
+    }
+}
+
+impl CypherConfiguration for FunctionRegistry {
+    fn get_aggregating_function_names(&self) -> std::collections::HashSet<String> {
+        let lock = self.functions.read().unwrap();
+        lock.iter()
+            .filter_map(|(name, function)| match function.as_ref() {
+                Function::Aggregating(_) => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
     }
 }

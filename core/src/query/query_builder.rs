@@ -1,13 +1,14 @@
 use std::{collections::HashMap, sync::Arc};
 
-use drasi_query_ast::ast::Query;
+use drasi_query_ast::api::QueryParser;
+use drasi_query_cypher::CypherParser;
 
 use crate::{
     evaluation::{
         functions::{
             future::RegisterFutureFunctions, past::RegisterPastFunctions, FunctionRegistry,
         },
-        ExpressionEvaluator, QueryPhaseEvaluator,
+        ExpressionEvaluator, QueryPartEvaluator,
     },
     in_memory_index::{
         in_memory_element_index::InMemoryElementIndex, in_memory_future_queue::InMemoryFutureQueue,
@@ -15,7 +16,7 @@ use crate::{
     },
     index_cache::shadowed_future_queue::ShadowedFutureQueue,
     interface::{
-        ElementArchiveIndex, ElementIndex, FutureQueue, MiddlewareSetupError, QueryBuidlerError,
+        ElementArchiveIndex, ElementIndex, FutureQueue, MiddlewareSetupError, QueryBuilderError,
         ResultIndex,
     },
     middleware::{
@@ -35,16 +36,18 @@ pub struct QueryBuilder {
     archive_index: Option<Arc<dyn ElementArchiveIndex>>,
     result_index: Option<Arc<dyn ResultIndex>>,
     future_queue: Option<Arc<dyn FutureQueue>>,
-    phase_evaluator: Option<Arc<QueryPhaseEvaluator>>,
+    part_evaluator: Option<Arc<QueryPartEvaluator>>,
     joins: Vec<Arc<QueryJoin>>,
     middleware_registry: Option<Arc<MiddlewareTypeRegistry>>,
     source_middleware: Vec<Arc<SourceMiddlewareConfig>>,
     source_pipelines: HashMap<Arc<str>, Vec<Arc<str>>>,
-    query: Arc<Query>,
+
+    query_source: String,
+    query_parser: Option<Arc<dyn QueryParser>>,
 }
 
 impl QueryBuilder {
-    pub fn new(query: Arc<Query>) -> Self {
+    pub fn new(query: impl Into<String>) -> Self {
         QueryBuilder {
             function_registry: None,
             expr_evaluator: None,
@@ -52,13 +55,19 @@ impl QueryBuilder {
             archive_index: None,
             result_index: None,
             future_queue: None,
-            phase_evaluator: None,
+            part_evaluator: None,
             joins: Vec::new(),
             middleware_registry: None,
             source_middleware: Vec::new(),
             source_pipelines: HashMap::new(),
-            query,
+            query_source: query.into(),
+            query_parser: None,
         }
+    }
+
+    pub fn with_query_parser(mut self, query_parser: Arc<dyn QueryParser>) -> Self {
+        self.query_parser = Some(query_parser);
+        self
     }
 
     pub fn with_middleware_registry(
@@ -129,21 +138,27 @@ impl QueryBuilder {
         &self.joins
     }
 
-    pub fn build(self) -> ContinuousQuery {
-        self.try_build().unwrap()
+    pub async fn build(self) -> ContinuousQuery {
+        self.try_build().await.unwrap()
     }
 
-    pub fn try_build(mut self) -> Result<ContinuousQuery, QueryBuidlerError> {
-        let match_path = Arc::new(MatchPath::from_query(&self.query.phases[0]).unwrap()); //todo: handle error
-
+    pub async fn try_build(mut self) -> Result<ContinuousQuery, QueryBuilderError> {
         let function_registry = match self.function_registry.take() {
             Some(registry) => registry,
             None => Arc::new(FunctionRegistry::new()),
         };
 
+        let query_parser = match self.query_parser.take() {
+            Some(index) => index,
+            None => Arc::new(CypherParser::new(function_registry.clone())),
+        };
+
+        let query = query_parser.parse(self.query_source.as_str())?;
+        let match_path = Arc::new(MatchPath::from_query(&query.parts[0])?);
+
         let element_index = match self.element_index.take() {
             Some(index) => index,
-            None => Arc::new(InMemoryElementIndex::new(&match_path, &self.joins)),
+            None => Arc::new(InMemoryElementIndex::new()),
         };
 
         if let Some(archive_index) = self.archive_index.take() {
@@ -170,9 +185,9 @@ impl QueryBuilder {
             )),
         };
 
-        let phase_evaluator = match self.phase_evaluator.take() {
+        let part_evaluator = match self.part_evaluator.take() {
             Some(evaluator) => evaluator,
-            None => Arc::new(QueryPhaseEvaluator::new(
+            None => Arc::new(QueryPartEvaluator::new(
                 expr_evaluator.clone(),
                 result_index.clone(),
             )),
@@ -207,13 +222,15 @@ impl QueryBuilder {
             }
         }?;
 
+        element_index.set_joins(&match_path, &self.joins).await;
+
         Ok(ContinuousQuery::new(
-            self.query,
+            Arc::new(query),
             match_path,
             expr_evaluator,
             element_index,
             path_solver,
-            phase_evaluator,
+            part_evaluator,
             future_queue,
             source_pipelines,
         ))

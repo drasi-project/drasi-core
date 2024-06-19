@@ -73,7 +73,7 @@ impl MatchPathSolver {
                 Ok((hash, solution)) => {
                     result.insert(hash, solution);
                 }
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(e),
             }
         }
 
@@ -259,7 +259,7 @@ async fn try_complete_solution(
             }
         }
 
-        if pointers.len() == 0 {
+        if pointers.is_empty() {
             continue;
         }
 
@@ -335,8 +335,8 @@ async fn get_adjacent_elements(
     }
 }
 
-fn merge_node_match<'a, 'b>(
-    mtch: &'a NodeMatch,
+fn merge_node_match<'b>(
+    mtch: &NodeMatch,
     slots: &'b mut Vec<match_path::MatchPathSlot>,
     alias_map: &'b mut HashMap<Arc<str>, usize>,
 ) -> Result<usize, EvaluationError> {
@@ -365,8 +365,8 @@ fn merge_node_match<'a, 'b>(
     }
 }
 
-fn merge_relation_match<'a, 'b>(
-    mtch: &'a RelationMatch,
+fn merge_relation_match<'b>(
+    mtch: &RelationMatch,
     slots: &'b mut Vec<match_path::MatchPathSlot>,
     alias_map: &'b mut HashMap<Arc<str>, usize>,
 ) -> Result<usize, EvaluationError> {

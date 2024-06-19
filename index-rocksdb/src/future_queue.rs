@@ -98,7 +98,7 @@ impl FutureQueue for RocksDbFutureQueue {
             let should_push = match push_type {
                 PushType::Always => true,
                 PushType::IfNotExists => {
-                    let mut iter = db.prefix_iterator_cf(&index_cf, &prefix);
+                    let mut iter = db.prefix_iterator_cf(&index_cf, prefix);
                     match iter.next() {
                         Some(item) => match item {
                             Ok((key, _)) => key[0..12] != prefix,
@@ -128,11 +128,11 @@ impl FutureQueue for RocksDbFutureQueue {
                     buf
                 };
 
-                if let Err(e) = txn.put_cf(&index_cf, &index_key, &due_time.to_be_bytes()) {
+                if let Err(e) = txn.put_cf(&index_cf, index_key, due_time.to_be_bytes()) {
                     return Err(IndexError::other(e));
                 };
 
-                if let Err(e) = txn.put_cf(&queue_cf, &queue_key, &future_ref.encode_to_vec()) {
+                if let Err(e) = txn.put_cf(&queue_cf, queue_key, future_ref.encode_to_vec()) {
                     return Err(IndexError::other(e));
                 };
 
@@ -217,11 +217,11 @@ impl FutureQueue for RocksDbFutureQueue {
                             let index_key = {
                                 let mut buf = [0u8; 20];
                                 buf[0..12].copy_from_slice(&prefix);
-                                buf[12..20].copy_from_slice(&hash);
+                                buf[12..20].copy_from_slice(hash);
                                 buf
                             };
 
-                            if let Err(e) = txn.delete_cf(&index_cf, &index_key) {
+                            if let Err(e) = txn.delete_cf(&index_cf, index_key) {
                                 return Err(IndexError::other(e));
                             };
 
@@ -263,12 +263,12 @@ impl FutureQueue for RocksDbFutureQueue {
                             Ok(v) => v,
                             Err(_) => return Err(IndexError::CorruptedData),
                         });
-                        return Ok(Some(due_time));
+                        Ok(Some(due_time))
                     }
-                    Err(e) => return Err(IndexError::other(e)),
+                    Err(e) => Err(IndexError::other(e)),
                 }
             } else {
-                return Ok(None);
+                Ok(None)
             }
         });
 
@@ -312,9 +312,9 @@ fn remove_internal(
     queue_cf: &impl AsColumnFamilyRef,
     index_prefix: [u8; 12],
 ) -> Result<(), IndexError> {
-    let mut iter = txn.prefix_iterator_cf(index_cf, index_prefix);
+    let iter = txn.prefix_iterator_cf(index_cf, index_prefix);
 
-    while let Some(item) = iter.next() {
+    for item in iter {
         match item {
             Ok((key, due_time)) => {
                 if key[0..12] != index_prefix {

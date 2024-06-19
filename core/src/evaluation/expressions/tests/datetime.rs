@@ -659,7 +659,7 @@ async fn test_datetime_epoch_millis() {
                 .evaluate_expression(&context, &expr)
                 .await
                 .unwrap(),
-            VariableValue::Integer((1448901144000 as i64).into())
+            VariableValue::Integer(1448901144000_i64.into())
         );
     }
 }
@@ -697,7 +697,7 @@ async fn test_datetime_epoch_seconds() {
                 .evaluate_expression(&context, &expr)
                 .await
                 .unwrap(),
-            VariableValue::Integer((1448901144 as i64).into())
+            VariableValue::Integer(1448901144_i64.into())
         );
     }
 }

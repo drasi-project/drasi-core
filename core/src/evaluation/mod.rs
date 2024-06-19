@@ -3,7 +3,7 @@ mod expressions;
 pub mod context;
 pub mod functions;
 pub mod instant_query_clock;
-pub mod phases;
+pub mod parts;
 pub mod temporal_constants;
 pub mod variable_value;
 
@@ -12,7 +12,7 @@ use std::{error::Error, fmt::Display};
 pub use context::ExpressionEvaluationContext;
 pub use expressions::*;
 pub use instant_query_clock::InstantQueryClock;
-pub use phases::*;
+pub use parts::*;
 
 use crate::interface::{IndexError, MiddlewareError};
 
@@ -33,6 +33,7 @@ pub enum EvaluationError {
         error: Box<EvaluationError>,
     },
     InvalidState,
+    InvalidArgument,
 }
 
 impl From<IndexError> for EvaluationError {
@@ -49,7 +50,7 @@ impl From<MiddlewareError> for EvaluationError {
 
 impl Display for EvaluationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Ok(format!("{:?}", self).fmt(f)?)
+        format!("{:?}", self).fmt(f)
     }
 }
 

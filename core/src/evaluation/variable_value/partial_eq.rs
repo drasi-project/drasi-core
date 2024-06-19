@@ -51,7 +51,7 @@ impl PartialEq<str> for VariableValue {
 
 impl<'a> PartialEq<&'a str> for VariableValue {
     fn eq(&self, other: &&str) -> bool {
-        eq_str(self, *other)
+        eq_str(self, other)
     }
 }
 
@@ -63,7 +63,7 @@ impl PartialEq<VariableValue> for str {
 
 impl<'a> PartialEq<VariableValue> for &'a str {
     fn eq(&self, other: &VariableValue) -> bool {
-        eq_str(other, *self)
+        eq_str(other, self)
     }
 }
 
@@ -208,11 +208,11 @@ impl PartialOrd for VariableValue {
             }
             (VariableValue::Integer(lhs), VariableValue::Float(rhs)) => lhs
                 .as_i64()
-                .map_or(None, |lhs| Some(lhs as f64))
+                .map(|lhs| lhs as f64)
                 .partial_cmp(&rhs.as_f64()),
             (VariableValue::Float(lhs), VariableValue::Integer(rhs)) => lhs
                 .as_f64()
-                .partial_cmp(&rhs.as_i64().map_or(None, |rhs| Some(rhs as f64))),
+                .partial_cmp(&rhs.as_i64().map(|rhs| rhs as f64)),
             (
                 VariableValue::Integer(_),
                 VariableValue::String(_)
