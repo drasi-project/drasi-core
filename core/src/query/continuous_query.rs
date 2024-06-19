@@ -552,6 +552,10 @@ impl ContinuousQuery {
             }
         }
     }
+
+    pub fn get_query(&self) -> Arc<Query> {
+        self.query.clone()
+    }
 }
 
 impl Drop for ContinuousQuery {
