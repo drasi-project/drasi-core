@@ -1,5 +1,11 @@
-echo "User: $(whoami)"
-echo "Current PATH: $PATH"
+#!/bin/sh
+case ":${PATH}:" in
+    *:"$HOME/.cargo/bin":*)
+        ;;
+    *)
+        export PATH="$HOME/.cargo/bin:$PATH"
+        ;;
+esac
 
 echo "Running cargo fmt..."
 cargo fmt -- --check
