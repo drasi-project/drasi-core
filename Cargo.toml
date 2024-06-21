@@ -7,8 +7,12 @@ members = [
   "index-rocksdb",
   "index-garnet",
   "middleware",
+  
+  # Internal
   "shared-tests",
-  "query-perf"]
+  "query-perf",
+  "examples",
+  ]
 
 [workspace.package]
 version = "0.2.0"

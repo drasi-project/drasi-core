@@ -1,12 +1,12 @@
 [package]
-name = "shared-tests"
-version = "0.1.0"
+name = "examples"
+version = "0.0.0"
 publish = false
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[dependencies]
+# If you copy one of the examples into a new project, you should be using
+# [dependencies] instead, and delete the **path**.
+[dev-dependencies]
 drasi-query-ast = { path = "../query-ast" }
 drasi-core = { path = "../core" }
 drasi-query-cypher = { path = "../query-cypher" }
@@ -19,3 +19,9 @@ env_logger = "0.10.0"
 log = "0.4"
 futures = "0.3.28"
 chrono = "0.4.31"
+rand = "0.8.5"
+
+
+[[example]]
+name = "temperature"
+path = "temperature.rs"
