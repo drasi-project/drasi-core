@@ -1,6 +1,6 @@
 # Drasi Core
 
-Drasi-core is the library used by [Drasi](https://github.com/project-drasi/drasi-platform) to implement continuous queries.
+Drasi-core is the library used by [Drasi](https://github.com/drasi-project/drasi-platform) to implement continuous queries.
 
 Continuous Queries, as the name implies, are queries that run continuously. To understand what is unique about them, it is useful to contrast them with a the kind of instantaneous queries developers are accustomed to running against databases.
 
