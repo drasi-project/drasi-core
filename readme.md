@@ -1,6 +1,6 @@
 # Drasi Core
 
-Drasi-core is the library used by [Drasi]()https://github.com/project-drasi/drasi-platform to implement continuous queries.
+Drasi-core is the library used by [Drasi](https://github.com/project-drasi/drasi-platform) to implement continuous queries.
 
 Continuous Queries, as the name implies, are queries that run continuously. To understand what is unique about them, it is useful to contrast them with a the kind of instantaneous queries developers are accustomed to running against databases.
 
@@ -13,7 +13,7 @@ Continuous Queries are implemented as graph queries written in the Cypher Query 
 
 ## Example
 
-In this scenario, we have a set of `vehicles` and a set of `zones` where vehicles can be.  The conceptual data model in Drasi is a labeled property graph, so we will add the vehicles and zones and nodes in the graph and we will connect them with a `LOCATED_IN` relationship.
+In this scenario, we have a set of `vehicles` and a set of `zones` where vehicles can be.  The conceptual data model in Drasi is a labeled property graph, so we will add the vehicles and zones as nodes in the graph and we will connect them with a `LOCATED_IN` relationship.
 
 We will create one continuous query, to monitor the vehicles in the `Parking Lot` zone.
 
@@ -21,15 +21,13 @@ We will create one continuous query, to monitor the vehicles in the `Parking Lot
 MATCH 
     (v:Vehicle)-[:LOCATED_IN]->(:Zone {type:'Parking Lot'}) 
 RETURN 
-    v.make AS make, 
-    v.model AS model, 
     v.color AS color, 
     v.plate AS plate
 ```
 
-When the `LOCATED_IN` relationship is changed, we will see the vehicle removed or added from the query result.  Changing one of the vehicle properties, such as the `plate` will cause the query to emit an update diff.
+When the `LOCATED_IN` relationship is changed, we will see the vehicle removed or added from the query result.  Changing one of the vehicle properties, such as the `color` will cause the query to emit an update diff.
 
-Let's look at how to configure a continuous query with `drasi-core`:
+Let's look at how to configure a continuous query using the query builder.
 
 ```rust
 let query_str = "
@@ -78,19 +76,18 @@ We can use the `process_source_change` function on the continuous query to compu
 
 
 ```rust
-println!("Result: {:?}", 
-    query.process_source_change(SourceChange::Insert {
-        element: Element::Relation {
-            metadata: ElementMetadata {
-                reference: ElementReference::new("", "v1-location"),
-                labels: Arc::new([Arc::from("LOCATED_IN")]),
-                effective_from: 0,
-            },
-            properties: ElementPropertyMap::new(),
-            out_node: ElementReference::new("", "z1"),
-            in_node: ElementReference::new("", "v1"),
+query.process_source_change(SourceChange::Insert {
+    element: Element::Relation {
+        metadata: ElementMetadata {
+            reference: ElementReference::new("", "v1-location"),
+            labels: Arc::new([Arc::from("LOCATED_IN")]),
+            effective_from: 0,
         },
-    }).await.unwrap());
+        properties: ElementPropertyMap::new(),
+        out_node: ElementReference::new("", "z1"),
+        in_node: ElementReference::new("", "v1"),
+    },
+}).await;
 ```
 
 ```
@@ -101,20 +98,19 @@ Result: [Adding {
 
 ```rust
 
-println!("Result: {:?}", 
-    query.process_source_change(SourceChange::Update {
-        element: Element::Node {
-            metadata: ElementMetadata {
-                reference: ElementReference::new("", "v1"),
-                labels: Arc::new([Arc::from("Vehicle")]),
-                effective_from: 0,
-            },
-            properties: ElementPropertyMap::from(json!({
-                "plate": "AAA-1234",
-                "color": "Green"
-            }))
+query.process_source_change(SourceChange::Update {
+    element: Element::Node {
+        metadata: ElementMetadata {
+            reference: ElementReference::new("", "v1"),
+            labels: Arc::new([Arc::from("Vehicle")]),
+            effective_from: 0,
         },
-    }).await.unwrap());
+        properties: ElementPropertyMap::from(json!({
+            "plate": "AAA-1234",
+            "color": "Green"
+        }))
+    },
+}).await;
 ```
 
 ```
@@ -125,14 +121,13 @@ Result: [Updating {
 ```
 
 ```rust
-println!("Result: {:?}", 
-    query.process_source_change(SourceChange::Delete {
-        metadata: ElementMetadata {
-            reference: ElementReference::new("", "v1-location"),
-            labels: Arc::new([Arc::from("LOCATED_AT")]),
-            effective_from: 0,
-        },
-    }).await.unwrap());
+query.process_source_change(SourceChange::Delete {
+    metadata: ElementMetadata {
+        reference: ElementReference::new("", "v1-location"),
+        labels: Arc::new([Arc::from("LOCATED_AT")]),
+        effective_from: 0,
+    },
+}).await;
 ```
 
 ```
@@ -140,6 +135,15 @@ Result: [Removing {
     before: {"color": String("Green"), "plate": String("AAA-1234")} 
 }]
 ```
+
+### Additional examples
+
+More examples can be found under the [examples](examples) folder.
+
+## Storage implementations
+
+Drasi maintains internal indexes that are used to compute the effect of a data change on the query result. By default these indexes are in-memory, but a continuous query can be configured to use persistent storage.  Currently there are storage implementions for Redis and RocksDB.
+
 
 ## Release status
 

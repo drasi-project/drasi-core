@@ -27,6 +27,8 @@ cargo run --example temperature
 
 ## Process Monitor
 
+This example models all the running processes on the host machine as nodes within the queryable graph.  The query matches on CPU processes and returns all those where the current CPU usage is above 10%.  As processes jump above and below this limit, entries will be added and removed from the query result set.
+
 ```cypher
 MATCH 
     (p:Process)
@@ -42,4 +44,26 @@ To run the example us the following command:
 
 ```
 cargo run --example process_monitor
+```
+
+## Vehicle Location
+
+In this scenario, we have a set of `vehicles` and a set of `zones` where vehicles can be.  The conceptual data model in Drasi is a labeled property graph, so we will add the vehicles and zones as nodes in the graph and we will connect them with a `LOCATED_IN` relationship.
+
+We will create one continuous query, to monitor the vehicles in the `Parking Lot` zone.
+
+```cypher
+MATCH 
+    (v:Vehicle)-[:LOCATED_IN]->(:Zone {type:'Parking Lot'}) 
+RETURN 
+    v.color AS color, 
+    v.plate AS plate
+```
+
+When the `LOCATED_IN` relationship is changed, we will see the vehicle removed or added from the query result.  Changing one of the vehicle properties, such as the `color` will cause the query to emit an update diff.
+
+To run the example us the following command:
+
+```
+cargo run --example vehicles
 ```
