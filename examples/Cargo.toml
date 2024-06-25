@@ -20,8 +20,17 @@ log = "0.4"
 futures = "0.3.28"
 chrono = "0.4.31"
 rand = "0.8.5"
+sysinfo = "0.30.12"
 
+
+[[example]]
+name = "vehicles"
+path = "vehicles.rs"
 
 [[example]]
 name = "temperature"
 path = "temperature.rs"
+
+[[example]]
+name = "process_monitor"
+path = "process_monitor.rs"

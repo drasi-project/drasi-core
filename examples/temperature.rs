@@ -1,3 +1,5 @@
+mod process_monitor;
+
 use std::sync::Arc;
 
 use drasi_core::{
@@ -11,7 +13,8 @@ use serde_json::json;
 #[tokio::main]
 async fn main() {
     let query_str = "
-    MATCH (c:Component)-[:HAS_LIMIT]->(l:Limit) 
+    MATCH 
+        (c:Component)-[:HAS_LIMIT]->(l:Limit) 
     WHERE c.temperature > l.max_temperature 
     RETURN 
         c.name AS component_name, 

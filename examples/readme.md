@@ -1,4 +1,3 @@
-
 # Examples
 
 ## Temperature Fluctuations
@@ -7,6 +6,40 @@ This example simulates a set of components that track temperature that can be co
 
 Note: Changing the value of the `Limit` node would also produce results on the query.
 
+The cypher query is a follows:
+
+```cypher
+MATCH 
+    (c:Component)-[:HAS_LIMIT]->(l:Limit) 
+WHERE c.temperature > l.max_temperature 
+RETURN 
+    c.name AS component_name, 
+    c.temperature AS component_temperature, 
+    l.max_temperature AS limit_temperature
+```
+
+
+To run the example us the following command:
+
 ```
 cargo run --example temperature
+```
+
+## Process Monitor
+
+```cypher
+MATCH 
+    (p:Process)
+WHERE p.cpu_usage > 10
+RETURN 
+    p.pid AS process_pid,
+    p.name AS process_name, 
+    p.cpu_usage AS process_cpu_usage
+```
+
+
+To run the example us the following command:
+
+```
+cargo run --example process_monitor
 ```
