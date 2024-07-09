@@ -13,9 +13,12 @@ use hashers::jenkins::spooky_hash::SpookyHasher;
 use prost::Message;
 use tokio::sync::RwLock;
 
-use crate::storage_models::{
-    StoredElement, StoredElementContainer, StoredElementMetadata, StoredElementReference,
-    StoredRelation, StoredValue, StoredValueMap,
+use crate::{
+    storage_models::{
+        StoredElement, StoredElementContainer, StoredElementMetadata, StoredElementReference,
+        StoredRelation, StoredValue, StoredValueMap,
+    },
+    ClearByPattern,
 };
 
 use redis::{aio::MultiplexedConnection, AsyncCommands, Pipeline, ToRedisArgs};
@@ -350,15 +353,13 @@ impl GarnetElementIndex {
         let new_slots = slots_to_bitset(slot_affinity);
 
         pipeline
-            .hset_multiple(
+            .hset(&element_key, "e", &element_as_redis_args)
+            .ignore();
+        pipeline
+            .hset(
                 &element_key,
-                &[
-                    ("e", &element_as_redis_args),
-                    (
-                        "slots",
-                        &new_slots.clone().into_bit_vec().to_bytes().to_redis_args(),
-                    ),
-                ],
+                "slots",
+                &new_slots.clone().into_bit_vec().to_bytes().to_redis_args(),
             )
             .ignore();
 
@@ -508,6 +509,7 @@ impl ElementIndex for GarnetElementIndex {
             .await?;
 
         let mut con = self.connection.clone();
+
         if let Err(err) = pipeline.query_async::<_, ()>(&mut con).await {
             return Err(IndexError::other(err));
         }
@@ -667,24 +669,9 @@ impl ElementIndex for GarnetElementIndex {
     }
 
     async fn clear(&self) -> Result<(), IndexError> {
-        let mut con = self.connection.clone();
-        let mut con2 = self.connection.clone();
-
-        let mut keys = match con
-            .scan_match::<String, String>(format!("ei:{}:*", self.query_id))
+        self.connection
+            .clear(format!("ei:{}:*", self.query_id))
             .await
-        {
-            Ok(v) => v,
-            Err(e) => return Err(IndexError::other(e)),
-        };
-
-        while let Some(key) = keys.next_item().await {
-            match con2.del::<String, ()>(key).await {
-                Ok(_) => (),
-                Err(e) => return Err(IndexError::other(e)),
-            }
-        }
-        Ok(())
     }
 
     async fn set_joins(&self, match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) {
