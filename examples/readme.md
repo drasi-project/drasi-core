@@ -25,6 +25,26 @@ To run the example us the following command:
 cargo run --example temperature
 ```
 
+```
+Loading initial data...
+Initial data loaded.
+Component1 - temperature: 23
+Results affected: 1
+Adding: {"component_name": String("Component1"), "component_temperature": Integer(23), "limit_temperature": Integer(20)}
+Component2 - temperature: 13
+Results affected: 0
+Component1 - temperature: 27
+Results affected: 1
+Updating: {"component_name": String("Component1"), "component_temperature": Integer(23), "limit_temperature": Integer(20)} -> {"component_name": String("Component1"), "component_temperature": Integer(27), "limit_temperature": Integer(20)}
+Component2 - temperature: 11
+Results affected: 0
+Component1 - temperature: 0
+Results affected: 1
+Removing: {"component_name": String("Component1"), "component_temperature": Integer(27), "limit_temperature": Integer(20)}
+Component2 - temperature: 21
+Results affected: 0
+```
+
 ## Process Monitor
 
 This example models all the running processes on the host machine as nodes within the queryable graph.  The query matches on CPU processes and returns all those where the current CPU usage is above 10%.  As processes jump above and below this limit, entries will be added and removed from the query result set.
@@ -44,6 +64,16 @@ To run the example us the following command:
 
 ```
 cargo run --example process_monitor
+```
+
+```
+Adding: {"process_cpu_usage": Float(16.280963897705078), "process_name": String("Process 1"), "process_pid": String("35260")}
+
+Adding: {"process_cpu_usage": Float(34.785438537597656), "process_name": String("Process 3"), "process_pid": String("74292")}
+
+Updating: {"process_cpu_usage": Float(16.280963897705078), "process_name": String("Process 2"), "process_pid": String("35260")} -> {"process_cpu_usage": Float(16.114809036254883), "process_name": String("Process 2"), "process_pid": String("35260")}
+
+Removing: {"process_cpu_usage": Float(34.785438537597656), "process_name": String("Process 3"), "process_pid": String("74292")}
 ```
 
 ## Vehicle Location
@@ -66,4 +96,10 @@ To run the example us the following command:
 
 ```
 cargo run --example vehicles
+```
+
+```
+Result: [Adding { after: {"color": String("Blue"), "plate": String("AAA-1234")} }]
+Result: [Updating { before: {"color": String("Blue"), "plate": String("AAA-1234")}, after: {"color": String("Green"), "plate": String("AAA-1234")} }]
+Result: [Removing { before: {"color": String("Green"), "plate": String("AAA-1234")} }]
 ```
