@@ -57,6 +57,7 @@ jobs:
       env:
         REDIS_URL: redis://localhost:6379
       run: |
+        cargo fmt -- --check
         cargo install junitify
         cargo test -- --format=json -Z unstable-options --report-time | junitify --ignore-parse-errors --out ./test-results
         ls
