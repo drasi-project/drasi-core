@@ -37,7 +37,7 @@ pub async fn overdue_invoice(config: &(impl QueryTestConfig + Send)) {
     cq.set_future_consumer(fqc.clone()).await;
 
     let inv_date = NaiveDateTime::new(NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(), NaiveTime::MIN);
-    let mut now = inv_date.timestamp_millis() as u64;
+    let mut now = inv_date.and_utc().timestamp_millis() as u64;
     now_override.store(now, Ordering::Relaxed);
 
     //create invoice
@@ -119,7 +119,7 @@ pub async fn overdue_count_persistent(config: &(impl QueryTestConfig + Send)) {
     cq.set_future_consumer(fqc.clone()).await;
 
     let inv_date = NaiveDateTime::new(NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(), NaiveTime::MIN);
-    let mut now = inv_date.timestamp_millis() as u64;
+    let mut now = inv_date.and_utc().timestamp_millis() as u64;
     now_override.store(now, Ordering::Relaxed);
 
     //create invoices

@@ -52,7 +52,7 @@ pub async fn not_reported(config: &(impl QueryTestConfig + Send)) {
 
     let init_time =
         NaiveDateTime::new(NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(), NaiveTime::MIN);
-    let time0 = init_time.timestamp_millis() as u64;
+    let time0 = init_time.and_utc().timestamp_millis() as u64;
     let time1 = time0 + Duration::minutes(30).num_milliseconds() as u64;
     let time2 = time1 + Duration::minutes(30).num_milliseconds() as u64;
     let time3 = time2 + Duration::minutes(30).num_milliseconds() as u64;
@@ -174,7 +174,7 @@ pub async fn not_reported(config: &(impl QueryTestConfig + Send)) {
             before: variablemap!(
                 "equipment" => VariableValue::String("Turbine 2".into()),
                 "sensor" => VariableValue::String("RPM".into()),
-                "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(init_time.timestamp_millis() as u64))
+                "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(init_time.and_utc().timestamp_millis() as u64))
             ),
         }));
     }
@@ -323,7 +323,7 @@ pub async fn percent_not_reported(config: &(impl QueryTestConfig + Send)) {
 
     let init_time =
         NaiveDateTime::new(NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(), NaiveTime::MIN);
-    let time0 = init_time.timestamp_millis() as u64;
+    let time0 = init_time.and_utc().timestamp_millis() as u64;
     let time1 = time0 + Duration::minutes(60).num_milliseconds() as u64;
     let time2 = time1 + Duration::minutes(30).num_milliseconds() as u64;
     let time3 = time2 + Duration::minutes(30).num_milliseconds() as u64;

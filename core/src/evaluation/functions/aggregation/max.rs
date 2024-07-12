@@ -19,7 +19,7 @@ use crate::evaluation::{
     variable_value::float::Float, variable_value::VariableValue, ExpressionEvaluationContext,
 };
 
-use chrono::{Duration as ChronoDuration, FixedOffset, NaiveDateTime};
+use chrono::{DateTime, Duration as ChronoDuration, FixedOffset};
 
 use super::{super::AggregatingFunction, lazy_sorted_set::LazySortedSet, Accumulator};
 
@@ -138,7 +138,9 @@ impl AggregatingFunction for Max {
                 accumulator.insert(duration_since_epoch * -1.0).await;
                 match accumulator.get_head().await? {
                     Some(head) => Ok(VariableValue::LocalDateTime(
-                        NaiveDateTime::from_timestamp_millis((head * -1.0) as i64).unwrap(),
+                        DateTime::from_timestamp_millis(head as i64 * -1.0 as i64)
+                            .unwrap_or_default()
+                            .naive_local(),
                     )),
                     None => Ok(VariableValue::Null),
                 }
@@ -248,7 +250,9 @@ impl AggregatingFunction for Max {
                 accumulator.remove(duration_since_epoch * -1.0).await;
                 match accumulator.get_head().await? {
                     Some(head) => Ok(VariableValue::LocalDateTime(
-                        NaiveDateTime::from_timestamp_millis((head * -1.0) as i64).unwrap(),
+                        DateTime::from_timestamp_millis(head as i64 * -1.0 as i64)
+                            .unwrap_or_default()
+                            .naive_local(),
                     )),
                     None => Ok(VariableValue::Null),
                 }
@@ -319,7 +323,9 @@ impl AggregatingFunction for Max {
                 ))
             }
             VariableValue::LocalDateTime(_) => Ok(VariableValue::LocalDateTime(
-                NaiveDateTime::from_timestamp_millis(value as i64).unwrap(),
+                DateTime::from_timestamp_millis(value as i64)
+                    .unwrap_or_default()
+                    .naive_local(),
             )),
             VariableValue::ZonedTime(_) => {
                 let epoch_date = *temporal_constants::EPOCH_NAIVE_DATE;

@@ -18,7 +18,7 @@ use crate::evaluation::{
 };
 
 use super::{super::AggregatingFunction, lazy_sorted_set::LazySortedSet, Accumulator};
-use chrono::{Duration as ChronoDuration, FixedOffset, NaiveDateTime, NaiveTime};
+use chrono::{DateTime, Duration as ChronoDuration, FixedOffset, NaiveTime};
 
 #[derive(Clone)]
 pub struct Min {}
@@ -127,11 +127,13 @@ impl AggregatingFunction for Min {
                 }
             }
             VariableValue::LocalDateTime(dt) => {
-                let duration_since_epoch = dt.timestamp_millis() as f64;
+                let duration_since_epoch = dt.and_utc().timestamp_millis() as f64;
                 accumulator.insert(duration_since_epoch).await;
                 match accumulator.get_head().await? {
                     Some(head) => Ok(VariableValue::LocalDateTime(
-                        NaiveDateTime::from_timestamp_millis(head as i64).unwrap(),
+                        DateTime::from_timestamp_millis(head as i64)
+                            .unwrap_or_default()
+                            .naive_local(),
                     )),
                     None => Ok(VariableValue::Null),
                 }
@@ -236,11 +238,13 @@ impl AggregatingFunction for Min {
                 }
             }
             VariableValue::LocalDateTime(dt) => {
-                let duration_since_epoch = dt.timestamp_millis() as f64;
+                let duration_since_epoch = dt.and_utc().timestamp_millis() as f64;
                 accumulator.remove(duration_since_epoch).await;
                 match accumulator.get_head().await? {
                     Some(head) => Ok(VariableValue::LocalDateTime(
-                        NaiveDateTime::from_timestamp_millis((head) as i64).unwrap(),
+                        DateTime::from_timestamp_millis(head as i64)
+                            .unwrap_or_default()
+                            .naive_local(),
                     )),
                     None => Ok(VariableValue::Null),
                 }
@@ -310,7 +314,9 @@ impl AggregatingFunction for Min {
                 ))
             }
             VariableValue::LocalDateTime(_) => Ok(VariableValue::LocalDateTime(
-                NaiveDateTime::from_timestamp_millis(value as i64).unwrap(),
+                DateTime::from_timestamp_millis(value as i64)
+                    .unwrap_or_default()
+                    .naive_local(),
             )),
             VariableValue::ZonedTime(_) => {
                 let epoch_date = *temporal_constants::EPOCH_NAIVE_DATE;

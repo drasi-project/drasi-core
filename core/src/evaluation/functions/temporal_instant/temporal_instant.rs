@@ -501,8 +501,8 @@ async fn create_date_time_from_epoch(o: BTreeMap<String, VariableValue>) -> Opti
             Some(epoch_millis) => epoch_millis.as_i64().unwrap_or(0),
             None => 0,
         };
-        let datetime_epoch = match NaiveDateTime::from_timestamp_millis(epoch_millis) {
-            Some(datetime_epoch) => datetime_epoch,
+        let datetime_epoch = match chrono::DateTime::from_timestamp_millis(epoch_millis) {
+            Some(datetime_epoch) => datetime_epoch.naive_local(),
             None => return None,
         };
         let datetime = datetime_epoch + Duration::nanoseconds(nanoseconds);
