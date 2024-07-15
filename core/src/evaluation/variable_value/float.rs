@@ -34,10 +34,8 @@ impl PartialEq<Integer> for Float {
     }
 }
 
-#[cfg(not(feature = "arbitrary_precision"))]
 impl Eq for Float {}
 
-#[cfg(not(feature = "arbitrary_precision"))]
 impl Hash for Float {
     fn hash<H: Hasher>(&self, h: &mut H) {
         match self.value {
@@ -107,16 +105,10 @@ impl Debug for Float {
 
 impl Display for Float {
     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        #[cfg(not(feature = "arbitrary_precision"))]
         {
             match &self.value {
                 value => formatter.write_str(&value.to_string()),
             }
-        }
-
-        #[cfg(feature = "arbitrary_precision")]
-        {
-            fmt::Display::fmt(&self.n, formatter)
         }
     }
 }
@@ -136,16 +128,6 @@ impl<'de> Deserialize<'de> for Float {
                 formatter.write_str("a JSON number")
             }
 
-            // #[inline]
-            // fn visit_i64<E>(self, value: i64) -> Result<Float, E> {
-            //     Ok(value.into())
-            // }
-
-            // #[inline]
-            // fn visit_u64<E>(self, value: u64) -> Result<Integer, E> {
-            //     Ok(value.into())
-            // }
-
             #[inline]
             fn visit_f64<E>(self, value: f64) -> Result<Float, E>
             where
@@ -160,20 +142,6 @@ impl<'de> Deserialize<'de> for Float {
                 E: de::Error,
             {
                 Ok(Float::from(value))
-            }
-
-            #[cfg(feature = "arbitrary_precision")]
-            #[inline]
-            fn visit_map<V>(self, mut visitor: V) -> Result<Float, V::Error>
-            where
-                V: de::MapAccess<'de>,
-            {
-                let value = tri!(visitor.next_key::<NumberKey>());
-                if value.is_none() {
-                    return Err(de::Error::invalid_type(Unexpected::Map, &self));
-                }
-                let v: NumberFromString = (visitor.next_value())?;
-                Ok(Float::from(v.value))
             }
         }
 
@@ -190,13 +158,8 @@ macro_rules! impl_from_float {
                 #[inline]
                 fn from(i: $ty) -> Self {
                     let n = {
-                        #[cfg(not(feature = "arbitrary_precision"))]
                         {
                             i as f64
-                        }
-                        #[cfg(feature = "arbitrary_precision")]
-                        {
-                            itoa::Buffer::new().format(i).to_owned()
                         }
                     };
                     Float { value: n }
@@ -207,36 +170,3 @@ macro_rules! impl_from_float {
 }
 
 impl_from_float!(f32, f64, i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
-
-// macro_rules! impl_from_signed {
-//     (
-//         $($ty:ty),*
-//     ) => {
-//         $(
-//             impl From<$ty> for Float {
-//                 #[inline]
-//                 fn from(i: $ty) -> Self {
-//                     panic!("Invalid conversion: Cannot convert {} to Float", i);
-//                 }
-//             }
-//         )*
-//     };
-// }
-
-// macro_rules! impl_from_unsigned {
-//     (
-//         $($ty:ty),*
-//     ) => {
-//         $(
-//             impl From<$ty> for Float {
-//                 #[inline]
-//                 fn from(i: $ty) -> Self {
-//                     panic!("Invalid conversion: Cannot convert {} to Float", i);
-//                 }
-//             }
-//         )*
-//     };
-// }
-
-// impl_from_unsigned!(u8, u16, u32, u64, usize);
-// impl_from_signed!();

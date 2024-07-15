@@ -5,7 +5,6 @@ use uuid::Uuid;
 
 use drasi_core::{
     interface::{AccumulatorIndex, ElementIndex},
-    path_solver::match_path::MatchPath,
     query::QueryBuilder,
 };
 use drasi_index_garnet::{element_index::GarnetElementIndex, result_index::GarnetResultIndex};

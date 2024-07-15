@@ -26,11 +26,6 @@ from_integer! {
     u8 u16 u32 u64 usize
 }
 
-#[cfg(feature = "arbitrary_precision")]
-from_integer! {
-    i128 u128
-}
-
 impl From<f32> for VariableValue {
     fn from(n: f32) -> Self {
         Float::from_f32(n).map_or(VariableValue::Null, VariableValue::Float)

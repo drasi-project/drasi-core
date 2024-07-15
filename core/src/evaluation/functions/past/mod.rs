@@ -60,8 +60,10 @@ impl ScalarFunction for GetVersionByTimestamp {
         };
 
         let timestamp = match &args[1] {
-            VariableValue::Date(d) => d.and_time(NaiveTime::MIN).timestamp_millis() as u64,
-            VariableValue::LocalDateTime(d) => d.timestamp_millis() as u64,
+            VariableValue::Date(d) => {
+                d.and_time(NaiveTime::MIN).and_utc().timestamp_millis() as u64
+            }
+            VariableValue::LocalDateTime(d) => d.and_utc().timestamp_millis() as u64,
             VariableValue::ZonedDateTime(d) => d.datetime().timestamp_millis() as u64,
             VariableValue::Integer(n) => match n.as_u64() {
                 Some(u) => u,
@@ -105,8 +107,10 @@ impl ScalarFunction for GetVersionsByTimeRange {
         };
 
         let from = match &args[1] {
-            VariableValue::Date(d) => d.and_time(NaiveTime::MIN).timestamp_millis() as u64,
-            VariableValue::LocalDateTime(d) => d.timestamp_millis() as u64,
+            VariableValue::Date(d) => {
+                d.and_time(NaiveTime::MIN).and_utc().timestamp_millis() as u64
+            }
+            VariableValue::LocalDateTime(d) => d.and_utc().timestamp_millis() as u64,
             VariableValue::ZonedDateTime(d) => d.datetime().timestamp_millis() as u64,
             VariableValue::Integer(n) => match n.as_u64() {
                 Some(u) => u,
@@ -116,8 +120,10 @@ impl ScalarFunction for GetVersionsByTimeRange {
         };
 
         let to = match &args[2] {
-            VariableValue::Date(d) => d.and_time(NaiveTime::MIN).timestamp_millis() as u64,
-            VariableValue::LocalDateTime(d) => d.timestamp_millis() as u64,
+            VariableValue::Date(d) => {
+                d.and_time(NaiveTime::MIN).and_utc().timestamp_millis() as u64
+            }
+            VariableValue::LocalDateTime(d) => d.and_utc().timestamp_millis() as u64,
             VariableValue::ZonedDateTime(d) => d.datetime().timestamp_millis() as u64,
             VariableValue::Integer(n) => match n.as_u64() {
                 Some(u) => u,
