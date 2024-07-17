@@ -67,6 +67,9 @@ impl ExpressionEvaluator {
             ast::Expression::ObjectExpression(expression) => {
                 self.evaluate_object_expression(context, expression).await
             }
+            ast::Expression::IteratorExpression(expression) => {
+                self.evaluate_iterator_expression(context, expression).await
+            }
         }
     }
 
@@ -102,6 +105,7 @@ impl ExpressionEvaluator {
             ast::Expression::CaseExpression(_) => "case",
             ast::Expression::ListExpression(_) => "list",
             ast::Expression::ObjectExpression(_) => "object",
+            ast::Expression::IteratorExpression(_) => "iterator",
         };
 
         Ok((alias.to_string(), value))
@@ -1297,86 +1301,6 @@ impl ExpressionEvaluator {
                     _ => VariableValue::Bool(false),
                 }
             }
-            ast::BinaryExpression::Iterate(_e1, _e2) => {
-                // This expression will be solely used in reduce().
-                // It should not (and will not) be evaluated here.
-                todo!()
-            }
-            ast::BinaryExpression::Reduce(_e1, _e2) => {
-                // This expression will be solely used in reduce().
-                // It should not (and will not) be evaluated here.
-                todo!()
-            }
-            ast::BinaryExpression::Filter(e1, e2) => {
-                // x in [a,b,c], where x > 0
-                let in_expression = *e1.clone(); //Check
-                let filter_expression = *e2.clone();
-                let mut result = Vec::new();
-                let (variable, val_list) = self
-                    .get_in_expression_element(context, in_expression)
-                    .await?;
-                let mut context_variables = QueryVariables::new();
-                let mut filter_and_map = false;
-                let mut condition_expression: Option<ast::Expression> = None;
-                let mut evaluation_expression: Option<ast::Expression> = None;
-                if let ast::Expression::UnaryExpression(exp) = filter_expression.clone() {
-                    if let ast::UnaryExpression::Literal(literal) = exp {
-                        if let ast::Literal::Expression(iterate_expression) = literal {
-                            filter_and_map = true;
-                            condition_expression =
-                                Some(iterate_expression.get_children()[0].clone());
-                            evaluation_expression =
-                                Some(iterate_expression.get_children()[1].clone());
-                        }
-                    }
-                }
-                for element in &val_list {
-                    // if filter_expression is a UnaryExpression::Literal::Expression (e.g. x in [a,b,c], where x > 0 | x+1 )
-                    if filter_and_map {
-                        context_variables.insert(variable.to_string().into(), element.clone());
-                        let local_context = ExpressionEvaluationContext::new(
-                            &context_variables,
-                            context.get_clock(),
-                        );
-                        let evaluation_result = self
-                            .evaluate_expression(
-                                &local_context,
-                                &condition_expression.clone().unwrap(),
-                            )
-                            .await;
-
-                        if let Ok(result_value) = evaluation_result {
-                            if result_value == VariableValue::Bool(true) {
-                                let evaluation_result = self
-                                    .evaluate_expression(
-                                        &local_context,
-                                        &evaluation_expression.clone().unwrap(),
-                                    )
-                                    .await;
-                                if let Ok(result_value) = evaluation_result {
-                                    result.push(result_value);
-                                }
-                            }
-                        }
-                    } else {
-                        context_variables.insert(variable.to_string().into(), element.clone());
-                        let local_context = ExpressionEvaluationContext::new(
-                            &context_variables,
-                            context.get_clock(),
-                        );
-                        let evaluation_result = self
-                            .evaluate_expression(&local_context, &filter_expression.clone())
-                            .await;
-
-                        if let Ok(result_value) = evaluation_result {
-                            if result_value == VariableValue::Bool(true) {
-                                result.push(element.clone());
-                            }
-                        }
-                    }
-                }
-                VariableValue::List(result)
-            }
             ast::BinaryExpression::Index(e1, e2) => {
                 let index_exp = self.evaluate_expression(context, e2).await?;
                 let variable_value_list = self.evaluate_expression(context, e1).await?;
@@ -1454,6 +1378,13 @@ impl ExpressionEvaluator {
                             error: Box::new(e),
                         })?
                 }
+                Function::LazyScalar(scalar) => scalar
+                    .call(context, expression, &expression.args)
+                    .await
+                    .map_err(|e| EvaluationError::FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: Box::new(e),
+                    })?,
                 Function::Aggregating(aggregate) => {
                     let mut values = Vec::new();
                     for arg in &expression.args {
@@ -1596,37 +1527,6 @@ impl ExpressionEvaluator {
     ) -> Result<VariableValue, EvaluationError> {
         let mut result = Vec::new();
         for e in &expression.elements {
-            //if e is type of filter expression, then we need to evaluate it differently
-            if let ast::Expression::BinaryExpression(exp) = e {
-                if let ast::BinaryExpression::Filter(_e1, _e2) = exp {
-                    //println!("exp: {:?}", exp);
-                    return self.evaluate_binary_expression(context, exp).await;
-                }
-            } else if let ast::Expression::UnaryExpression(exp) = e {
-                if let ast::UnaryExpression::Literal(literal) = exp {
-                    if let ast::Literal::Expression(iterate_expression) = literal {
-                        let in_expression = iterate_expression.get_children()[0];
-                        let (variable, val_list) = self
-                            .get_in_expression_element(&context.clone(), in_expression.clone())
-                            .await?;
-                        let mapping_expression = iterate_expression.get_children()[1].clone();
-                        let mut variables = context.clone_variables();
-                        for element in val_list {
-                            variables.insert(variable.to_string().into(), element.clone());
-                            let local_context =
-                                ExpressionEvaluationContext::new(&variables, context.get_clock());
-                            let evaluation_result = self
-                                .evaluate_expression(&local_context, &mapping_expression.clone())
-                                .await;
-                            if let Ok(result_value) = evaluation_result {
-                                result.push(result_value.clone());
-                            }
-                        }
-                        return Ok(VariableValue::List(result));
-                    }
-                }
-            }
-
             result.push(self.evaluate_expression(context, e).await?);
         }
 
@@ -1649,30 +1549,122 @@ impl ExpressionEvaluator {
         Ok(VariableValue::Object(result))
     }
 
-    async fn get_in_expression_element(
+    pub async fn evaluate_assignment(
         &self,
         context: &ExpressionEvaluationContext<'_>,
-        in_expression: ast::Expression,
-    ) -> Result<(String, Vec<VariableValue>), EvaluationError> {
-        let variable_name = match in_expression.get_children()[0] {
-            // x
-            ast::Expression::UnaryExpression(exp) => match exp {
-                ast::UnaryExpression::Identifier(ident) => ident,
-                _ => return Err(EvaluationError::InvalidType),
+        expression: &ast::Expression,
+    ) -> Result<(Arc<str>, VariableValue), EvaluationError> {
+        match expression {
+            ast::Expression::BinaryExpression(exp) => match exp {
+                ast::BinaryExpression::Eq(var, val) => {
+                    let variable = match *var.clone() {
+                        ast::Expression::UnaryExpression(exp) => match exp {
+                            ast::UnaryExpression::Identifier(ident) => ident,
+                            _ => return Err(EvaluationError::InvalidType),
+                        },
+                        _ => return Err(EvaluationError::InvalidType),
+                    };
+                    let value = self.evaluate_expression(context, val).await?;
+                    Ok((variable, value))
+                }
+                _ => Err(EvaluationError::InvalidType),
             },
-            _ => return Err(EvaluationError::InvalidType),
-        };
-        let list_expression = in_expression.get_children()[1];
-        let list_evaluated = self
-            .evaluate_expression(context, &list_expression.clone())
-            .await
-            .unwrap();
-        let val_list = match list_evaluated {
-            VariableValue::List(list) => list,
-            _ => return Err(EvaluationError::InvalidType),
-        };
+            _ => Err(EvaluationError::InvalidType),
+        }
+    }
 
-        Ok((variable_name.to_string(), val_list))
+    async fn evaluate_iterator_expression(
+        &self,
+        context: &ExpressionEvaluationContext<'_>,
+        expression: &ast::IteratorExpression,
+    ) -> Result<VariableValue, EvaluationError> {
+        let items = self
+            .evaluate_expression(context, &expression.list_expression)
+            .await?;
+        match items {
+            VariableValue::List(items) => {
+                let mut result = Vec::new();
+                let mut variables = context.clone_variables();
+                for item in items {
+                    if let Some(filter) = &expression.filter {
+                        variables
+                            .insert(expression.item_identifier.to_string().into(), item.clone());
+                        let local_context =
+                            ExpressionEvaluationContext::new(&variables, context.get_clock());
+                        if !self.evaluate_predicate(&local_context, filter).await? {
+                            continue;
+                        }
+                    }
+
+                    match &expression.map_expression {
+                        Some(map_expression) => {
+                            variables.insert(
+                                expression.item_identifier.to_string().into(),
+                                item.clone(),
+                            );
+                            let local_context =
+                                ExpressionEvaluationContext::new(&variables, context.get_clock());
+                            let item_result = self
+                                .evaluate_expression(&local_context, map_expression)
+                                .await?;
+                            result.push(item_result);
+                        }
+                        None => {
+                            result.push(item);
+                        }
+                    }
+                }
+                Ok(VariableValue::List(result))
+            }
+            _ => Err(EvaluationError::InvalidType),
+        }
+    }
+
+    pub async fn reduce_iterator_expression(
+        &self,
+        context: &ExpressionEvaluationContext<'_>,
+        expression: &ast::IteratorExpression,
+        accumulator_variable: Arc<str>,
+    ) -> Result<VariableValue, EvaluationError> {
+        let items = self
+            .evaluate_expression(context, &expression.list_expression)
+            .await?;
+        match items {
+            VariableValue::List(items) => {
+                let mut result = VariableValue::Null;
+                let mut variables = context.clone_variables();
+                for item in items {
+                    if let Some(filter) = &expression.filter {
+                        variables
+                            .insert(expression.item_identifier.to_string().into(), item.clone());
+                        let local_context =
+                            ExpressionEvaluationContext::new(&variables, context.get_clock());
+                        if !self.evaluate_predicate(&local_context, filter).await? {
+                            continue;
+                        }
+                    }
+
+                    match &expression.map_expression {
+                        Some(map_expression) => {
+                            variables.insert(
+                                expression.item_identifier.to_string().into(),
+                                item.clone(),
+                            );
+                            let local_context =
+                                ExpressionEvaluationContext::new(&variables, context.get_clock());
+                            result = self
+                                .evaluate_expression(&local_context, map_expression)
+                                .await?;
+                            variables
+                                .insert(accumulator_variable.to_string().into(), result.clone());
+                        }
+                        None => {}
+                    }
+                }
+                Ok(result)
+            }
+            _ => Err(EvaluationError::InvalidType),
+        }
     }
 }
 
