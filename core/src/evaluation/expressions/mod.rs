@@ -8,7 +8,7 @@ use async_recursion::async_recursion;
 use chrono::{
     Datelike, Duration, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Weekday,
 };
-use drasi_query_ast::ast::{self, ParentExpression};
+use drasi_query_ast::ast;
 
 use crate::evaluation::temporal_constants;
 use crate::evaluation::variable_value::duration::Duration as DurationStruct;
@@ -21,7 +21,7 @@ use crate::interface::{ResultKey, ResultOwner};
 use crate::{evaluation::variable_value::VariableValue, interface::ResultIndex};
 
 use super::{
-    context::{ExpressionEvaluationContext, QueryVariables, SideEffects},
+    context::{ExpressionEvaluationContext, SideEffects},
     functions::{aggregation::Accumulator, Function, FunctionRegistry},
     EvaluationError,
 };
@@ -1631,7 +1631,10 @@ impl ExpressionEvaluator {
             .await?;
         match items {
             VariableValue::List(items) => {
-                let mut result = VariableValue::Null;
+                let mut result = match context.get_variable(accumulator_variable.clone()) {
+                    Some(value) => value.clone(),
+                    None => VariableValue::Null,
+                };
                 let mut variables = context.clone_variables();
                 for item in items {
                     if let Some(filter) = &expression.filter {
@@ -1639,6 +1642,7 @@ impl ExpressionEvaluator {
                             .insert(expression.item_identifier.to_string().into(), item.clone());
                         let local_context =
                             ExpressionEvaluationContext::new(&variables, context.get_clock());
+
                         if !self.evaluate_predicate(&local_context, filter).await? {
                             continue;
                         }

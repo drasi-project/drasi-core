@@ -95,6 +95,31 @@ async fn test_list_comprehension_property_with_mapping_only() {
 }
 
 #[tokio::test]
+async fn test_list_comprehension_property_with_mapping_only_non_numeric() {
+    let expr = "[x IN ['foo', 'bar'] | x + 'baz']";
+
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+    let function_registry = Arc::new(FunctionRegistry::new());
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+
+    let variables = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+
+    assert_eq!(
+        evaluator
+            .evaluate_expression(&context, &expr)
+            .await
+            .unwrap(),
+        VariableValue::List(vec![
+            VariableValue::String(String::from("foobaz")),
+            VariableValue::String(String::from("barbaz")),
+        ])
+    );
+}
+
+#[tokio::test]
 async fn test_list_comprehension_property() {
     let expr = "[x IN [123,342,12,34,-12] where x > 0| x - 10]"; //for each element in param1, return the value property
 
