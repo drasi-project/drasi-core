@@ -327,6 +327,8 @@ impl ScalarFunction for Substring {
         }
         match (&args[0], &args[1], &args.get(2)) {
             (VariableValue::Null, _, _) => Ok(VariableValue::Null),
+            (_, VariableValue::Null, _) => Err(EvaluationError::InvalidType),
+            (_,_, Some(VariableValue::Null)) => Err(EvaluationError::InvalidType),
             (VariableValue::String(original), VariableValue::Integer(start), None) => {
                 // Handle case with two arguments
                 if !start.is_i64() {
