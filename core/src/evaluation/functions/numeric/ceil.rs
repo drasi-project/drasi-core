@@ -24,7 +24,7 @@ impl ScalarFunction for Ceil {
         match &args[0] {
             VariableValue::Null => Ok(VariableValue::Null),
             VariableValue::Integer(n) => {
-                Ok(VariableValue::Integer(Integer::from(n.as_i64().unwrap())))
+                Ok(VariableValue::Float(Float::from_f64(n.as_i64().unwrap() as f64).unwrap())) // ceil always return a float
             }
             VariableValue::Float(n) => Ok(VariableValue::Float(
                 Float::from_f64(n.as_f64().unwrap().ceil()).unwrap(),
