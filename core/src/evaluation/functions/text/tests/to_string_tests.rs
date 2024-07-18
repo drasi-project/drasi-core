@@ -84,3 +84,18 @@ async fn test_to_string_too_few_args() {
         EvaluationError::InvalidArgumentCount(_)
     ));
 }
+
+
+#[tokio::test]
+async fn test_to_string_null() {
+    let to_string = text::ToString {};
+    let binding = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
+
+    let args = vec![VariableValue::Null];
+    let result = to_string
+        .call(&context, &get_func_expr(), args.clone())
+        .await;
+    assert_eq!(result.unwrap(), VariableValue::Null);
+}

@@ -21,6 +21,7 @@ impl ScalarFunction for ToUpper {
         }
         match &args[0] {
             VariableValue::String(s) => Ok(VariableValue::String(s.to_uppercase())),
+            VariableValue::Null => Ok(VariableValue::Null),
             _ => Err(EvaluationError::InvalidType),
         }
     }
@@ -42,6 +43,7 @@ impl ScalarFunction for ToLower {
         }
         match &args[0] {
             VariableValue::String(s) => Ok(VariableValue::String(s.to_lowercase())),
+            VariableValue::Null => Ok(VariableValue::Null),
             _ => Err(EvaluationError::InvalidType),
         }
     }
@@ -63,6 +65,7 @@ impl ScalarFunction for Trim {
         }
         match &args[0] {
             VariableValue::String(s) => Ok(VariableValue::String(s.trim().to_string())),
+            VariableValue::Null => Ok(VariableValue::Null),
             _ => Err(EvaluationError::InvalidType),
         }
     }
@@ -84,6 +87,7 @@ impl ScalarFunction for LTrim {
         }
         match &args[0] {
             VariableValue::String(s) => Ok(VariableValue::String(s.trim_start().to_string())),
+            VariableValue::Null => Ok(VariableValue::Null),
             _ => Err(EvaluationError::InvalidType),
         }
     }
@@ -105,6 +109,7 @@ impl ScalarFunction for RTrim {
         }
         match &args[0] {
             VariableValue::String(s) => Ok(VariableValue::String(s.trim_end().to_string())),
+            VariableValue::Null => Ok(VariableValue::Null),
             _ => Err(EvaluationError::InvalidType),
         }
     }
@@ -126,6 +131,7 @@ impl ScalarFunction for Reverse {
         }
         match &args[0] {
             VariableValue::String(s) => Ok(VariableValue::String(s.chars().rev().collect())),
+            VariableValue::Null => Ok(VariableValue::Null),
             _ => Err(EvaluationError::InvalidType),
         }
     }
@@ -146,17 +152,25 @@ impl ScalarFunction for Left {
             return Err(EvaluationError::InvalidArgumentCount("left".to_string()));
         }
         match (&args[0], &args[1]) {
+            (VariableValue::Null, VariableValue::Integer(_length)) => Ok(VariableValue::Null),
+            (VariableValue::Null, VariableValue::Null) => Ok(VariableValue::Null),
             (VariableValue::String(original), VariableValue::Integer(length)) => {
-                if !length.is_i64() {
-                    return Err(EvaluationError::InvalidType);
-                }
-                let len = length.as_i64().unwrap() as usize;
+                let len = match length.as_i64() {
+                    Some(l) => {
+                        if l <= 0 {
+                            return Err(EvaluationError::InvalidType);
+                        }
+                        l as usize
+                    }
+                    None => return Err(EvaluationError::InvalidType),
+                };
                 if len > original.len() {
-                    return Err(EvaluationError::InvalidType);
+                    return Ok(VariableValue::String(original.to_string()));
                 }
                 let result = original.chars().take(len).collect::<String>();
                 Ok(VariableValue::String(result))
-            }
+            },
+            (_, VariableValue::Null) => return Err(EvaluationError::InvalidType),
             _ => Err(EvaluationError::InvalidType),
         }
     }
@@ -177,18 +191,26 @@ impl ScalarFunction for Right {
             return Err(EvaluationError::InvalidArgumentCount("right".to_string()));
         }
         match (&args[0], &args[1]) {
+            (VariableValue::Null, VariableValue::Integer(_length)) => Ok(VariableValue::Null),
+            (VariableValue::Null, VariableValue::Null) => Ok(VariableValue::Null),
             (VariableValue::String(original), VariableValue::Integer(length)) => {
-                if !length.is_i64() {
-                    return Err(EvaluationError::InvalidType);
-                }
-                let len = length.as_i64().unwrap() as usize;
+                let len = match length.as_i64() {
+                    Some(l) => {
+                        if l <= 0 {
+                            return Err(EvaluationError::InvalidType);
+                        }
+                        l as usize
+                    }
+                    None => return Err(EvaluationError::InvalidType),
+                };
                 if len > original.len() {
-                    return Err(EvaluationError::InvalidType);
+                    return Ok(VariableValue::String(original.to_string()));
                 }
                 let start_index = original.len() - len;
                 let result = original[start_index..].to_string();
                 Ok(VariableValue::String(result))
-            }
+            },
+            (_, VariableValue::Null) => return Err(EvaluationError::InvalidType),
             _ => Err(EvaluationError::InvalidType),
         }
     }
@@ -219,7 +241,10 @@ impl ScalarFunction for Replace {
                 }
                 let result = original.replace(search, replace);
                 return Ok(VariableValue::String(result));
-            }
+            },
+            (VariableValue::Null, _, _) => Ok(VariableValue::Null),
+            (_, VariableValue::Null, _) => Ok(VariableValue::Null),
+            (_, _, VariableValue::Null) => Ok(VariableValue::Null),
             _ => Err(EvaluationError::InvalidType),
         }
     }
@@ -240,6 +265,8 @@ impl ScalarFunction for Split {
             return Err(EvaluationError::InvalidArgumentCount("split".to_string()));
         }
         match (&args[0], &args[1]) {
+            (VariableValue::Null, _) => Ok(VariableValue::Null),
+            (_, VariableValue::Null) => Ok(VariableValue::Null),
             (VariableValue::String(original), VariableValue::String(separator)) => {
                 if separator.is_empty() {
                     return Err(EvaluationError::InvalidType);
@@ -299,12 +326,21 @@ impl ScalarFunction for Substring {
             ));
         }
         match (&args[0], &args[1], &args.get(2)) {
+            (VariableValue::Null, _, _) => Ok(VariableValue::Null),
             (VariableValue::String(original), VariableValue::Integer(start), None) => {
                 // Handle case with two arguments
                 if !start.is_i64() {
                     return Err(EvaluationError::InvalidType);
                 }
-                let start_index = start.as_i64().unwrap() as usize;
+                let start_index = match start.as_i64() {
+                    Some(s) => {
+                        if s < 0 {
+                            return Err(EvaluationError::InvalidType);
+                        }
+                        s as usize
+                    }
+                    None => return Err(EvaluationError::InvalidType),
+                };
                 if start_index > original.len() {
                     return Err(EvaluationError::InvalidType);
                 }
@@ -319,8 +355,25 @@ impl ScalarFunction for Substring {
                 if !start.is_i64() || !length.is_i64() {
                     return Err(EvaluationError::InvalidType);
                 }
-                let start_index = start.as_i64().unwrap() as usize;
-                let len = length.as_i64().unwrap() as usize;
+                let start_index = match start.as_i64() {
+                    Some(s) => {
+                        if s < 0 {
+                            return Err(EvaluationError::InvalidType);
+                        }
+                        s as usize
+                    }
+                    None => return Err(EvaluationError::InvalidType),
+                };
+
+                let len = match length.as_i64() {
+                    Some(l) => {
+                        if l < 0 {
+                            return Err(EvaluationError::InvalidType);
+                        }
+                        l as usize
+                    }
+                    None => return Err(EvaluationError::InvalidType),
+                };
                 if start_index > original.len() || start_index + len - start_index > original.len()
                 {
                     return Err(EvaluationError::InvalidType);
@@ -353,6 +406,7 @@ impl ScalarFunction for ToString {
             VariableValue::Integer(n) => return Ok(VariableValue::String(n.to_string())),
             VariableValue::Float(n) => return Ok(VariableValue::String(n.to_string())),
             VariableValue::String(s) => return Ok(VariableValue::String(s.to_string())),
+            VariableValue::Bool(b) => return Ok(VariableValue::String(b.to_string())),
             VariableValue::List(a) => {
                 let mut result = String::new();
                 result.push('[');
@@ -363,7 +417,8 @@ impl ScalarFunction for ToString {
                 result.truncate(result.len() - 2);
                 result.push(']');
                 return Ok(VariableValue::String(result));
-            }
+            },
+            VariableValue::Null => return Ok(VariableValue::Null),
             _ => return Err(EvaluationError::InvalidType),
         }
     }

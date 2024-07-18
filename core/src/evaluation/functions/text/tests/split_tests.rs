@@ -187,3 +187,33 @@ async fn test_split_multiple_delimiter_invalid_inputs() {
     let result = split.call(&context, &get_func_expr(), args.clone()).await;
     assert!(matches!(result.unwrap_err(), EvaluationError::InvalidType));
 }
+
+
+#[tokio::test]
+async fn test_split_null() {
+    let split = text::Split {};
+    let binding = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
+
+    let args = vec![
+        VariableValue::Null,
+        VariableValue::String(",".to_string()),
+    ];
+    let result = split.call(&context, &get_func_expr(), args.clone()).await;
+    assert_eq!(result.unwrap(), VariableValue::Null);
+
+    let args = vec![
+        VariableValue::String("hello,world".to_string()),
+        VariableValue::Null,
+    ];
+    let result = split.call(&context, &get_func_expr(), args.clone()).await;
+    assert_eq!(result.unwrap(), VariableValue::Null);
+
+    let args = vec![
+        VariableValue::Null,
+        VariableValue::Null,
+    ];
+    let result = split.call(&context, &get_func_expr(), args.clone()).await;
+    assert_eq!(result.unwrap(), VariableValue::Null);
+}
