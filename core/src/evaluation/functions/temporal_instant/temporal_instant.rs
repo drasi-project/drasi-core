@@ -9,7 +9,7 @@ use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::{EvaluationError, ExpressionEvaluationContext};
 use chrono::{
     Datelike, Days, Duration, FixedOffset, LocalResult, NaiveDate, NaiveDateTime, NaiveTime,
-    TimeZone, Timelike, Weekday,
+    TimeZone, Timelike, Weekday, prelude::*
 };
 use chrono_tz::Tz;
 use log::error;
@@ -29,8 +29,14 @@ impl ScalarFunction for Date {
         _expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
     ) -> Result<VariableValue, EvaluationError> {
-        if args.len() != 1 {
+        if args.len() > 1 {
             return Err(EvaluationError::InvalidArgumentCount("date".to_string()));
+        }
+        if args.len() == 0 {
+            // current date
+            let local = Local::now();
+            let date = local.date_naive();
+            return Ok(VariableValue::Date(date));
         }
         match &args[0] {
             VariableValue::String(s) => {
@@ -51,6 +57,7 @@ impl ScalarFunction for Date {
                     "quarter",
                     "dayOfWeek",
                     "dayOfQuarter",
+                    "timezone",
                 ]
                 .iter()
                 .map(|s| s.to_string())
@@ -61,6 +68,21 @@ impl ScalarFunction for Date {
                 if !invalid_keys.is_empty() {
                     error!("Invalid keys in the date object");
                     return Err(EvaluationError::InvalidType);
+                }
+                if o.get("timezone").is_some() {
+                    let tz = match o.get("timezone") {
+                        Some(tz) => {
+                            let tz_str = tz.as_str().unwrap();
+                            let tz: Tz = match  tz_str.parse() {
+                                Ok(tz) => tz,
+                                Err(_) => return Err(EvaluationError::InvalidType),
+                            };
+                            tz
+                        }
+                        None => return Err(EvaluationError::InvalidType)
+                    };
+                    let local: chrono::DateTime<Tz> = Local::now().with_timezone(&tz);
+                    return Ok(VariableValue::Date(local.date_naive()));
                 }
                 let result = create_date_from_componet(o.clone()).await;
                 match result {

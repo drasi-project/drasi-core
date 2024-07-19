@@ -1,4 +1,5 @@
 use chrono::NaiveDate;
+use chrono::prelude::*;
 use std::sync::Arc;
 
 use crate::evaluation::context::QueryVariables;
@@ -8,6 +9,34 @@ use crate::evaluation::{ExpressionEvaluationContext, ExpressionEvaluator, Instan
 
 use crate::evaluation::functions::FunctionRegistry;
 use crate::in_memory_index::in_memory_result_index::InMemoryResultIndex;
+
+
+#[tokio::test]
+async fn evaluate_date_empty() {
+    let expr = "date()";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+
+    let function_registry = Arc::new(FunctionRegistry::new());
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+
+    let variables = QueryVariables::new();
+
+    {
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            {
+                let local = Local::now().date_naive();
+                VariableValue::Date(local)
+            }
+        );
+    }
+}
 
 #[tokio::test]
 async fn evalute_local_time_yy_mm_dd() {
@@ -390,7 +419,7 @@ async fn test_date_property_day_of_quarter() {
 }
 
 #[tokio::test]
-async fn test_evaluate_date_truncate() {
+async fn test_evaluate_date_truncate_month() {
     let expr = "date.truncate('month', $param1)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
@@ -416,6 +445,160 @@ async fn test_evaluate_date_truncate() {
             VariableValue::Date(NaiveDate::from_ymd_opt(2015, 5, 1).unwrap())
         );
     }
+}
+
+
+#[tokio::test]
+async fn test_evaluate_date_truncate_week() {
+    let expr = "date.truncate('week', $param1, {dayOfWeek: 2})";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+
+    let function_registry = Arc::new(FunctionRegistry::new());
+
+    let ari = Arc::new(InMemoryResultIndex::new());
+
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+
+    let mut variables = QueryVariables::new();
+    variables.insert(
+        "param1".into(),
+        VariableValue::Date(NaiveDate::from_ymd_opt(2017,11,11).unwrap()),
+    );
+    {
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::Date(NaiveDate::from_ymd_opt(2017,11,7).unwrap())
+        );
+    }
+
+}
+
+#[tokio::test]
+async fn test_truncate_with_millenium() {
+    let expr = "date.truncate('millenium', $param1)";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+
+    let function_registry = Arc::new(FunctionRegistry::new());
+
+    let ari = Arc::new(InMemoryResultIndex::new());
+
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+
+    let mut variables = QueryVariables::new();
+    variables.insert(
+        "param1".into(),
+        VariableValue::Date(NaiveDate::from_ymd_opt(2015, 5, 30).unwrap()),
+    );
+    {
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::Date(NaiveDate::from_ymd_opt(2000, 1, 1).unwrap())
+        );
+    }
+
+}
+
+
+#[tokio::test]
+async fn test_evaluate_date_truncate_weekyear() {
+    let expr = "date.truncate('weekyear', $param1)";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+
+    let function_registry = Arc::new(FunctionRegistry::new());
+
+    let ari = Arc::new(InMemoryResultIndex::new());
+
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+
+    let mut variables = QueryVariables::new();
+    variables.insert(
+        "param1".into(),
+        VariableValue::Date(NaiveDate::from_ymd_opt(2017,11,11).unwrap()),
+    );
+    {
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::Date(NaiveDate::from_ymd_opt(2017,1,2).unwrap())
+        );
+    }
+
+
+}
+
+#[tokio::test]
+async fn test_evaluate_date_truncate_quarter() {
+    let expr = "date.truncate('quarter', $param1)";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+
+    let function_registry = Arc::new(FunctionRegistry::new());
+
+    let ari = Arc::new(InMemoryResultIndex::new());
+
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+
+    let mut variables = QueryVariables::new();
+    variables.insert(
+        "param1".into(),
+        VariableValue::Date(NaiveDate::from_ymd_opt(2017,11,11).unwrap()),
+    );
+    {
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::Date(NaiveDate::from_ymd_opt(2017,10,1).unwrap())
+        );
+    }
+
+}
+
+#[tokio::test]
+async fn test_evaluate_date_truncate_day() {
+    let expr = "date.truncate('day', $param1)";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+
+    let function_registry = Arc::new(FunctionRegistry::new());
+
+    let ari = Arc::new(InMemoryResultIndex::new());
+
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+
+    let mut variables = QueryVariables::new();
+    variables.insert(
+        "param1".into(),
+        VariableValue::Date(NaiveDate::from_ymd_opt(2017,11,11).unwrap()),
+    );
+    {
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::Date(NaiveDate::from_ymd_opt(2017,11,11).unwrap())
+        );
+    }
+
+
 }
 
 #[tokio::test]
