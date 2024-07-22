@@ -107,10 +107,14 @@ impl ScalarFunction for LocalTime {
         _expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
     ) -> Result<VariableValue, EvaluationError> {
-        if args.len() != 1 {
+        if args.len() > 1 {
             return Err(EvaluationError::InvalidArgumentCount(
                 "localtime".to_string(),
             ));
+        }
+        if args.len() == 0 {
+            let local = Local::now().time();
+            return Ok(VariableValue::LocalTime(local));
         }
         match &args[0] {
             VariableValue::String(s) => {
