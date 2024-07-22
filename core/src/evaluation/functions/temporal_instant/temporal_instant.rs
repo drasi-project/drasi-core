@@ -163,10 +163,16 @@ impl ScalarFunction for LocalDateTime {
         _expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
     ) -> Result<VariableValue, EvaluationError> {
-        if args.len() != 1 {
+        if args.len() > 1 {
             return Err(EvaluationError::InvalidArgumentCount(
                 "localdatetime".to_string(),
             ));
+        }
+        if args.len() == 0 {
+            // current datetime
+            let local = Local::now();
+            let datetime = local.naive_local();
+            return Ok(VariableValue::LocalDateTime(datetime));
         }
         match &args[0] {
             VariableValue::String(s) => {
@@ -193,6 +199,7 @@ impl ScalarFunction for LocalDateTime {
                     "millisecond",
                     "microsecond",
                     "nanosecond",
+                    "timezone"
                 ]
                 .iter()
                 .map(|s| s.to_string())
@@ -203,6 +210,23 @@ impl ScalarFunction for LocalDateTime {
                 if !invalid_keys.is_empty() {
                     error!("Invalid keys in the localdatetime object");
                     return Err(EvaluationError::InvalidType);
+                }
+                if o.get("timezone").is_some() {
+                    // retrieve the naivedatetime from the timezone
+                    let tz = match o.get("timezone") {
+                        Some(tz) => {
+                            let tz_str = tz.as_str().unwrap();
+                            let tz: Tz = match tz_str.parse() {
+                                Ok(tz) => tz,
+                                Err(_) => return Err(EvaluationError::InvalidType),
+                            };
+                            tz
+                        }
+                        None => return Err(EvaluationError::InvalidType),
+                    };
+
+                    let local: chrono::DateTime<Tz> = Local::now().with_timezone(&tz);
+                    return Ok(VariableValue::LocalDateTime(local.naive_local()));
                 }
 
                 let date_result = match create_date_from_componet(o.clone()).await {
@@ -631,10 +655,12 @@ impl ScalarFunction for Truncate {
                     Ok(date) => date,
                     Err(_) => return Err(EvaluationError::InvalidType),
                 };
+                println!("truncated_date: {:?}", truncated_date);
                 let truncated_time = match truncate_local_time(s.to_string(), dt.time()).await {
                     Ok(time) => time,
                     Err(_) => return Err(EvaluationError::InvalidType),
                 };
+                println!("truncated_time: {:?}", truncated_time);
                 let truncated_date_time = NaiveDateTime::new(truncated_date, truncated_time);
                 Ok(VariableValue::LocalDateTime(truncated_date_time))
             }
@@ -802,7 +828,7 @@ async fn truncate_date(unit: String, date: NaiveDate) -> Result<NaiveDate, Evalu
     let date_lowercase = unit.to_lowercase();
     let truncation_unit = date_lowercase.as_str();
     match truncation_unit {
-        "millenium" => {
+        "millennium" => {
             let year = year / 1000 * 1000;
             Ok(NaiveDate::from_ymd_opt(year, 1, 1).unwrap())
         }
@@ -959,6 +985,8 @@ async fn truncate_local_time(unit: String, time: NaiveTime) -> Result<NaiveTime,
 
     let time_lowercase = unit.to_lowercase();
     let truncation_unit = time_lowercase.as_str();
+
+    println!("truncation_unit: {:?}", truncation_unit);
     match truncation_unit {
         "millennium" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
         "century" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
@@ -1017,6 +1045,10 @@ async fn truncate_local_time_with_map(
     };
     let microseconds_to_add = match map.get("microsecond") {
         Some(microsecond) => microsecond.as_i64().unwrap(),
+        None => 0,
+    };
+    let nanoseconds_to_add = match map.get("nanosecond") {
+        Some(nanosecond) => nanosecond.as_i64().unwrap(),
         None => 0,
     };
 
@@ -1087,7 +1119,8 @@ async fn truncate_local_time_with_map(
         truncated_time.second() + second_to_add as u32,
         truncated_time.nanosecond()
             + milliseconds_to_add as u32 * 1_000_000
-            + microseconds_to_add as u32 * 1_000,
+            + microseconds_to_add as u32 * 1_000
+            + nanoseconds_to_add as u32,
     )
     .unwrap();
     Ok(truncated_time)

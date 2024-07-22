@@ -479,8 +479,8 @@ async fn test_evaluate_date_truncate_week() {
 }
 
 #[tokio::test]
-async fn test_truncate_with_millenium() {
-    let expr = "date.truncate('millenium', $param1)";
+async fn test_truncate_with_millennium() {
+    let expr = "date.truncate('millennium', $param1)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
     let function_registry = Arc::new(FunctionRegistry::new());
@@ -973,6 +973,29 @@ async fn test_date_ge() {
                 .await
                 .unwrap(),
             VariableValue::Bool(true)
+        );
+    }
+}
+
+
+#[tokio::test]
+async fn test_retrieve_current_date() {
+    let expr = "date()";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+    let function_registry = Arc::new(FunctionRegistry::new());
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+    {
+        let variables = QueryVariables::new();
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::Date(Local::now().date_naive())
         );
     }
 }
