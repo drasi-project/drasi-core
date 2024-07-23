@@ -16,7 +16,7 @@ mod duration;
 mod list_construction;
 mod list_indexing;
 mod list_reduce;
-mod list_tail;
+mod list_functions;
 mod logical;
 mod numeric;
 mod time;

@@ -3,7 +3,6 @@ use crate::evaluation::variable_value::zoned_datetime::ZonedDateTime;
 use crate::evaluation::variable_value::zoned_time::ZonedTime;
 use crate::evaluation::variable_value::VariableValue;
 use async_trait::async_trait;
-use chrono::format::Fixed;
 use drasi_query_ast::ast;
 
 use crate::evaluation::functions::ScalarFunction;

@@ -131,6 +131,11 @@ impl ScalarFunction for Reverse {
         }
         match &args[0] {
             VariableValue::String(s) => Ok(VariableValue::String(s.chars().rev().collect())),
+            VariableValue::List(l) => {
+                let mut l = l.clone();
+                l.reverse();
+                Ok(VariableValue::List(l))
+            },
             VariableValue::Null => Ok(VariableValue::Null),
             _ => Err(EvaluationError::InvalidType),
         }
