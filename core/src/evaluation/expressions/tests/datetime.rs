@@ -1362,3 +1362,4 @@ async fn test_local_date_time_truncate() {
     let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
     assert_eq!(result, VariableValue::LocalDateTime(NaiveDate::from_ymd_opt(2017, 11, 11).unwrap().and_hms_nano_opt(12, 0, 0,2).unwrap()));
 }
+

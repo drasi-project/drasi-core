@@ -264,8 +264,13 @@ impl ScalarFunction for Time {
         _expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
     ) -> Result<VariableValue, EvaluationError> {
-        if args.len() != 1 {
+        if args.len() > 1 {
             return Err(EvaluationError::InvalidArgumentCount("time".to_string()));
+        }
+        if args.len() == 0 {
+            let local = Local::now().time();
+            let timezone = FixedOffset::east_opt(0).unwrap();
+            return Ok(VariableValue::ZonedTime(ZonedTime::new(local, timezone)));
         }
         match &args[0] {
             VariableValue::String(s) => {
@@ -296,6 +301,8 @@ impl ScalarFunction for Time {
                     error!("Invalid keys in the time object");
                     return Err(EvaluationError::InvalidType);
                 }
+               
+
                 let timezone = match o.get("timezone") {
                     Some(tz) => {
                         let tz_str = match tz {
@@ -309,6 +316,14 @@ impl ScalarFunction for Time {
                     }
                     None => Tz::UTC,
                 };
+
+                // if only the timezone is specified, return the current time in that timezone
+                if o.get("timezone").is_some() && o.len() == 1 {
+                    let local: chrono::DateTime<Tz> = Local::now().with_timezone(&timezone);
+                    let fixed_offset = local.offset().fix();
+                    return Ok(VariableValue::ZonedTime(ZonedTime::new(local.time(), fixed_offset)));    
+                }
+
                 let result = create_time_from_componet(o.clone()).await;
                 match result {
                     Some(time) => {
