@@ -20,6 +20,7 @@ mod list_tail;
 mod logical;
 mod numeric;
 mod time;
+mod string;
 
 #[tokio::test]
 async fn evaluate_property_access() {

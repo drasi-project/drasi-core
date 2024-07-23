@@ -32,11 +32,11 @@ async fn test_trim() {
     let context =
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
-    let args = vec![VariableValue::String("  hello  ".to_string())];
+    let args = vec![VariableValue::String("  NULL ".to_string())];
     let result = ltrim.call(&context, &get_func_expr(), args.clone()).await;
     assert_eq!(
         result.unwrap(),
-        VariableValue::String("hello  ".to_string())
+        VariableValue::String("NULL ".to_string())
     );
 
     let rtrim = text::RTrim {};
@@ -151,4 +151,26 @@ async fn test_trim_too_few_args() {
         result.unwrap_err(),
         EvaluationError::InvalidArgumentCount(_)
     ));
+}
+
+#[tokio::test]
+async fn test_trim_null() {
+    let trim = text::Trim {};
+    let ltrim = text::LTrim {};
+    let rtrim = text::RTrim {};
+    let binding = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
+
+    let args = vec![VariableValue::Null];
+    let result = trim.call(&context, &get_func_expr(), args.clone()).await;
+    assert_eq!(result.unwrap(), VariableValue::Null);
+
+    let args = vec![VariableValue::Null];
+    let result = ltrim.call(&context, &get_func_expr(), args.clone()).await;
+    assert_eq!(result.unwrap(), VariableValue::Null);
+
+    let args = vec![VariableValue::Null];
+    let result = rtrim.call(&context, &get_func_expr(), args.clone()).await;
+    assert_eq!(result.unwrap(), VariableValue::Null);
 }

@@ -80,3 +80,18 @@ async fn test_to_lower_invalid_args() {
         .await;
     assert!(matches!(result.unwrap_err(), EvaluationError::InvalidType));
 }
+
+
+#[tokio::test]
+async fn test_to_lower_null() {
+    let to_lower = text::ToLower {};
+    let binding = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
+
+    let args = vec![VariableValue::Null];
+    let result = to_lower
+        .call(&context, &get_func_expr(), args.clone())
+        .await;
+    assert_eq!(result.unwrap(), VariableValue::Null);
+}

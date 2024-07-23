@@ -9,3 +9,4 @@ mod to_string_or_null_tests;
 mod to_string_tests;
 mod to_upper_tests;
 mod trim_tests;
+mod reverse_tests;

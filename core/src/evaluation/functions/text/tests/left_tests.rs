@@ -29,6 +29,13 @@ async fn test_left() {
     ];
     let result = left.call(&context, &get_func_expr(), args.clone()).await;
     assert_eq!(result.unwrap(), VariableValue::String("dra".to_string()));
+
+    let args = vec![
+        VariableValue::String("drasi".to_string()),
+        VariableValue::Integer(10.into()),
+    ];
+    let result = left.call(&context, &get_func_expr(), args.clone()).await;
+    assert_eq!(result.unwrap(), VariableValue::String("drasi".to_string()));
 }
 
 #[tokio::test]
@@ -55,7 +62,7 @@ async fn test_left_invalid_input_value() {
 
     let args = vec![
         VariableValue::String("drasi".to_string()),
-        VariableValue::Integer(10.into()),
+        VariableValue::Integer((-1).into()),
     ];
     let result = left.call(&context, &get_func_expr(), args.clone()).await;
     assert!(matches!(result.unwrap_err(), EvaluationError::InvalidType));
@@ -100,4 +107,34 @@ async fn test_left_too_few_args() {
         result.unwrap_err(),
         EvaluationError::InvalidArgumentCount(_)
     ));
+}
+
+#[tokio::test]
+async fn test_left_null() {
+    let left = text::Left {};
+    let binding = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
+
+    let args = vec![
+        VariableValue::Null,
+        VariableValue::Integer(3.into()),
+    ];
+    let result = left.call(&context, &get_func_expr(), args.clone()).await;
+    assert_eq!(result.unwrap(), VariableValue::Null);
+
+    let args = vec![
+        VariableValue::Null,
+        VariableValue::Null,
+    ];
+    let result = left.call(&context, &get_func_expr(), args.clone()).await;
+    assert_eq!(result.unwrap(), VariableValue::Null);
+
+    let args = vec![
+        VariableValue::String("drasi".to_string()),
+        VariableValue::Null,
+    ];
+
+    let result = left.call(&context, &get_func_expr(), args.clone()).await;
+    assert!(matches!(result.unwrap_err(), EvaluationError::InvalidType));
 }

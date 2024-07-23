@@ -26,10 +26,17 @@ async fn test_right() {
 
     let args = vec![
         VariableValue::String("hello".to_string()),
-        VariableValue::Integer(2.into()),
+        VariableValue::Integer(4.into()),
     ];
     let result = right.call(&context, &get_func_expr(), args.clone()).await;
-    assert_eq!(result.unwrap(), VariableValue::String("lo".to_string()));
+    assert_eq!(result.unwrap(), VariableValue::String("ello".to_string()));
+
+    let args = vec![
+        VariableValue::String("hello".to_string()),
+        VariableValue::Integer(10.into()),
+    ];
+    let result = right.call(&context, &get_func_expr(), args.clone()).await;
+    assert_eq!(result.unwrap(), VariableValue::String("hello".to_string()));
 }
 
 #[tokio::test]
@@ -91,6 +98,37 @@ async fn test_right_invalid_input() {
         VariableValue::String("drasi".to_string()),
         VariableValue::Integer(10.into()),
     ];
+    let result = right.call(&context, &get_func_expr(), args.clone()).await;
+    assert_eq!(result.unwrap(), VariableValue::String("drasi".to_string()));
+}
+
+
+#[tokio::test]
+async fn test_right_null() {
+    let right = text::Right {};
+    let binding = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
+
+    let args = vec![
+        VariableValue::Null,
+        VariableValue::Integer(3.into()),
+    ];
+    let result = right.call(&context, &get_func_expr(), args.clone()).await;
+    assert_eq!(result.unwrap(), VariableValue::Null);
+
+    let args = vec![
+        VariableValue::Null,
+        VariableValue::Null,
+    ];
+    let result = right.call(&context, &get_func_expr(), args.clone()).await;
+    assert_eq!(result.unwrap(), VariableValue::Null);
+
+    let args = vec![
+        VariableValue::String("drasi".to_string()),
+        VariableValue::Null,
+    ];
+
     let result = right.call(&context, &get_func_expr(), args.clone()).await;
     assert!(matches!(result.unwrap_err(), EvaluationError::InvalidType));
 }

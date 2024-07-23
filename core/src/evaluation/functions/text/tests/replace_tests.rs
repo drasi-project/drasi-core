@@ -46,6 +46,16 @@ async fn test_replace() {
         result.unwrap(),
         VariableValue::String("-drasi is ...? drasi can xxxx".to_string())
     );
+
+
+    let args = vec![
+        VariableValue::String("drasi".to_string()),
+        VariableValue::String("e".to_string()),
+        VariableValue::String("t".to_string()),
+    ];
+
+    let result = replace.call(&context, &get_func_expr(), args.clone()).await;
+    assert_eq!(result.unwrap(), VariableValue::String("drasi".to_string()));
 }
 
 #[tokio::test]
@@ -116,4 +126,37 @@ async fn test_replace_too_few_args() {
         result.unwrap_err(),
         EvaluationError::InvalidArgumentCount(_)
     ));
+}
+
+
+#[tokio::test]
+async fn test_replace_null() {
+    let replace = text::Replace {};
+    let binding = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
+
+    let args = vec![
+        VariableValue::Null,
+        VariableValue::String("l".to_string()),
+        VariableValue::String("x".to_string()),
+    ];
+    let result = replace.call(&context, &get_func_expr(), args.clone()).await;
+    assert_eq!(result.unwrap(), VariableValue::Null);
+
+    let args = vec![
+        VariableValue::String("hello".to_string()),
+        VariableValue::Null,
+        VariableValue::String("x".to_string()),
+    ];
+    let result = replace.call(&context, &get_func_expr(), args.clone()).await;
+    assert_eq!(result.unwrap(), VariableValue::Null);
+
+    let args = vec![
+        VariableValue::String("hello".to_string()),
+        VariableValue::String("l".to_string()),
+        VariableValue::Null,
+    ];
+    let result = replace.call(&context, &get_func_expr(), args.clone()).await;
+    assert_eq!(result.unwrap(), VariableValue::Null);
 }
