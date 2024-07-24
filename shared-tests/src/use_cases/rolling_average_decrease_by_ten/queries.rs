@@ -68,7 +68,7 @@ pub fn rolling_average_decrease_by_ten_query() -> &'static str {
     WITH
       val,
       elementId(equip) AS freezerId,
-      drasi.getVersionByTimestamp(val, drasi.max([1696150800,val.timestamp - 1])) AS previousSensorVal
+      drasi.getVersionByTimestamp(val, drasi.listMax([1696150800,val.timestamp - 1])) AS previousSensorVal
     WITH
       freezerId,
       drasi.getVersionsByTimeRange(previousSensorVal,previousSensorVal.timestamp - (6 * 60 * 60), previousSensorVal.timestamp) AS previousSensorValVersions,

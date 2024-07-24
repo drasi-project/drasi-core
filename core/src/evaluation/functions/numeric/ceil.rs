@@ -3,7 +3,6 @@ use drasi_query_ast::ast;
 
 use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::variable_value::float::Float;
-use crate::evaluation::variable_value::integer::Integer;
 use crate::evaluation::variable_value::VariableValue;
 use crate::evaluation::{EvaluationError, ExpressionEvaluationContext};
 

@@ -1,4 +1,4 @@
-use chrono::{FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Local, LocalResult, DateTime, TimeZone};
+use chrono::{FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Local, LocalResult, TimeZone};
 use std::sync::Arc;
 use std::str::FromStr;
 

@@ -18,7 +18,7 @@ impl ScalarFunction for DrasiMin {
     ) -> Result<VariableValue, EvaluationError> {
         if args.len() != 1 {
             return Err(EvaluationError::InvalidArgumentCount(
-                "drasi.min".to_string(),
+                "drasi.listMin".to_string(),
             ));
         }
         match args.len() {

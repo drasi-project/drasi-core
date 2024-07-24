@@ -18,7 +18,7 @@ impl ScalarFunction for DrasiMax {
     ) -> Result<VariableValue, EvaluationError> {
         if args.is_empty() || args.len() > 2 {
             return Err(EvaluationError::InvalidArgumentCount(
-                "drasi.max".to_string(),
+                "drasi.listMax".to_string(),
             ));
         }
         match args.len() {

@@ -73,5 +73,5 @@ async fn test_drasi_stdevp_with_null() {
         .call(&context, &get_func_expr(), vec![args])
         .await
         .unwrap();
-    assert_eq!(result.as_i64().unwrap(), 0);
+    assert_eq!(result, VariableValue::Null);
 }

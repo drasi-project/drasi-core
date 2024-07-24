@@ -17,8 +17,8 @@ pub trait RegisterDrasiFunctions {
 
 impl RegisterDrasiFunctions for FunctionRegistry {
     fn register_drasi_functions(&self) {
-        self.register_function("drasi.max", Function::Scalar(Arc::new(DrasiMax {})));
-        self.register_function("drasi.min", Function::Scalar(Arc::new(DrasiMin {})));
+        self.register_function("drasi.listMax", Function::Scalar(Arc::new(DrasiMax {})));
+        self.register_function("drasi.listMin", Function::Scalar(Arc::new(DrasiMin {})));
         self.register_function("drasi.stdevp", Function::Scalar(Arc::new(DrasiStdevP {})));
     }
 }

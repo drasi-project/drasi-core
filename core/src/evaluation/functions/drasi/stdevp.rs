@@ -24,7 +24,7 @@ impl ScalarFunction for DrasiStdevP {
             ));
         }
         match &args[0] {
-            VariableValue::Null => Ok(VariableValue::Integer(0.into())),
+            VariableValue::Null => Ok(VariableValue::Null),
             VariableValue::List(l) => {
                 let mut cleaned_list = vec![];
                 for element in l {
@@ -34,6 +34,9 @@ impl ScalarFunction for DrasiStdevP {
                         }
                         VariableValue::Float(f) => {
                             cleaned_list.push(f.as_f64().unwrap());
+                        },
+                        VariableValue::Null => {
+                            continue;
                         }
                         _ => {
                             continue;

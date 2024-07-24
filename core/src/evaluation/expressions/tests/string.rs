@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::evaluation::variable_value::VariableValue;
 
 use crate::evaluation::context::QueryVariables;
-use crate::evaluation::{EvaluationError, ExpressionEvaluationContext, ExpressionEvaluator, InstantQueryClock};
+use crate::evaluation::{ExpressionEvaluationContext, ExpressionEvaluator, InstantQueryClock};
 
 use crate::evaluation::functions::FunctionRegistry;
 use crate::in_memory_index::in_memory_result_index::InMemoryResultIndex;
