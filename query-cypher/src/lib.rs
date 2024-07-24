@@ -255,8 +255,7 @@ peg::parser! {
 
         // e.g. 'sign', 'duration_between'
         rule function_name()  -> Arc<str>
-            = quiet!{func:$(("duration" /"datetime" /"date"/"localdatetime"/"localtime"/"time") ("." alpha()*)?) { Arc::from(func) }}
-            / quiet!{func:$(alpha()alpha_num()* ("." alpha_num()+)?) { Arc::from(func) }}
+            = quiet!{func:$(alpha()alpha_num()* ("." alpha_num()+)?) { Arc::from(func) }}
             / expected!("function name")
 
         rule component() -> Vec<(Arc<str>, Expression)>

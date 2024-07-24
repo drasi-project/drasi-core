@@ -25,6 +25,7 @@ impl ScalarFunction for ToBoolean {
             VariableValue::Null => Ok(VariableValue::Null),
             VariableValue::Integer(i) => Ok(VariableValue::Bool(i.as_i64().unwrap() != 0)),
             VariableValue::String(s) => {
+                let s = s.to_lowercase();
                 if (s == "true") || (s == "false") {
                     Ok(VariableValue::Bool(s == "true"))
                 } else {

@@ -6,6 +6,7 @@ mod size;
 mod to_boolean;
 mod to_float;
 mod to_integer;
+mod timestamp;
 
 #[cfg(test)]
 mod tests;
@@ -19,7 +20,9 @@ use size::Size;
 use to_boolean::{ToBoolean, ToBooleanOrNull};
 use to_float::{ToFloat, ToFloatOrNull};
 use to_integer::{ToInteger, ToIntegerOrNull};
-
+use head::Head;
+use last::Last;
+use timestamp::Timestamp;
 use super::{Function, FunctionRegistry};
 
 pub trait RegisterCypherScalarFunctions {
@@ -50,5 +53,8 @@ impl RegisterCypherScalarFunctions for FunctionRegistry {
             Function::Scalar(Arc::new(ToBooleanOrNull {})),
         );
         self.register_function("coalesce", Function::Scalar(Arc::new(Coalesce {})));
+        self.register_function("head", Function::Scalar(Arc::new(Head {})));
+        self.register_function("last", Function::Scalar(Arc::new(Last {})));
+        self.register_function("timestamp", Function::Scalar(Arc::new(Timestamp {})));
     }
 }
