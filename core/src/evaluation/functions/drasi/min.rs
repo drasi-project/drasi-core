@@ -21,35 +21,32 @@ impl ScalarFunction for DrasiMin {
                 "drasi.listMin".to_string(),
             ));
         }
-        match args.len() {
-            1 => match &args[0] {
-                VariableValue::List(l) => {
-                    let mut result = l[0].clone();
-                    for element in l {
-                        if element == &VariableValue::Null {
-                            continue;
-                        }
-                        if element < &result {
-                            result = element.clone();
-                        }
+        match &args[0] {
+            VariableValue::List(l) => {
+                let mut result = l[0].clone();
+                for element in l {
+                    if element == &VariableValue::Null {
+                        continue;
                     }
-                    Ok(result.clone())
+                    if element < &result {
+                        result = element.clone();
+                    }
                 }
-                VariableValue::Null => Ok(VariableValue::Null),
-                VariableValue::String(s) => Ok(VariableValue::String(s.clone())),
-                VariableValue::Float(f) => Ok(VariableValue::Float(f.clone())),
-                VariableValue::Integer(i) => Ok(VariableValue::Integer(i.clone())),
-                VariableValue::Bool(b) => Ok(VariableValue::Bool(*b)),
-                VariableValue::Object(o) => Ok(VariableValue::Object(o.clone())),
-                VariableValue::Date(d) => Ok(VariableValue::Date(*d)),
-                VariableValue::LocalTime(t) => Ok(VariableValue::LocalTime(*t)),
-                VariableValue::LocalDateTime(dt) => Ok(VariableValue::LocalDateTime(*dt)),
-                VariableValue::ZonedTime(t) => Ok(VariableValue::ZonedTime(*t)),
-                VariableValue::ZonedDateTime(dt) => Ok(VariableValue::ZonedDateTime(dt.clone())),
-                VariableValue::Duration(d) => Ok(VariableValue::Duration(d.clone())),
-                _ => Ok(VariableValue::Null),
-            },
-            _ => unreachable!(),
+                Ok(result.clone())
+            }
+            VariableValue::Null => Ok(VariableValue::Null),
+            VariableValue::String(s) => Ok(VariableValue::String(s.clone())),
+            VariableValue::Float(f) => Ok(VariableValue::Float(f.clone())),
+            VariableValue::Integer(i) => Ok(VariableValue::Integer(i.clone())),
+            VariableValue::Bool(b) => Ok(VariableValue::Bool(*b)),
+            VariableValue::Object(o) => Ok(VariableValue::Object(o.clone())),
+            VariableValue::Date(d) => Ok(VariableValue::Date(*d)),
+            VariableValue::LocalTime(t) => Ok(VariableValue::LocalTime(*t)),
+            VariableValue::LocalDateTime(dt) => Ok(VariableValue::LocalDateTime(*dt)),
+            VariableValue::ZonedTime(t) => Ok(VariableValue::ZonedTime(*t)),
+            VariableValue::ZonedDateTime(dt) => Ok(VariableValue::ZonedDateTime(dt.clone())),
+            VariableValue::Duration(d) => Ok(VariableValue::Duration(d.clone())),
+            _ => Err(EvaluationError::InvalidType),
         }
     }
 }
