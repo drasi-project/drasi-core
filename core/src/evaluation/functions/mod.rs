@@ -25,7 +25,7 @@ use self::{
     text::RegisterTextFunctions,
 };
 
-use super::{EvaluationError, ExpressionEvaluationContext};
+use super::{EvaluationError, ExpressionEvaluationContext, ExpressionEvaluator};
 
 pub mod aggregation;
 pub mod context_mutators;
@@ -42,6 +42,7 @@ pub mod text;
 
 pub enum Function {
     Scalar(Arc<dyn ScalarFunction>),
+    LazyScalar(Arc<dyn LazyScalarFunction>),
     Aggregating(Arc<dyn AggregatingFunction>),
     ContextMutator(Arc<dyn ContextMutatorFunction>),
 }
@@ -53,6 +54,16 @@ pub trait ScalarFunction: Send + Sync {
         context: &ExpressionEvaluationContext,
         expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
+    ) -> Result<VariableValue, EvaluationError>;
+}
+
+#[async_trait]
+pub trait LazyScalarFunction: Send + Sync {
+    async fn call(
+        &self,
+        context: &ExpressionEvaluationContext,
+        expression: &ast::FunctionExpression,
+        args: &Vec<ast::Expression>,
     ) -> Result<VariableValue, EvaluationError>;
 }
 

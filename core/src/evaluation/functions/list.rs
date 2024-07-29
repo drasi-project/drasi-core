@@ -13,7 +13,7 @@ pub trait RegisterListFunctions {
 
 impl RegisterListFunctions for FunctionRegistry {
     fn register_list_functions(&self) {
-        self.register_function("reduce", Function::Scalar(Arc::new(Reduce {})));
+        self.register_function("reduce", Function::LazyScalar(Arc::new(Reduce::new())));
         self.register_function("tail", Function::Scalar(Arc::new(Tail {})));
     }
 }
