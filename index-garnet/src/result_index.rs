@@ -15,7 +15,7 @@ use hashers::jenkins::spooky_hash::SpookyHasher;
 use ordered_float::OrderedFloat;
 use redis::{aio::MultiplexedConnection, AsyncCommands};
 
-use crate::storage_models::StoredValueAccumulator;
+use crate::{storage_models::StoredValueAccumulator, ClearByPattern};
 
 /// Redis key structure:
 /// ari:{query_id}:{set_id} -> {value}
@@ -96,24 +96,9 @@ impl AccumulatorIndex for GarnetResultIndex {
     }
 
     async fn clear(&self) -> Result<(), IndexError> {
-        let mut con = self.connection.clone();
-        let mut con2 = self.connection.clone();
-
-        let mut keys = match con
-            .scan_match::<String, String>(format!("ari:{}:*", self.query_id))
+        self.connection
+            .clear(format!("ari:{}:*", self.query_id))
             .await
-        {
-            Ok(v) => v,
-            Err(e) => return Err(IndexError::other(e)),
-        };
-
-        while let Some(key) = keys.next_item().await {
-            match con2.del::<String, ()>(key).await {
-                Ok(_) => (),
-                Err(e) => return Err(IndexError::other(e)),
-            }
-        }
-        Ok(())
     }
 }
 
