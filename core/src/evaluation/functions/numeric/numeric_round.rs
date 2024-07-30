@@ -33,7 +33,7 @@ impl ScalarFunction for Round {
                 match &args[0] {
                     VariableValue::Null => Ok(VariableValue::Null),
                     VariableValue::Integer(n) => {
-                        Ok(VariableValue::Integer(Integer::from(n.as_i64().unwrap())))
+                        Ok(VariableValue::Float(Float::from_f64(n.as_i64().unwrap() as f64).unwrap()))
                     }
                     VariableValue::Float(n) => {
                         let input_as_f64 = n.as_f64().unwrap();
