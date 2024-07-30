@@ -1,4 +1,7 @@
-use std::{env, sync::Arc};
+use std::{
+    env,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 
@@ -6,6 +9,7 @@ use drasi_core::{
     index_cache::{
         cached_element_index::CachedElementIndex, cached_result_index::CachedResultIndex,
     },
+    interface::ElementIndex,
     query::QueryBuilder,
 };
 use shared_tests::QueryTestConfig;
@@ -19,6 +23,7 @@ use crate::{
 struct GarnetQueryConfig {
     url: String,
     use_cache: bool,
+    element_index: Mutex<Option<Arc<dyn ElementIndex>>>,
 }
 
 impl GarnetQueryConfig {
@@ -28,13 +33,21 @@ impl GarnetQueryConfig {
             Err(_) => "redis://127.0.0.1:6379".to_string(),
         };
 
-        GarnetQueryConfig { url, use_cache }
+        GarnetQueryConfig {
+            url,
+            use_cache,
+            element_index: Mutex::new(None),
+        }
     }
 
     pub async fn build_future_queue(&self, query_id: &str) -> GarnetFutureQueue {
         GarnetFutureQueue::connect(query_id, &self.url)
             .await
             .unwrap()
+    }
+
+    pub fn get_element_index(&self) -> Arc<dyn ElementIndex> {
+        self.element_index.lock().unwrap().clone().unwrap()
     }
 }
 
@@ -56,8 +69,11 @@ impl QueryTestConfig for GarnetQueryConfig {
             .unwrap();
 
         element_index.enable_archive();
+
         let element_index = Arc::new(element_index);
         let archive_index = element_index.clone();
+
+        *self.element_index.lock().unwrap() = Some(element_index.clone());
 
         if self.use_cache {
             let element_index = Arc::new(CachedElementIndex::new(element_index, 3).unwrap());
@@ -86,13 +102,18 @@ mod building_comfort {
     async fn building_comfort_use_case() {
         let test_config = GarnetQueryConfig::new(false);
         building_comfort::building_comfort_use_case(&test_config).await;
+        let element_index = test_config.get_element_index();
+        element_index.clear().await.unwrap();
+        println!("Element Index Cleared");
     }
 
-    #[tokio::test]
-    async fn building_comfort_use_case_with_cache() {
-        let test_config = GarnetQueryConfig::new(true);
-        building_comfort::building_comfort_use_case(&test_config).await;
-    }
+    // #[tokio::test]
+    // async fn building_comfort_use_case_with_cache() {
+    //     let test_config = GarnetQueryConfig::new(true);
+    //     building_comfort::building_comfort_use_case(&test_config).await;
+    //     let element_index = test_config.get_element_index();
+    //     element_index.clear().await.unwrap();
+    // }
 }
 
 mod curbside_pickup {

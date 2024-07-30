@@ -413,7 +413,7 @@ async fn aggregating_part_to_aggregating_part_add_solution() {
         "
     MATCH (a) 
     WHERE a.Value1 < 10 
-    WITH a.Name, a.Category, sum(a.Value1) as my_sum
+    WITH a.Name, sum(a.Value1) as my_sum, a.Category
     RETURN Category, avg(my_sum) as my_avg
     ",
     );

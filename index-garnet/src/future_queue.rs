@@ -7,7 +7,10 @@ use drasi_core::{
 };
 use redis::{aio::MultiplexedConnection, AsyncCommands};
 
-use crate::storage_models::{StoredFutureElementRef, StoredFutureElementRefWithContext};
+use crate::{
+    storage_models::{StoredFutureElementRef, StoredFutureElementRefWithContext},
+    ClearByPattern,
+};
 
 /// Redis key structure:
 ///
@@ -206,31 +209,8 @@ impl FutureQueue for GarnetFutureQueue {
     }
 
     async fn clear(&self) -> Result<(), IndexError> {
-        let mut con = self.connection.clone();
-        let mut con2 = self.connection.clone();
-
-        match con2
-            .del::<String, ()>(format!("fqi:{}", self.query_id))
+        self.connection
+            .clear(format!("fqi:{}:*", self.query_id))
             .await
-        {
-            Ok(_) => (),
-            Err(e) => return Err(IndexError::other(e)),
-        };
-
-        let mut keys = match con
-            .scan_match::<String, String>(format!("fqi:{}:*", self.query_id))
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => return Err(IndexError::other(e)),
-        };
-
-        while let Some(key) = keys.next_item().await {
-            match con2.del::<String, ()>(key).await {
-                Ok(_) => (),
-                Err(e) => return Err(IndexError::other(e)),
-            }
-        }
-        Ok(())
     }
 }
