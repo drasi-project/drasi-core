@@ -7,9 +7,12 @@ use drasi_core::{
     models::{Element, ElementReference, ElementTimestamp, TimestampBound, TimestampRange},
 };
 use prost::Message;
-use redis::AsyncCommands;
+use redis::{aio::MultiplexedConnection, cmd, AsyncCommands};
 
-use crate::storage_models::{StoredElement, StoredElementContainer, StoredElementMetadata};
+use crate::{
+    storage_models::{StoredElement, StoredElementContainer, StoredElementMetadata},
+    ClearByPattern,
+};
 
 use super::GarnetElementIndex;
 
@@ -25,8 +28,19 @@ impl ElementArchiveIndex for GarnetElementIndex {
     ) -> Result<Option<Arc<Element>>, IndexError> {
         let mut con = self.connection.clone();
         let key = self.key_formatter.get_archive_key(element_ref);
-        let result = match con
-            .zrevrangebyscore_limit::<String, u64, &str, Vec<Vec<u8>>>(key, time, "-inf", 0, 1)
+
+        let mut cmd = cmd("ZRANGE");
+        let cmd = cmd.arg(key);
+        let cmd = cmd.arg(time);
+        let cmd = cmd.arg("-inf");
+        let cmd = cmd.arg("BYSCORE");
+        let cmd = cmd.arg("REV");
+        let cmd = cmd.arg("LIMIT");
+        let cmd = cmd.arg(0);
+        let cmd = cmd.arg(1);
+
+        let result = match cmd
+            .query_async::<MultiplexedConnection, Vec<Vec<u8>>>(&mut con)
             .await
         {
             Ok(v) => v,
@@ -101,24 +115,9 @@ impl ElementArchiveIndex for GarnetElementIndex {
     }
 
     async fn clear(&self) -> Result<(), IndexError> {
-        let mut con = self.connection.clone();
-        let mut con2 = self.connection.clone();
-
-        let mut keys = match con
-            .scan_match::<String, String>(format!("archive:{}:*", self.query_id))
+        self.connection
+            .clear(format!("archive:{}:*", self.query_id))
             .await
-        {
-            Ok(v) => v,
-            Err(e) => return Err(IndexError::other(e)),
-        };
-
-        while let Some(key) = keys.next_item().await {
-            match con2.del::<String, ()>(key).await {
-                Ok(_) => (),
-                Err(e) => return Err(IndexError::other(e)),
-            }
-        }
-        Ok(())
     }
 }
 

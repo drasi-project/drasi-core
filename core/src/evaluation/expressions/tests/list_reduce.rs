@@ -194,3 +194,143 @@ async fn evaluate_reduce_func_sensor_value_count() {
         VariableValue::Integer(5.into())
     );
 }
+
+#[tokio::test]
+async fn evaluate_reduce_func_with_filter() {
+    let expr = "reduce (count = 0, val IN $param1 where val.value > 0| count + 1)";
+
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+
+    let function_registry = Arc::new(FunctionRegistry::new());
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+
+    let mut variables = QueryVariables::new();
+
+    let sensor_val_version_list = vec![
+        VariableValue::Object({
+            let mut map = BTreeMap::new();
+            map.insert(
+                "value".to_string(),
+                VariableValue::Integer(Integer::from(11)),
+            );
+            map
+        }),
+        VariableValue::Object({
+            let mut map = BTreeMap::new();
+            map.insert(
+                "value".to_string(),
+                VariableValue::Integer(Integer::from(86)),
+            );
+            map
+        }),
+        VariableValue::Object({
+            let mut map = BTreeMap::new();
+            map.insert(
+                "value".to_string(),
+                VariableValue::Integer(Integer::from(3)),
+            );
+            map
+        }),
+        VariableValue::Object({
+            let mut map = BTreeMap::new();
+            map.insert(
+                "value".to_string(),
+                VariableValue::Integer(Integer::from(121)),
+            );
+            map
+        }),
+        VariableValue::Object({
+            let mut map = BTreeMap::new();
+            map.insert(
+                "value".to_string(),
+                VariableValue::Integer(Integer::from(-45)),
+            );
+            map
+        }),
+    ];
+    variables.insert(
+        "param1".to_string().into(),
+        VariableValue::List(sensor_val_version_list),
+    );
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+
+    assert_eq!(
+        evaluator
+            .evaluate_expression(&context, &expr)
+            .await
+            .unwrap(),
+        VariableValue::Integer(4.into())
+    );
+}
+
+#[tokio::test]
+async fn evaluate_reduce_func_with_filter_no_results() {
+    let expr = "reduce (count = 0, val IN $param1 where 1 = 0| count + 1)";
+
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+
+    let function_registry = Arc::new(FunctionRegistry::new());
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+
+    let mut variables = QueryVariables::new();
+
+    let sensor_val_version_list = vec![
+        VariableValue::Object({
+            let mut map = BTreeMap::new();
+            map.insert(
+                "value".to_string(),
+                VariableValue::Integer(Integer::from(11)),
+            );
+            map
+        }),
+        VariableValue::Object({
+            let mut map = BTreeMap::new();
+            map.insert(
+                "value".to_string(),
+                VariableValue::Integer(Integer::from(86)),
+            );
+            map
+        }),
+        VariableValue::Object({
+            let mut map = BTreeMap::new();
+            map.insert(
+                "value".to_string(),
+                VariableValue::Integer(Integer::from(3)),
+            );
+            map
+        }),
+        VariableValue::Object({
+            let mut map = BTreeMap::new();
+            map.insert(
+                "value".to_string(),
+                VariableValue::Integer(Integer::from(121)),
+            );
+            map
+        }),
+        VariableValue::Object({
+            let mut map = BTreeMap::new();
+            map.insert(
+                "value".to_string(),
+                VariableValue::Integer(Integer::from(-45)),
+            );
+            map
+        }),
+    ];
+    variables.insert(
+        "param1".to_string().into(),
+        VariableValue::List(sensor_val_version_list),
+    );
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+
+    assert_eq!(
+        evaluator
+            .evaluate_expression(&context, &expr)
+            .await
+            .unwrap(),
+        VariableValue::Integer(0.into())
+    );
+}

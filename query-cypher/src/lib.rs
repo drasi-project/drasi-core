@@ -188,10 +188,6 @@ peg::parser! {
         rule else_expression() -> Expression
             = kw_else() __+ else_:expression() __+ { else_ }
 
-        // rule list_range_expression() -> Expression
-        //     = start:expression()? __* ".." __* end:expression()? { UnaryExpression::list_range(start, end) }
-            // / start:expression() __* ".." __* { BinaryExpression::range(start, UnaryExpression::literal(Literal::Integer(9223372036854775807))) }
-
             #[cache_left_rec]
         pub rule expression() -> Expression
             = precedence!{
@@ -200,12 +196,9 @@ peg::parser! {
                 --
                 kw_not() __* c:(@) { UnaryExpression::not(c) }
                 --
-                v:variable() {UnaryExpression::literal(Literal::Expression(Box::new(v)))}
-
-
-                a:(@) __* "|" __* b:@ { UnaryExpression::literal(Literal::Expression(Box::new(BinaryExpression::iterate(a, b)))) }
+                it:iterator() { it }
+                --
                 a:(@) __* kw_in() __* b:@ { BinaryExpression::in_(a, b) }
-                a:(@) __* kw_where() __* b:expression() { BinaryExpression::filter(a, b) }
                 a:(@) __* "="  __* b:@ { BinaryExpression::eq(a, b) }
                 a:(@) __* ("<>" / "!=") __* b:@ { BinaryExpression::ne(a, b) }
                 a:(@) __* "<"  __* b:@ { BinaryExpression::lt(a, b) }
@@ -246,6 +239,32 @@ peg::parser! {
                 c: component() { ObjectExpression::object_from_vec(c)  } //ObjectExpression
                 "[" __* c:expression() ** (__* "," __*) __* "]" { ListExpression::list(c) }
             }
+
+            #[cache_left_rec]
+        rule iterator() -> Expression
+            = "[" __* item:ident() __* kw_in() __* list:expression() __* kw_where() __* filter:expression() __* "|" __* map:expression()__* "]"
+                { IteratorExpression::map_with_filter(item, list, map, filter) }
+
+            / "[" __* item:ident() __* kw_in() __* list:expression() __*  "|" __* map:expression()__* "]"
+                { IteratorExpression::map(item, list, map) }
+
+            / "[" __* item:ident() __* kw_in() __* list:expression() __* kw_where() __* filter:expression()__* "]"
+                { IteratorExpression::iterator_with_filter(item, list, filter) }
+
+            / "[" __* item:ident() __* kw_in() __* list:expression()__* "]"
+                { IteratorExpression::iterator(item, list) }
+
+            / item:ident() __* kw_in() __* list:expression() __* kw_where() __* filter:expression() __* "|" __* map:expression()
+                { IteratorExpression::map_with_filter(item, list, map, filter) }
+
+            / item:ident() __* kw_in() __* list:expression() __*  "|" __* map:expression()
+                { IteratorExpression::map(item, list, map) }
+
+            / item:ident() __* kw_in() __* list:expression() __* kw_where() __* filter:expression()
+                { IteratorExpression::iterator_with_filter(item, list, filter) }
+
+            / item:ident() __* kw_in() __* list:expression()
+                { IteratorExpression::iterator(item, list) }
 
 
         // e.g. 'hello_world', 'Rust', 'HAS_PROPERTY'
@@ -329,11 +348,6 @@ peg::parser! {
             = kw_set() __+ p:property() _* "=" _* e:expression() {
                 SetClause { name: p.0, key: p.1, value: e }
             }
-
-        rule variable() -> Expression
-            =  n:ident()  _()? "=" _()? v:real() { UnaryExpression::variable(n,UnaryExpression::literal(Literal::Real(v)))  }
-            / n:ident()  _()? "=" _()? v:integer() { UnaryExpression::variable(n,UnaryExpression::literal(Literal::Integer(v))) }
-
 
         // e.g. 'DELETE a'
         rule delete_clause() -> Arc<str>

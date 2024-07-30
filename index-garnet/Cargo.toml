@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 drasi-query-ast = { path = "../query-ast" }
 drasi-core = { path = "../core" }
-redis = { version = "0.23.0", features = ["tokio-comp"] }
+redis = { version = "0.25.4", features = ["tokio-comp"] }
 async-trait = "0.1.68"
 hashers = "1.0.1"
 serde = { version = "1", features = ["derive"] }

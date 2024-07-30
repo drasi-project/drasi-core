@@ -227,7 +227,8 @@ pub enum Expression {
     FunctionExpression(FunctionExpression),
     CaseExpression(CaseExpression),
     ListExpression(ListExpression),
-    ObjectExpression(ObjectExpression),
+    ObjectExpression(ObjectExpression), //do we really need this?
+    IteratorExpression(IteratorExpression),
 }
 
 impl ParentExpression for Expression {
@@ -239,6 +240,7 @@ impl ParentExpression for Expression {
             Expression::CaseExpression(expr) => expr.get_children(),
             Expression::ListExpression(expr) => expr.get_children(),
             Expression::ObjectExpression(expr) => expr.get_children(),
+            Expression::IteratorExpression(expr) => expr.get_children(),
         }
     }
 }
@@ -379,10 +381,7 @@ pub enum BinaryExpression {
     Divide(Box<Expression>, Box<Expression>),
     Modulo(Box<Expression>, Box<Expression>),
     Exponent(Box<Expression>, Box<Expression>),
-    Iterate(Box<Expression>, Box<Expression>),
-    Reduce(Box<Expression>, Box<Expression>),
     HasLabel(Box<Expression>, Box<Expression>),
-    Filter(Box<Expression>, Box<Expression>),
     Index(Box<Expression>, Box<Expression>),
 }
 
@@ -451,18 +450,6 @@ impl BinaryExpression {
         Expression::BinaryExpression(Self::HasLabel(Box::new(a), Box::new(b)))
     }
 
-    pub fn iterate(a: Expression, b: Expression) -> Expression {
-        Expression::BinaryExpression(Self::Iterate(Box::new(a), Box::new(b)))
-    }
-
-    pub fn reduce(a: Expression, b: Expression) -> Expression {
-        Expression::BinaryExpression(Self::Reduce(Box::new(a), Box::new(b)))
-    }
-
-    pub fn filter(a: Expression, b: Expression) -> Expression {
-        Expression::BinaryExpression(Self::Filter(Box::new(a), Box::new(b)))
-    }
-
     pub fn index(a: Expression, b: Expression) -> Expression {
         Expression::BinaryExpression(Self::Index(Box::new(a), Box::new(b)))
     }
@@ -487,9 +474,6 @@ impl ParentExpression for BinaryExpression {
             BinaryExpression::Modulo(a, b) => vec![a, b],
             BinaryExpression::Exponent(a, b) => vec![a, b],
             BinaryExpression::HasLabel(a, b) => vec![a, b],
-            BinaryExpression::Iterate(a, b) => vec![a, b],
-            BinaryExpression::Reduce(a, b) => vec![a, b],
-            BinaryExpression::Filter(a, b) => vec![a, b],
             BinaryExpression::Index(a, b) => vec![a, b],
         }
     }
@@ -607,6 +591,76 @@ impl ParentExpression for ListExpression {
             children.push(element);
         }
 
+        children
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Hash, Eq)]
+pub struct IteratorExpression {
+    pub item_identifier: Arc<str>,
+    pub list_expression: Box<Expression>,
+    pub filter: Option<Box<Expression>>,
+    pub map_expression: Option<Box<Expression>>,
+}
+
+impl IteratorExpression {
+    pub fn map(
+        item_identifier: Arc<str>,
+        list_expression: Expression,
+        map_expression: Expression,
+    ) -> Expression {
+        Expression::IteratorExpression(IteratorExpression {
+            item_identifier,
+            list_expression: Box::new(list_expression),
+            filter: None,
+            map_expression: Some(Box::new(map_expression)),
+        })
+    }
+
+    pub fn map_with_filter(
+        item_identifier: Arc<str>,
+        list_expression: Expression,
+        map_expression: Expression,
+        filter: Expression,
+    ) -> Expression {
+        Expression::IteratorExpression(IteratorExpression {
+            item_identifier,
+            list_expression: Box::new(list_expression),
+            filter: Some(Box::new(filter)),
+            map_expression: Some(Box::new(map_expression)),
+        })
+    }
+
+    pub fn iterator(item_identifier: Arc<str>, list_expression: Expression) -> Expression {
+        Expression::IteratorExpression(IteratorExpression {
+            item_identifier,
+            list_expression: Box::new(list_expression),
+            filter: None,
+            map_expression: None,
+        })
+    }
+
+    pub fn iterator_with_filter(
+        item_identifier: Arc<str>,
+        list_expression: Expression,
+        filter: Expression,
+    ) -> Expression {
+        Expression::IteratorExpression(IteratorExpression {
+            item_identifier,
+            list_expression: Box::new(list_expression),
+            filter: Some(Box::new(filter)),
+            map_expression: None,
+        })
+    }
+}
+
+impl ParentExpression for IteratorExpression {
+    fn get_children(&self) -> Vec<&Expression> {
+        let mut children = Vec::new();
+        children.push(&*self.list_expression);
+        if let Some(filter) = &self.filter {
+            children.push(filter);
+        }
         children
     }
 }
