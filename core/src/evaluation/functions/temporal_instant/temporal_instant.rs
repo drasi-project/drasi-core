@@ -3,6 +3,7 @@ use crate::evaluation::variable_value::zoned_datetime::ZonedDateTime;
 use crate::evaluation::variable_value::zoned_time::ZonedTime;
 use crate::evaluation::variable_value::VariableValue;
 use async_trait::async_trait;
+use chrono::format::Fixed;
 use drasi_query_ast::ast;
 
 use crate::evaluation::functions::ScalarFunction;
@@ -107,10 +108,14 @@ impl ScalarFunction for LocalTime {
         _expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
     ) -> Result<VariableValue, EvaluationError> {
-        if args.len() != 1 {
+        if args.len() > 1 {
             return Err(EvaluationError::InvalidArgumentCount(
                 "localtime".to_string(),
             ));
+        }
+        if args.len() == 0 {
+            let local = Local::now().time();
+            return Ok(VariableValue::LocalTime(local));
         }
         match &args[0] {
             VariableValue::String(s) => {
@@ -260,8 +265,13 @@ impl ScalarFunction for Time {
         _expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
     ) -> Result<VariableValue, EvaluationError> {
-        if args.len() != 1 {
+        if args.len() > 1 {
             return Err(EvaluationError::InvalidArgumentCount("time".to_string()));
+        }
+        if args.len() == 0 {
+            let local = Local::now().time();
+            let timezone = FixedOffset::east_opt(0).unwrap();
+            return Ok(VariableValue::ZonedTime(ZonedTime::new(local, timezone)));
         }
         match &args[0] {
             VariableValue::String(s) => {
@@ -292,6 +302,8 @@ impl ScalarFunction for Time {
                     error!("Invalid keys in the time object");
                     return Err(EvaluationError::InvalidType);
                 }
+               
+
                 let timezone = match o.get("timezone") {
                     Some(tz) => {
                         let tz_str = match tz {
@@ -305,6 +317,14 @@ impl ScalarFunction for Time {
                     }
                     None => Tz::UTC,
                 };
+
+                // if only the timezone is specified, return the current time in that timezone
+                if o.get("timezone").is_some() && o.len() == 1 {
+                    let local: chrono::DateTime<Tz> = Local::now().with_timezone(&timezone);
+                    let fixed_offset = local.offset().fix();
+                    return Ok(VariableValue::ZonedTime(ZonedTime::new(local.time(), fixed_offset)));    
+                }
+
                 let result = create_time_from_componet(o.clone()).await;
                 match result {
                     Some(time) => {
@@ -358,12 +378,17 @@ impl ScalarFunction for DateTime {
         _expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
     ) -> Result<VariableValue, EvaluationError> {
-        if args.len() != 1 {
+        if args.len() > 1 {
             return Err(EvaluationError::InvalidArgumentCount(
                 "datetime".to_string(),
             ));
         }
 
+        if args.len() == 0 {
+            let local = Local::now();
+            let datetime = local.with_timezone(&FixedOffset::east_opt(0).unwrap());
+            return Ok(VariableValue::ZonedDateTime(ZonedDateTime::new(datetime, None)));
+        }
         match &args[0] {
             VariableValue::String(s) => {
                 let time_str = s.as_str();
@@ -421,6 +446,15 @@ impl ScalarFunction for DateTime {
                     }
                     None => Tz::UTC,
                 };
+
+                if o.get("timezone").is_some() && o.len() == 1 {
+                    let local: chrono::DateTime<Tz> = Local::now().with_timezone(&timezone);
+                    let zoned_time = match timezone.from_local_datetime(&local.naive_local()) {
+                        LocalResult::Single(zoned_time) => zoned_time.fixed_offset(),
+                        _ => return Err(EvaluationError::InvalidType),
+                    };
+                    return Ok(VariableValue::ZonedDateTime(ZonedDateTime::new(zoned_time, None)));
+                }
                 let naive_date = match create_date_from_componet(o.clone()).await {
                     Some(date) => date.as_date().unwrap(),
                     None => return Err(EvaluationError::InvalidType),
@@ -734,7 +768,52 @@ impl ScalarFunction for Truncate {
                     };
                 let zoned_date_time = ZonedDateTime::new(truncated_date_time, timezone);
                 Ok(VariableValue::ZonedDateTime(zoned_date_time))
-            }
+            },
+            (VariableValue::String(s), VariableValue::ZonedDateTime(dt), Some(VariableValue::Object(m))) => {
+                let datetime = *dt.datetime();
+                let timezone = dt.timezone().clone();
+                let naive_date = datetime.date_naive();
+                let naive_time = datetime.time();
+                let offset = datetime.offset();
+                let truncated_time = match truncate_local_time_with_map(s.to_string(), naive_time, m.clone()).await {
+                    Ok(time) => time,
+                    Err(_) => return Err(EvaluationError::InvalidType),
+                };
+                println!("truncated_time: {:?}", truncated_time);
+                let truncate_date = match truncate_date_with_map(s.to_string(), naive_date, m.clone()).await {
+                    Ok(date) => date,
+                    Err(_) => return Err(EvaluationError::InvalidType),
+                };
+                println!("truncate_date: {:?}", truncate_date);
+                let truncated_naive_date_time = NaiveDateTime::new(truncate_date, truncated_time);
+                if m.get("timezone").is_some() {
+                    let timezone = match m.get("timezone") {
+                        Some(tz) => {
+                            let tz_str = tz.as_str().unwrap();
+                            match handle_iana_timezone(tz_str).await {
+                                Some(tz) => tz,
+                                None => return Err(EvaluationError::ParseError),
+                            }
+                        }
+                        None => return Err(EvaluationError::InvalidType),
+                    };
+                    let datetime_tz = match timezone.from_local_datetime(&truncated_naive_date_time) {
+                        LocalResult::Single(dt) => dt,
+                        _ => return Err(EvaluationError::InvalidType),
+                    };
+                    let datetime_fixed_offset = datetime_tz.fixed_offset();
+                    let timezone_string = m.get("timezone").unwrap().as_str().unwrap();
+                    let zoned_date_time = ZonedDateTime::new(datetime_fixed_offset, Some(timezone_string.to_string()));
+                    return Ok(VariableValue::ZonedDateTime(zoned_date_time));
+                }
+                let truncated_date_time =
+                    match truncated_naive_date_time.and_local_timezone(*offset) {
+                        LocalResult::Single(dt) => dt,
+                        _ => return Err(EvaluationError::InvalidType),
+                    };
+                let zoned_date_time = ZonedDateTime::new(truncated_date_time, timezone);
+                Ok(VariableValue::ZonedDateTime(zoned_date_time))
+            },
             _ => Err(EvaluationError::InvalidType),
         }
     }
@@ -908,7 +987,7 @@ async fn truncate_date_with_map(
 
     let mut truncated_date;
     match truncation_unit {
-        "millenium" => {
+        "millennium" => {
             let year = year / 1000 * 1000;
             truncated_date = NaiveDate::from_ymd_opt(year, 1, 1).unwrap();
         }
@@ -1107,6 +1186,10 @@ async fn truncate_local_time_with_map(
 
             truncated_time =
                 NaiveTime::from_hms_nano_opt(hour, minute, second, truncated_nanos).unwrap();
+        }
+        "timezone" => {
+            // don't truncate timezone
+            truncated_time = NaiveTime::from_hms_nano_opt(hour, minute, second, nanosecond).unwrap();
         }
         _ => {
             return Err(EvaluationError::InvalidType);
