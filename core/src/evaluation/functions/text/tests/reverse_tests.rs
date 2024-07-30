@@ -16,7 +16,6 @@ fn get_func_expr() -> ast::FunctionExpression {
     }
 }
 
-
 #[tokio::test]
 async fn test_reverse() {
     let reverse = text::Reverse {};
@@ -24,15 +23,11 @@ async fn test_reverse() {
     let context =
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
-    let args = vec![
-        VariableValue::String("drasi".to_string()),
-    ];
+    let args = vec![VariableValue::String("drasi".to_string())];
     let result = reverse.call(&context, &get_func_expr(), args.clone()).await;
     assert_eq!(result.unwrap(), VariableValue::String("isard".to_string()));
 
-    let args = vec![
-        VariableValue::String("tenet".to_string()),
-    ];
+    let args = vec![VariableValue::String("tenet".to_string())];
     let result = reverse.call(&context, &get_func_expr(), args.clone()).await;
     assert_eq!(result.unwrap(), VariableValue::String("tenet".to_string()));
 }
@@ -44,9 +39,7 @@ async fn test_reverse_invalid_inputs() {
     let context =
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
-    let args = vec![
-        VariableValue::Integer(10.into()),
-    ];
+    let args = vec![VariableValue::Integer(10.into())];
     let result = reverse.call(&context, &get_func_expr(), args.clone()).await;
     assert!(matches!(result.unwrap_err(), EvaluationError::InvalidType));
 }
@@ -63,7 +56,10 @@ async fn test_reverse_too_many_args() {
         VariableValue::String("drasi".to_string()),
     ];
     let result = reverse.call(&context, &get_func_expr(), args.clone()).await;
-    assert!(matches!(result.unwrap_err(), EvaluationError::InvalidArgumentCount(_)));
+    assert!(matches!(
+        result.unwrap_err(),
+        EvaluationError::InvalidArgumentCount(_)
+    ));
 }
 
 #[tokio::test]
@@ -73,9 +69,7 @@ async fn test_reverse_null() {
     let context =
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
-    let args = vec![
-        VariableValue::Null,
-    ];
+    let args = vec![VariableValue::Null];
     let result = reverse.call(&context, &get_func_expr(), args.clone()).await;
     assert_eq!(result.unwrap(), VariableValue::Null);
 }

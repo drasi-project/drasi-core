@@ -131,6 +131,11 @@ impl ScalarFunction for Reverse {
         }
         match &args[0] {
             VariableValue::String(s) => Ok(VariableValue::String(s.chars().rev().collect())),
+            VariableValue::List(l) => {
+                let mut l = l.clone();
+                l.reverse();
+                Ok(VariableValue::List(l))
+            }
             VariableValue::Null => Ok(VariableValue::Null),
             _ => Err(EvaluationError::InvalidType),
         }
@@ -169,7 +174,7 @@ impl ScalarFunction for Left {
                 }
                 let result = original.chars().take(len).collect::<String>();
                 Ok(VariableValue::String(result))
-            },
+            }
             (_, VariableValue::Null) => return Err(EvaluationError::InvalidType),
             _ => Err(EvaluationError::InvalidType),
         }
@@ -209,7 +214,7 @@ impl ScalarFunction for Right {
                 let start_index = original.len() - len;
                 let result = original[start_index..].to_string();
                 Ok(VariableValue::String(result))
-            },
+            }
             (_, VariableValue::Null) => return Err(EvaluationError::InvalidType),
             _ => Err(EvaluationError::InvalidType),
         }
@@ -241,7 +246,7 @@ impl ScalarFunction for Replace {
                 }
                 let result = original.replace(search, replace);
                 return Ok(VariableValue::String(result));
-            },
+            }
             (VariableValue::Null, _, _) => Ok(VariableValue::Null),
             (_, VariableValue::Null, _) => Ok(VariableValue::Null),
             (_, _, VariableValue::Null) => Ok(VariableValue::Null),
@@ -328,7 +333,7 @@ impl ScalarFunction for Substring {
         match (&args[0], &args[1], &args.get(2)) {
             (VariableValue::Null, _, _) => Ok(VariableValue::Null),
             (_, VariableValue::Null, _) => Err(EvaluationError::InvalidType),
-            (_,_, Some(VariableValue::Null)) => Err(EvaluationError::InvalidType),
+            (_, _, Some(VariableValue::Null)) => Err(EvaluationError::InvalidType),
             (VariableValue::String(original), VariableValue::Integer(start), None) => {
                 // Handle case with two arguments
                 if !start.is_i64() {
@@ -419,7 +424,7 @@ impl ScalarFunction for ToString {
                 result.truncate(result.len() - 2);
                 result.push(']');
                 return Ok(VariableValue::String(result));
-            },
+            }
             VariableValue::Null => return Ok(VariableValue::Null),
             _ => return Err(EvaluationError::InvalidType),
         }

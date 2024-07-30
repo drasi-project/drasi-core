@@ -83,6 +83,12 @@ impl AggregatingFunction for Avg {
                     0,
                 )))
             }
+            VariableValue::Null => {
+                let avg = *sum / *count as f64;
+                Ok(VariableValue::Float(
+                    Float::from_f64(avg).unwrap_or_default(),
+                ))
+            }
             _ => Err(EvaluationError::InvalidType),
         }
     }
@@ -154,6 +160,12 @@ impl AggregatingFunction for Avg {
                     0,
                     0,
                 )))
+            }
+            VariableValue::Null => {
+                let avg = *sum / *count as f64;
+                Ok(VariableValue::Float(
+                    Float::from_f64(avg).unwrap_or_default(),
+                ))
             }
             _ => Err(EvaluationError::InvalidType),
         }

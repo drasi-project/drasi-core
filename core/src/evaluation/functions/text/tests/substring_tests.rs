@@ -67,7 +67,6 @@ async fn test_substring_zero_length() {
         .call(&context, &get_func_expr(), args.clone())
         .await;
     assert_eq!(result.unwrap(), VariableValue::String("".to_string()));
-
 }
 
 #[tokio::test]
@@ -173,7 +172,6 @@ async fn test_substring_invalid_inputs() {
     assert!(matches!(result.unwrap_err(), EvaluationError::InvalidType));
 }
 
-
 #[tokio::test]
 async fn test_substring_null() {
     let substring = text::Substring {};
@@ -181,10 +179,7 @@ async fn test_substring_null() {
     let context =
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
-    let args = vec![
-        VariableValue::Null,
-        VariableValue::Integer(1.into()),
-    ];
+    let args = vec![VariableValue::Null, VariableValue::Integer(1.into())];
     let result = substring
         .call(&context, &get_func_expr(), args.clone())
         .await;

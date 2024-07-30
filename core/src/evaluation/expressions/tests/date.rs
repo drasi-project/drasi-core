@@ -1,5 +1,5 @@
-use chrono::NaiveDate;
 use chrono::prelude::*;
+use chrono::NaiveDate;
 use std::sync::Arc;
 
 use crate::evaluation::context::QueryVariables;
@@ -9,7 +9,6 @@ use crate::evaluation::{ExpressionEvaluationContext, ExpressionEvaluator, Instan
 
 use crate::evaluation::functions::FunctionRegistry;
 use crate::in_memory_index::in_memory_result_index::InMemoryResultIndex;
-
 
 #[tokio::test]
 async fn evaluate_date_empty() {
@@ -447,7 +446,6 @@ async fn test_evaluate_date_truncate_month() {
     }
 }
 
-
 #[tokio::test]
 async fn test_evaluate_date_truncate_week() {
     let expr = "date.truncate('week', $param1, {dayOfWeek: 2})";
@@ -462,7 +460,7 @@ async fn test_evaluate_date_truncate_week() {
     let mut variables = QueryVariables::new();
     variables.insert(
         "param1".into(),
-        VariableValue::Date(NaiveDate::from_ymd_opt(2017,11,11).unwrap()),
+        VariableValue::Date(NaiveDate::from_ymd_opt(2017, 11, 11).unwrap()),
     );
     {
         let context =
@@ -472,10 +470,9 @@ async fn test_evaluate_date_truncate_week() {
                 .evaluate_expression(&context, &expr)
                 .await
                 .unwrap(),
-            VariableValue::Date(NaiveDate::from_ymd_opt(2017,11,7).unwrap())
+            VariableValue::Date(NaiveDate::from_ymd_opt(2017, 11, 7).unwrap())
         );
     }
-
 }
 
 #[tokio::test]
@@ -505,9 +502,7 @@ async fn test_truncate_with_millennium() {
             VariableValue::Date(NaiveDate::from_ymd_opt(2000, 1, 1).unwrap())
         );
     }
-
 }
-
 
 #[tokio::test]
 async fn test_evaluate_date_truncate_weekyear() {
@@ -523,7 +518,7 @@ async fn test_evaluate_date_truncate_weekyear() {
     let mut variables = QueryVariables::new();
     variables.insert(
         "param1".into(),
-        VariableValue::Date(NaiveDate::from_ymd_opt(2017,11,11).unwrap()),
+        VariableValue::Date(NaiveDate::from_ymd_opt(2017, 11, 11).unwrap()),
     );
     {
         let context =
@@ -533,11 +528,9 @@ async fn test_evaluate_date_truncate_weekyear() {
                 .evaluate_expression(&context, &expr)
                 .await
                 .unwrap(),
-            VariableValue::Date(NaiveDate::from_ymd_opt(2017,1,2).unwrap())
+            VariableValue::Date(NaiveDate::from_ymd_opt(2017, 1, 2).unwrap())
         );
     }
-
-
 }
 
 #[tokio::test]
@@ -554,7 +547,7 @@ async fn test_evaluate_date_truncate_quarter() {
     let mut variables = QueryVariables::new();
     variables.insert(
         "param1".into(),
-        VariableValue::Date(NaiveDate::from_ymd_opt(2017,11,11).unwrap()),
+        VariableValue::Date(NaiveDate::from_ymd_opt(2017, 11, 11).unwrap()),
     );
     {
         let context =
@@ -564,10 +557,9 @@ async fn test_evaluate_date_truncate_quarter() {
                 .evaluate_expression(&context, &expr)
                 .await
                 .unwrap(),
-            VariableValue::Date(NaiveDate::from_ymd_opt(2017,10,1).unwrap())
+            VariableValue::Date(NaiveDate::from_ymd_opt(2017, 10, 1).unwrap())
         );
     }
-
 }
 
 #[tokio::test]
@@ -584,7 +576,7 @@ async fn test_evaluate_date_truncate_day() {
     let mut variables = QueryVariables::new();
     variables.insert(
         "param1".into(),
-        VariableValue::Date(NaiveDate::from_ymd_opt(2017,11,11).unwrap()),
+        VariableValue::Date(NaiveDate::from_ymd_opt(2017, 11, 11).unwrap()),
     );
     {
         let context =
@@ -594,11 +586,9 @@ async fn test_evaluate_date_truncate_day() {
                 .evaluate_expression(&context, &expr)
                 .await
                 .unwrap(),
-            VariableValue::Date(NaiveDate::from_ymd_opt(2017,11,11).unwrap())
+            VariableValue::Date(NaiveDate::from_ymd_opt(2017, 11, 11).unwrap())
         );
     }
-
-
 }
 
 #[tokio::test]
@@ -976,7 +966,6 @@ async fn test_date_ge() {
         );
     }
 }
-
 
 #[tokio::test]
 async fn test_retrieve_current_date() {

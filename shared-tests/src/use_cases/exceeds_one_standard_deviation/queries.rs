@@ -68,7 +68,7 @@ pub fn exceeds_one_standard_deviation_query() -> &'static str {
     WITH
         val,
         elementId(equip) AS freezerId,
-        drasi.max([1696150800, val.timestamp - (7 * 24 * 60 * 60)]) AS timeRangeStart
+        drasi.listMax([1696150800, val.timestamp - (7 * 24 * 60 * 60)]) AS timeRangeStart
     WITH
         freezerId,
         val,

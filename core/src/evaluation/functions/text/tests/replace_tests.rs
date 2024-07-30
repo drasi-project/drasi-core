@@ -47,7 +47,6 @@ async fn test_replace() {
         VariableValue::String("-drasi is ...? drasi can xxxx".to_string())
     );
 
-
     let args = vec![
         VariableValue::String("drasi".to_string()),
         VariableValue::String("e".to_string()),
@@ -127,7 +126,6 @@ async fn test_replace_too_few_args() {
         EvaluationError::InvalidArgumentCount(_)
     ));
 }
-
 
 #[tokio::test]
 async fn test_replace_null() {

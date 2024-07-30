@@ -32,9 +32,9 @@ impl ScalarFunction for Round {
             1 => {
                 match &args[0] {
                     VariableValue::Null => Ok(VariableValue::Null),
-                    VariableValue::Integer(n) => {
-                        Ok(VariableValue::Float(Float::from_f64(n.as_i64().unwrap() as f64).unwrap()))
-                    }
+                    VariableValue::Integer(n) => Ok(VariableValue::Float(
+                        Float::from_f64(n.as_i64().unwrap() as f64).unwrap(),
+                    )),
                     VariableValue::Float(n) => {
                         let input_as_f64 = n.as_f64().unwrap();
                         if input_as_f64.fract() == -0.5 {

@@ -68,6 +68,7 @@ impl AggregatingFunction for Sum {
                     0,
                 )))
             }
+            VariableValue::Null => Ok(VariableValue::Float(Float::from_f64(*accumulator).unwrap())),
             _ => Err(EvaluationError::InvalidType),
         }
     }
@@ -106,6 +107,7 @@ impl AggregatingFunction for Sum {
                     0,
                 )))
             }
+            VariableValue::Null => Ok(VariableValue::Float(Float::from_f64(*accumulator).unwrap())),
             _ => Err(EvaluationError::InvalidType),
         }
     }
@@ -139,6 +141,9 @@ impl AggregatingFunction for Sum {
                 0,
                 0,
             ))),
+            VariableValue::Null => Ok(VariableValue::Float(
+                Float::from_f64(*accumulator_value).unwrap(),
+            )),
             _ => Err(EvaluationError::InvalidType),
         }
     }

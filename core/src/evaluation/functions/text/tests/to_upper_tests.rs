@@ -81,7 +81,6 @@ async fn test_to_upper_invalid_args() {
     assert!(matches!(result.unwrap_err(), EvaluationError::InvalidType));
 }
 
-
 #[tokio::test]
 async fn test_to_upper_null() {
     let to_upper = text::ToUpper {};

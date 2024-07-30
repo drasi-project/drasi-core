@@ -1,6 +1,6 @@
-use chrono::{FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Local, LocalResult, DateTime, TimeZone};
-use std::sync::Arc;
+use chrono::{FixedOffset, Local, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
 use std::str::FromStr;
+use std::sync::Arc;
 
 use crate::evaluation::context::QueryVariables;
 use crate::evaluation::variable_value::zoned_datetime::ZonedDateTime;
@@ -391,7 +391,6 @@ async fn evaluate_local_date_time_creation_with_quarter() {
     })";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
     let function_registry = Arc::new(FunctionRegistry::new());
-    
 
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
@@ -411,7 +410,6 @@ async fn evaluate_local_date_time_creation_with_quarter() {
         );
     }
 }
-
 
 #[tokio::test]
 async fn evaluate_zoned_date_time_yy_ww_dd_timezone_with_frac() {
@@ -1242,7 +1240,11 @@ async fn test_local_date_time_get_current() {
     let context =
         ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
     let now = Local::now().naive_local();
-    let result = match evaluator.evaluate_expression(&context, &expr).await.unwrap() {
+    let result = match evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap()
+    {
         VariableValue::LocalDateTime(result) => result,
         _ => panic!("Failed to get local date time"),
     };
@@ -1260,16 +1262,26 @@ async fn test_local_date_time_with_timezone() {
     let variables = QueryVariables::new();
     let context =
         ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-    let current_time_in_shanghai = Local::now().with_timezone(&FixedOffset::east_opt(8 * 3600).unwrap()).naive_local();
-    let result = match evaluator.evaluate_expression(&context, &expr).await.unwrap() {
+    let current_time_in_shanghai = Local::now()
+        .with_timezone(&FixedOffset::east_opt(8 * 3600).unwrap())
+        .naive_local();
+    let result = match evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap()
+    {
         VariableValue::LocalDateTime(result) => result,
         _ => panic!("Failed to get local date time"),
     };
     // ensure that the result is within 500ms of the current time
-    assert!(current_time_in_shanghai.signed_duration_since(result).num_milliseconds().abs() < 500);
-
+    assert!(
+        current_time_in_shanghai
+            .signed_duration_since(result)
+            .num_milliseconds()
+            .abs()
+            < 500
+    );
 }
-
 
 #[tokio::test]
 async fn test_local_date_time_transaction() {
@@ -1281,12 +1293,22 @@ async fn test_local_date_time_transaction() {
     let variables = QueryVariables::new();
     let context =
         ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-    let result = match evaluator.evaluate_expression(&context, &expr).await.unwrap() {
+    let result = match evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap()
+    {
         VariableValue::LocalDateTime(result) => result,
         _ => panic!("Failed to get local date time"),
     };
 
-    assert_eq!(result, NaiveDate::from_ymd_opt(1970, 1, 1).unwrap().and_hms_opt(0, 0, 0).unwrap());
+    assert_eq!(
+        result,
+        NaiveDate::from_ymd_opt(1970, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -1299,12 +1321,22 @@ async fn test_local_date_time_statement() {
     let variables = QueryVariables::new();
     let context =
         ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-    let result = match evaluator.evaluate_expression(&context, &expr).await.unwrap() {
+    let result = match evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap()
+    {
         VariableValue::LocalDateTime(result) => result,
         _ => panic!("Failed to get local date time"),
     };
 
-    assert_eq!(result, NaiveDate::from_ymd_opt(1970, 1, 1).unwrap().and_hms_opt(0, 0, 0).unwrap());
+    assert_eq!(
+        result,
+        NaiveDate::from_ymd_opt(1970, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -1317,18 +1349,30 @@ async fn test_local_date_time_realtime() {
     let variables = QueryVariables::new();
     let context =
         ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-    let result = match evaluator.evaluate_expression(&context, &expr).await.unwrap() {
+    let result = match evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap()
+    {
         VariableValue::LocalDateTime(result) => result,
         _ => panic!("Failed to get local date time"),
     };
 
-    assert_eq!(result,  NaiveDate::from_ymd_opt(1970, 1, 1).unwrap().and_hms_opt(0, 0, 0).unwrap());
+    assert_eq!(
+        result,
+        NaiveDate::from_ymd_opt(1970, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+    );
 }
-
 
 #[tokio::test]
 async fn test_local_date_time_truncate() {
-    let naive_datetime = NaiveDate::from_ymd_opt(2017,11,11).unwrap().and_hms_nano_opt(12, 31, 14, 645876123).unwrap(); 
+    let naive_datetime = NaiveDate::from_ymd_opt(2017, 11, 11)
+        .unwrap()
+        .and_hms_nano_opt(12, 31, 14, 645876123)
+        .unwrap();
     let local_datetime = VariableValue::LocalDateTime(naive_datetime);
 
     let function_registry = Arc::new(FunctionRegistry::new());
@@ -1339,31 +1383,86 @@ async fn test_local_date_time_truncate() {
 
     let expr = "localdatetime.truncate('millennium', $param1)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let context = ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
-    assert_eq!(result, VariableValue::LocalDateTime(NaiveDate::from_ymd_opt(2000, 1, 1).unwrap().and_hms_opt(0, 0, 0).unwrap()));
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
+    assert_eq!(
+        result,
+        VariableValue::LocalDateTime(
+            NaiveDate::from_ymd_opt(2000, 1, 1)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+        )
+    );
 
     let expr = "localdatetime.truncate('year', $param1, {day: 2})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
-    assert_eq!(result, VariableValue::LocalDateTime(NaiveDate::from_ymd_opt(2017, 1, 2).unwrap().and_hms_opt(0, 0, 0).unwrap()));
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
+    assert_eq!(
+        result,
+        VariableValue::LocalDateTime(
+            NaiveDate::from_ymd_opt(2017, 1, 2)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+        )
+    );
 
     let expr = "localdatetime.truncate('month', $param1)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
-    assert_eq!(result, VariableValue::LocalDateTime(NaiveDate::from_ymd_opt(2017, 11, 1).unwrap().and_hms_opt(0, 0, 0).unwrap()));
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
+    assert_eq!(
+        result,
+        VariableValue::LocalDateTime(
+            NaiveDate::from_ymd_opt(2017, 11, 1)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+        )
+    );
 
     let expr = "localdatetime.truncate('day', $param1)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
-    assert_eq!(result, VariableValue::LocalDateTime(NaiveDate::from_ymd_opt(2017, 11, 11).unwrap().and_hms_opt(0, 0, 0).unwrap()));
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
+    assert_eq!(
+        result,
+        VariableValue::LocalDateTime(
+            NaiveDate::from_ymd_opt(2017, 11, 11)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+        )
+    );
 
     let expr = "localdatetime.truncate('hour', $param1, {nanosecond: 2})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
-    assert_eq!(result, VariableValue::LocalDateTime(NaiveDate::from_ymd_opt(2017, 11, 11).unwrap().and_hms_nano_opt(12, 0, 0,2).unwrap()));
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
+    assert_eq!(
+        result,
+        VariableValue::LocalDateTime(
+            NaiveDate::from_ymd_opt(2017, 11, 11)
+                .unwrap()
+                .and_hms_nano_opt(12, 0, 0, 2)
+                .unwrap()
+        )
+    );
 }
-
 
 #[tokio::test]
 async fn test_zoned_datetime_get_current() {
@@ -1377,14 +1476,22 @@ async fn test_zoned_datetime_get_current() {
         ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
     let now = Local::now().with_timezone(&FixedOffset::east_opt(0).unwrap());
 
-    let result = match evaluator.evaluate_expression(&context, &expr).await.unwrap() {
+    let result = match evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap()
+    {
         VariableValue::ZonedDateTime(result) => result,
         _ => panic!("Failed to get zoned date time"),
     };
     // ensure that the result is within 500ms of the current time
-    assert!(now.signed_duration_since(result.datetime()).num_milliseconds().abs() < 500);
+    assert!(
+        now.signed_duration_since(result.datetime())
+            .num_milliseconds()
+            .abs()
+            < 500
+    );
 }
-
 
 #[tokio::test]
 async fn test_zoned_datetime_get_current_time_in_shanghai() {
@@ -1398,11 +1505,20 @@ async fn test_zoned_datetime_get_current_time_in_shanghai() {
         ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
     let now = Local::now().with_timezone(&FixedOffset::east_opt(8 * 3600).unwrap());
 
-    let result = match evaluator.evaluate_expression(&context, &expr).await.unwrap() {
+    let result = match evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap()
+    {
         VariableValue::ZonedDateTime(result) => result,
         _ => panic!("Failed to get zoned date time"),
     };
-    assert!(now.signed_duration_since(result.datetime()).num_milliseconds().abs() < 500);
+    assert!(
+        now.signed_duration_since(result.datetime())
+            .num_milliseconds()
+            .abs()
+            < 500
+    );
 }
 
 #[tokio::test]
@@ -1415,15 +1531,22 @@ async fn test_zoned_datetime_transaction() {
     let variables = QueryVariables::new();
     let context =
         ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-    let result = match evaluator.evaluate_expression(&context, &expr).await.unwrap() {
+    let result = match evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap()
+    {
         VariableValue::ZonedDateTime(result) => result,
         _ => panic!("Failed to get zoned date time"),
     };
 
-    let naive_date_time = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap().and_hms_opt(0, 0, 0).unwrap();
+    let naive_date_time = NaiveDate::from_ymd_opt(1970, 1, 1)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap();
     let date_time =
-            NaiveDateTime::and_local_timezone(&naive_date_time, FixedOffset::east_opt(0).unwrap())
-                .unwrap();
+        NaiveDateTime::and_local_timezone(&naive_date_time, FixedOffset::east_opt(0).unwrap())
+            .unwrap();
     assert_eq!(*result.datetime(), date_time);
 }
 
@@ -1437,18 +1560,24 @@ async fn test_zoned_datetime_statement() {
     let variables = QueryVariables::new();
     let context =
         ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-    let result = match evaluator.evaluate_expression(&context, &expr).await.unwrap() {
+    let result = match evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap()
+    {
         VariableValue::ZonedDateTime(result) => result,
         _ => panic!("Failed to get zoned date time"),
     };
 
-    let naive_date_time = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap().and_hms_opt(0, 0, 0).unwrap();
+    let naive_date_time = NaiveDate::from_ymd_opt(1970, 1, 1)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap();
     let date_time =
-            NaiveDateTime::and_local_timezone(&naive_date_time, FixedOffset::east_opt(0).unwrap())
-                .unwrap();
+        NaiveDateTime::and_local_timezone(&naive_date_time, FixedOffset::east_opt(0).unwrap())
+            .unwrap();
     assert_eq!(*result.datetime(), date_time);
 }
-
 
 #[tokio::test]
 async fn test_zoned_datetime_realtime() {
@@ -1460,27 +1589,38 @@ async fn test_zoned_datetime_realtime() {
     let variables = QueryVariables::new();
     let context =
         ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-    let result = match evaluator.evaluate_expression(&context, &expr).await.unwrap() {
+    let result = match evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap()
+    {
         VariableValue::ZonedDateTime(result) => result,
         _ => panic!("Failed to get zoned date time"),
     };
 
-    let naive_date_time = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap().and_hms_opt(0, 0, 0).unwrap();
+    let naive_date_time = NaiveDate::from_ymd_opt(1970, 1, 1)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap();
     let date_time =
-            NaiveDateTime::and_local_timezone(&naive_date_time, FixedOffset::east_opt(0).unwrap())
-                .unwrap();
+        NaiveDateTime::and_local_timezone(&naive_date_time, FixedOffset::east_opt(0).unwrap())
+            .unwrap();
     assert_eq!(*result.datetime(), date_time);
 }
 
 #[tokio::test]
 async fn test_zoned_datetime_truncate() {
-    let naive_datetime = NaiveDate::from_ymd_opt(2017,11,11).unwrap().and_hms_nano_opt(12, 31, 14, 645876123).unwrap();
+    let naive_datetime = NaiveDate::from_ymd_opt(2017, 11, 11)
+        .unwrap()
+        .and_hms_nano_opt(12, 31, 14, 645876123)
+        .unwrap();
     let fixed_offset = FixedOffset::from_str("+03:00").unwrap();
     let datetime = match fixed_offset.from_local_datetime(&naive_datetime) {
         LocalResult::Single(zoned_datetime) => zoned_datetime.fixed_offset(),
         _ => panic!("Failed to create zoned date time"),
     };
-    let zoned_datetime = VariableValue::ZonedDateTime(ZonedDateTime::new(datetime, Some("+03:00".to_string())));
+    let zoned_datetime =
+        VariableValue::ZonedDateTime(ZonedDateTime::new(datetime, Some("+03:00".to_string())));
 
     let function_registry = Arc::new(FunctionRegistry::new());
     let ari = Arc::new(InMemoryResultIndex::new());
@@ -1490,82 +1630,114 @@ async fn test_zoned_datetime_truncate() {
 
     let expr = "datetime.truncate('millennium', $param1, {timezone: 'Europe/Stockholm'})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let context = ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
     let result = match evaluator.evaluate_expression(&context, &expr).await {
         Ok(VariableValue::ZonedDateTime(result)) => result,
         _ => panic!("Failed to get zoned datetime"),
     };
-    let naive_date_time = NaiveDate::from_ymd_opt(2000, 1, 1).unwrap().and_hms_opt(0, 0, 0).unwrap();
+    let naive_date_time = NaiveDate::from_ymd_opt(2000, 1, 1)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap();
     let date_time =
-            NaiveDateTime::and_local_timezone(&naive_date_time, FixedOffset::east_opt(3600).unwrap())
-                .unwrap();
+        NaiveDateTime::and_local_timezone(&naive_date_time, FixedOffset::east_opt(3600).unwrap())
+            .unwrap();
     assert_eq!(*result.datetime(), date_time);
     assert_eq!(*result.timezone(), Some("Europe/Stockholm".to_string()));
 
-
     let expr = "datetime.truncate('year', $param1, {day: 5})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let context = ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
     let result = match evaluator.evaluate_expression(&context, &expr).await {
         Ok(VariableValue::ZonedDateTime(result)) => result,
         _ => panic!("Failed to get zoned datetime"),
     };
-    let naive_date_time = NaiveDate::from_ymd_opt(2017,1,5).unwrap().and_hms_opt(0, 0, 0).unwrap();
-    let date_time =
-            NaiveDateTime::and_local_timezone(&naive_date_time, FixedOffset::east_opt(3600 * 3).unwrap())
-                .unwrap();
+    let naive_date_time = NaiveDate::from_ymd_opt(2017, 1, 5)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap();
+    let date_time = NaiveDateTime::and_local_timezone(
+        &naive_date_time,
+        FixedOffset::east_opt(3600 * 3).unwrap(),
+    )
+    .unwrap();
     assert_eq!(*result.datetime(), date_time);
 
     let expr = "datetime.truncate('month', $param1)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let context = ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
     let result = match evaluator.evaluate_expression(&context, &expr).await {
         Ok(VariableValue::ZonedDateTime(result)) => result,
         _ => panic!("Failed to get zoned datetime"),
     };
-    let naive_date_time = NaiveDate::from_ymd_opt(2017,11,1).unwrap().and_hms_opt(0, 0, 0).unwrap();
-    let date_time =
-            NaiveDateTime::and_local_timezone(&naive_date_time, FixedOffset::east_opt(3600 * 3).unwrap())
-                .unwrap();
+    let naive_date_time = NaiveDate::from_ymd_opt(2017, 11, 1)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap();
+    let date_time = NaiveDateTime::and_local_timezone(
+        &naive_date_time,
+        FixedOffset::east_opt(3600 * 3).unwrap(),
+    )
+    .unwrap();
     assert_eq!(*result.datetime(), date_time);
 
     let expr = "datetime.truncate('day', $param1, {millisecond: 2})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let context = ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
     let result = match evaluator.evaluate_expression(&context, &expr).await {
         Ok(VariableValue::ZonedDateTime(result)) => result,
         _ => panic!("Failed to get zoned datetime"),
     };
-    let naive_date_time = NaiveDate::from_ymd_opt(2017,11,11).unwrap().and_hms_milli_opt(0, 0, 0,2).unwrap();
-    let date_time =
-            NaiveDateTime::and_local_timezone(&naive_date_time, FixedOffset::east_opt(3600 * 3).unwrap())
-                .unwrap();
+    let naive_date_time = NaiveDate::from_ymd_opt(2017, 11, 11)
+        .unwrap()
+        .and_hms_milli_opt(0, 0, 0, 2)
+        .unwrap();
+    let date_time = NaiveDateTime::and_local_timezone(
+        &naive_date_time,
+        FixedOffset::east_opt(3600 * 3).unwrap(),
+    )
+    .unwrap();
     assert_eq!(*result.datetime(), date_time);
 
     let expr = "datetime.truncate('hour', $param1)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let context = ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
     let result = match evaluator.evaluate_expression(&context, &expr).await {
         Ok(VariableValue::ZonedDateTime(result)) => result,
         _ => panic!("Failed to get zoned datetime"),
     };
-    let naive_date_time = NaiveDate::from_ymd_opt(2017,11,11).unwrap().and_hms_opt(12, 0, 0).unwrap();
-    let date_time =
-            NaiveDateTime::and_local_timezone(&naive_date_time, FixedOffset::east_opt(3600 * 3).unwrap())
-                .unwrap();
+    let naive_date_time = NaiveDate::from_ymd_opt(2017, 11, 11)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let date_time = NaiveDateTime::and_local_timezone(
+        &naive_date_time,
+        FixedOffset::east_opt(3600 * 3).unwrap(),
+    )
+    .unwrap();
     assert_eq!(*result.datetime(), date_time);
-
 
     let expr = "datetime.truncate('second', $param1)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let context = ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
     let result = match evaluator.evaluate_expression(&context, &expr).await {
         Ok(VariableValue::ZonedDateTime(result)) => result,
         _ => panic!("Failed to get zoned datetime"),
     };
-    let naive_date_time = NaiveDate::from_ymd_opt(2017,11,11).unwrap().and_hms_opt(12, 31, 14).unwrap();
-    let date_time =
-            NaiveDateTime::and_local_timezone(&naive_date_time, FixedOffset::east_opt(3600 * 3).unwrap())
-                .unwrap();
+    let naive_date_time = NaiveDate::from_ymd_opt(2017, 11, 11)
+        .unwrap()
+        .and_hms_opt(12, 31, 14)
+        .unwrap();
+    let date_time = NaiveDateTime::and_local_timezone(
+        &naive_date_time,
+        FixedOffset::east_opt(3600 * 3).unwrap(),
+    )
+    .unwrap();
     assert_eq!(*result.datetime(), date_time);
 }

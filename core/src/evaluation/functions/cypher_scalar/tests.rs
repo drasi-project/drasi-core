@@ -5,3 +5,5 @@ mod size_tests;
 mod to_boolean_tests;
 mod to_float_tests;
 mod to_integer_tests;
+
+mod timestamp_tests;

@@ -14,13 +14,13 @@ mod date;
 mod datetime;
 mod duration;
 mod list_construction;
+mod list_functions;
 mod list_indexing;
 mod list_reduce;
-mod list_tail;
 mod logical;
 mod numeric;
-mod time;
 mod string;
+mod time;
 
 #[tokio::test]
 async fn evaluate_property_access() {

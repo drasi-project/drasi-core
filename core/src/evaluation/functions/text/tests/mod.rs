@@ -1,6 +1,7 @@
 use super::text;
 mod left_tests;
 mod replace_tests;
+mod reverse_tests;
 mod right_tests;
 mod split_tests;
 mod substring_tests;
@@ -9,4 +10,3 @@ mod to_string_or_null_tests;
 mod to_string_tests;
 mod to_upper_tests;
 mod trim_tests;
-mod reverse_tests;

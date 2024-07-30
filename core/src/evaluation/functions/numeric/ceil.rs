@@ -3,7 +3,6 @@ use drasi_query_ast::ast;
 
 use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::variable_value::float::Float;
-use crate::evaluation::variable_value::integer::Integer;
 use crate::evaluation::variable_value::VariableValue;
 use crate::evaluation::{EvaluationError, ExpressionEvaluationContext};
 
@@ -24,7 +23,9 @@ impl ScalarFunction for Ceil {
         match &args[0] {
             VariableValue::Null => Ok(VariableValue::Null),
             VariableValue::Integer(n) => {
-                Ok(VariableValue::Float(Float::from_f64(n.as_i64().unwrap() as f64).unwrap())) // ceil always return a float
+                Ok(VariableValue::Float(
+                    Float::from_f64(n.as_i64().unwrap() as f64).unwrap(),
+                )) // ceil always return a float
             }
             VariableValue::Float(n) => Ok(VariableValue::Float(
                 Float::from_f64(n.as_f64().unwrap().ceil()).unwrap(),

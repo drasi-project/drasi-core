@@ -3,11 +3,10 @@ use std::sync::Arc;
 use crate::evaluation::variable_value::VariableValue;
 
 use crate::evaluation::context::QueryVariables;
-use crate::evaluation::{EvaluationError, ExpressionEvaluationContext, ExpressionEvaluator, InstantQueryClock};
+use crate::evaluation::{ExpressionEvaluationContext, ExpressionEvaluator, InstantQueryClock};
 
 use crate::evaluation::functions::FunctionRegistry;
 use crate::in_memory_index::in_memory_result_index::InMemoryResultIndex;
-
 
 #[tokio::test]
 async fn evaluate_left() {
@@ -105,7 +104,8 @@ async fn evaluate_replace() {
         );
     }
 
-    let expr = "replace('-reactive-graph is ...? reactive-graph can xxxx', 'reactive-graph', 'drasi')";
+    let expr =
+        "replace('-reactive-graph is ...? reactive-graph can xxxx', 'reactive-graph', 'drasi')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
     {
         let context =
@@ -147,7 +147,6 @@ async fn evaluate_replace() {
         );
     }
 }
-
 
 #[tokio::test]
 async fn evaluate_reverse() {
@@ -259,7 +258,6 @@ async fn evaluate_rtrim() {
         );
     }
 }
-
 
 #[tokio::test]
 async fn evaluate_split() {
@@ -391,22 +389,20 @@ async fn evaluate_substring() {
         );
     }
 
-
     let expr = "substring('drasi', 2, 0)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
     {
         let context =
             ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-            assert_eq!(
-                evaluator
-                    .evaluate_expression(&context, &expr)
-                    .await
-                    .unwrap(),
-                VariableValue::String("".to_string())
-            );
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::String("".to_string())
+        );
     }
 }
-
 
 #[tokio::test]
 async fn evaluate_to_lower() {
@@ -421,13 +417,13 @@ async fn evaluate_to_lower() {
     {
         let context =
             ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-            assert_eq!(
-                evaluator
-                    .evaluate_expression(&context, &expr)
-                    .await
-                    .unwrap(),
-                VariableValue::String("drasi".to_string())
-            );
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::String("drasi".to_string())
+        );
     }
 
     let expr = "toLower(NULL)";
@@ -435,16 +431,15 @@ async fn evaluate_to_lower() {
     {
         let context =
             ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-            assert_eq!(
-                evaluator
-                    .evaluate_expression(&context, &expr)
-                    .await
-                    .unwrap(),
-                VariableValue::Null
-            );
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::Null
+        );
     }
 }
-
 
 #[tokio::test]
 async fn test_to_upper() {
@@ -459,13 +454,13 @@ async fn test_to_upper() {
     {
         let context =
             ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-            assert_eq!(
-                evaluator
-                    .evaluate_expression(&context, &expr)
-                    .await
-                    .unwrap(),
-                VariableValue::String("DRASI".to_string())
-            );
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::String("DRASI".to_string())
+        );
     }
 
     let expr = "toUpper(NULL)";
@@ -473,13 +468,13 @@ async fn test_to_upper() {
     {
         let context =
             ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-            assert_eq!(
-                evaluator
-                    .evaluate_expression(&context, &expr)
-                    .await
-                    .unwrap(),
-                VariableValue::Null
-            );
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::Null
+        );
     }
 }
 
@@ -496,13 +491,13 @@ async fn test_to_string() {
     {
         let context =
             ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-            assert_eq!(
-                evaluator
-                    .evaluate_expression(&context, &expr)
-                    .await
-                    .unwrap(),
-                VariableValue::String("123".to_string())
-            );
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::String("123".to_string())
+        );
     }
 
     let expr = "toString(NULL)";
@@ -510,13 +505,13 @@ async fn test_to_string() {
     {
         let context =
             ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-            assert_eq!(
-                evaluator
-                    .evaluate_expression(&context, &expr)
-                    .await
-                    .unwrap(),
-                VariableValue::Null
-            );
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::Null
+        );
     }
 
     let expr = "toString(TRUE   )";
@@ -524,16 +519,15 @@ async fn test_to_string() {
     {
         let context =
             ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-            assert_eq!(
-                evaluator
-                    .evaluate_expression(&context, &expr)
-                    .await
-                    .unwrap(),
-                VariableValue::String("true".to_string())
-            );
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::String("true".to_string())
+        );
     }
 }
-
 
 #[tokio::test]
 async fn test_trim() {
@@ -548,13 +542,13 @@ async fn test_trim() {
     {
         let context =
             ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-            assert_eq!(
-                evaluator
-                    .evaluate_expression(&context, &expr)
-                    .await
-                    .unwrap(),
-                VariableValue::String("drasi".to_string())
-            );
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::String("drasi".to_string())
+        );
     }
 
     let expr = "trim(   NULL)";
@@ -562,12 +556,12 @@ async fn test_trim() {
     {
         let context =
             ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-            assert_eq!(
-                evaluator
-                    .evaluate_expression(&context, &expr)
-                    .await
-                    .unwrap(),
-                VariableValue::Null
-            );
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::Null
+        );
     }
 }

@@ -1,7 +1,7 @@
-use chrono::{FixedOffset, NaiveTime, Local};
+use chrono::{FixedOffset, Local, NaiveTime};
 use std::result;
-use std::sync::Arc;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use crate::evaluation::context::QueryVariables;
 use crate::evaluation::variable_value::zoned_time::ZonedTime;
@@ -1106,7 +1106,6 @@ async fn test_zoned_time_ge() {
     }
 }
 
-
 #[tokio::test]
 async fn evaluate_local_time_empty_param() {
     let expr = "localtime()";
@@ -1123,12 +1122,22 @@ async fn evaluate_local_time_empty_param() {
             ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
 
         let curr_time = Local::now().time();
-        let result = match evaluator.evaluate_expression(&context, &expr).await.unwrap() {
+        let result = match evaluator
+            .evaluate_expression(&context, &expr)
+            .await
+            .unwrap()
+        {
             VariableValue::LocalTime(result) => result,
             _ => panic!("Failed to get local time"),
         };
         // ensure that the result is within 500ms of the current time
-        assert!(curr_time.signed_duration_since(result).num_milliseconds().abs() < 500);
+        assert!(
+            curr_time
+                .signed_duration_since(result)
+                .num_milliseconds()
+                .abs()
+                < 500
+        );
     }
 }
 
@@ -1143,9 +1152,13 @@ async fn test_local_time_transaction() {
 
     let variables = QueryVariables::new();
 
-    let context = ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
 
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     let result = match result {
         VariableValue::LocalTime(result) => result,
         _ => panic!("Failed to get local time"),
@@ -1164,9 +1177,13 @@ async fn test_local_time_statement() {
 
     let variables = QueryVariables::new();
 
-    let context = ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
 
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     let result = match result {
         VariableValue::LocalTime(result) => result,
         _ => panic!("Failed to get local time"),
@@ -1189,7 +1206,11 @@ async fn test_local_time_realtime() {
     {
         let context =
             ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-        let result = match evaluator.evaluate_expression(&context, &expr).await.unwrap() {
+        let result = match evaluator
+            .evaluate_expression(&context, &expr)
+            .await
+            .unwrap()
+        {
             VariableValue::LocalTime(result) => result,
             _ => panic!("Failed to get local time"),
         };
@@ -1210,18 +1231,28 @@ async fn test_create_local_time_with_components() {
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
     let variables = QueryVariables::new();
-    let context = ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
 
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     let result = match result {
         VariableValue::LocalTime(result) => result,
         _ => panic!("Failed to get local time"),
     };
-    assert_eq!(result, NaiveTime::from_hms_nano_opt(12, 31, 14, 123456789).unwrap());
+    assert_eq!(
+        result,
+        NaiveTime::from_hms_nano_opt(12, 31, 14, 123456789).unwrap()
+    );
 
     let expr = "localtime({hour: 12})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     let result = match result {
         VariableValue::LocalTime(result) => result,
         _ => panic!("Failed to get local time"),
@@ -1229,24 +1260,26 @@ async fn test_create_local_time_with_components() {
     assert_eq!(result, NaiveTime::from_hms_opt(12, 0, 0).unwrap());
 }
 
-
 #[tokio::test]
 async fn test_local_time_truncate() {
-    let naive_time = NaiveTime::from_hms_nano_opt(12,31,14,645876123).unwrap();
+    let naive_time = NaiveTime::from_hms_nano_opt(12, 31, 14, 645876123).unwrap();
     let local_time = VariableValue::LocalTime(naive_time);
-
 
     let function_registry = Arc::new(FunctionRegistry::new());
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let mut variables = QueryVariables::new();
     variables.insert("param1".to_string().into(), local_time);
-    let context = ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
 
     let expr = "localtime.truncate('day', $param1)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     let result = match result {
         VariableValue::LocalTime(result) => result,
         _ => panic!("Failed to get local time"),
@@ -1255,8 +1288,11 @@ async fn test_local_time_truncate() {
 
     let expr = "localtime.truncate('hour', $param1)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     let result = match result {
         VariableValue::LocalTime(result) => result,
         _ => panic!("Failed to get local time"),
@@ -1265,8 +1301,11 @@ async fn test_local_time_truncate() {
 
     let expr = "localtime.truncate('minute', $param1, {millisecond: 2})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     let result = match result {
         VariableValue::LocalTime(result) => result,
         _ => panic!("Failed to get local time"),
@@ -1275,8 +1314,11 @@ async fn test_local_time_truncate() {
 
     let expr = "localtime.truncate('second', $param1)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     let result = match result {
         VariableValue::LocalTime(result) => result,
         _ => panic!("Failed to get local time"),
@@ -1285,23 +1327,35 @@ async fn test_local_time_truncate() {
 
     let expr = "localtime.truncate('millisecond', $param1)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     let result = match result {
         VariableValue::LocalTime(result) => result,
         _ => panic!("Failed to get local time"),
     };
-    assert_eq!(result, NaiveTime::from_hms_milli_opt(12, 31, 14, 645).unwrap());
+    assert_eq!(
+        result,
+        NaiveTime::from_hms_milli_opt(12, 31, 14, 645).unwrap()
+    );
 
     let expr = "localtime.truncate('microsecond', $param1)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     let result = match result {
         VariableValue::LocalTime(result) => result,
         _ => panic!("Failed to get local time"),
     };
-    assert_eq!(result, NaiveTime::from_hms_micro_opt(12, 31, 14, 645876).unwrap()); 
+    assert_eq!(
+        result,
+        NaiveTime::from_hms_micro_opt(12, 31, 14, 645876).unwrap()
+    );
 }
 
 #[tokio::test]
@@ -1320,12 +1374,22 @@ async fn evaluate_zoned_time_empty_param() {
             ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
 
         let curr_time = Local::now().time();
-        let result = match evaluator.evaluate_expression(&context, &expr).await.unwrap() {
+        let result = match evaluator
+            .evaluate_expression(&context, &expr)
+            .await
+            .unwrap()
+        {
             VariableValue::ZonedTime(result) => result,
             _ => panic!("Failed to get zoned date time"),
         };
         // ensure that the result is within 500ms of the current time
-        assert!(curr_time.signed_duration_since(*result.time()).num_milliseconds().abs() < 500);
+        assert!(
+            curr_time
+                .signed_duration_since(*result.time())
+                .num_milliseconds()
+                .abs()
+                < 500
+        );
     }
 }
 
@@ -1344,13 +1408,25 @@ async fn evaluate_zoned_time_with_timezone() {
     {
         let context =
             ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-        let result = match evaluator.evaluate_expression(&context, &expr).await.unwrap() {
+        let result = match evaluator
+            .evaluate_expression(&context, &expr)
+            .await
+            .unwrap()
+        {
             VariableValue::ZonedTime(result) => result,
             _ => panic!("Failed to get zoned date time"),
         };
-        
-        let current_time_in_shanghai = Local::now().with_timezone(&FixedOffset::east_opt(28800).unwrap()).time(); 
-        assert!(current_time_in_shanghai.signed_duration_since(*result.time()).num_milliseconds().abs() < 500);
+
+        let current_time_in_shanghai = Local::now()
+            .with_timezone(&FixedOffset::east_opt(28800).unwrap())
+            .time();
+        assert!(
+            current_time_in_shanghai
+                .signed_duration_since(*result.time())
+                .num_milliseconds()
+                .abs()
+                < 500
+        );
     }
 }
 
@@ -1369,7 +1445,11 @@ async fn evaluate_zoned_time_statement() {
     {
         let context =
             ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-        let result = match evaluator.evaluate_expression(&context, &expr).await.unwrap() {
+        let result = match evaluator
+            .evaluate_expression(&context, &expr)
+            .await
+            .unwrap()
+        {
             VariableValue::ZonedTime(result) => result,
             _ => panic!("Failed to get zoned date time"),
         };
@@ -1392,7 +1472,11 @@ async fn evaluate_zoned_time_transaction() {
     {
         let context =
             ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-        let result = match evaluator.evaluate_expression(&context, &expr).await.unwrap() {
+        let result = match evaluator
+            .evaluate_expression(&context, &expr)
+            .await
+            .unwrap()
+        {
             VariableValue::ZonedTime(result) => result,
             _ => panic!("Failed to get zoned date time"),
         };
@@ -1400,10 +1484,9 @@ async fn evaluate_zoned_time_transaction() {
     }
 }
 
-
 #[tokio::test]
 async fn test_zoned_time_truncate() {
-    let time = NaiveTime::from_hms_nano_opt(12,31,14,645876123).unwrap();
+    let time = NaiveTime::from_hms_nano_opt(12, 31, 14, 645876123).unwrap();
     let fixed_offset = FixedOffset::from_str("-01:00").unwrap();
 
     let zoned_time = VariableValue::ZonedTime(ZonedTime::new(time, fixed_offset));
@@ -1415,7 +1498,8 @@ async fn test_zoned_time_truncate() {
 
     let expr = "time.truncate('day', $param1)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let context = ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
     let result = match evaluator.evaluate_expression(&context, &expr).await {
         Ok(VariableValue::ZonedTime(result)) => result,
         _ => panic!("Failed to get zoned time"),
@@ -1425,7 +1509,8 @@ async fn test_zoned_time_truncate() {
 
     let expr = "time.truncate('hour', $param1)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let context = ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
     let result = match evaluator.evaluate_expression(&context, &expr).await {
         Ok(VariableValue::ZonedTime(result)) => result,
         _ => panic!("Failed to get zoned time"),
@@ -1435,7 +1520,8 @@ async fn test_zoned_time_truncate() {
 
     let expr = "time.truncate('minute', $param1)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let context = ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
     let result = match evaluator.evaluate_expression(&context, &expr).await {
         Ok(VariableValue::ZonedTime(result)) => result,
         _ => panic!("Failed to get zoned time"),
@@ -1445,7 +1531,8 @@ async fn test_zoned_time_truncate() {
 
     let expr = "time.truncate('second', $param1)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let context = ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
     let result = match evaluator.evaluate_expression(&context, &expr).await {
         Ok(VariableValue::ZonedTime(result)) => result,
         _ => panic!("Failed to get zoned time"),
@@ -1455,21 +1542,29 @@ async fn test_zoned_time_truncate() {
 
     let expr = "time.truncate('millisecond', $param1, {nanosecond: 2})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let context = ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
     let result = match evaluator.evaluate_expression(&context, &expr).await {
         Ok(VariableValue::ZonedTime(result)) => result,
         _ => panic!("Failed to get zoned time"),
     };
-    assert_eq!(result.time(), &NaiveTime::from_hms_nano_opt(12, 31, 14, 645000002).unwrap());
+    assert_eq!(
+        result.time(),
+        &NaiveTime::from_hms_nano_opt(12, 31, 14, 645000002).unwrap()
+    );
     assert_eq!(result.offset(), &FixedOffset::west_opt(3600).unwrap());
 
     let expr = "time.truncate('microsecond', $param1)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let context = ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
     let result = match evaluator.evaluate_expression(&context, &expr).await {
         Ok(VariableValue::ZonedTime(result)) => result,
         _ => panic!("Failed to get zoned time"),
     };
-    assert_eq!(result.time(), &NaiveTime::from_hms_micro_opt(12, 31, 14, 645876).unwrap());
+    assert_eq!(
+        result.time(),
+        &NaiveTime::from_hms_micro_opt(12, 31, 14, 645876).unwrap()
+    );
     assert_eq!(result.offset(), &FixedOffset::west_opt(3600).unwrap());
 }

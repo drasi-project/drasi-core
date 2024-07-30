@@ -24,7 +24,9 @@ impl ScalarFunction for Floor {
         match &args[0] {
             VariableValue::Null => Ok(VariableValue::Null),
             VariableValue::Integer(n) => {
-                Ok(VariableValue::Float(Float::from_f64(n.as_i64().unwrap() as f64).unwrap())) // floor always return a float
+                Ok(VariableValue::Float(
+                    Float::from_f64(n.as_i64().unwrap() as f64).unwrap(),
+                )) // floor always return a float
             }
             VariableValue::Float(n) => Ok(VariableValue::Float(
                 Float::from_f64(n.as_f64().unwrap().floor()).unwrap(),
