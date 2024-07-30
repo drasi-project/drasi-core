@@ -1,6 +1,6 @@
+mod range;
 mod reduce;
 mod tail;
-mod range;
 
 use super::{Function, FunctionRegistry};
 use std::sync::Arc;
