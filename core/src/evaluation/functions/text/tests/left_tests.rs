@@ -116,17 +116,11 @@ async fn test_left_null() {
     let context =
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
-    let args = vec![
-        VariableValue::Null,
-        VariableValue::Integer(3.into()),
-    ];
+    let args = vec![VariableValue::Null, VariableValue::Integer(3.into())];
     let result = left.call(&context, &get_func_expr(), args.clone()).await;
     assert_eq!(result.unwrap(), VariableValue::Null);
 
-    let args = vec![
-        VariableValue::Null,
-        VariableValue::Null,
-    ];
+    let args = vec![VariableValue::Null, VariableValue::Null];
     let result = left.call(&context, &get_func_expr(), args.clone()).await;
     assert_eq!(result.unwrap(), VariableValue::Null);
 

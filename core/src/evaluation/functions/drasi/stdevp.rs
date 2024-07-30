@@ -34,7 +34,7 @@ impl ScalarFunction for DrasiStdevP {
                         }
                         VariableValue::Float(f) => {
                             cleaned_list.push(f.as_f64().unwrap());
-                        },
+                        }
                         VariableValue::Null => {
                             continue;
                         }

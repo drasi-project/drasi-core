@@ -73,7 +73,6 @@ async fn evaluate_size_of_string() {
     );
 }
 
-
 #[tokio::test]
 async fn evaluate_size_of_list() {
     let expr = "size([1,null,3,4,5])";
@@ -116,7 +115,6 @@ async fn evaluate_size_null() {
             .unwrap(),
         VariableValue::Null
     );
-
 }
 
 #[tokio::test]
@@ -231,7 +229,9 @@ async fn evaluate_timestamp() {
         Err(e) => panic!("Error: {:?}", e),
     };
 
-    let time_since_epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+    let time_since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
     let time_since_epoch = time_since_epoch.as_millis() as i64;
 
     //abs diff should be less than 500
@@ -268,21 +268,29 @@ async fn evalaute_to_boolean_string() {
     let context =
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     assert_eq!(result, VariableValue::Bool(true));
 
     let expr = "toBoolean('false')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     assert_eq!(result, VariableValue::Bool(false));
 
     let expr = "toBoolean('foo')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     assert_eq!(result, VariableValue::Null);
 }
-
 
 #[tokio::test]
 async fn evaluate_to_boolean_bool() {
@@ -297,13 +305,19 @@ async fn evaluate_to_boolean_bool() {
     let context =
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     assert_eq!(result, VariableValue::Bool(true));
 
     let expr = "toBoolean(false)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     assert_eq!(result, VariableValue::Bool(false));
 }
 
@@ -320,7 +334,10 @@ async fn evaluate_to_boolean_null() {
     let context =
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     assert_eq!(result, VariableValue::Null);
 }
 
@@ -337,19 +354,28 @@ async fn evaluate_to_float_string() {
     let context =
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     assert_eq!(result, VariableValue::Float(12.34.into()));
 
     let expr = "toFloat('12')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     assert_eq!(result, VariableValue::Float(12.0.into()));
 
     let expr = "toFloat('foo')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     assert_eq!(result, VariableValue::Null);
 }
 
@@ -366,16 +392,21 @@ async fn evaluate_to_float_numeric() {
     let context =
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     assert_eq!(result, VariableValue::Float(12.0.into()));
 
     let expr = "toFloat(12.34)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     assert_eq!(result, VariableValue::Float(12.34.into()));
 }
-
 
 #[tokio::test]
 async fn evluate_to_float_null() {
@@ -390,10 +421,12 @@ async fn evluate_to_float_null() {
     let context =
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     assert_eq!(result, VariableValue::Null);
 }
-
 
 #[tokio::test]
 async fn evaluate_to_integer_string() {
@@ -408,19 +441,28 @@ async fn evaluate_to_integer_string() {
     let context =
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     assert_eq!(result, VariableValue::Integer(12.into()));
 
     let expr = "toInteger('12.34')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     assert_eq!(result, VariableValue::Integer(12.into()));
 
     let expr = "toInteger('foo')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     assert_eq!(result, VariableValue::Null);
 }
 
@@ -437,13 +479,19 @@ async fn evaluate_to_integer_numeric() {
     let context =
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     assert_eq!(result, VariableValue::Integer(12.into()));
 
     let expr = "toInteger(12.34)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     assert_eq!(result, VariableValue::Integer(12.into()));
 }
 
@@ -460,8 +508,9 @@ async fn test_to_integer_null() {
     let context =
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
-    let result = evaluator.evaluate_expression(&context, &expr).await.unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
     assert_eq!(result, VariableValue::Null);
 }
-
-

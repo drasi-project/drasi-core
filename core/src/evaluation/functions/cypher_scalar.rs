@@ -3,10 +3,10 @@ mod coalesce;
 mod head;
 mod last;
 mod size;
+mod timestamp;
 mod to_boolean;
 mod to_float;
 mod to_integer;
-mod timestamp;
 
 #[cfg(test)]
 mod tests;
@@ -16,14 +16,14 @@ use std::sync::Arc;
 use char_length::CharLength;
 use coalesce::Coalesce;
 
+use super::{Function, FunctionRegistry};
+use head::Head;
+use last::Last;
 use size::Size;
+use timestamp::Timestamp;
 use to_boolean::{ToBoolean, ToBooleanOrNull};
 use to_float::{ToFloat, ToFloatOrNull};
 use to_integer::{ToInteger, ToIntegerOrNull};
-use head::Head;
-use last::Last;
-use timestamp::Timestamp;
-use super::{Function, FunctionRegistry};
 
 pub trait RegisterCypherScalarFunctions {
     fn register_scalar_functions(&self);

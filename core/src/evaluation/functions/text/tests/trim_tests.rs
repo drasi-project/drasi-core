@@ -34,10 +34,7 @@ async fn test_trim() {
 
     let args = vec![VariableValue::String("  NULL ".to_string())];
     let result = ltrim.call(&context, &get_func_expr(), args.clone()).await;
-    assert_eq!(
-        result.unwrap(),
-        VariableValue::String("NULL ".to_string())
-    );
+    assert_eq!(result.unwrap(), VariableValue::String("NULL ".to_string()));
 
     let rtrim = text::RTrim {};
     let binding = QueryVariables::new();

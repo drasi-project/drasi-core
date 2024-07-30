@@ -1,13 +1,13 @@
+mod range;
 mod reduce;
 mod tail;
-mod range;
 
 use super::{Function, FunctionRegistry};
 use std::sync::Arc;
 
+pub use range::Range;
 pub use reduce::Reduce;
 pub use tail::Tail;
-pub use range::Range;
 
 pub trait RegisterListFunctions {
     fn register_list_functions(&self);

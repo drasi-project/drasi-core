@@ -81,7 +81,6 @@ async fn test_to_lower_invalid_args() {
     assert!(matches!(result.unwrap_err(), EvaluationError::InvalidType));
 }
 
-
 #[tokio::test]
 async fn test_to_lower_null() {
     let to_lower = text::ToLower {};

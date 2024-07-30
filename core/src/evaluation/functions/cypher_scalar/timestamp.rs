@@ -17,10 +17,14 @@ impl ScalarFunction for Timestamp {
         args: Vec<VariableValue>,
     ) -> Result<VariableValue, EvaluationError> {
         if args.len() != 0 {
-            return Err(EvaluationError::InvalidArgumentCount("timestamp".to_string()));
+            return Err(EvaluationError::InvalidArgumentCount(
+                "timestamp".to_string(),
+            ));
         }
         let now = std::time::SystemTime::now();
         let since_epoch = now.duration_since(std::time::UNIX_EPOCH).unwrap();
-        Ok(VariableValue::Integer((since_epoch.as_millis() as i64).into()))
+        Ok(VariableValue::Integer(
+            (since_epoch.as_millis() as i64).into(),
+        ))
     }
 }

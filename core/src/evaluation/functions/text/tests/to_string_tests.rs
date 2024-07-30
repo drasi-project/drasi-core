@@ -85,7 +85,6 @@ async fn test_to_string_too_few_args() {
     ));
 }
 
-
 #[tokio::test]
 async fn test_to_string_null() {
     let to_string = text::ToString {};

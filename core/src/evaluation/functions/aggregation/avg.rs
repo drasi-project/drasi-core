@@ -82,7 +82,7 @@ impl AggregatingFunction for Avg {
                     0,
                     0,
                 )))
-            },
+            }
             VariableValue::Null => {
                 let avg = *sum / *count as f64;
                 Ok(VariableValue::Float(
@@ -160,7 +160,7 @@ impl AggregatingFunction for Avg {
                     0,
                     0,
                 )))
-            },
+            }
             VariableValue::Null => {
                 let avg = *sum / *count as f64;
                 Ok(VariableValue::Float(
