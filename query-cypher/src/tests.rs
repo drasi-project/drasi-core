@@ -408,28 +408,22 @@ fn test_reduce_function() {
             FunctionExpression::function(
                 "reduce".into(),
                 vec![
-                    UnaryExpression::literal(Literal::Expression(Box::new(
-                        UnaryExpression::variable(
-                            "s".into(),
-                            UnaryExpression::literal(Literal::Integer(0))
+                    BinaryExpression::eq(
+                        UnaryExpression::ident("s"),
+                        UnaryExpression::literal(Literal::Integer(0))
+                    ),
+                    IteratorExpression::map(
+                        "x".into(),
+                        ListExpression::list(vec![
+                            UnaryExpression::literal(Literal::Integer(1)),
+                            UnaryExpression::literal(Literal::Integer(2)),
+                            UnaryExpression::literal(Literal::Integer(3)),
+                        ]),
+                        BinaryExpression::add(
+                            UnaryExpression::ident("s"),
+                            UnaryExpression::ident("x")
                         )
-                    ))),
-                    UnaryExpression::literal(Literal::Expression(Box::new(
-                        BinaryExpression::iterate(
-                            BinaryExpression::in_(
-                                UnaryExpression::ident("x"),
-                                ListExpression::list(vec![
-                                    UnaryExpression::literal(Literal::Integer(1)),
-                                    UnaryExpression::literal(Literal::Integer(2)),
-                                    UnaryExpression::literal(Literal::Integer(3)),
-                                ])
-                            ),
-                            BinaryExpression::add(
-                                UnaryExpression::ident("s"),
-                                UnaryExpression::ident("x")
-                            )
-                        )
-                    )))
+                    )
                 ],
                 17,
             ),
@@ -652,5 +646,33 @@ fn test_function_empty_args() {
             vec![],
             17
         ),])
+    );
+}
+
+#[test]
+fn where_follows_with_no_alias() {
+    let query =
+        cypher::query("MATCH (a) WITH a WHERE 1 = 1 RETURN a.Field1", &TEST_CONFIG).unwrap();
+
+    println!("{:#?}", query.parts);
+
+    assert_eq!(2, query.parts.len());
+
+    assert_eq!(
+        query.parts[0].return_clause,
+        ProjectionClause::Item(vec![UnaryExpression::ident("a".into())])
+    );
+
+    assert_eq!(
+        query.parts[1].where_clauses,
+        vec![BinaryExpression::eq(
+            UnaryExpression::literal(Literal::Integer(1)),
+            UnaryExpression::literal(Literal::Integer(1))
+        )]
+    );
+
+    assert_eq!(
+        query.parts[1].return_clause,
+        ProjectionClause::Item(vec![UnaryExpression::property("a".into(), "Field1".into())])
     );
 }
