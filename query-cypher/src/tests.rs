@@ -641,14 +641,9 @@ fn test_reflex_query_with_comment() {
     );
 }
 
-
 #[test]
 fn test_function_empty_args() {
-    let query = cypher::query(
-        "MATCH (a) RETURN datetime()",
-        &TEST_CONFIG,
-    )
-    .unwrap();
+    let query = cypher::query("MATCH (a) RETURN datetime()", &TEST_CONFIG).unwrap();
 
     assert_eq!(
         query.parts[0].return_clause,
