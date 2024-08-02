@@ -6,11 +6,11 @@ use std::sync::Arc;
 
 use async_recursion::async_recursion;
 use chrono::{
-    Datelike, Duration, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Weekday,
+    Datelike, Duration, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Weekday, LocalResult
 };
 use drasi_query_ast::ast;
 
-use crate::evaluation::temporal_constants;
+use crate::evaluation::temporal_constants::{self, MIDNIGHT_NAIVE_TIME, EPOCH_MIDNIGHT_NAIVE_DATETIME, UTC_FIXED_OFFSET};
 use crate::evaluation::variable_value::duration::Duration as DurationStruct;
 use crate::evaluation::variable_value::float::Float;
 use crate::evaluation::variable_value::integer::Integer;
@@ -134,33 +134,35 @@ impl ExpressionEvaluator {
                 ast::Literal::Null => VariableValue::Null,
                 ast::Literal::Date(_) => VariableValue::Date(*temporal_constants::EPOCH_NAIVE_DATE),
                 ast::Literal::Integer(i) => VariableValue::Integer(Integer::from(
-                    serde_json::Number::from(*i).as_i64().unwrap(),
-                )), //NOte might need to consider both integer and float situations
+                    match serde_json::Number::from(*i).as_i64() {
+                        Some(n) => n,
+                        None => return Err(EvaluationError::ParseError),
+                    },
+                )),
                 ast::Literal::Real(r) => match serde_json::Number::from_f64(*r) {
-                    Some(n) => VariableValue::Float(Float::from(n.as_f64().unwrap())),
+                    Some(n) => VariableValue::Float(Float::from(match n.as_f64() {
+                        Some(n) => n,
+                        None => return Err(EvaluationError::ParseError),
+                    })),
                     None => VariableValue::Null,
                 },
                 ast::Literal::LocalTime(_t) => {
-                    VariableValue::LocalTime(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
+                    VariableValue::LocalTime(*MIDNIGHT_NAIVE_TIME)
                 }
                 ast::Literal::ZonedTime(_t) => VariableValue::ZonedTime(ZonedTime::new(
-                    NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
-                    FixedOffset::east_opt(0).unwrap(),
+                    *MIDNIGHT_NAIVE_TIME,
+                    *UTC_FIXED_OFFSET,
                 )),
                 ast::Literal::LocalDateTime(_dt) => VariableValue::LocalDateTime(
-                    NaiveDate::from_ymd_opt(1970, 1, 1)
-                        .unwrap()
-                        .and_hms_opt(0, 0, 0)
-                        .unwrap(),
+                    *EPOCH_MIDNIGHT_NAIVE_DATETIME,
                 ),
                 ast::Literal::ZonedDateTime(_dt) => {
+                    let local_datetime = *EPOCH_MIDNIGHT_NAIVE_DATETIME;
                     VariableValue::ZonedDateTime(ZonedDateTime::new(
-                        NaiveDate::from_ymd_opt(1970, 1, 1)
-                            .unwrap()
-                            .and_hms_opt(0, 0, 0)
-                            .unwrap()
-                            .and_local_timezone(FixedOffset::east_opt(0).unwrap())
-                            .unwrap(),
+                        match local_datetime.and_local_timezone(*UTC_FIXED_OFFSET) {
+                            LocalResult::Single(dt) => dt,
+                            _ => return Err(EvaluationError::InvalidType),
+                        },
                         None,
                     ))
                 }
@@ -172,11 +174,17 @@ impl ExpressionEvaluator {
                     for (key, value) in o {
                         let val = match value {
                             ast::Literal::Integer(i) => VariableValue::Integer(Integer::from(
-                                serde_json::Number::from(*i).as_i64().unwrap(),
+                                match serde_json::Number::from(*i).as_i64() {
+                                    Some(n) => n,
+                                    None => return Err(EvaluationError::ParseError),
+                                },
                             )),
                             ast::Literal::Text(s) => VariableValue::String(s.to_string()),
                             ast::Literal::Real(r) => match serde_json::Number::from_f64(*r) {
-                                Some(n) => VariableValue::Float(Float::from(n.as_f64().unwrap())),
+                                Some(n) => VariableValue::Float(Float::from( match n.as_f64() {
+                                    Some(n) => n,
+                                    None => return Err(EvaluationError::ParseError),
+                                })),
                                 None => VariableValue::Null,
                             },
                             _ => VariableValue::Null,
@@ -409,8 +417,14 @@ impl ExpressionEvaluator {
                         return Err(EvaluationError::InvalidType);
                     }
                     VariableValue::ListRange(ListRange {
-                        start: RangeBound::Index(start.as_i64().unwrap()),
-                        end: RangeBound::Index(end.as_i64().unwrap()),
+                        start: RangeBound::Index(match start.as_i64() {
+                            Some(n) => n,
+                            None => return Err(EvaluationError::InvalidType),
+                        }),
+                        end: RangeBound::Index(match end.as_i64() {
+                            Some(n) => n,
+                            None => return Err(EvaluationError::InvalidType),
+                        }),
                     })
                 }
                 (Some(start), None) => {
@@ -419,7 +433,10 @@ impl ExpressionEvaluator {
                         return Err(EvaluationError::InvalidType);
                     }
                     VariableValue::ListRange(ListRange {
-                        start: RangeBound::Index(start.as_i64().unwrap()),
+                        start: RangeBound::Index(match start.as_i64() {
+                            Some(n) => n,
+                            None => return Err(EvaluationError::InvalidType),
+                        }),
                         end: RangeBound::Unbounded,
                     })
                 }
@@ -430,7 +447,10 @@ impl ExpressionEvaluator {
                     }
                     VariableValue::ListRange(ListRange {
                         start: RangeBound::Unbounded,
-                        end: RangeBound::Index(end.as_i64().unwrap()),
+                        end: RangeBound::Index(match end.as_i64() {
+                            Some(n) => n,
+                            None => return Err(EvaluationError::InvalidType),
+                        }),
                     })
                 }
                 (None, None) => VariableValue::ListRange(ListRange {
@@ -508,10 +528,16 @@ impl ExpressionEvaluator {
                     VariableValue::Bool(n1 != n2)
                 }
                 (VariableValue::Float(n1), VariableValue::Integer(n2)) => {
-                    VariableValue::Bool(n1 != n2.as_i64().unwrap() as f64)
+                    VariableValue::Bool(n1 != match n2.as_i64() {
+                        Some(n) => n as f64,
+                        None => return Err(EvaluationError::ParseError),
+                    })
                 }
                 (VariableValue::Integer(n1), VariableValue::Float(n2)) => {
-                    VariableValue::Bool(n2 != n1.as_i64().unwrap() as f64)
+                    VariableValue::Bool(n2 != match n1.as_i64() {
+                        Some(n) => n as f64,
+                        None => return Err(EvaluationError::ParseError),
+                    })
                 }
                 (VariableValue::String(s1), VariableValue::String(s2)) => {
                     VariableValue::Bool(s1 != s2)
@@ -568,7 +594,7 @@ impl ExpressionEvaluator {
                     VariableValue::Bool(dt1 < dt2)
                 }
                 (VariableValue::LocalDateTime(dt1), VariableValue::Date(date2)) => {
-                    let dt2 = NaiveDateTime::new(date2, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt2 = NaiveDateTime::new(date2, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(dt1 < dt2)
                 }
                 (VariableValue::LocalDateTime(dt1), VariableValue::LocalTime(time2)) => {
@@ -580,25 +606,29 @@ impl ExpressionEvaluator {
                     VariableValue::Bool(dt1 < dt2)
                 }
                 (VariableValue::Date(date1), VariableValue::LocalDateTime(dt2)) => {
-                    let dt1 = NaiveDateTime::new(date1, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt1 = NaiveDateTime::new(date1, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(dt1 < dt2)
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::ZonedTime(time2)) => {
                     let dt1 =
-                        NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time())
-                            .and_local_timezone(*time1.offset())
-                            .unwrap();
+                        match NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time())
+                            .and_local_timezone(*time1.offset()) {
+                                LocalResult::Single(dt) => dt,
+                                _ => return Err(EvaluationError::InvalidType),  
+                            };
                     let dt2 =
-                        NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time2.time())
-                            .and_local_timezone(*time2.offset())
-                            .unwrap();
+                        match NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time2.time())
+                            .and_local_timezone(*time2.offset()){
+                                LocalResult::Single(dt) => dt,
+                                _ => return Err(EvaluationError::InvalidType),  
+                            };
                     VariableValue::Bool(dt1 < dt2)
                 }
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::ZonedDateTime(zdt2)) => {
                     VariableValue::Bool(zdt1.datetime() < zdt2.datetime())
                 }
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::Date(date2)) => {
-                    let dt2 = NaiveDateTime::new(date2, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt2 = NaiveDateTime::new(date2, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(zdt1.datetime() < &dt2.and_utc())
                 }
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::LocalDateTime(dt2)) => {
@@ -611,22 +641,30 @@ impl ExpressionEvaluator {
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::ZonedTime(time2)) => {
                     let dt2 =
                         NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time2.time());
+                    let zdt2 = match dt2.and_local_timezone(*time2.offset()) {
+                        LocalResult::Single(dt) => dt,
+                        _ => return Err(EvaluationError::InvalidType),
+                    };
                     VariableValue::Bool(
-                        zdt1.datetime() < &dt2.and_local_timezone(*time2.offset()).unwrap(),
+                        zdt1.datetime() < &zdt2,
                     )
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::ZonedDateTime(zdt2)) => {
                     let dt1 =
                         NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time());
+                    let zdt1 = match dt1.and_local_timezone(*time1.offset()) {
+                        LocalResult::Single(dt) => dt,
+                        _ => return Err(EvaluationError::InvalidType),
+                    };
                     VariableValue::Bool(
-                        dt1.and_local_timezone(zdt2.datetime().timezone()).unwrap()
+                        zdt1
                             < *zdt2.datetime(),
                     )
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::Date(date2)) => {
                     let dt1 =
                         NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time());
-                    let dt2 = NaiveDateTime::new(date2, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt2 = NaiveDateTime::new(date2, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(dt1 < dt2)
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::LocalDateTime(dt2)) => {
@@ -682,7 +720,7 @@ impl ExpressionEvaluator {
                     VariableValue::Bool(dt1 <= dt2)
                 }
                 (VariableValue::LocalDateTime(dt1), VariableValue::Date(date2)) => {
-                    let dt2 = NaiveDateTime::new(date2, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt2 = NaiveDateTime::new(date2, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(dt1 <= dt2)
                 }
                 (VariableValue::LocalDateTime(dt1), VariableValue::LocalTime(time2)) => {
@@ -694,22 +732,26 @@ impl ExpressionEvaluator {
                     VariableValue::Bool(dt1 <= dt2)
                 }
                 (VariableValue::Date(date1), VariableValue::LocalDateTime(dt2)) => {
-                    let dt1 = NaiveDateTime::new(date1, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt1 = NaiveDateTime::new(date1, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(dt1 <= dt2)
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::ZonedTime(time2)) => {
                     let dt1 =
-                        NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time())
-                            .and_local_timezone(*time1.offset())
-                            .unwrap();
+                        match NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time())
+                            .and_local_timezone(*time1.offset()) {
+                                LocalResult::Single(dt) => dt,
+                                _ => return Err(EvaluationError::InvalidType),  
+                            };
                     let dt2 =
-                        NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time2.time())
-                            .and_local_timezone(*time2.offset())
-                            .unwrap();
+                        match NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time2.time())
+                            .and_local_timezone(*time2.offset()) {
+                                LocalResult::Single(dt) => dt,
+                                _ => return Err(EvaluationError::InvalidType),  
+                            };
                     VariableValue::Bool(dt1 <= dt2)
                 }
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::Date(date2)) => {
-                    let dt2 = NaiveDateTime::new(date2, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt2 = NaiveDateTime::new(date2, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(zdt1.datetime() <= &dt2.and_utc())
                 }
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::LocalDateTime(dt2)) => {
@@ -722,22 +764,30 @@ impl ExpressionEvaluator {
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::ZonedTime(time2)) => {
                     let dt2 =
                         NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time2.time());
+                    let zdt2 = match dt2.and_local_timezone(*time2.offset()) {
+                        LocalResult::Single(dt) => dt,
+                        _ => return Err(EvaluationError::InvalidType),  
+                    };
                     VariableValue::Bool(
-                        zdt1.datetime() <= &dt2.and_local_timezone(*time2.offset()).unwrap(),
+                        zdt1.datetime() <= &zdt2,
                     )
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::ZonedDateTime(zdt2)) => {
                     let dt1 =
                         NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time());
+                    let zdt1 = match dt1.and_local_timezone(*time1.offset()) {
+                        LocalResult::Single(dt) => dt,
+                        _ => return Err(EvaluationError::InvalidType),  
+                    };
                     VariableValue::Bool(
-                        dt1.and_local_timezone(zdt2.datetime().timezone()).unwrap()
+                        zdt1
                             <= *zdt2.datetime(),
                     )
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::Date(date2)) => {
                     let dt1 =
                         NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time());
-                    let dt2 = NaiveDateTime::new(date2, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt2 = NaiveDateTime::new(date2, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(dt1 <= dt2)
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::LocalDateTime(dt2)) => {
@@ -790,7 +840,7 @@ impl ExpressionEvaluator {
                     VariableValue::Bool(dt1 > dt2)
                 }
                 (VariableValue::LocalDateTime(dt1), VariableValue::Date(date2)) => {
-                    let dt2 = NaiveDateTime::new(date2, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt2 = NaiveDateTime::new(date2, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(dt1 > dt2)
                 }
                 (VariableValue::LocalDateTime(dt1), VariableValue::LocalTime(time2)) => {
@@ -802,25 +852,30 @@ impl ExpressionEvaluator {
                     VariableValue::Bool(dt1 > dt2)
                 }
                 (VariableValue::Date(date1), VariableValue::LocalDateTime(dt2)) => {
-                    let dt1 = NaiveDateTime::new(date1, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt1 = NaiveDateTime::new(date1, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(dt1 > dt2)
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::ZonedTime(time2)) => {
                     let dt1 =
-                        NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time())
-                            .and_local_timezone(*time1.offset())
-                            .unwrap();
+                        match NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time())
+                            .and_local_timezone(*time1.offset()) {
+                                LocalResult::Single(dt) => dt,
+                                _ => return Err(EvaluationError::InvalidType),  
+                            };
                     let dt2 =
-                        NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time2.time())
-                            .and_local_timezone(*time2.offset())
-                            .unwrap();
+                        match NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time2.time())
+                            .and_local_timezone(*time2.offset()) {
+                                LocalResult::Single(dt) => dt,
+                                _ => return Err(EvaluationError::InvalidType),  
+                            };
+
                     VariableValue::Bool(dt1 > dt2)
                 }
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::ZonedDateTime(zdt2)) => {
                     VariableValue::Bool(zdt1.datetime() > zdt2.datetime())
                 }
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::Date(date2)) => {
-                    let dt2 = NaiveDateTime::new(date2, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt2 = NaiveDateTime::new(date2, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(zdt1.datetime() > &dt2.and_utc())
                 }
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::LocalDateTime(dt2)) => {
@@ -833,22 +888,30 @@ impl ExpressionEvaluator {
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::ZonedTime(time2)) => {
                     let dt2 =
                         NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time2.time());
+                    let zdt2 = match dt2.and_local_timezone(*time2.offset()) {
+                        LocalResult::Single(dt) => dt,
+                        _ => return Err(EvaluationError::InvalidType),
+                    };
                     VariableValue::Bool(
-                        zdt1.datetime() > &dt2.and_local_timezone(*time2.offset()).unwrap(),
+                        zdt1.datetime() > &zdt2,
                     )
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::ZonedDateTime(zdt2)) => {
                     let dt1 =
                         NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time());
+                    let zdt1 = match dt1.and_local_timezone(*time1.offset()) {
+                        LocalResult::Single(dt) => dt,
+                        _ => return Err(EvaluationError::InvalidType),
+                    };
                     VariableValue::Bool(
-                        dt1.and_local_timezone(zdt2.datetime().timezone()).unwrap()
+                        zdt1
                             > *zdt2.datetime(),
                     )
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::Date(date2)) => {
                     let dt1 =
                         NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time());
-                    let dt2 = NaiveDateTime::new(date2, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt2 = NaiveDateTime::new(date2, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(dt1 > dt2)
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::LocalDateTime(dt2)) => {
@@ -857,20 +920,24 @@ impl ExpressionEvaluator {
                     VariableValue::Bool(dt1 > dt2)
                 }
                 (VariableValue::Date(date1), VariableValue::ZonedDateTime(zdt2)) => {
-                    let dt1 = NaiveDateTime::new(date1, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt1 = NaiveDateTime::new(date1, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(&dt1.and_utc() > zdt2.datetime())
                 }
                 (VariableValue::Date(date1), VariableValue::LocalTime(time2)) => {
-                    let dt1 = NaiveDateTime::new(date1, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt1 = NaiveDateTime::new(date1, *MIDNIGHT_NAIVE_TIME);
                     let dt2 = NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, time2);
                     VariableValue::Bool(dt1 > dt2)
                 }
                 (VariableValue::Date(date1), VariableValue::ZonedTime(time2)) => {
-                    let dt1 = NaiveDateTime::new(date1, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt1 = NaiveDateTime::new(date1, *MIDNIGHT_NAIVE_TIME);
                     let dt2 =
                         NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time2.time());
+                    let zdt2 = match dt2.and_local_timezone(*time2.offset()) {
+                        LocalResult::Single(dt) => dt,
+                        _ => return Err(EvaluationError::InvalidType),
+                    };
                     VariableValue::Bool(
-                        &dt1.and_utc() > &dt2.and_local_timezone(*time2.offset()).unwrap(),
+                        dt1.and_utc() > zdt2,
                     )
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::LocalTime(time2)) => {
@@ -918,7 +985,7 @@ impl ExpressionEvaluator {
                     VariableValue::Bool(dt1 >= dt2)
                 }
                 (VariableValue::LocalDateTime(dt1), VariableValue::Date(date2)) => {
-                    let dt2 = NaiveDateTime::new(date2, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt2 = NaiveDateTime::new(date2, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(dt1 >= dt2)
                 }
                 (VariableValue::LocalDateTime(dt1), VariableValue::LocalTime(time2)) => {
@@ -930,14 +997,14 @@ impl ExpressionEvaluator {
                     VariableValue::Bool(dt1 >= dt2)
                 }
                 (VariableValue::Date(date1), VariableValue::LocalDateTime(dt2)) => {
-                    let dt1 = NaiveDateTime::new(date1, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt1 = NaiveDateTime::new(date1, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(dt1 >= dt2)
                 }
                 (VariableValue::LocalDateTime(dt1), VariableValue::ZonedDateTime(zdt2)) => {
                     VariableValue::Bool(dt1 >= zdt2.datetime().naive_utc())
                 }
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::Date(date2)) => {
-                    let dt2 = NaiveDateTime::new(date2, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt2 = NaiveDateTime::new(date2, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(zdt1.datetime() >= &dt2.and_utc())
                 }
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::LocalDateTime(dt2)) => {
@@ -950,22 +1017,30 @@ impl ExpressionEvaluator {
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::ZonedTime(time2)) => {
                     let dt2 =
                         NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time2.time());
+                    let zdt2 = match dt2.and_local_timezone(*time2.offset()) {
+                        LocalResult::Single(dt) => dt,
+                        _ => return Err(EvaluationError::InvalidType),
+                    };
                     VariableValue::Bool(
-                        zdt1.datetime() >= &dt2.and_local_timezone(*time2.offset()).unwrap(),
+                        zdt1.datetime() >= &zdt2,
                     )
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::ZonedDateTime(zdt2)) => {
                     let dt1 =
                         NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time());
+                    let zdt1 = match dt1.and_local_timezone(zdt2.datetime().timezone()) {
+                        LocalResult::Single(dt) => dt,
+                        _ => return Err(EvaluationError::InvalidType),
+                    };
                     VariableValue::Bool(
-                        dt1.and_local_timezone(zdt2.datetime().timezone()).unwrap()
+                        zdt1
                             >= *zdt2.datetime(),
                     )
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::Date(date2)) => {
                     let dt1 =
                         NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time());
-                    let dt2 = NaiveDateTime::new(date2, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt2 = NaiveDateTime::new(date2, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(dt1 >= dt2)
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::LocalDateTime(dt2)) => {
@@ -981,13 +1056,17 @@ impl ExpressionEvaluator {
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::ZonedTime(time2)) => {
                     let dt1 =
-                        NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time())
-                            .and_local_timezone(*time1.offset())
-                            .unwrap();
+                        match NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time())
+                            .and_local_timezone(*time1.offset()) {
+                                LocalResult::Single(dt) => dt,
+                                _ => return Err(EvaluationError::InvalidType),  
+                            };
                     let dt2 =
-                        NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time2.time())
-                            .and_local_timezone(*time2.offset())
-                            .unwrap();
+                        match NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time2.time())
+                            .and_local_timezone(*time2.offset()) {
+                                LocalResult::Single(dt) => dt,
+                                _ => return Err(EvaluationError::InvalidType),  
+                            };
                     VariableValue::Bool(dt1 >= dt2)
                 }
                 (VariableValue::Duration(d1), VariableValue::Duration(d2)) => {
@@ -1304,7 +1383,10 @@ impl ExpressionEvaluator {
             ast::BinaryExpression::Index(e1, e2) => {
                 let index_exp = self.evaluate_expression(context, e2).await?;
                 let variable_value_list = self.evaluate_expression(context, e1).await?;
-                let list = variable_value_list.as_array().unwrap();
+                let list = match variable_value_list.as_array() {
+                    Some(list) => list,
+                    None => return Err(EvaluationError::ParseError),
+                };
                 match index_exp {
                     VariableValue::ListRange(list_range) => {
                         let start_bound = match list_range.start {
@@ -1338,7 +1420,10 @@ impl ExpressionEvaluator {
                         if !index.is_i64() {
                             return Err(EvaluationError::InvalidType);
                         }
-                        let index_i64 = index.as_i64().unwrap();
+                        let index_i64 = match index.as_i64() {
+                            Some(index) => index,
+                            None => return Err(EvaluationError::ParseError),
+                        };
                         if index_i64 >= list.len() as i64 {
                             return Ok(VariableValue::Null);
                         }
@@ -1347,7 +1432,11 @@ impl ExpressionEvaluator {
                             let element = list[index_i64 as usize].clone();
                             return Ok(element);
                         }
-                        let element = list[index.as_i64().unwrap() as usize].clone();
+                        let index = match index.as_i64() {
+                            Some(index) => index as usize,
+                            None => return Err(EvaluationError::ParseError),
+                        };
+                        let element = list[index].clone();
 
                         return Ok(element);
                     }
@@ -1674,7 +1763,7 @@ impl ExpressionEvaluator {
 
 async fn get_date_property(date: NaiveDate, property: String) -> Option<u32> {
     match property.as_str() {
-        "year" => Some(date.year().try_into().unwrap()),
+        "year" => Some(date.year() as u32),
         "month" => Some(date.month()),
         "day" => Some(date.day()),
         "quarter" => Some((date.month() - 1) / 3 + 1),
@@ -1706,22 +1795,29 @@ async fn get_date_property(date: NaiveDate, property: String) -> Option<u32> {
             Some(day_of_week_num)
         }
         "ordinalDay" => Some(date.ordinal()),
-        "weekYear" => Some(date.iso_week().year().try_into().unwrap()),
+        "weekYear" => Some(date.iso_week().year() as u32),
         "dayOfQuarter" => {
             let quarter = (date.month() - 1) / 3 + 1;
             let start_date =
-                NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1).unwrap();
+                match NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1) {
+                    Some(date) => date,
+                    None => return None,
+                };
+            
             let duration = date - start_date;
             let num_days = duration.num_days();
-            Some((num_days + 1).try_into().unwrap())
+            Some((num_days + 1) as u32)
         }
         "quarterDay" => {
             let quarter = (date.month() - 1) / 3 + 1;
             let start_date =
-                NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1).unwrap();
+                match NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1) {
+                    Some(date) => date,
+                    None => return None,
+                };
             let duration = date - start_date;
             let num_days = duration.num_days();
-            Some((num_days + 1).try_into().unwrap())
+            Some((num_days + 1) as u32)
         }
         _ => None,
     }
@@ -1767,7 +1863,7 @@ async fn get_local_datetime_property(datetime: NaiveDateTime, property: String) 
     let date = datetime.date();
     let time = datetime.time();
     match property.as_str() {
-        "year" => Some(date.year().try_into().unwrap()),
+        "year" => Some(date.year() as u32),
         "month" => Some(date.month()),
         "day" => Some(date.day()),
         "quarter" => Some((date.month() - 1) / 3 + 1),
@@ -1799,22 +1895,28 @@ async fn get_local_datetime_property(datetime: NaiveDateTime, property: String) 
             Some(day_of_week_num)
         }
         "ordinalDay" => Some(date.ordinal()),
-        "weekYear" => Some(date.iso_week().year().try_into().unwrap()),
+        "weekYear" => Some(date.iso_week().year() as u32),
         "dayOfQuarter" => {
             let quarter = (date.month() - 1) / 3 + 1;
             let start_date =
-                NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1).unwrap();
+                match NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1) {
+                    Some(date) => date,
+                    None => return None,
+                };
             let duration = date - start_date;
             let num_days = duration.num_days();
-            Some((num_days + 1).try_into().unwrap())
+            Some((num_days + 1) as u32)
         }
         "quarterDay" => {
             let quarter = (date.month() - 1) / 3 + 1;
             let start_date =
-                NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1).unwrap();
+                match NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1) {
+                    Some(date) => date,
+                    None => return None,
+                };
             let duration = date - start_date;
             let num_days = duration.num_days();
-            Some((num_days + 1).try_into().unwrap())
+            Some((num_days + 1) as u32)
         }
         "hour" => Some(time.hour()),
         "minute" => Some(time.minute()),
@@ -1871,7 +1973,10 @@ async fn get_datetime_property(zoned_datetime: ZonedDateTime, property: String) 
         "dayOfQuarter" => {
             let quarter = (date.month() - 1) / 3 + 1;
             let start_date =
-                NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1).unwrap();
+                match NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1) {
+                    Some(date) => date,
+                    None => return None,
+                };
             let duration = date - start_date;
             let num_days = duration.num_days();
             Some((num_days + 1).to_string())
@@ -1879,7 +1984,10 @@ async fn get_datetime_property(zoned_datetime: ZonedDateTime, property: String) 
         "quarterDay" => {
             let quarter = (date.month() - 1) / 3 + 1;
             let start_date =
-                NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1).unwrap();
+                match NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1) {
+                    Some(date) => date,
+                    None => return None,
+                };
             let duration = date - start_date;
             let num_days = duration.num_days();
             Some((num_days + 1).to_string())
@@ -1904,19 +2012,13 @@ async fn get_datetime_property(zoned_datetime: ZonedDateTime, property: String) 
             Some(minutes.to_string())
         }
         "epochMillis" => {
-            let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)
-                .unwrap()
-                .and_hms_opt(0, 0, 0)
-                .unwrap();
+            let epoch = *EPOCH_MIDNIGHT_NAIVE_DATETIME;
             let duration = datetime.naive_utc() - epoch;
             let millis = duration.num_milliseconds();
             Some(millis.to_string())
         }
         "epochSeconds" => {
-            let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)
-                .unwrap()
-                .and_hms_opt(0, 0, 0)
-                .unwrap();
+            let epoch = *EPOCH_MIDNIGHT_NAIVE_DATETIME;
             let duration = datetime.naive_utc() - epoch;
             let seconds = duration.num_seconds();
             Some(seconds.to_string())
@@ -1940,8 +2042,14 @@ async fn get_duration_property(duration_struct: DurationStruct, property: String
         "minutes" => Some(duration.num_minutes()),
         "seconds" => Some(duration.num_seconds()),
         "milliseconds" => Some(duration.num_milliseconds()),
-        "microseconds" => Some(duration.num_microseconds().unwrap()),
-        "nanoseconds" => Some(duration.num_nanoseconds().unwrap()),
+        "microseconds" => Some(match duration.num_microseconds() {
+            Some(micros) => micros,
+            None => 0,
+        }),
+        "nanoseconds" => Some(match duration.num_nanoseconds(){
+            Some(nanos) => nanos,
+            None => 0,
+        }),
         "quartersOfYear" => {
             let quarters = month / 3 + 1;
             Some(quarters)
@@ -1980,11 +2088,17 @@ async fn get_duration_property(duration_struct: DurationStruct, property: String
             Some(millis)
         }
         "microsecondsOfSecond" => {
-            let micros = duration.num_microseconds().unwrap() % 1000000;
+            let micros = match duration.num_microseconds(){
+                Some(micros) => micros,
+                None => 0,
+            } % 1000000;
             Some(micros)
         }
         "nanosecondsOfSecond" => {
-            let nanos = duration.num_nanoseconds().unwrap() % 1000000000;
+            let nanos = match duration.num_nanoseconds(){
+                Some(nanos) => nanos,
+                None => 0,
+            } % 1000000000;
             Some(nanos)
         }
         _ => None,
