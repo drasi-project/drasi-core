@@ -136,13 +136,13 @@ impl ExpressionEvaluator {
                 ast::Literal::Integer(i) => VariableValue::Integer(Integer::from(
                     match serde_json::Number::from(*i).as_i64() {
                         Some(n) => n,
-                        None => return Err(EvaluationError::ParseError),
+                        None => return Err(EvaluationError::ConversionError),
                     },
                 )),
                 ast::Literal::Real(r) => match serde_json::Number::from_f64(*r) {
                     Some(n) => VariableValue::Float(Float::from(match n.as_f64() {
                         Some(n) => n,
-                        None => return Err(EvaluationError::ParseError),
+                        None => return Err(EvaluationError::ConversionError),
                     })),
                     None => VariableValue::Null,
                 },
@@ -176,14 +176,14 @@ impl ExpressionEvaluator {
                             ast::Literal::Integer(i) => VariableValue::Integer(Integer::from(
                                 match serde_json::Number::from(*i).as_i64() {
                                     Some(n) => n,
-                                    None => return Err(EvaluationError::ParseError),
+                                    None => return Err(EvaluationError::ConversionError),
                                 },
                             )),
                             ast::Literal::Text(s) => VariableValue::String(s.to_string()),
                             ast::Literal::Real(r) => match serde_json::Number::from_f64(*r) {
                                 Some(n) => VariableValue::Float(Float::from( match n.as_f64() {
                                     Some(n) => n,
-                                    None => return Err(EvaluationError::ParseError),
+                                    None => return Err(EvaluationError::ConversionError),
                                 })),
                                 None => VariableValue::Null,
                             },
@@ -530,13 +530,13 @@ impl ExpressionEvaluator {
                 (VariableValue::Float(n1), VariableValue::Integer(n2)) => {
                     VariableValue::Bool(n1 != match n2.as_i64() {
                         Some(n) => n as f64,
-                        None => return Err(EvaluationError::ParseError),
+                        None => return Err(EvaluationError::ConversionError),
                     })
                 }
                 (VariableValue::Integer(n1), VariableValue::Float(n2)) => {
                     VariableValue::Bool(n2 != match n1.as_i64() {
                         Some(n) => n as f64,
-                        None => return Err(EvaluationError::ParseError),
+                        None => return Err(EvaluationError::ConversionError),
                     })
                 }
                 (VariableValue::String(s1), VariableValue::String(s2)) => {
@@ -1385,7 +1385,7 @@ impl ExpressionEvaluator {
                 let variable_value_list = self.evaluate_expression(context, e1).await?;
                 let list = match variable_value_list.as_array() {
                     Some(list) => list,
-                    None => return Err(EvaluationError::ParseError),
+                    None => return Err(EvaluationError::ConversionError),
                 };
                 match index_exp {
                     VariableValue::ListRange(list_range) => {
@@ -1422,7 +1422,7 @@ impl ExpressionEvaluator {
                         }
                         let index_i64 = match index.as_i64() {
                             Some(index) => index,
-                            None => return Err(EvaluationError::ParseError),
+                            None => return Err(EvaluationError::ConversionError),
                         };
                         if index_i64 >= list.len() as i64 {
                             return Ok(VariableValue::Null);
@@ -1434,7 +1434,7 @@ impl ExpressionEvaluator {
                         }
                         let index = match index.as_i64() {
                             Some(index) => index as usize,
-                            None => return Err(EvaluationError::ParseError),
+                            None => return Err(EvaluationError::ConversionError),
                         };
                         let element = list[index].clone();
 

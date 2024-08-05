@@ -53,12 +53,24 @@ impl AggregatingFunction for Sum {
 
         match &args[0] {
             VariableValue::Float(n) => {
-                *accumulator += n.as_f64().unwrap();
-                Ok(VariableValue::Float(Float::from_f64(*accumulator).unwrap()))
+                *accumulator += match n.as_f64() {
+                    Some(n) => n,
+                    None => return Err(EvaluationError::ConversionError),
+                };
+                Ok(VariableValue::Float(match Float::from_f64(*accumulator) {
+                    Some(n) => n,
+                    None => return Err(EvaluationError::ConversionError),
+                }))
             }
             VariableValue::Integer(n) => {
-                *accumulator += n.as_i64().unwrap() as f64;
-                Ok(VariableValue::Float(Float::from_f64(*accumulator).unwrap()))
+                *accumulator += match n.as_i64() {
+                    Some(n) => n as f64,
+                    None => return Err(EvaluationError::ConversionError),
+                };
+                Ok(VariableValue::Float(match Float::from_f64(*accumulator) {
+                    Some(n) => n,
+                    None => return Err(EvaluationError::ConversionError),
+                }))
             }
             VariableValue::Duration(d) => {
                 *accumulator += d.duration().num_milliseconds() as f64;
@@ -68,7 +80,10 @@ impl AggregatingFunction for Sum {
                     0,
                 )))
             }
-            VariableValue::Null => Ok(VariableValue::Float(Float::from_f64(*accumulator).unwrap())),
+            VariableValue::Null => Ok(VariableValue::Float(match Float::from_f64(*accumulator) {
+                    Some(n) => n,
+                    None => return Err(EvaluationError::ConversionError),
+                })),
             _ => Err(EvaluationError::InvalidType),
         }
     }
@@ -92,12 +107,24 @@ impl AggregatingFunction for Sum {
 
         match &args[0] {
             VariableValue::Float(n) => {
-                *accumulator -= n.as_f64().unwrap();
-                Ok(VariableValue::Float(Float::from_f64(*accumulator).unwrap()))
+                *accumulator -= match n.as_f64() {
+                    Some(n) => n,
+                    None => return Err(EvaluationError::ConversionError),
+                };
+                Ok(VariableValue::Float(match Float::from_f64(*accumulator) {
+                    Some(n) => n,
+                    None => return Err(EvaluationError::ConversionError),
+                }))
             }
             VariableValue::Integer(n) => {
-                *accumulator -= n.as_i64().unwrap() as f64;
-                Ok(VariableValue::Float(Float::from_f64(*accumulator).unwrap()))
+                *accumulator -= match n.as_i64() {
+                    Some(n) => n as f64,
+                    None => return Err(EvaluationError::ConversionError),
+                };
+                Ok(VariableValue::Float(match Float::from_f64(*accumulator) {
+                    Some(n) => n,
+                    None => return Err(EvaluationError::ConversionError),
+                }))
             }
             VariableValue::Duration(d) => {
                 *accumulator -= d.duration().num_milliseconds() as f64;
@@ -107,7 +134,10 @@ impl AggregatingFunction for Sum {
                     0,
                 )))
             }
-            VariableValue::Null => Ok(VariableValue::Float(Float::from_f64(*accumulator).unwrap())),
+            VariableValue::Null => Ok(VariableValue::Float(match Float::from_f64(*accumulator) {
+                    Some(n) => n,
+                    None => return Err(EvaluationError::ConversionError),
+                })),
             _ => Err(EvaluationError::InvalidType),
         }
     }
@@ -131,10 +161,16 @@ impl AggregatingFunction for Sum {
 
         match &args[0] {
             VariableValue::Float(_) => Ok(VariableValue::Float(
-                Float::from_f64(*accumulator_value).unwrap(),
+                match Float::from_f64(*accumulator_value) {
+                    Some(n) => n,
+                    None => return Err(EvaluationError::ConversionError),
+                },
             )),
             VariableValue::Integer(_) => Ok(VariableValue::Float(
-                Float::from_f64(*accumulator_value).unwrap(),
+                match Float::from_f64(*accumulator_value) {
+                    Some(n) => n,
+                    None => return Err(EvaluationError::ConversionError),
+                },
             )),
             VariableValue::Duration(_) => Ok(VariableValue::Duration(Duration::new(
                 ChronoDuration::milliseconds(*accumulator_value as i64),
@@ -142,7 +178,10 @@ impl AggregatingFunction for Sum {
                 0,
             ))),
             VariableValue::Null => Ok(VariableValue::Float(
-                Float::from_f64(*accumulator_value).unwrap(),
+                match Float::from_f64(*accumulator_value) {
+                    Some(n) => n,
+                    None => return Err(EvaluationError::ConversionError),
+                },
             )),
             _ => Err(EvaluationError::InvalidType),
         }

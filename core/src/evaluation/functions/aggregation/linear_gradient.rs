@@ -205,8 +205,14 @@ impl AggregatingFunction for LinearGradient {
 
 fn extract_parameter(p: &VariableValue) -> Result<f64, EvaluationError> {
     let result = match p {
-        VariableValue::Float(n) => n.as_f64().unwrap(),
-        VariableValue::Integer(n) => n.as_i64().unwrap() as f64,
+        VariableValue::Float(n) => match n.as_f64() {
+            Some(n) => n,
+            None => return Err(EvaluationError::ConversionError),
+        }
+        VariableValue::Integer(n) => match n.as_i64() {
+            Some(n) => n as f64,
+            None => return Err(EvaluationError::ConversionError),
+        },
         VariableValue::Duration(d) => d.duration().num_milliseconds() as f64,
         VariableValue::LocalDateTime(l) => l.and_utc().timestamp_millis() as f64,
         VariableValue::ZonedDateTime(z) => z.datetime().timestamp_millis() as f64,

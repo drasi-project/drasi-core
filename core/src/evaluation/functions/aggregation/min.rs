@@ -18,7 +18,7 @@ use crate::evaluation::{
 };
 
 use super::{super::AggregatingFunction, lazy_sorted_set::LazySortedSet, Accumulator};
-use chrono::{DateTime, Duration as ChronoDuration, FixedOffset, NaiveTime};
+use chrono::{offset::LocalResult, DateTime, Duration as ChronoDuration};
 
 #[derive(Clone)]
 pub struct Min {}
@@ -60,7 +60,10 @@ impl AggregatingFunction for Min {
 
         match &args[0] {
             VariableValue::Float(n) => {
-                let value = n.as_f64().unwrap();
+                let value = match n.as_f64() {
+                    Some(n) => n,
+                    None => return Err(EvaluationError::ConversionError),
+                };
                 accumulator.insert(value).await;
                 match accumulator.get_head().await? {
                     Some(head) => match Float::from_f64(head) {
@@ -71,7 +74,10 @@ impl AggregatingFunction for Min {
                 }
             }
             VariableValue::Integer(n) => {
-                let value = n.as_i64().unwrap();
+                let value = match n.as_i64() {
+                    Some(n) => n,
+                    None => return Err(EvaluationError::ConversionError),
+                };
                 accumulator.insert(value as f64).await;
                 match accumulator.get_head().await? {
                     Some(head) => match Float::from_f64(head) {
@@ -115,7 +121,7 @@ impl AggregatingFunction for Min {
                 }
             }
             VariableValue::LocalTime(t) => {
-                let reference_time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+                let reference_time = *temporal_constants::MIDNIGHT_NAIVE_TIME;
                 let seconds_since_midnight =
                     t.signed_duration_since(reference_time).num_milliseconds() as f64;
                 accumulator.insert(seconds_since_midnight).await;
@@ -140,16 +146,18 @@ impl AggregatingFunction for Min {
             }
             VariableValue::ZonedTime(t) => {
                 let epoch_date = *temporal_constants::EPOCH_NAIVE_DATE;
-                let epoch_datetime = epoch_date
+                let epoch_datetime = match epoch_date
                     .and_time(*t.time())
-                    .and_local_timezone(*t.offset())
-                    .unwrap();
+                    .and_local_timezone(*t.offset()) {
+                        LocalResult::Single(dt) => dt,
+                        _ => return Err(EvaluationError::InvalidType),
+                    };
                 let duration_since_epoch = epoch_datetime.timestamp_millis() as f64;
                 accumulator.insert(duration_since_epoch).await;
                 match accumulator.get_head().await? {
                     Some(head) => Ok(VariableValue::ZonedTime(ZonedTime::new(
                         (epoch_datetime + ChronoDuration::milliseconds((head) as i64)).time(),
-                        FixedOffset::east_opt(0).unwrap(),
+                        *temporal_constants::UTC_FIXED_OFFSET,
                     ))),
                     None => Ok(VariableValue::Null),
                 }
@@ -175,18 +183,30 @@ impl AggregatingFunction for Min {
 
         match &args[0] {
             VariableValue::Float(n) => {
-                let value = n.as_f64().unwrap();
+                let value = match n.as_f64() {
+                    Some(n) => n,
+                    None => return Err(EvaluationError::ConversionError),
+                };
                 accumulator.remove(value).await;
                 match accumulator.get_head().await? {
-                    Some(head) => Ok(VariableValue::Float(Float::from_f64(head).unwrap())),
+                    Some(head) => Ok(VariableValue::Float(match Float::from_f64(head){
+                        Some(f) => f,
+                        None => return Err(EvaluationError::ConversionError),
+                    })),
                     None => Ok(VariableValue::Null),
                 }
             }
             VariableValue::Integer(n) => {
-                let value = n.as_i64().unwrap();
+                let value = match n.as_i64() {
+                    Some(n) => n,
+                    None => return Err(EvaluationError::ConversionError),
+                };
                 accumulator.remove((value as f64) * 1.0).await;
                 match accumulator.get_head().await? {
-                    Some(head) => Ok(VariableValue::Float(Float::from_f64(head).unwrap())),
+                    Some(head) => Ok(VariableValue::Float(match Float::from_f64(head){
+                        Some(f) => f,
+                        None => return Err(EvaluationError::ConversionError),
+                    })),
                     None => Ok(VariableValue::Null),
                 }
             }
@@ -251,16 +271,18 @@ impl AggregatingFunction for Min {
             }
             VariableValue::ZonedTime(t) => {
                 let epoch_date = *temporal_constants::EPOCH_NAIVE_DATE;
-                let epoch_datetime = epoch_date
+                let epoch_datetime = match epoch_date
                     .and_time(*t.time())
-                    .and_local_timezone(*t.offset())
-                    .unwrap();
+                    .and_local_timezone(*t.offset()) {
+                        LocalResult::Single(dt) => dt,
+                        _ => return Err(EvaluationError::InvalidType),
+                    };
                 let duration_since_epoch = epoch_datetime.timestamp_millis() as f64;
                 accumulator.remove(duration_since_epoch).await;
                 match accumulator.get_head().await? {
                     Some(head) => Ok(VariableValue::ZonedTime(ZonedTime::new(
                         (epoch_datetime + ChronoDuration::milliseconds((head) as i64)).time(),
-                        FixedOffset::east_opt(0).unwrap(),
+                        *temporal_constants::UTC_FIXED_OFFSET,
                     ))),
                     None => Ok(VariableValue::Null),
                 }
@@ -291,7 +313,10 @@ impl AggregatingFunction for Min {
         };
 
         return match &args[0] {
-            VariableValue::Float(_) => Ok(VariableValue::Float(Float::from_f64(value).unwrap())),
+            VariableValue::Float(_) => Ok(VariableValue::Float(match Float::from_f64(value) {
+                Some(f) => f,
+                None => return Err(EvaluationError::ConversionError),
+            })),
             VariableValue::Integer(_) => Ok(VariableValue::Integer((value as i64).into())),
             VariableValue::ZonedDateTime(_) => Ok(VariableValue::ZonedDateTime(
                 ZonedDateTime::from_epoch_millis(value as u64),
@@ -320,13 +345,15 @@ impl AggregatingFunction for Min {
             )),
             VariableValue::ZonedTime(_) => {
                 let epoch_date = *temporal_constants::EPOCH_NAIVE_DATE;
-                let epoch_datetime = epoch_date
+                let epoch_datetime = match epoch_date
                     .and_time(*temporal_constants::MIDNIGHT_NAIVE_TIME)
-                    .and_local_timezone(FixedOffset::east_opt(0).unwrap())
-                    .unwrap();
+                    .and_local_timezone(*temporal_constants::UTC_FIXED_OFFSET) {
+                        LocalResult::Single(dt) => dt,
+                        _ => return Err(EvaluationError::InvalidType),
+                    };
                 Ok(VariableValue::ZonedTime(ZonedTime::new(
                     (epoch_datetime + ChronoDuration::milliseconds(value as i64)).time(),
-                    FixedOffset::east_opt(0).unwrap(),
+                    *temporal_constants::UTC_FIXED_OFFSET,
                 )))
             }
             VariableValue::Null => Ok(VariableValue::Null),

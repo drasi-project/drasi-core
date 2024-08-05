@@ -5,8 +5,9 @@ use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::variable_value::duration::Duration;
 use crate::evaluation::variable_value::VariableValue;
 use crate::evaluation::{EvaluationError, ExpressionEvaluationContext};
+use crate::evaluation::temporal_constants;
 
-use chrono::{Datelike, Duration as ChronoDuration, LocalResult, NaiveDate, NaiveTime};
+use chrono::{Datelike, Duration as ChronoDuration, LocalResult, NaiveDate};
 use iso8601_duration::Duration as IsoDuration;
 use log::error;
 use regex::Regex;
@@ -143,7 +144,7 @@ impl ScalarFunction for Between {
                 )))
             }
             (VariableValue::Date(_start), VariableValue::LocalTime(end)) => {
-                let start_time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+                let start_time = *temporal_constants::MIDNIGHT_NAIVE_TIME;
                 let duration = end.signed_duration_since(start_time);
                 Ok(VariableValue::Duration(Duration::new(
                     ChronoDuration::from(duration),
@@ -161,7 +162,7 @@ impl ScalarFunction for Between {
                 )))
             }
             (VariableValue::Date(_start), VariableValue::ZonedTime(end)) => {
-                let start_time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+                let start_time = *temporal_constants::MIDNIGHT_NAIVE_TIME;
                 let end_time = end.time();
                 let duration = end_time.signed_duration_since(start_time);
                 Ok(VariableValue::Duration(Duration::new(
@@ -196,7 +197,7 @@ impl ScalarFunction for Between {
                 )))
             }
             (VariableValue::LocalTime(start), VariableValue::Date(_end)) => {
-                let end_time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+                let end_time = *temporal_constants::MIDNIGHT_NAIVE_TIME;
                 let duration = end_time.signed_duration_since(*start);
                 Ok(VariableValue::Duration(Duration::new(
                     ChronoDuration::from(duration),
@@ -267,7 +268,7 @@ impl ScalarFunction for Between {
                 )))
             }
             (VariableValue::ZonedTime(start), VariableValue::Date(_end)) => {
-                let end_time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+                let end_time = *temporal_constants::MIDNIGHT_NAIVE_TIME;
                 let start_time = start.time();
 
                 let duration = end_time.signed_duration_since(*start_time);

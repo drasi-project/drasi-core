@@ -54,7 +54,10 @@ impl AggregatingFunction for Avg {
         match &args[0] {
             VariableValue::Float(n) => {
                 *count += 1;
-                *sum += n.as_f64().unwrap();
+                *sum += match n.as_f64() {
+                    Some(n) => n,
+                    None => return Err(EvaluationError::ConversionError),
+                };
                 let avg = *sum / *count as f64;
 
                 Ok(VariableValue::Float(
@@ -63,7 +66,10 @@ impl AggregatingFunction for Avg {
             }
             VariableValue::Integer(n) => {
                 *count += 1;
-                *sum += n.as_i64().unwrap() as f64;
+                *sum += match n.as_i64() {
+                    Some(n) => n as f64,
+                    None => return Err(EvaluationError::ConversionError),
+                };
                 let avg = *sum / *count as f64;
 
                 Ok(VariableValue::Float(
@@ -113,7 +119,10 @@ impl AggregatingFunction for Avg {
         match &args[0] {
             VariableValue::Float(n) => {
                 *count -= 1;
-                *sum -= n.as_f64().unwrap();
+                *sum -= match n.as_f64() {
+                    Some(n) => n,
+                    None => return Err(EvaluationError::ConversionError),
+                };
 
                 if *count == 0 {
                     return Ok(VariableValue::Float(
@@ -129,7 +138,10 @@ impl AggregatingFunction for Avg {
             }
             VariableValue::Integer(n) => {
                 *count -= 1;
-                *sum -= n.as_i64().unwrap() as f64;
+                *sum -= match n.as_i64() {
+                    Some(n) => n as f64,
+                    None => return Err(EvaluationError::ConversionError),
+                };
 
                 if *count == 0 {
                     return Ok(VariableValue::Float(
@@ -197,8 +209,8 @@ impl AggregatingFunction for Avg {
         let avg = *sum / *count as f64;
 
         match &args[0] {
-            VariableValue::Float(_) => Ok(VariableValue::Float(Float::from_f64(avg).unwrap())),
-            VariableValue::Integer(_) => Ok(VariableValue::Float(Float::from_f64(avg).unwrap())),
+            VariableValue::Float(_) => Ok(VariableValue::Float(Float::from_f64(avg).unwrap_or_default())),
+            VariableValue::Integer(_) => Ok(VariableValue::Float(Float::from_f64(avg).unwrap_or_default())),
             VariableValue::Duration(_) => Ok(VariableValue::Duration(Duration::new(
                 ChronoDuration::milliseconds(avg as i64),
                 0,

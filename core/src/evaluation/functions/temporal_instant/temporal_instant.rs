@@ -1087,15 +1087,15 @@ async fn truncate_local_time(unit: String, time: NaiveTime) -> Result<NaiveTime,
 
     println!("truncation_unit: {:?}", truncation_unit);
     match truncation_unit {
-        "millennium" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
-        "century" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
-        "decade" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
-        "year" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
-        "month" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
-        "week" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
-        "quarter" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
-        "weekyear" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
-        "day" => Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
+        "millennium" => Ok(*temporal_constants::MIDNIGHT_NAIVE_TIME),
+        "century" => Ok(*temporal_constants::MIDNIGHT_NAIVE_TIME),
+        "decade" => Ok(*temporal_constants::MIDNIGHT_NAIVE_TIME),
+        "year" => Ok(*temporal_constants::MIDNIGHT_NAIVE_TIME),
+        "month" => Ok(*temporal_constants::MIDNIGHT_NAIVE_TIME),
+        "week" => Ok(*temporal_constants::MIDNIGHT_NAIVE_TIME),
+        "quarter" => Ok(*temporal_constants::MIDNIGHT_NAIVE_TIME),
+        "weekyear" => Ok(*temporal_constants::MIDNIGHT_NAIVE_TIME),
+        "day" => Ok(*temporal_constants::MIDNIGHT_NAIVE_TIME),
         "hour" => Ok(NaiveTime::from_hms_opt(hour, 0, 0).unwrap()),
         "minute" => Ok(NaiveTime::from_hms_opt(hour, minute, 0).unwrap()),
         "second" => Ok(NaiveTime::from_hms_opt(hour, minute, second).unwrap()),
@@ -1157,31 +1157,31 @@ async fn truncate_local_time_with_map(
     let mut truncated_time;
     match truncation_unit {
         "millennium" => {
-            truncated_time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+            truncated_time = *temporal_constants::MIDNIGHT_NAIVE_TIME;
         }
         "century" => {
-            truncated_time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+            truncated_time = *temporal_constants::MIDNIGHT_NAIVE_TIME;
         }
         "decade" => {
-            truncated_time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+            truncated_time = *temporal_constants::MIDNIGHT_NAIVE_TIME;
         }
         "weekyear" => {
-            return Ok(NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+            return Ok(*temporal_constants::MIDNIGHT_NAIVE_TIME);
         }
         "year" => {
-            truncated_time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+            truncated_time = *temporal_constants::MIDNIGHT_NAIVE_TIME;
         }
         "month" => {
-            truncated_time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+            truncated_time = *temporal_constants::MIDNIGHT_NAIVE_TIME;
         }
         "week" => {
-            truncated_time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+            truncated_time = *temporal_constants::MIDNIGHT_NAIVE_TIME;
         }
         "quarter" => {
-            truncated_time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+            truncated_time = *temporal_constants::MIDNIGHT_NAIVE_TIME;
         }
         "day" => {
-            truncated_time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+            truncated_time = *temporal_constants::MIDNIGHT_NAIVE_TIME;
         }
         "hour" => {
             truncated_time = NaiveTime::from_hms_opt(hour, 0, 0).unwrap();

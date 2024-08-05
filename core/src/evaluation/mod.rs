@@ -34,6 +34,7 @@ pub enum EvaluationError {
     },
     InvalidState,
     InvalidArgument,
+    ConversionError,
 }
 
 impl From<IndexError> for EvaluationError {
