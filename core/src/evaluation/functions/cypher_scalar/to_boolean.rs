@@ -1,3 +1,5 @@
+use std::f32::consts::E;
+
 use crate::evaluation::variable_value::VariableValue;
 use async_trait::async_trait;
 use drasi_query_ast::ast;
@@ -23,7 +25,11 @@ impl ScalarFunction for ToBoolean {
         }
         match &args[0] {
             VariableValue::Null => Ok(VariableValue::Null),
-            VariableValue::Integer(i) => Ok(VariableValue::Bool(i.as_i64().unwrap() != 0)),
+            VariableValue::Integer(i) => Ok(VariableValue::Bool(match i.as_i64() {
+                Some(i) => i != 0,
+                None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), 
+                        error: Box::new(EvaluationError::ConversionError)}),
+            })),
             VariableValue::String(s) => {
                 let s = s.to_lowercase();
                 if (s == "true") || (s == "false") {
@@ -59,7 +65,11 @@ impl ScalarFunction for ToBooleanOrNull {
         }
         match &args[0] {
             VariableValue::Null => Ok(VariableValue::Null),
-            VariableValue::Integer(i) => Ok(VariableValue::Bool(i.as_i64().unwrap() != 0)),
+            VariableValue::Integer(i) => Ok(VariableValue::Bool(match i.as_i64() {
+                Some(i) => i != 0,
+                None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), 
+                        error: Box::new(EvaluationError::ConversionError)}),
+            })),
             VariableValue::String(s) => {
                 if (s == "true") || (s == "false") {
                     Ok(VariableValue::Bool(s == "true"))

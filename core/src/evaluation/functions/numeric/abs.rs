@@ -14,7 +14,7 @@ impl ScalarFunction for Abs {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
     ) -> Result<VariableValue, EvaluationError> {
         if args.len() != 1 {
@@ -23,10 +23,25 @@ impl ScalarFunction for Abs {
         match &args[0] {
             VariableValue::Null => Ok(VariableValue::Null),
             VariableValue::Integer(n) => {
-                Ok(VariableValue::Integer(n.as_i64().unwrap().abs().into()))
+                Ok(VariableValue::Integer(match n.as_i64() {
+                    Some(i) => i.abs(),
+                    None => return Err(EvaluationError::FunctionError { 
+                        function_name: expression.name.to_string(),
+                         error: Box::new(EvaluationError::ConversionError) }),
+                }.into()))
             }
             VariableValue::Float(n) => Ok(VariableValue::Float(
-                Float::from_f64(n.as_f64().unwrap().abs()).unwrap(),
+                match Float::from_f64(match n.as_f64() {
+                    Some(f) => f.abs(),
+                    None => return Err(EvaluationError::FunctionError { 
+                        function_name: expression.name.to_string(),
+                         error: Box::new(EvaluationError::ConversionError) }),
+                }) {
+                    Some(f) => f,
+                    None => return Err(EvaluationError::FunctionError { 
+                        function_name: expression.name.to_string(),
+                         error: Box::new(EvaluationError::ConversionError) }),
+                }
             )),
             _ => Err(EvaluationError::InvalidType),
         }

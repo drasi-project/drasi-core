@@ -24,7 +24,13 @@ impl ScalarFunction for ToFloat {
         match &args[0] {
             VariableValue::Null => Ok(VariableValue::Null),
             VariableValue::Integer(i) => {
-                Ok(VariableValue::Float((i.as_i64().unwrap() as f64).into()))
+                Ok(VariableValue::Float((match i.as_i64() {
+                    Some(i) => i as f64,
+                    None => return Err(EvaluationError::FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: Box::new(EvaluationError::ConversionError),
+                    }),
+                }).into()))
             }
             VariableValue::Float(f) => Ok(VariableValue::Float(f.clone())),
             VariableValue::String(s) => {
@@ -63,7 +69,13 @@ impl ScalarFunction for ToFloatOrNull {
         match &args[0] {
             VariableValue::Null => Ok(VariableValue::Null),
             VariableValue::Integer(i) => {
-                Ok(VariableValue::Float((i.as_i64().unwrap() as f64).into()))
+                Ok(VariableValue::Float((match i.as_i64() {
+                    Some(i) => i as f64,
+                    None => return Err(EvaluationError::FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: Box::new(EvaluationError::ConversionError),
+                    }),
+                }).into()))
             }
             VariableValue::Float(f) => Ok(VariableValue::Float(f.clone())),
             VariableValue::String(s) => {

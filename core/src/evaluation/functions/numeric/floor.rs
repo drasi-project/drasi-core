@@ -15,7 +15,7 @@ impl ScalarFunction for Floor {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
     ) -> Result<VariableValue, EvaluationError> {
         if args.len() != 1 {
@@ -25,11 +25,35 @@ impl ScalarFunction for Floor {
             VariableValue::Null => Ok(VariableValue::Null),
             VariableValue::Integer(n) => {
                 Ok(VariableValue::Float(
-                    Float::from_f64(n.as_i64().unwrap() as f64).unwrap(),
-                )) // floor always return a float
+                    match Float::from_f64(match n.as_i64() {
+                        Some(i) => i as f64,
+                        None => return Err(EvaluationError::FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: Box::new(EvaluationError::ConversionError),
+                        }),
+                    }) {
+                        Some(f) => f,
+                        None => return Err(EvaluationError::FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: Box::new(EvaluationError::ConversionError),
+                        }),
+                    },
+                )) 
             }
             VariableValue::Float(n) => Ok(VariableValue::Float(
-                Float::from_f64(n.as_f64().unwrap().floor()).unwrap(),
+                match Float::from_f64(match n.as_f64() {
+                    Some(f) => f.floor(),
+                    None => return Err(EvaluationError::FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: Box::new(EvaluationError::ConversionError),
+                    }),
+                }) {
+                    Some(f) => f,
+                    None => return Err(EvaluationError::FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: Box::new(EvaluationError::ConversionError),
+                    }),
+                },
             )),
             _ => Err(EvaluationError::InvalidType),
         }

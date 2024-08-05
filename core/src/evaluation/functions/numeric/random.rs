@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use drasi_query_ast::ast;
+use drasi_query_ast::ast::{self, Expression};
 use rand::prelude::*;
 
 use crate::evaluation::functions::ScalarFunction;
@@ -15,13 +15,19 @@ impl ScalarFunction for Rand {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
     ) -> Result<VariableValue, EvaluationError> {
         if !args.is_empty() {
             return Err(EvaluationError::InvalidArgumentCount("rand".to_string()));
         }
         let mut rng = rand::thread_rng();
-        Ok(VariableValue::Float(Float::from_f64(rng.gen()).unwrap()))
+        Ok(VariableValue::Float(match Float::from_f64(rng.gen()) {
+            Some(f) => f,
+            None => return Err(EvaluationError::FunctionError {
+                function_name: expression.name.to_string(),
+                error: Box::new(EvaluationError::ConversionError),
+            }),
+        }))
     }
 }

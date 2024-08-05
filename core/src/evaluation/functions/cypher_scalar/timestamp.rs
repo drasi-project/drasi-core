@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use drasi_query_ast::ast;
 
 use crate::evaluation::functions::ScalarFunction;
-use crate::evaluation::{EvaluationError, ExpressionEvaluationContext};
+use crate::evaluation::{expressions, EvaluationError, ExpressionEvaluationContext};
 
 #[derive(Debug)]
 pub struct Timestamp {}
@@ -13,7 +13,7 @@ impl ScalarFunction for Timestamp {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
     ) -> Result<VariableValue, EvaluationError> {
         if args.len() != 0 {
@@ -22,7 +22,10 @@ impl ScalarFunction for Timestamp {
             ));
         }
         let now = std::time::SystemTime::now();
-        let since_epoch = now.duration_since(std::time::UNIX_EPOCH).unwrap();
+        let since_epoch = match now.duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => d,
+            Err(_) => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
+        };
         Ok(VariableValue::Integer(
             (since_epoch.as_millis() as i64).into(),
         ))

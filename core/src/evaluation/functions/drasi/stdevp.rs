@@ -1,4 +1,4 @@
-use crate::evaluation::functions::ScalarFunction;
+use crate::evaluation::{expressions, functions::ScalarFunction};
 use crate::evaluation::EvaluationError;
 use async_trait::async_trait;
 use drasi_query_ast::ast;
@@ -15,7 +15,7 @@ impl ScalarFunction for DrasiStdevP {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
     ) -> Result<VariableValue, EvaluationError> {
         if args.len() != 1 {
@@ -30,10 +30,20 @@ impl ScalarFunction for DrasiStdevP {
                 for element in l {
                     match element {
                         VariableValue::Integer(i) => {
-                            cleaned_list.push(i.as_i64().unwrap() as f64);
+                            cleaned_list.push(match i.as_i64() {
+                                Some(i) => i as f64,
+                                None => return Err(EvaluationError::FunctionError { 
+                                            function_name: expression.name.to_string(),
+                                             error: Box::new(EvaluationError::ConversionError) }),
+                            });
                         }
                         VariableValue::Float(f) => {
-                            cleaned_list.push(f.as_f64().unwrap());
+                            cleaned_list.push(match f.as_f64() {
+                                Some(f) => f,
+                                None => return Err(EvaluationError::FunctionError { 
+                                            function_name: expression.name.to_string(),
+                                             error: Box::new(EvaluationError::ConversionError) }),
+                            });
                         }
                         VariableValue::Null => {
                             continue;
