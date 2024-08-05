@@ -26,7 +26,7 @@ impl ScalarFunction for Date {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
     ) -> Result<VariableValue, EvaluationError> {
         if args.len() > 1 {
@@ -44,7 +44,7 @@ impl ScalarFunction for Date {
                 let date = parse_date_string(date_str).await;
                 match date {
                     Ok(result_date) => Ok(VariableValue::Date(result_date)),
-                    _ => Err(EvaluationError::InvalidType),
+                    _ => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                 }
             }
             VariableValue::Object(o) => {
@@ -67,19 +67,22 @@ impl ScalarFunction for Date {
                     o.keys().filter(|&key| !valid_keys.contains(key)).collect();
                 if !invalid_keys.is_empty() {
                     error!("Invalid keys in the date object");
-                    return Err(EvaluationError::InvalidType);
+                    return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) });
                 }
                 if o.get("timezone").is_some() {
                     let tz = match o.get("timezone") {
                         Some(tz) => {
-                            let tz_str = tz.as_str().unwrap();
+                            let tz_str = match tz.as_str() {
+                                Some(tz_str) => tz_str,
+                                None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::ParseError) }),
+                            };
                             let tz: Tz = match tz_str.parse() {
                                 Ok(tz) => tz,
-                                Err(_) => return Err(EvaluationError::InvalidType),
+                                Err(_) => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                             };
                             tz
                         }
-                        None => return Err(EvaluationError::InvalidType),
+                        None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                     };
                     let local: chrono::DateTime<Tz> = Local::now().with_timezone(&tz);
                     return Ok(VariableValue::Date(local.date_naive()));
@@ -87,11 +90,11 @@ impl ScalarFunction for Date {
                 let result = create_date_from_componet(o.clone()).await;
                 match result {
                     Some(date) => Ok(date),
-                    None => Err(EvaluationError::InvalidType),
+                    None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                 }
             }
             VariableValue::Date(d) => Ok(VariableValue::Date(*d)),
-            _ => Err(EvaluationError::InvalidType),
+            _ => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
         }
     }
 }
@@ -104,7 +107,7 @@ impl ScalarFunction for LocalTime {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
     ) -> Result<VariableValue, EvaluationError> {
         if args.len() > 1 {
@@ -142,16 +145,16 @@ impl ScalarFunction for LocalTime {
                     o.keys().filter(|&key| !valid_keys.contains(key)).collect();
                 if !invalid_keys.is_empty() {
                     error!("Invalid keys in the localtime object");
-                    return Err(EvaluationError::InvalidType);
+                    return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) });
                 }
                 let result = create_time_from_componet(o.clone()).await;
                 match result {
                     Some(time) => Ok(time),
-                    None => Err(EvaluationError::InvalidType),
+                    None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                 }
             }
             VariableValue::LocalTime(t) => Ok(VariableValue::LocalTime(*t)),
-            _ => Err(EvaluationError::InvalidType),
+            _ => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
         }
     }
 }
@@ -164,7 +167,7 @@ impl ScalarFunction for LocalDateTime {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
     ) -> Result<VariableValue, EvaluationError> {
         if args.len() > 1 {
@@ -184,7 +187,7 @@ impl ScalarFunction for LocalDateTime {
                 let datetime = parse_local_date_time_input(datetime_str).await;
                 match datetime {
                     Ok(result_datetime) => Ok(VariableValue::LocalDateTime(result_datetime)),
-                    _ => Err(EvaluationError::InvalidType),
+                    _ => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                 }
             }
             VariableValue::Object(o) => {
@@ -213,20 +216,23 @@ impl ScalarFunction for LocalDateTime {
                     o.keys().filter(|&key| !valid_keys.contains(key)).collect();
                 if !invalid_keys.is_empty() {
                     error!("Invalid keys in the localdatetime object");
-                    return Err(EvaluationError::InvalidType);
+                    return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) });
                 }
                 if o.get("timezone").is_some() {
                     // retrieve the naivedatetime from the timezone
                     let tz = match o.get("timezone") {
                         Some(tz) => {
-                            let tz_str = tz.as_str().unwrap();
+                            let tz_str = match tz.as_str() {
+                                Some(tz_str) => tz_str,
+                                None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::ParseError) }),
+                            };
                             let tz: Tz = match tz_str.parse() {
                                 Ok(tz) => tz,
-                                Err(_) => return Err(EvaluationError::InvalidType),
+                                Err(_) => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                             };
                             tz
                         }
-                        None => return Err(EvaluationError::InvalidType),
+                        None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                     };
 
                     let local: chrono::DateTime<Tz> = Local::now().with_timezone(&tz);
@@ -235,20 +241,25 @@ impl ScalarFunction for LocalDateTime {
 
                 let date_result = match create_date_from_componet(o.clone()).await {
                     Some(date) => date,
-                    None => return Err(EvaluationError::InvalidType),
+                    None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                 };
                 let time_result = match create_time_from_componet(o.clone()).await {
                     Some(time) => time,
-                    None => return Err(EvaluationError::InvalidType),
+                    None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                 };
-                let datetime = date_result
-                    .as_date()
-                    .unwrap()
-                    .and_time(time_result.as_local_time().unwrap());
+                let date = match date_result.as_date() {
+                    Some(date) => date,
+                    None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
+                };
+                let time = match time_result.as_local_time() {
+                    Some(time) => time,
+                    None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
+                };
+                let datetime = date.and_time(time);
                 Ok(VariableValue::LocalDateTime(datetime))
             }
             VariableValue::LocalDateTime(dt) => Ok(VariableValue::LocalDateTime(*dt)),
-            _ => Err(EvaluationError::InvalidType),
+            _ => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
         }
     }
 }
@@ -261,7 +272,7 @@ impl ScalarFunction for Time {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
     ) -> Result<VariableValue, EvaluationError> {
         if args.len() > 1 {
@@ -269,7 +280,7 @@ impl ScalarFunction for Time {
         }
         if args.len() == 0 {
             let local = Local::now().time();
-            let timezone = FixedOffset::east_opt(0).unwrap();
+            let timezone = *temporal_constants::UTC_FIXED_OFFSET;
             return Ok(VariableValue::ZonedTime(ZonedTime::new(local, timezone)));
         }
         match &args[0] {
@@ -278,7 +289,7 @@ impl ScalarFunction for Time {
                 let time = parse_zoned_time_input(time_str).await;
                 match time {
                     Ok(result_time) => Ok(VariableValue::ZonedTime(result_time)),
-                    _ => Err(EvaluationError::InvalidType),
+                    _ => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                 }
             }
             VariableValue::Object(o) => {
@@ -299,7 +310,7 @@ impl ScalarFunction for Time {
                     o.keys().filter(|&key| !valid_keys.contains(key)).collect();
                 if !invalid_keys.is_empty() {
                     error!("Invalid keys in the time object");
-                    return Err(EvaluationError::InvalidType);
+                    return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) });
                 }
 
                 let timezone = match o.get("timezone") {
@@ -310,7 +321,7 @@ impl ScalarFunction for Time {
                         };
                         match handle_iana_timezone(tz_str).await {
                             Some(tz) => tz,
-                            None => return Err(EvaluationError::ParseError),
+                            None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                         }
                     }
                     None => Tz::UTC,
@@ -332,12 +343,12 @@ impl ScalarFunction for Time {
                         let dummy_date = *temporal_constants::EPOCH_NAIVE_DATE;
                         let local_time = match time.as_local_time() {
                             Some(time) => time,
-                            None => return Err(EvaluationError::InvalidType),
+                            None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                         };
                         let datetime = dummy_date.and_time(local_time);
                         let zoned_datetime = match timezone.from_local_datetime(&datetime) {
                             LocalResult::Single(zoned_datetime) => zoned_datetime.fixed_offset(),
-                            _ => return Err(EvaluationError::InvalidType),
+                            _ => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                         };
                         let zoned_time = zoned_datetime.time();
                         let offset = zoned_datetime.offset();
@@ -349,7 +360,7 @@ impl ScalarFunction for Time {
                         if timezone_str.contains('+') || timezone_str.contains('-') {
                             let offset = match FixedOffset::from_str(timezone_str) {
                                 Ok(offset) => offset,
-                                Err(_) => return Err(EvaluationError::ParseError),
+                                Err(_) => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::ParseError) }),
                             };
                             return Ok(VariableValue::ZonedTime(ZonedTime::new(
                                 zoned_time, offset,
@@ -359,11 +370,11 @@ impl ScalarFunction for Time {
                             zoned_time, *offset,
                         )));
                     }
-                    None => Err(EvaluationError::InvalidType),
+                    None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                 }
             }
             VariableValue::ZonedTime(t) => Ok(VariableValue::ZonedTime(*t)),
-            _ => Err(EvaluationError::InvalidType),
+            _ => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
         }
     }
 }
@@ -376,7 +387,7 @@ impl ScalarFunction for DateTime {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
     ) -> Result<VariableValue, EvaluationError> {
         if args.len() > 1 {
@@ -387,7 +398,7 @@ impl ScalarFunction for DateTime {
 
         if args.len() == 0 {
             let local = Local::now();
-            let datetime = local.with_timezone(&FixedOffset::east_opt(0).unwrap());
+            let datetime = local.with_timezone(&*temporal_constants::UTC_FIXED_OFFSET);
             return Ok(VariableValue::ZonedDateTime(ZonedDateTime::new(
                 datetime, None,
             )));
@@ -398,7 +409,7 @@ impl ScalarFunction for DateTime {
                 let time = parse_zoned_date_time_input(time_str).await;
                 match time {
                     Ok(result_time) => Ok(VariableValue::ZonedDateTime(result_time)),
-                    _ => Err(EvaluationError::InvalidType),
+                    _ => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                 }
             }
             VariableValue::Object(o) => {
@@ -429,22 +440,25 @@ impl ScalarFunction for DateTime {
                     o.keys().filter(|&key| !valid_keys.contains(key)).collect();
                 if !invalid_keys.is_empty() {
                     error!("Invalid keys in the datetime object");
-                    return Err(EvaluationError::InvalidType);
+                    return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) });
                 }
                 if o.contains_key("epochSeconds") || o.contains_key("epochMillis") {
                     let result = match create_date_time_from_epoch(o.clone()).await {
                         Some(datetime) => datetime,
-                        None => return Err(EvaluationError::InvalidType),
+                        None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                     };
 
                     return Ok(result);
                 }
                 let timezone = match o.get("timezone") {
                     Some(tz) => {
-                        let tz_str = tz.as_str().unwrap();
+                        let tz_str = match tz.as_str() {
+                                Some(tz_str) => tz_str,
+                                None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::ParseError) }),
+                            };
                         match handle_iana_timezone(tz_str).await {
                             Some(tz) => tz,
-                            None => return Err(EvaluationError::ParseError),
+                            None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::ParseError) }),
                         }
                     }
                     None => Tz::UTC,
@@ -454,22 +468,25 @@ impl ScalarFunction for DateTime {
                     let local: chrono::DateTime<Tz> = Local::now().with_timezone(&timezone);
                     let zoned_time = match timezone.from_local_datetime(&local.naive_local()) {
                         LocalResult::Single(zoned_time) => zoned_time.fixed_offset(),
-                        _ => return Err(EvaluationError::InvalidType),
+                        _ => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                     };
                     return Ok(VariableValue::ZonedDateTime(ZonedDateTime::new(
                         zoned_time, None,
                     )));
                 }
                 let naive_date = match create_date_from_componet(o.clone()).await {
-                    Some(date) => date.as_date().unwrap(),
-                    None => return Err(EvaluationError::InvalidType),
+                    Some(date) => match date.as_date() {
+                        Some(date) => date,
+                        None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::ConversionError) }),
+                    },
+                    None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                 };
                 let result = create_time_from_componet(o.clone()).await;
                 match result {
                     Some(time) => {
                         let local_time = match time.as_local_time() {
                             Some(time) => time,
-                            None => return Err(EvaluationError::InvalidType),
+                            None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                         };
                         let datetime = naive_date.and_time(local_time);
                         let timezone_str = match o.get("timezone") {
@@ -510,54 +527,90 @@ impl ScalarFunction for DateTime {
 
 async fn create_date_from_componet(o: BTreeMap<String, VariableValue>) -> Option<VariableValue> {
     let year = match o.get("year") {
-        Some(year) => year.as_i64().unwrap(),
+        Some(year) => match year.as_i64() {
+            Some(year) => year,
+            None => return None,
+        },
         None => 0,
     };
     let week = match o.get("week") {
-        Some(week) => week.as_i64().unwrap(),
+        Some(week) =>match week.as_i64() {
+            Some(week) => week,
+            None => return None,
+        },
         None => 0,
     };
     if week > 0 {
         let day_of_week = match o.get("dayOfWeek") {
-            Some(day_of_week) => day_of_week.as_i64().unwrap(),
+            Some(day_of_week) => match day_of_week.as_i64() {
+                Some(day_of_week) => day_of_week,
+                None => return None,
+            },
             None => 0,
         };
         let begin_date =
-            NaiveDate::from_isoywd_opt(year as i32, week as u32, Weekday::Mon).unwrap();
+            match NaiveDate::from_isoywd_opt(year as i32, week as u32, Weekday::Mon) {
+                Some(begin_date) => begin_date,
+                None => return None,
+            };
         let date = begin_date + Duration::days(day_of_week - 1);
         return Some(VariableValue::Date(date));
     }
     let ordinal_day = match o.get("ordinalDay") {
-        Some(ordinal_day) => ordinal_day.as_i64().unwrap(),
+        Some(ordinal_day) => match ordinal_day.as_i64() {
+            Some(ordinal_day) => ordinal_day,
+            None => return None,
+        },
         None => 0,
     };
     if ordinal_day > 0 {
-        let date = NaiveDate::from_yo_opt(year as i32, ordinal_day as u32).unwrap();
+        let date = match NaiveDate::from_yo_opt(year as i32, ordinal_day as u32) {
+            Some(date) => date,
+            None => return None,
+        };
         return Some(VariableValue::Date(date));
     }
     let quarter = match o.get("quarter") {
-        Some(quarter) => quarter.as_i64().unwrap(),
+        Some(quarter) => match quarter.as_i64() {
+            Some(quarter) => quarter,
+            None => return None,
+        },
         None => 0,
     };
     if quarter > 0 {
         let day_of_quarter = match o.get("dayOfQuarter") {
-            Some(day_of_quarter) => day_of_quarter.as_i64().unwrap(),
+            Some(day_of_quarter) => match day_of_quarter.as_i64() {
+                Some(day_of_quarter) => day_of_quarter,
+                None => return None,
+            },
             None => 0,
         };
         let month = (quarter - 1) * 3 + 1;
-        let begin_date = NaiveDate::from_ymd_opt(year as i32, month as u32, 1).unwrap();
+        let begin_date = match NaiveDate::from_ymd_opt(year as i32, month as u32, 1) {
+            Some(begin_date) => begin_date,
+            None => return None,
+        };
         let date = begin_date + Duration::days(day_of_quarter - 1);
         return Some(VariableValue::Date(date));
     }
     let month = match o.get("month") {
-        Some(month) => month.as_i64().unwrap(),
+        Some(month) => match month.as_i64() {
+            Some(month) => month,
+            None => return None,
+        },
         None => 0,
     };
     let day = match o.get("day") {
-        Some(day) => day.as_i64().unwrap(),
+        Some(day) => match day.as_i64() {
+            Some(day) => day,
+            None => return None,
+        },
         None => 0,
     };
-    let date = NaiveDate::from_ymd_opt(year as i32, month as u32, day as u32).unwrap();
+    let date = match NaiveDate::from_ymd_opt(year as i32, month as u32, day as u32) {
+        Some(date) => date,
+        None => return None,
+    };
     Some(VariableValue::Date(date))
 }
 
@@ -572,8 +625,8 @@ async fn create_date_time_from_epoch(o: BTreeMap<String, VariableValue>) -> Opti
             None => 0,
         };
         let datetime =
-            NaiveDateTime::from_timestamp_opt(epoch_seconds, nanoseconds as u32).unwrap();
-        let zoned_datetime = match datetime.and_local_timezone(FixedOffset::east_opt(0).unwrap()) {
+            NaiveDateTime::from_timestamp(epoch_seconds, nanoseconds as u32);
+        let zoned_datetime = match datetime.and_local_timezone(*temporal_constants::UTC_FIXED_OFFSET) {
             LocalResult::Single(zoned_datetime) => zoned_datetime,
             _ => return None,
         };
@@ -591,7 +644,7 @@ async fn create_date_time_from_epoch(o: BTreeMap<String, VariableValue>) -> Opti
             None => return None,
         };
         let datetime = datetime_epoch + Duration::nanoseconds(nanoseconds);
-        let zoned_datetime = match datetime.and_local_timezone(FixedOffset::east_opt(0).unwrap()) {
+        let zoned_datetime = match datetime.and_local_timezone(*temporal_constants::UTC_FIXED_OFFSET) {
             LocalResult::Single(zoned_datetime) => zoned_datetime,
             _ => return None,
         };
@@ -630,7 +683,10 @@ async fn create_time_from_componet(o: BTreeMap<String, VariableValue>) -> Option
         None => 0,
     };
 
-    let mut time = NaiveTime::from_hms_opt(hour as u32, minute as u32, second as u32).unwrap();
+    let mut time = match NaiveTime::from_hms_opt(hour as u32, minute as u32, second as u32) {
+        Some(time) => time,
+        None => return None,
+    };
     time = time
         + Duration::nanoseconds(nanosecond)
         + Duration::microseconds(microsecond)
@@ -646,7 +702,7 @@ impl ScalarFunction for Truncate {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
     ) -> Result<VariableValue, EvaluationError> {
         if args.len() < 2 || args.len() > 3 {
@@ -658,7 +714,7 @@ impl ScalarFunction for Truncate {
             (VariableValue::String(s), VariableValue::Date(d), None) => {
                 let truncated_date = match truncate_date(s.to_string(), *d).await {
                     Ok(date) => date,
-                    Err(_) => return Err(EvaluationError::InvalidType),
+                    Err(_) => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                 };
                 Ok(VariableValue::Date(truncated_date))
             }
@@ -666,14 +722,14 @@ impl ScalarFunction for Truncate {
                 let truncated_date =
                     match truncate_date_with_map(s.to_string(), *d, m.clone()).await {
                         Ok(date) => date,
-                        Err(_) => return Err(EvaluationError::InvalidType),
+                        Err(_) => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                     };
                 Ok(VariableValue::Date(truncated_date))
             }
             (VariableValue::String(s), VariableValue::LocalTime(d), None) => {
                 let truncated_time = match truncate_local_time(s.to_string(), *d).await {
                     Ok(time) => time,
-                    Err(_) => return Err(EvaluationError::InvalidType),
+                    Err(_) =>return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                 };
                 Ok(VariableValue::LocalTime(truncated_time))
             }
@@ -685,21 +741,19 @@ impl ScalarFunction for Truncate {
                 let truncated_time =
                     match truncate_local_time_with_map(s.to_string(), *d, m.clone()).await {
                         Ok(time) => time,
-                        Err(_) => return Err(EvaluationError::InvalidType),
+                        Err(_) => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                     };
                 Ok(VariableValue::LocalTime(truncated_time))
             }
             (VariableValue::String(s), VariableValue::LocalDateTime(dt), None) => {
                 let truncated_date = match truncate_date(s.to_string(), dt.date()).await {
                     Ok(date) => date,
-                    Err(_) => return Err(EvaluationError::InvalidType),
+                    Err(_) => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                 };
-                println!("truncated_date: {:?}", truncated_date);
                 let truncated_time = match truncate_local_time(s.to_string(), dt.time()).await {
                     Ok(time) => time,
-                    Err(_) => return Err(EvaluationError::InvalidType),
+                    Err(_) => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                 };
-                println!("truncated_time: {:?}", truncated_time);
                 let truncated_date_time = NaiveDateTime::new(truncated_date, truncated_time);
                 Ok(VariableValue::LocalDateTime(truncated_date_time))
             }
@@ -711,12 +765,12 @@ impl ScalarFunction for Truncate {
                 let truncated_date =
                     match truncate_date_with_map(s.to_string(), dt.date(), m.clone()).await {
                         Ok(date) => date,
-                        Err(_) => return Err(EvaluationError::InvalidType),
+                        Err(_) => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                     };
                 let truncated_time =
                     match truncate_local_time_with_map(s.to_string(), dt.time(), m.clone()).await {
                         Ok(time) => time,
-                        Err(_) => return Err(EvaluationError::InvalidType),
+                        Err(_) => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                     };
                 let truncated_date_time = NaiveDateTime::new(truncated_date, truncated_time);
                 Ok(VariableValue::LocalDateTime(truncated_date_time))
@@ -726,7 +780,7 @@ impl ScalarFunction for Truncate {
                 let offset = *t.offset();
                 let truncated_time = match truncate_local_time(s.to_string(), naive_time).await {
                     Ok(time) => time,
-                    Err(_) => return Err(EvaluationError::InvalidType),
+                    Err(_) => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                 };
                 let zoned_time_result = ZonedTime::new(truncated_time, offset);
                 Ok(VariableValue::ZonedTime(zoned_time_result))
@@ -746,7 +800,7 @@ impl ScalarFunction for Truncate {
                 .await
                 {
                     Ok(time) => time,
-                    Err(_) => return Err(EvaluationError::InvalidType),
+                    Err(_) => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                 };
                 let zoned_time_result = ZonedTime::new(truncated_time, offset);
                 Ok(VariableValue::ZonedTime(zoned_time_result))
@@ -759,17 +813,17 @@ impl ScalarFunction for Truncate {
                 let offset = datetime.offset();
                 let truncated_time = match truncate_local_time(s.to_string(), naive_time).await {
                     Ok(time) => time,
-                    Err(_) => return Err(EvaluationError::InvalidType),
+                    Err(_) => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                 };
                 let truncate_date = match truncate_date(s.to_string(), naive_date).await {
                     Ok(date) => date,
-                    Err(_) => return Err(EvaluationError::InvalidType),
+                    Err(_) => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                 };
                 let truncated_naive_date_time = NaiveDateTime::new(truncate_date, truncated_time);
                 let truncated_date_time =
                     match truncated_naive_date_time.and_local_timezone(*offset) {
                         LocalResult::Single(dt) => dt,
-                        _ => return Err(EvaluationError::InvalidType),
+                        _ => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                     };
                 let zoned_date_time = ZonedDateTime::new(truncated_date_time, timezone);
                 Ok(VariableValue::ZonedDateTime(zoned_date_time))
@@ -792,34 +846,43 @@ impl ScalarFunction for Truncate {
                 .await
                 {
                     Ok(time) => time,
-                    Err(_) => return Err(EvaluationError::InvalidType),
+                    Err(e) => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(e) }),
                 };
-                println!("truncated_time: {:?}", truncated_time);
+                // retrieving the naivedate
                 let truncate_date =
                     match truncate_date_with_map(s.to_string(), naive_date, m.clone()).await {
                         Ok(date) => date,
-                        Err(_) => return Err(EvaluationError::InvalidType),
+                        Err(_) => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                     };
-                println!("truncate_date: {:?}", truncate_date);
+                
                 let truncated_naive_date_time = NaiveDateTime::new(truncate_date, truncated_time);
                 if m.get("timezone").is_some() {
                     let timezone = match m.get("timezone") {
                         Some(tz) => {
-                            let tz_str = tz.as_str().unwrap();
+                            let tz_str = match tz.as_str() {
+                                Some(tz_str) => tz_str,
+                                None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::ParseError) }),
+                            };
                             match handle_iana_timezone(tz_str).await {
                                 Some(tz) => tz,
-                                None => return Err(EvaluationError::ParseError),
+                                None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::ParseError) }),
                             }
                         }
-                        None => return Err(EvaluationError::InvalidType),
+                        None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                     };
                     let datetime_tz = match timezone.from_local_datetime(&truncated_naive_date_time)
                     {
                         LocalResult::Single(dt) => dt,
-                        _ => return Err(EvaluationError::InvalidType),
+                        _ => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                     };
                     let datetime_fixed_offset = datetime_tz.fixed_offset();
-                    let timezone_string = m.get("timezone").unwrap().as_str().unwrap();
+                    let timezone_string = match m.get("timezone") {
+                        Some(tz) => match tz.as_str() {
+                            Some(tz_str) => tz_str,
+                            None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::ParseError) }),
+                        },
+                        None => return Err(EvaluationError::InvalidType),
+                    };
                     let zoned_date_time = ZonedDateTime::new(
                         datetime_fixed_offset,
                         Some(timezone_string.to_string()),
@@ -829,7 +892,7 @@ impl ScalarFunction for Truncate {
                 let truncated_date_time =
                     match truncated_naive_date_time.and_local_timezone(*offset) {
                         LocalResult::Single(dt) => dt,
-                        _ => return Err(EvaluationError::InvalidType),
+                        _ => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::InvalidType) }),
                     };
                 let zoned_date_time = ZonedDateTime::new(truncated_date_time, timezone);
                 Ok(VariableValue::ZonedDateTime(zoned_date_time))
@@ -869,7 +932,7 @@ impl ScalarFunction for ClockFunction {
     async fn call(
         &self,
         context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
     ) -> Result<VariableValue, EvaluationError> {
         let timestamp = match self.clock {
@@ -888,19 +951,22 @@ impl ScalarFunction for ClockFunction {
                 }
                 ClockResult::ZonedTime => VariableValue::ZonedTime(ZonedTime::new(
                     zdt.datetime().time(),
-                    FixedOffset::east_opt(0).unwrap(),
+                    *temporal_constants::UTC_FIXED_OFFSET,
                 )),
                 ClockResult::ZonedDateTime => VariableValue::ZonedDateTime(zdt),
             });
         } else {
-            let timezone_string = args[0].as_str().unwrap();
+            let timezone_string = match args[0].as_str() {
+                Some(tz) => tz,
+                None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::ParseError) }),
+            };
             let tz = match handle_iana_timezone(timezone_string).await {
                 Some(tz) => tz,
-                None => return Err(EvaluationError::ParseError),
+                None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::ParseError) }),
             };
             let date_time = match tz.timestamp_millis_opt(timestamp as i64) {
                 LocalResult::Single(dt) => dt.fixed_offset(),
-                _ => return Err(EvaluationError::ParseError),
+                _ => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::ParseError) }),
             };
 
             return Ok(match self.result {
@@ -929,22 +995,40 @@ async fn truncate_date(unit: String, date: NaiveDate) -> Result<NaiveDate, Evalu
     match truncation_unit {
         "millennium" => {
             let year = year / 1000 * 1000;
-            Ok(NaiveDate::from_ymd_opt(year, 1, 1).unwrap())
+            Ok(match NaiveDate::from_ymd_opt(year, 1, 1) {
+                Some(date) => date,
+                None => return Err(EvaluationError::InvalidType),
+            })
         }
         "century" => {
             let year = year / 100 * 100;
-            Ok(NaiveDate::from_ymd_opt(year, 1, 1).unwrap())
+            Ok(match NaiveDate::from_ymd_opt(year, 1, 1) {
+                Some(date) => date,
+                None => return Err(EvaluationError::InvalidType),
+            })
         }
         "decade" => {
             let year = year / 10 * 10;
-            Ok(NaiveDate::from_ymd_opt(year, 1, 1).unwrap())
+            Ok(match NaiveDate::from_ymd_opt(year, 1, 1) {
+                Some(date) => date,
+                None => return Err(EvaluationError::InvalidType),
+            })
         }
-        "year" => Ok(NaiveDate::from_ymd_opt(year, 1, 1).unwrap()),
+        "year" => Ok(match NaiveDate::from_ymd_opt(year, 1, 1) {
+                Some(date) => date,
+                None => return Err(EvaluationError::InvalidType),
+            }),
         "quarter" => {
             let month = month / 3 * 3 + 1;
-            Ok(NaiveDate::from_ymd_opt(year, month, 1).unwrap())
+            Ok(match NaiveDate::from_ymd_opt(year, month, 1) {
+                Some(date) => date,
+                None => return Err(EvaluationError::InvalidType),
+            })
         }
-        "month" => Ok(NaiveDate::from_ymd_opt(year, month, 1).unwrap()),
+        "month" => Ok(match NaiveDate::from_ymd_opt(year, month, 1) {
+                Some(date) => date,
+                None => return Err(EvaluationError::InvalidType),
+            }),
         "week" => {
             let weekday = date.weekday();
             let days_to_subtract = match weekday {
@@ -959,7 +1043,10 @@ async fn truncate_date(unit: String, date: NaiveDate) -> Result<NaiveDate, Evalu
 
             Ok(date - chrono::Duration::days(days_to_subtract as i64))
         }
-        "day" => Ok(NaiveDate::from_ymd_opt(year, month, day).unwrap()),
+        "day" => Ok(match NaiveDate::from_ymd_opt(year, month, day) {
+                Some(date) => date,
+                None => return Err(EvaluationError::InvalidType),
+            }),
         "weekyear" => {
             // First day of the first week of the year
             let date_string = format!("{}-1-1", year);
@@ -970,7 +1057,10 @@ async fn truncate_date(unit: String, date: NaiveDate) -> Result<NaiveDate, Evalu
             Ok(date)
         }
         "hour" | "minute" | "second" | "millisecond" | "microsecond" => {
-            Ok(NaiveDate::from_ymd_opt(year, month, day).unwrap())
+            Ok(match NaiveDate::from_ymd_opt(year, month, day) {
+                Some(date) => date,
+                None => return Err(EvaluationError::InvalidType),
+            })
         }
         _ => Err(EvaluationError::InvalidType),
     }
@@ -986,19 +1076,31 @@ async fn truncate_date_with_map(
     let day = date.day();
 
     let years_to_add = match map.get("year") {
-        Some(year) => year.as_i64().unwrap() - 1,
+        Some(year) => match year.as_i64(){
+            Some(year) => year - 1,
+            None => return Err(EvaluationError::InvalidType),
+        },
         None => 0,
     };
     let months_to_add = match map.get("month") {
-        Some(month) => month.as_i64().unwrap() - 1,
+        Some(month) => match month.as_i64() {
+            Some(month) => month - 1,
+            None => return Err(EvaluationError::InvalidType),
+        },
         None => 0,
     };
     let days_to_add = match map.get("day") {
-        Some(day) => day.as_i64().unwrap() - 1,
+        Some(day) => match day.as_i64() {
+            Some(day) => day - 1,
+            None => return Err(EvaluationError::InvalidType),
+        },
         None => 0,
     };
     let days_of_week_to_add = match map.get("dayOfWeek") {
-        Some(day_of_week) => day_of_week.as_i64().unwrap() - 1,
+        Some(day_of_week) => match day_of_week.as_i64() {
+            Some(day_of_week) => day_of_week - 1,
+            None => return Err(EvaluationError::InvalidType),
+        },
         None => 0,
     };
 
@@ -1009,25 +1111,43 @@ async fn truncate_date_with_map(
     match truncation_unit {
         "millennium" => {
             let year = year / 1000 * 1000;
-            truncated_date = NaiveDate::from_ymd_opt(year, 1, 1).unwrap();
+            truncated_date = match NaiveDate::from_ymd_opt(year, 1, 1) {
+                Some(date) => date,
+                None => return Err(EvaluationError::InvalidType),
+            };
         }
         "century" => {
             let year = year / 100 * 100;
-            truncated_date = NaiveDate::from_ymd_opt(year, 1, 1).unwrap();
+            truncated_date = match NaiveDate::from_ymd_opt(year, 1, 1) {
+                Some(date) => date,
+                None => return Err(EvaluationError::InvalidType),
+            };
         }
         "decade" => {
             let year = year / 10 * 10;
-            truncated_date = NaiveDate::from_ymd_opt(year, 1, 1).unwrap();
+            truncated_date = match NaiveDate::from_ymd_opt(year, 1, 1) {
+                Some(date) => date,
+                None => return Err(EvaluationError::InvalidType),
+            };
         }
         "year" => {
-            truncated_date = NaiveDate::from_ymd_opt(year, 1, 1).unwrap();
+            truncated_date = match NaiveDate::from_ymd_opt(year, 1, 1) {
+                Some(date) => date,
+                None => return Err(EvaluationError::InvalidType),
+            };
         }
         "quarter" => {
             let month = month / 3 * 3 + 1;
-            truncated_date = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+            truncated_date = match NaiveDate::from_ymd_opt(year, month, 1) {
+                Some(date) => date,
+                None => return Err(EvaluationError::InvalidType),
+            };
         }
         "month" => {
-            truncated_date = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+            truncated_date = match NaiveDate::from_ymd_opt(year, month, 1) {
+                Some(date) => date,
+                None => return Err(EvaluationError::InvalidType),
+            };
         }
         "week" => {
             let weekday = date.weekday();
@@ -1044,7 +1164,10 @@ async fn truncate_date_with_map(
             truncated_date = date - chrono::Duration::days(days_to_subtract as i64);
         }
         "day" => {
-            truncated_date = NaiveDate::from_ymd_opt(year, month, day).unwrap();
+            truncated_date = match NaiveDate::from_ymd_opt(year, month, day) {
+                Some(date) => date,
+                None => return Err(EvaluationError::InvalidType),
+            };
         }
         "weekyear" => {
             // First day of the first week of the year
@@ -1056,19 +1179,24 @@ async fn truncate_date_with_map(
             truncated_date = date;
         }
         "hour" | "minute" | "second" | "millisecond" | "microsecond" => {
-            truncated_date = NaiveDate::from_ymd_opt(year, month, day).unwrap();
+            truncated_date = match NaiveDate::from_ymd_opt(year, month, day) {
+                Some(date) => date,
+                None => return Err(EvaluationError::InvalidType),
+            };
         }
         _ => {
             return Err(EvaluationError::InvalidType);
         }
     };
 
-    truncated_date = NaiveDate::from_ymd_opt(
+    truncated_date = match NaiveDate::from_ymd_opt(
         truncated_date.year() + years_to_add as i32,
         truncated_date.month() + months_to_add as u32,
         truncated_date.day() + days_to_add as u32,
-    )
-    .unwrap();
+    ) {
+        Some(date) => date,
+        None => return Err(EvaluationError::InvalidType),
+    };
     if truncation_unit == "week" || truncation_unit == "weekyear" {
         truncated_date += chrono::Duration::days(days_of_week_to_add);
     }
@@ -1096,21 +1224,36 @@ async fn truncate_local_time(unit: String, time: NaiveTime) -> Result<NaiveTime,
         "quarter" => Ok(*temporal_constants::MIDNIGHT_NAIVE_TIME),
         "weekyear" => Ok(*temporal_constants::MIDNIGHT_NAIVE_TIME),
         "day" => Ok(*temporal_constants::MIDNIGHT_NAIVE_TIME),
-        "hour" => Ok(NaiveTime::from_hms_opt(hour, 0, 0).unwrap()),
-        "minute" => Ok(NaiveTime::from_hms_opt(hour, minute, 0).unwrap()),
-        "second" => Ok(NaiveTime::from_hms_opt(hour, minute, second).unwrap()),
+        "hour" => Ok(match NaiveTime::from_hms_opt(hour, 0, 0) {
+            Some(time) => time,
+            None => return Err(EvaluationError::InvalidType),
+        }),
+        "minute" => Ok(match NaiveTime::from_hms_opt(hour, minute, 0) {
+            Some(time) => time,
+            None => return Err(EvaluationError::InvalidType),
+        }),
+        "second" => Ok(match NaiveTime::from_hms_opt(hour, minute, second) {
+            Some(time) => time,
+            None => return Err(EvaluationError::InvalidType),
+        }),
         "millisecond" => {
             let divisor = 10u32.pow(6);
 
             let truncated_nanos = (nanosecond / divisor) * divisor;
 
-            Ok(NaiveTime::from_hms_nano_opt(hour, minute, second, truncated_nanos).unwrap())
+            Ok(match NaiveTime::from_hms_nano_opt(hour, minute, second, truncated_nanos) {
+                Some(time) => time,
+                None => return Err(EvaluationError::InvalidType),
+            })
         }
         "microsecond" => {
             let divisor = 10u32.pow(3);
             let truncated_nanos = (nanosecond / divisor) * divisor;
 
-            Ok(NaiveTime::from_hms_nano_opt(hour, minute, second, truncated_nanos).unwrap())
+            Ok(match NaiveTime::from_hms_nano_opt(hour, minute, second, truncated_nanos) {
+                Some(time) => time,
+                None => return Err(EvaluationError::InvalidType),
+            })
         }
         _ => Err(EvaluationError::InvalidType),
     }
@@ -1127,27 +1270,45 @@ async fn truncate_local_time_with_map(
     let nanosecond = time.nanosecond();
 
     let hour_to_add = match map.get("hour") {
-        Some(hour) => hour.as_i64().unwrap(),
+        Some(hour) => match hour.as_i64() {
+            Some(hour) => hour,
+            None => return Err(EvaluationError::ConversionError),
+        },
         None => 0,
     };
     let minute_to_add = match map.get("minute") {
-        Some(minute) => minute.as_i64().unwrap(),
+        Some(minute) => match minute.as_i64() {
+            Some(minute) => minute,
+            None => return Err(EvaluationError::ConversionError),
+        },
         None => 0,
     };
     let second_to_add = match map.get("second") {
-        Some(second) => second.as_i64().unwrap(),
+        Some(second) => match second.as_i64() {
+            Some(second) => second,
+            None => return Err(EvaluationError::ConversionError),
+        },
         None => 0,
     };
     let milliseconds_to_add = match map.get("millisecond") {
-        Some(millisecond) => millisecond.as_i64().unwrap(),
+        Some(millisecond) => match millisecond.as_i64() {
+            Some(millisecond) => millisecond,
+            None => return Err(EvaluationError::ConversionError),
+        },
         None => 0,
     };
     let microseconds_to_add = match map.get("microsecond") {
-        Some(microsecond) => microsecond.as_i64().unwrap(),
+        Some(microsecond) => match microsecond.as_i64() {
+            Some(microsecond) => microsecond,
+            None => return Err(EvaluationError::ConversionError),
+        },
         None => 0,
     };
     let nanoseconds_to_add = match map.get("nanosecond") {
-        Some(nanosecond) => nanosecond.as_i64().unwrap(),
+        Some(nanosecond) => match nanosecond.as_i64() {
+            Some(nanosecond) => nanosecond,
+            None => return Err(EvaluationError::ConversionError),
+        },
         None => 0,
     };
 
@@ -1184,13 +1345,22 @@ async fn truncate_local_time_with_map(
             truncated_time = *temporal_constants::MIDNIGHT_NAIVE_TIME;
         }
         "hour" => {
-            truncated_time = NaiveTime::from_hms_opt(hour, 0, 0).unwrap();
+            truncated_time = match NaiveTime::from_hms_opt(hour, 0, 0) {
+                Some(time) => time,
+                None => return Err(EvaluationError::InvalidType),
+            };
         }
         "minute" => {
-            truncated_time = NaiveTime::from_hms_opt(hour, minute, 0).unwrap();
+            truncated_time = match NaiveTime::from_hms_opt(hour, minute, 0) {
+                Some(time) => time,
+                None => return Err(EvaluationError::InvalidType),
+            };
         }
         "second" => {
-            truncated_time = NaiveTime::from_hms_opt(hour, minute, second).unwrap();
+            truncated_time = match NaiveTime::from_hms_opt(hour, minute, second) {
+                Some(time) => time,
+                None => return Err(EvaluationError::InvalidType),
+            };
         }
         "millisecond" => {
             let divisor = 10u32.pow(6);
@@ -1198,26 +1368,35 @@ async fn truncate_local_time_with_map(
             let truncated_nanos = (nanosecond / divisor) * divisor;
 
             truncated_time =
-                NaiveTime::from_hms_nano_opt(hour, minute, second, truncated_nanos).unwrap();
+                match NaiveTime::from_hms_nano_opt(hour, minute, second, truncated_nanos) {
+                    Some(time) => time,
+                    None => return Err(EvaluationError::InvalidType),
+                };
         }
         "microsecond" => {
             let divisor = 10u32.pow(3);
             let truncated_nanos = (nanosecond / divisor) * divisor;
 
             truncated_time =
-                NaiveTime::from_hms_nano_opt(hour, minute, second, truncated_nanos).unwrap();
+                match NaiveTime::from_hms_nano_opt(hour, minute, second, truncated_nanos) {
+                    Some(time) => time,
+                    None => return Err(EvaluationError::InvalidType),
+                };
         }
         "timezone" => {
             // don't truncate timezone
             truncated_time =
-                NaiveTime::from_hms_nano_opt(hour, minute, second, nanosecond).unwrap();
+                match NaiveTime::from_hms_nano_opt(hour, minute, second, nanosecond) {
+                    Some(time) => time,
+                    None => return Err(EvaluationError::InvalidType),
+                };
         }
         _ => {
             return Err(EvaluationError::InvalidType);
         }
     }
 
-    truncated_time = NaiveTime::from_hms_nano_opt(
+    truncated_time = match NaiveTime::from_hms_nano_opt(
         truncated_time.hour() + hour_to_add as u32,
         truncated_time.minute() + minute_to_add as u32,
         truncated_time.second() + second_to_add as u32,
@@ -1225,8 +1404,10 @@ async fn truncate_local_time_with_map(
             + milliseconds_to_add as u32 * 1_000_000
             + microseconds_to_add as u32 * 1_000
             + nanoseconds_to_add as u32,
-    )
-    .unwrap();
+    ) {
+        Some(time) => time,
+        None => return Err(EvaluationError::InvalidType),
+    };
     Ok(truncated_time)
 }
 
@@ -1367,7 +1548,10 @@ async fn parse_quarter_date(date_str: &str) -> Result<String, EvaluationError> {
         _ => unreachable!(),
     };
 
-    let temp_date = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+    let temp_date = match NaiveDate::from_ymd_opt(year, month, 1) {
+        Some(d) => d,
+        None => return Err(EvaluationError::OutOfRange),
+    };
 
     let date = match temp_date.checked_add_days(Days::new(day_of_quarter as u64 - 1)) {
         Some(d) => d,
@@ -1455,7 +1639,7 @@ async fn parse_zoned_time_input(input: &str) -> Result<ZonedTime, EvaluationErro
     };
 
     if is_utc {
-        let offset = FixedOffset::east_opt(0).unwrap();
+        let offset = *temporal_constants::UTC_FIXED_OFFSET;
         if contains_frac {
             let naive_time = match NaiveTime::parse_from_str(time_string, "%H%M%S%.f") {
                 Ok(t) => t,
@@ -1498,7 +1682,10 @@ async fn parse_zoned_time_input(input: &str) -> Result<ZonedTime, EvaluationErro
 }
 
 async fn extract_timezone(input: &str) -> Option<&str> {
-    let re = Regex::new(r"(\d{2,6}(\.\d{1,9})?)(([+-].*)|Z|(\[.*?\])?)?").unwrap();
+    let re = match Regex::new(r"(\d{2,6}(\.\d{1,9})?)(([+-].*)|Z|(\[.*?\])?)?") {
+        Ok(re) => re,
+        Err(_) => return None,
+    };
 
     if let Some(captures) = re.captures(input) {
         captures.get(3).map(|m| m.as_str())
@@ -1555,7 +1742,7 @@ async fn parse_zoned_date_time_input(input: &str) -> Result<ZonedDateTime, Evalu
     if is_utc {
         let date_time = match NaiveDateTime::and_local_timezone(
             &naive_date_time,
-            FixedOffset::east_opt(0).unwrap(),
+            *temporal_constants::UTC_FIXED_OFFSET,
         ) {
             LocalResult::Single(dt) => dt,
             _ => return Err(EvaluationError::ParseError),

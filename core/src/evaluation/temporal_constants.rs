@@ -6,7 +6,7 @@ use lazy_static::lazy_static;
 lazy_static! {
     pub static ref EPOCH_NAIVE_DATE: NaiveDate = match NaiveDate::from_ymd_opt(1970, 1, 1) {
         Some(date) => date,
-        None => unreachable!(),
+        None => unreachable!(), // This should never happen
     };
     pub static ref MIDNIGHT_NAIVE_TIME: NaiveTime = match NaiveTime::from_hms_opt(0, 0, 0) {
         Some(time) => time,

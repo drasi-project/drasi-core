@@ -137,12 +137,20 @@ impl FunctionRegistry {
     }
 
     pub fn register_function(&self, name: &str, function: Function) {
-        let mut lock = self.functions.write().unwrap();
-        lock.insert(name.to_string(), Arc::new(function));
+        match self.functions.write() {
+            Ok(mut lock) => {
+                lock.insert(name.to_string(), Arc::new(function));
+            }
+            Err(e) => {
+                eprintln!("Failed to acquire write lock: {:?}", e);
+                // Handle the error appropriately
+            }
+        }
     }
+    
 
     pub fn get_function(&self, name: &str) -> Option<Arc<Function>> {
-        let lock = self.functions.read().unwrap();
+        let lock = self.functions.read().expect("Failed to acquire read lock");
         lock.get(name).cloned()
     }
 }

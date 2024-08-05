@@ -13,7 +13,7 @@ impl ScalarFunction for Sign {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
     ) -> Result<VariableValue, EvaluationError> {
         if args.len() != 1 {
@@ -22,7 +22,10 @@ impl ScalarFunction for Sign {
         match &args[0] {
             VariableValue::Null => Ok(VariableValue::Null),
             VariableValue::Integer(n) => {
-                let f = n.as_i64().unwrap();
+                let f = match n.as_i64() {
+                    Some(i) => i,
+                    None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::ConversionError)}),
+                };
                 if f > 0 {
                     Ok(VariableValue::Integer(Integer::from(1)))
                 } else if f < 0 {
@@ -32,7 +35,10 @@ impl ScalarFunction for Sign {
                 }
             }
             VariableValue::Float(n) => {
-                let f = n.as_f64().unwrap();
+                let f = match n.as_f64() {
+                    Some(f) => f,
+                    None => return Err(EvaluationError::FunctionError { function_name: expression.name.to_string(), error: Box::new(EvaluationError::ConversionError)}),
+                };
                 if f > 0.0 {
                     Ok(VariableValue::Integer(Integer::from(1)))
                 } else if f < 0.0 {
