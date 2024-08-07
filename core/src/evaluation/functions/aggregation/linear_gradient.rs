@@ -1,6 +1,6 @@
 use std::{fmt::Debug, sync::Arc};
 
-use crate::{evaluation::EvaluationError, interface::ResultIndex};
+use crate::{evaluation::{FunctionError, FunctionEvaluationError}, interface::ResultIndex};
 
 use async_trait::async_trait;
 
@@ -43,11 +43,12 @@ impl AggregatingFunction for LinearGradient {
         _context: &ExpressionEvaluationContext,
         args: Vec<VariableValue>,
         accumulator: &mut Accumulator,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 2 {
-            return Err(EvaluationError::InvalidArgumentCount(
-                "linearGradient".to_string(),
-            ));
+            return Err(FunctionError {
+                function_name: "linearGradient".to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
 
         let (count, mean_x, mean_y, m2, cov) = match accumulator {
@@ -59,9 +60,15 @@ impl AggregatingFunction for LinearGradient {
                     m2,
                     cov,
                 } => (count, mean_x, mean_y, m2, cov),
-                _ => return Err(EvaluationError::InvalidType),
+                _ => return Err(FunctionError {
+                    function_name: "LinearGradient".to_string(),
+                    error: FunctionEvaluationError::InvalidAccumulator,
+                }),
             },
-            _ => return Err(EvaluationError::InvalidType),
+            _ => return Err(FunctionError {
+                function_name: "LinearGradient".to_string(),
+                error: FunctionEvaluationError::InvalidAccumulator,
+            }),
         };
 
         if let VariableValue::Null = args[0] {
@@ -72,8 +79,8 @@ impl AggregatingFunction for LinearGradient {
             return Ok(VariableValue::Null);
         }
 
-        let x = extract_parameter(&args[0])?;
-        let y = extract_parameter(&args[1])?;
+        let x = extract_parameter(&args[0],0)?;
+        let y = extract_parameter(&args[1],1)?;
 
         *count += 1;
         let delta_x = x - *mean_x;
@@ -100,11 +107,12 @@ impl AggregatingFunction for LinearGradient {
         _context: &ExpressionEvaluationContext,
         args: Vec<VariableValue>,
         accumulator: &mut Accumulator,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 2 {
-            return Err(EvaluationError::InvalidArgumentCount(
-                "linearGradient".to_string(),
-            ));
+            return Err(FunctionError {
+                function_name: "linearGradient".to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
 
         let (count, mean_x, mean_y, m2, cov) = match accumulator {
@@ -116,9 +124,15 @@ impl AggregatingFunction for LinearGradient {
                     m2,
                     cov,
                 } => (count, mean_x, mean_y, m2, cov),
-                _ => return Err(EvaluationError::InvalidType),
+                _ => return Err(FunctionError {
+                    function_name: "LinearGradient".to_string(),
+                    error: FunctionEvaluationError::InvalidAccumulator,
+                }),
             },
-            _ => return Err(EvaluationError::InvalidType),
+            _ => return Err(FunctionError {
+                function_name: "LinearGradient".to_string(),
+                error: FunctionEvaluationError::InvalidAccumulator,
+            }),
         };
 
         if let VariableValue::Null = args[0] {
@@ -129,8 +143,8 @@ impl AggregatingFunction for LinearGradient {
             return Ok(VariableValue::Null);
         }
 
-        let x = extract_parameter(&args[0])?;
-        let y = extract_parameter(&args[1])?;
+        let x = extract_parameter(&args[0],0)?;
+        let y = extract_parameter(&args[1],1)?;
 
         *count -= 1;
 
@@ -166,11 +180,12 @@ impl AggregatingFunction for LinearGradient {
         _context: &ExpressionEvaluationContext,
         args: Vec<VariableValue>,
         accumulator: &Accumulator,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 2 {
-            return Err(EvaluationError::InvalidArgumentCount(
-                "linearGradient".to_string(),
-            ));
+            return Err(FunctionError {
+                function_name: "linearGradient".to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
 
         let (count, _mean_x, _mean_y, m2, cov) = match accumulator {
@@ -182,9 +197,15 @@ impl AggregatingFunction for LinearGradient {
                     m2,
                     cov,
                 } => (count, mean_x, mean_y, m2, cov),
-                _ => return Err(EvaluationError::InvalidType),
+                _ => return Err(FunctionError {
+                    function_name: "LinearGradient".to_string(),
+                    error: FunctionEvaluationError::InvalidAccumulator,
+                }),
             },
-            _ => return Err(EvaluationError::InvalidType),
+            _ => return Err(FunctionError {
+                function_name: "LinearGradient".to_string(),
+                error: FunctionEvaluationError::InvalidAccumulator,
+            }),
         };
 
         if *count == 0 {
@@ -203,15 +224,21 @@ impl AggregatingFunction for LinearGradient {
     }
 }
 
-fn extract_parameter(p: &VariableValue) -> Result<f64, EvaluationError> {
+fn extract_parameter(p: &VariableValue, index: u64) -> Result<f64, FunctionError> {
     let result = match p {
         VariableValue::Float(n) => match n.as_f64() {
             Some(n) => n,
-            None => return Err(EvaluationError::InvalidType { expected: () }),
+            None => return Err(FunctionError {
+                function_name: "LinearGradient".to_string(),
+                error: FunctionEvaluationError::OverflowError,
+            }),
         }
         VariableValue::Integer(n) => match n.as_i64() {
             Some(n) => n as f64,
-            None => return Err(EvaluationError::ConversionError),
+            None => return Err(FunctionError { 
+                function_name: "LinearGradient".to_string(),
+                error: FunctionEvaluationError::OverflowError,
+            }),
         },
         VariableValue::Duration(d) => d.duration().num_milliseconds() as f64,
         VariableValue::LocalDateTime(l) => l.and_utc().timestamp_millis() as f64,
@@ -219,7 +246,10 @@ fn extract_parameter(p: &VariableValue) -> Result<f64, EvaluationError> {
         VariableValue::Date(d) => d.and_time(NaiveTime::MIN).and_utc().timestamp_millis() as f64,
         VariableValue::LocalTime(l) => l.num_seconds_from_midnight() as f64,
         VariableValue::ZonedTime(z) => z.time().num_seconds_from_midnight() as f64,
-        _ => return Err(EvaluationError::InvalidType),
+        _ => return Err(FunctionError {
+            function_name: "LinearGradient".to_string(),
+            error: FunctionEvaluationError::InvalidArgument(index as usize),
+        }),
     };
 
     Ok(result)

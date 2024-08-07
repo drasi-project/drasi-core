@@ -25,7 +25,7 @@ use self::{
     text::RegisterTextFunctions,
 };
 
-use super::{EvaluationError, ExpressionEvaluationContext, ExpressionEvaluator};
+use super::{EvaluationError, FunctionError, ExpressionEvaluationContext, ExpressionEvaluator};
 
 pub mod aggregation;
 pub mod context_mutators;
@@ -81,19 +81,19 @@ pub trait AggregatingFunction: Debug + Send + Sync {
         context: &ExpressionEvaluationContext,
         args: Vec<VariableValue>,
         accumulator: &mut Accumulator,
-    ) -> Result<VariableValue, EvaluationError>;
+    ) -> Result<VariableValue, FunctionError>;
     async fn revert(
         &self,
         context: &ExpressionEvaluationContext,
         args: Vec<VariableValue>,
         accumulator: &mut Accumulator,
-    ) -> Result<VariableValue, EvaluationError>;
+    ) -> Result<VariableValue, FunctionError>;
     async fn snapshot(
         &self,
         context: &ExpressionEvaluationContext,
         args: Vec<VariableValue>,
         accumulator: &Accumulator,
-    ) -> Result<VariableValue, EvaluationError>;
+    ) -> Result<VariableValue, FunctionError>;
     fn accumulator_is_lazy(&self) -> bool;
 }
 

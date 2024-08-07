@@ -52,7 +52,8 @@ pub struct FunctionError {
 #[derive(Debug)]
 pub enum FunctionEvaluationError {
     InvalidArgument(usize),
-    InvalidArgumentCount(String),
+    InvalidArgumentCount,
+    IndexError(IndexError),
     OverflowError,
     OutofRange,
     InvalidDateFormat,
@@ -61,6 +62,10 @@ pub enum FunctionEvaluationError {
     InvalidDateTimeFormat,
     InvalidLocalDateTimeFormat,
     InvalidDurationFormat,
+    InvalidAccumulator,
+    InvalidType {
+        expected: String,
+    },
 }
 
 #[derive(Debug)]
@@ -70,36 +75,11 @@ pub enum OutOfRangeType {
     TemporalInstantOutOfRange,
 }
 
-
-// pub enum FunctionEvaluationError{
-//     InvalidArgument
-// }
-
-// #[derive(Debug)]
-// pub enum EvaluationError {
-//     DivideByZero,  // never used lol
-//     InvalidType,
-//     UnknownIdentifier(String),
-//     UnknownFunction(String), // Unknown Cypher function or internal helper function
-//     InvalidArgumentCount(String),
-//     IndexError(IndexError),
-//     MiddlewareError(MiddlewareError),
-//     ParseError,
-//     InvalidContext,
-//     OutOfRange,  // Is this for a index out of range error? or something else?
-//     FunctionError {
-//         function_name: String,
-//         error: Box<EvaluationError>,
-//     },
-//     InvalidState,
-//     InvalidArgument,
-//     // InvalidType {
-//     //     expected: String,
-//     //     actual: String,
-//     // }
-//     // CreationError? TemporalCreationError
-//     // RetrievalError? "failed to retrieve duration"
-// }
+impl From<IndexError> for FunctionEvaluationError {
+    fn from(e: IndexError) -> Self {
+        FunctionEvaluationError::IndexError(e)
+    }
+}
 
 impl From<IndexError> for EvaluationError {
     fn from(e: IndexError) -> Self {

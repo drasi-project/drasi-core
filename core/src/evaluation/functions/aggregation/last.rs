@@ -1,6 +1,6 @@
 use std::{fmt::Debug, sync::Arc};
 
-use crate::{evaluation::EvaluationError, interface::ResultIndex, models::ElementValue};
+use crate::{evaluation::{FunctionError, FunctionEvaluationError}, interface::ResultIndex, models::ElementValue};
 
 use async_trait::async_trait;
 
@@ -33,22 +33,34 @@ impl AggregatingFunction for Last {
         _context: &ExpressionEvaluationContext,
         args: Vec<VariableValue>,
         accumulator: &mut Accumulator,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
-            return Err(EvaluationError::InvalidArgumentCount("Last".to_string()));
+            return Err(FunctionError {
+                function_name: "Last".to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
 
         let value = match accumulator {
             Accumulator::Value(accumulator) => match accumulator {
                 super::ValueAccumulator::Value(value) => value,
-                _ => return Err(EvaluationError::InvalidType),
+                _ => return Err(FunctionError {
+                    function_name: "Last".to_string(),
+                    error: FunctionEvaluationError::InvalidAccumulator,
+                }),
             },
-            _ => return Err(EvaluationError::InvalidType),
+            _ => return Err(FunctionError {
+                function_name: "Last".to_string(),
+                error: FunctionEvaluationError::InvalidAccumulator,
+            }),
         };
 
         *value = match (&args[0]).try_into() {
             Ok(value) => value,
-            Err(_) => return Err(EvaluationError::InvalidType),
+            Err(_) => return Err(FunctionError {
+                function_name: "Last".to_string(),
+                error: FunctionEvaluationError::InvalidType { expected: "ElementValue".to_string() },
+            }),
         };
 
         Ok((&value.clone()).into())
@@ -59,16 +71,25 @@ impl AggregatingFunction for Last {
         _context: &ExpressionEvaluationContext,
         args: Vec<VariableValue>,
         accumulator: &mut Accumulator,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
-            return Err(EvaluationError::InvalidArgumentCount("Last".to_string()));
+            return Err(FunctionError {
+                function_name: "Last".to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         let value = match accumulator {
             Accumulator::Value(accumulator) => match accumulator {
                 super::ValueAccumulator::Value(value) => value,
-                _ => return Err(EvaluationError::InvalidType),
+                _ => return Err(FunctionError {
+                    function_name: "Last".to_string(),
+                    error: FunctionEvaluationError::InvalidAccumulator,
+                }),
             },
-            _ => return Err(EvaluationError::InvalidType),
+            _ => return Err(FunctionError {
+                function_name: "Last".to_string(),
+                error: FunctionEvaluationError::InvalidAccumulator,
+            }),
         };
 
         *value = ElementValue::Null;
@@ -80,13 +101,19 @@ impl AggregatingFunction for Last {
         _context: &ExpressionEvaluationContext,
         _args: Vec<VariableValue>,
         accumulator: &Accumulator,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         let value = match accumulator {
             Accumulator::Value(accumulator) => match accumulator {
                 super::ValueAccumulator::Value(value) => value,
-                _ => return Err(EvaluationError::InvalidType),
+                _ => return Err(FunctionError {
+                    function_name: "Last".to_string(),
+                    error: FunctionEvaluationError::InvalidAccumulator,
+                }),
             },
-            _ => return Err(EvaluationError::InvalidType),
+            _ => return Err(FunctionError {
+                function_name: "Last".to_string(),
+                error: FunctionEvaluationError::InvalidAccumulator,
+            }),
         };
         Ok((&value.clone()).into())
     }
