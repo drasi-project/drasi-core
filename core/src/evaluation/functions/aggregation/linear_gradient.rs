@@ -207,7 +207,7 @@ fn extract_parameter(p: &VariableValue) -> Result<f64, EvaluationError> {
     let result = match p {
         VariableValue::Float(n) => match n.as_f64() {
             Some(n) => n,
-            None => return Err(EvaluationError::ConversionError),
+            None => return Err(EvaluationError::InvalidType { expected: () }),
         }
         VariableValue::Integer(n) => match n.as_i64() {
             Some(n) => n as f64,

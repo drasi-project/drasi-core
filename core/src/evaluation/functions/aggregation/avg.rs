@@ -56,7 +56,7 @@ impl AggregatingFunction for Avg {
                 *count += 1;
                 *sum += match n.as_f64() {
                     Some(n) => n,
-                    None => return Err(EvaluationError::ConversionError),
+                    None => return Err(EvaluationError::InvalidType { expected: "Float".to_string() }),
                 };
                 let avg = *sum / *count as f64;
 
@@ -68,7 +68,7 @@ impl AggregatingFunction for Avg {
                 *count += 1;
                 *sum += match n.as_i64() {
                     Some(n) => n as f64,
-                    None => return Err(EvaluationError::ConversionError),
+                    None => return Err(EvaluationError::InvalidType { expected: "Integer".to_string() }),
                 };
                 let avg = *sum / *count as f64;
 
@@ -140,7 +140,7 @@ impl AggregatingFunction for Avg {
                 *count -= 1;
                 *sum -= match n.as_i64() {
                     Some(n) => n as f64,
-                    None => return Err(EvaluationError::ConversionError),
+                    None => return Err(EvaluationError::InvalidType { expected: "Integer".to_string() }),
                 };
 
                 if *count == 0 {
@@ -179,7 +179,7 @@ impl AggregatingFunction for Avg {
                     Float::from_f64(avg).unwrap_or_default(),
                 ))
             }
-            _ => Err(EvaluationError::InvalidType),
+            _ => Err(EvaluationError::InvalidArgument),
         }
     }
 
