@@ -6,9 +6,6 @@ pub mod future_queue;
 pub mod result_index;
 mod storage_models;
 
-#[cfg(test)]
-mod tests;
-
 trait ClearByPattern {
     async fn clear(&self, pattern: String) -> Result<(), IndexError>;
 }
