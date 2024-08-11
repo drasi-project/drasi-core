@@ -5,7 +5,7 @@ use rand::prelude::*;
 use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::variable_value::float::Float;
 use crate::evaluation::variable_value::VariableValue;
-use crate::evaluation::{EvaluationError, ExpressionEvaluationContext};
+use crate::evaluation::{FunctionError, FunctionEvaluationError, ExpressionEvaluationContext};
 
 #[derive(Debug)]
 pub struct Rand {}
@@ -15,11 +15,14 @@ impl ScalarFunction for Rand {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if !args.is_empty() {
-            return Err(EvaluationError::InvalidArgumentCount("rand".to_string()));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         let mut rng = rand::thread_rng();
         Ok(VariableValue::Float(Float::from_f64(rng.gen()).unwrap()))

@@ -25,7 +25,7 @@ use self::{
     text::RegisterTextFunctions,
 };
 
-use super::{EvaluationError, FunctionError, ExpressionEvaluationContext, ExpressionEvaluator};
+use super::{FunctionError, ExpressionEvaluationContext, ExpressionEvaluator};
 
 pub mod aggregation;
 pub mod context_mutators;
@@ -54,7 +54,7 @@ pub trait ScalarFunction: Send + Sync {
         context: &ExpressionEvaluationContext,
         expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError>;
+    ) -> Result<VariableValue, FunctionError>;
 }
 
 #[async_trait]
@@ -64,7 +64,7 @@ pub trait LazyScalarFunction: Send + Sync {
         context: &ExpressionEvaluationContext,
         expression: &ast::FunctionExpression,
         args: &Vec<ast::Expression>,
-    ) -> Result<VariableValue, EvaluationError>;
+    ) -> Result<VariableValue, FunctionError>;
 }
 
 #[async_trait]
@@ -103,7 +103,7 @@ pub trait ContextMutatorFunction: Send + Sync {
         &self,
         context: &ExpressionEvaluationContext<'a>,
         expression: &ast::FunctionExpression,
-    ) -> Result<ExpressionEvaluationContext<'a>, EvaluationError>;
+    ) -> Result<ExpressionEvaluationContext<'a>, FunctionError>;
 }
 
 pub struct FunctionRegistry {

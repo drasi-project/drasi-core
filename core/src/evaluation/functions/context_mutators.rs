@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use drasi_query_ast::ast;
 
-use crate::evaluation::{context::SideEffects, EvaluationError, ExpressionEvaluationContext};
+use crate::evaluation::{context::SideEffects, FunctionError, ExpressionEvaluationContext};
 
 use super::ContextMutatorFunction;
 
@@ -30,7 +30,7 @@ impl ContextMutatorFunction for RetainHistory {
         &self,
         context: &ExpressionEvaluationContext<'a>,
         _expression: &ast::FunctionExpression,
-    ) -> Result<ExpressionEvaluationContext<'a>, EvaluationError> {
+    ) -> Result<ExpressionEvaluationContext<'a>, FunctionError> {
         let mut new_context = context.clone();
         match new_context.get_side_effects() {
             SideEffects::RevertForUpdate => new_context.set_side_effects(SideEffects::Snapshot),

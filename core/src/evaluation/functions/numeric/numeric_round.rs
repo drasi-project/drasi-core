@@ -5,7 +5,7 @@ use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::variable_value::float::Float;
 use crate::evaluation::variable_value::integer::Integer;
 use crate::evaluation::variable_value::VariableValue;
-use crate::evaluation::{EvaluationError, ExpressionEvaluationContext};
+use crate::evaluation::{FunctionError, FunctionEvaluationError, ExpressionEvaluationContext};
 use std::collections::HashSet;
 
 extern crate round;
@@ -19,11 +19,14 @@ impl ScalarFunction for Round {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.is_empty() || args.len() > 3 {
-            return Err(EvaluationError::InvalidArgumentCount("round".to_string()));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         if args.contains(&VariableValue::Null) {
             return Ok(VariableValue::Null);
@@ -47,7 +50,10 @@ impl ScalarFunction for Round {
                             Float::from_f64(n.as_f64().unwrap().round()).unwrap(),
                         ))
                     }
-                    _ => Err(EvaluationError::InvalidType),
+                    _ => Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::InvalidArgument(0),
+                    }),
                 }
             }
             2 => {
@@ -77,7 +83,24 @@ impl ScalarFunction for Round {
                     (VariableValue::Integer(n), VariableValue::Integer(_p)) => {
                         Ok(VariableValue::Integer(Integer::from(n.as_i64().unwrap())))
                     }
-                    _ => Err(EvaluationError::InvalidType),
+                    (VariableValue::Float(_n), _) => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidArgument(1),
+                        });
+                    }
+                    (VariableValue::Integer(_n), _) => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidArgument(1),
+                        });
+                    },
+                    _ => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidArgument(0),
+                        });
+                    }
                 }
             }
             3 => {
@@ -102,7 +125,10 @@ impl ScalarFunction for Round {
                         // let valid_keys: HashSet<String> = vec!["year", "month", "week", "day", "ordinalDay", "quarter", "dayOfWeek", "dayOfQuarter"].iter().map(|s| s.to_string()).collect();
                         let mode = m.to_uppercase();
                         if !valid_modes.contains(&mode) {
-                            return Err(EvaluationError::InvalidType);
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::InvalidArgument(2),
+                            });
                         }
                         let is_positive = n.as_f64().unwrap().is_sign_positive();
                         match mode.as_str() {
@@ -236,7 +262,10 @@ impl ScalarFunction for Round {
                                     Float::from_f64(rounded_value).unwrap(),
                                 ));
                             }
-                            _ => return Err(EvaluationError::InvalidType),
+                            _ => return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::InvalidArgument(2),
+                            }),
                         }
                     }
                     (
@@ -244,10 +273,13 @@ impl ScalarFunction for Round {
                         VariableValue::Integer(_p),
                         VariableValue::Integer(_m),
                     ) => Ok(VariableValue::Integer(Integer::from(n.as_i64().unwrap()))),
-                    _ => Err(EvaluationError::InvalidType),
+                    _ => Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::InvalidArgument(2),
+                    }),
                 }
             }
-            _ => Err(EvaluationError::InvalidArgumentCount("round".to_string())),
+            _ => unreachable!()
         }
     }
 }

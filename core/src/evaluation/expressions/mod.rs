@@ -1443,18 +1443,12 @@ impl ExpressionEvaluator {
                     scalar
                         .call(context, expression, values)
                         .await
-                        .map_err(|e| EvaluationError::FunctionError(FunctionError {
-                            function_name: expression.name.to_string(),
-                            error: Box::new(e),
-                        }))?,
+                        .map_err(|e| EvaluationError::FunctionError(e))?
                 }
                 Function::LazyScalar(scalar) => scalar
                     .call(context, expression, &expression.args)
                     .await
-                    .map_err(|e| EvaluationError::FunctionError(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: Box::new(e),
-                    }))?,
+                    .map_err(|e| EvaluationError::FunctionError(e))?,
                 Function::Aggregating(aggregate) => {
                     let mut values = Vec::new();
                     for arg in &expression.args {
@@ -1501,24 +1495,15 @@ impl ExpressionEvaluator {
                         SideEffects::Apply => aggregate
                             .apply(context, values, &mut accumulator)
                             .await
-                            .map_err(|e| EvaluationError::FunctionError(FunctionError {
-                                function_name: expression.name.to_string(),
-                                error: Box::new(e),
-                            }))?,
+                            .map_err(|e| EvaluationError::FunctionError(e))?,
                         SideEffects::RevertForUpdate | SideEffects::RevertForDelete => aggregate
                             .revert(context, values, &mut accumulator)
                             .await
-                            .map_err(|e| EvaluationError::FunctionError(FunctionError {
-                                function_name: expression.name.to_string(),
-                                error: Box::new(e),
-                            }))?,
+                            .map_err(|e| EvaluationError::FunctionError(e))?,
                         SideEffects::Snapshot => aggregate
                             .snapshot(context, values, &accumulator)
                             .await
-                            .map_err(|e| EvaluationError::FunctionError(FunctionError {
-                                function_name: expression.name.to_string(),
-                                error: Box::new(e),
-                            }))?,
+                            .map_err(|e| EvaluationError::FunctionError(e))?,
                     };
 
                     //println!("{:?} {}{} : {:?}", context.get_side_effects(), expression.name, expression.position_in_query, result);
@@ -1540,7 +1525,12 @@ impl ExpressionEvaluator {
                     if expression.args.is_empty() {
                         VariableValue::Null
                     } else {
-                        let new_context = context_mutator.call(context, expression).await?;
+                        let new_context = match context_mutator.call(context, expression).await {
+                            Ok(new_context) => new_context,
+                            Err(e) => {
+                                return Err(EvaluationError::FunctionError(e));
+                            }
+                        };
 
                         self.evaluate_expression(&new_context, &expression.args[0])
                             .await?
@@ -1623,23 +1613,26 @@ impl ExpressionEvaluator {
         &self,
         context: &ExpressionEvaluationContext<'_>,
         expression: &ast::Expression,
-    ) -> Result<(Arc<str>, VariableValue), EvaluationError> {
+    ) -> Result<(Arc<str>, VariableValue), FunctionEvaluationError> {
         match expression {
             ast::Expression::BinaryExpression(exp) => match exp {
                 ast::BinaryExpression::Eq(var, val) => {
                     let variable = match *var.clone() {
                         ast::Expression::UnaryExpression(exp) => match exp {
                             ast::UnaryExpression::Identifier(ident) => ident,
-                            _ => return Err(EvaluationError::InvalidExpression),
+                            _ => return Err( FunctionEvaluationError::InvalidAssignmentExpression),
                         },
-                        _ => return Err(EvaluationError::InvalidExpression),
+                        _ => return Err(FunctionEvaluationError::InvalidAssignmentExpression),
                     };
-                    let value = self.evaluate_expression(context, val).await?;
+                    let value = match self.evaluate_expression(context, val).await {
+                        Ok(value) => value,
+                        Err(_) => return Err(FunctionEvaluationError::InvalidAssignmentExpression),
+                    };
                     Ok((variable, value))
                 }
-                _ => Err(EvaluationError::InvalidExpression),
+                _ => Err(FunctionEvaluationError::InvalidAssignmentExpression),
             },
-            _ => Err(EvaluationError::InvalidExpression),
+            _ => Err(FunctionEvaluationError::InvalidAssignmentExpression),
         }
     }
 

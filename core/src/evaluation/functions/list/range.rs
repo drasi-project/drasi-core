@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use drasi_query_ast::ast;
 
 use crate::evaluation::functions::ScalarFunction;
-use crate::evaluation::{EvaluationError, ExpressionEvaluationContext};
+use crate::evaluation::{FunctionError, FunctionEvaluationError,  ExpressionEvaluationContext};
 
 #[derive(Debug)]
 pub struct Range {}
@@ -15,11 +15,12 @@ impl ScalarFunction for Range {
         _context: &ExpressionEvaluationContext,
         expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() < 2 || args.len() > 3 {
-            return Err(EvaluationError::InvalidArgumentCount(
-                expression.name.to_string(),
-            ));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         match args.len() {
             2 => match (&args[0], &args[1]) {
@@ -32,7 +33,14 @@ impl ScalarFunction for Range {
                     }
                     Ok(VariableValue::List(range))
                 }
-                _ => Err(EvaluationError::InvalidType),
+                (VariableValue::Integer(_), _) => Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(1),
+                }),
+                _ => Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(0),
+                }),
             },
             3 => match (&args[0], &args[1], &args[2]) {
                 (
@@ -49,7 +57,22 @@ impl ScalarFunction for Range {
                     }
                     Ok(VariableValue::List(range))
                 }
-                _ => Err(EvaluationError::InvalidType),
+                (VariableValue::Integer(_), VariableValue::Integer(_), _) => Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(2),
+                }),
+                (_, VariableValue::Integer(_), VariableValue::Integer(_)) => Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(0),
+                }),
+                (VariableValue::Integer(_), _, VariableValue::Integer(_)) => Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(1),
+                }),
+                _ => Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(0),
+                }),
             },
             _ => unreachable!(),
         }

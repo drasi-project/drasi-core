@@ -1,5 +1,5 @@
 use crate::evaluation::functions::ScalarFunction;
-use crate::evaluation::EvaluationError;
+use crate::evaluation::{FunctionError, FunctionEvaluationError};
 use async_trait::async_trait;
 use drasi_query_ast::ast;
 
@@ -13,13 +13,14 @@ impl ScalarFunction for DrasiMax {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.is_empty() || args.len() > 2 {
-            return Err(EvaluationError::InvalidArgumentCount(
-                "drasi.listMax".to_string(),
-            ));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         match &args[0] {
             VariableValue::List(l) => {
@@ -46,7 +47,10 @@ impl ScalarFunction for DrasiMax {
             VariableValue::ZonedTime(t) => Ok(VariableValue::ZonedTime(*t)),
             VariableValue::ZonedDateTime(dt) => Ok(VariableValue::ZonedDateTime(dt.clone())),
             VariableValue::Duration(d) => Ok(VariableValue::Duration(d.clone())),
-            _ => Err(EvaluationError::InvalidType),
+            _ => Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
         }
     }
 }

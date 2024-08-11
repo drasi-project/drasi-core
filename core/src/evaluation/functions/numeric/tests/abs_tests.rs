@@ -6,7 +6,7 @@ use crate::evaluation::context::QueryVariables;
 use crate::evaluation::functions::numeric::Abs;
 use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::variable_value::VariableValue;
-use crate::evaluation::{EvaluationError, ExpressionEvaluationContext, InstantQueryClock};
+use crate::evaluation::{FunctionError,  FunctionEvaluationError, ExpressionEvaluationContext, InstantQueryClock};
 
 #[tokio::test]
 async fn abs_too_few_args() {
@@ -28,7 +28,10 @@ async fn abs_too_few_args() {
     let result = abs.call(&context, &func_expr, args.clone()).await;
     assert!(matches!(
         result.unwrap_err(),
-        EvaluationError::InvalidArgumentCount(_)
+        FunctionError {
+            function_name: _,
+            error: FunctionEvaluationError::InvalidArgumentCount
+        }
     ));
 }
 
@@ -55,7 +58,10 @@ async fn abs_too_many_args() {
     let result = abs.call(&context, &func_expr, args.clone()).await;
     assert!(matches!(
         result.unwrap_err(),
-        EvaluationError::InvalidArgumentCount(_)
+        FunctionError {
+            function_name: _,
+            error: FunctionEvaluationError::InvalidArgumentCount
+        }
     ));
 }
 

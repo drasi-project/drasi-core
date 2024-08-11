@@ -4,7 +4,7 @@ use drasi_query_ast::ast;
 use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::variable_value::duration::Duration;
 use crate::evaluation::variable_value::VariableValue;
-use crate::evaluation::{EvaluationError, ExpressionEvaluationContext};
+use crate::evaluation::{FunctionError, FunctionEvaluationError, ExpressionEvaluationContext};
 use crate::evaluation::temporal_constants;
 
 use chrono::{Datelike, Duration as ChronoDuration, LocalResult, NaiveDate};
@@ -21,20 +21,21 @@ impl ScalarFunction for DurationFunc {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
-            return Err(EvaluationError::InvalidArgumentCount(
-                "duration".to_string(),
-            ));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         match &args[0] {
             VariableValue::String(s) => {
                 let duration_str = s.as_str();
                 let duration = match parse_duration_input(duration_str).await {
                     Ok(duration) => duration,
-                    Err(_) => return Err(EvaluationError::ParseError),
+                    Err(e) => return Err(e),
                 };
                 Ok(VariableValue::Duration(duration))
             }
@@ -59,7 +60,10 @@ impl ScalarFunction for DurationFunc {
                     o.keys().filter(|&key| !valid_keys.contains(key)).collect();
                 if !invalid_keys.is_empty() {
                     error!("Invalid keys in duration object");
-                    return Err(EvaluationError::InvalidType);
+                    return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::InvalidArgument(0),
+                    });
                 }
 
                 let year = match o.get("years") {
@@ -115,7 +119,10 @@ impl ScalarFunction for DurationFunc {
                     Duration::new(chrono_duration, year.floor() as i64, month.floor() as i64);
                 Ok(VariableValue::Duration(duration))
             }
-            _ => Err(EvaluationError::InvalidType),
+            _ => Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
         }
     }
 }
@@ -128,11 +135,14 @@ impl ScalarFunction for Between {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 2 {
-            return Err(EvaluationError::InvalidArgumentCount("between".to_string()));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         match (&args[0], &args[1]) {
             (VariableValue::Date(start), VariableValue::Date(end)) => {
@@ -174,11 +184,14 @@ impl ScalarFunction for Between {
             (VariableValue::Date(start), VariableValue::ZonedDateTime(end)) => {
                 let start_time = match start.and_hms_opt(0, 0, 0) {
                     Some(start_time) => start_time,
-                    None => return Err(EvaluationError::InvalidType),
+                    None => unreachable!(),
                 };
                 let start_datetime = match start_time.and_local_timezone(*end.datetime().offset()) {
                     LocalResult::Single(start_datetime) => start_datetime,
-                    _ => return Err(EvaluationError::InvalidType),
+                    _ => return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::InvalidDateTimeFormat,
+                    }),
                 };
                 let end_datetime = end.datetime().fixed_offset();
                 let duration = end_datetime.signed_duration_since(start_datetime);
@@ -232,7 +245,10 @@ impl ScalarFunction for Between {
                     .and_local_timezone(*end_datetime.offset())
                 {
                     LocalResult::Single(start_datetime) => start_datetime,
-                    _ => return Err(EvaluationError::InvalidType),
+                    _ => return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::InvalidDateTimeFormat,
+                    }),
                 };
                 let duration = end_datetime.signed_duration_since(start_datetime);
                 Ok(VariableValue::Duration(Duration::new(
@@ -248,14 +264,20 @@ impl ScalarFunction for Between {
                     .and_local_timezone(*start.offset())
                 {
                     LocalResult::Single(start_datetime) => start_datetime,
-                    _ => return Err(EvaluationError::InvalidType),
+                    _ => return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::InvalidArgument(0),
+                    }),
                 };
                 let end_datetime = match dummy_date
                     .and_time(*end.time())
                     .and_local_timezone(*end.offset())
                 {
                     LocalResult::Single(end_datetime) => end_datetime,
-                    _ => return Err(EvaluationError::InvalidType),
+                    _ => return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::InvalidArgument(1),
+                    }),
                 };
 
                 let start_time = start_datetime.fixed_offset();
@@ -296,7 +318,10 @@ impl ScalarFunction for Between {
                     .and_local_timezone(*start_offset)
                 {
                     LocalResult::Single(end_datetime) => end_datetime,
-                    _ => return Err(EvaluationError::InvalidType),
+                    _ => return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::InvalidLocalDateTimeFormat,
+                    }),
                 };
                 let start_datetime = match end
                     .date()
@@ -304,7 +329,10 @@ impl ScalarFunction for Between {
                     .and_local_timezone(*start_offset)
                 {
                     LocalResult::Single(start_datetime) => start_datetime,
-                    _ => return Err(EvaluationError::InvalidType),
+                    _ => return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::InvalidDateTimeFormat,
+                    }),
                 };
 
                 let duration = end_datetime.signed_duration_since(start_datetime);
@@ -322,7 +350,10 @@ impl ScalarFunction for Between {
                     .and_local_timezone(*start.offset())
                 {
                     LocalResult::Single(start_datetime) => start_datetime,
-                    _ => return Err(EvaluationError::InvalidType),
+                    _ => return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::InvalidDateTimeFormat,
+                    }),
                 };
 
                 let fixed_start_datetime = start_datetime.fixed_offset();
@@ -369,11 +400,17 @@ impl ScalarFunction for Between {
                     .and_local_timezone(*offset)
                 {
                     LocalResult::Single(end_datetime) => end_datetime,
-                    _ => return Err(EvaluationError::InvalidType),
+                    _ => return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::InvalidTimeFormat,
+                    }),
                 };
                 let start_datetime = match start.and_local_timezone(*offset) {
                     LocalResult::Single(start_datetime) => start_datetime,
-                    _ => return Err(EvaluationError::InvalidType),
+                    _ => return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::InvalidLocalDateTimeFormat,
+                    }),
                 };
 
                 let duration = end_datetime.signed_duration_since(start_datetime);
@@ -387,7 +424,10 @@ impl ScalarFunction for Between {
                 let start_offset = end.datetime().offset();
                 let start_datetime = match start.and_local_timezone(*start_offset) {
                     LocalResult::Single(start_datetime) => start_datetime,
-                    _ => return Err(EvaluationError::InvalidType),
+                    _ => return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::InvalidDateTimeFormat,
+                    }),
                 };
 
                 let duration = end.datetime().signed_duration_since(start_datetime);
@@ -413,7 +453,10 @@ impl ScalarFunction for Between {
                     .and_local_timezone(*start_datetime.offset())
                 {
                     LocalResult::Single(end_datetime) => end_datetime,
-                    _ => return Err(EvaluationError::InvalidType),
+                    _ => return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::InvalidDateTimeFormat,
+                    }),
                 };
                 let duration = end_datetime.signed_duration_since(start_datetime);
                 Ok(VariableValue::Duration(Duration::new(
@@ -430,7 +473,10 @@ impl ScalarFunction for Between {
                     .and_local_timezone(*start_datetime.offset())
                 {
                     LocalResult::Single(end_datetime) => end_datetime,
-                    _ => return Err(EvaluationError::InvalidType),
+                    _ => return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::InvalidDateTimeFormat,
+                    }),
                 };
                 let duration = end_datetime.signed_duration_since(start_datetime);
                 Ok(VariableValue::Duration(Duration::new(
@@ -447,7 +493,10 @@ impl ScalarFunction for Between {
                     .and_local_timezone(*end.offset())
                 {
                     LocalResult::Single(end_datetime) => end_datetime,
-                    _ => return Err(EvaluationError::InvalidType),
+                    _ => return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::InvalidDateTimeFormat,
+                    }),
                 };
 
                 let fixed_end_datetime = end_datetime.fixed_offset();
@@ -463,7 +512,10 @@ impl ScalarFunction for Between {
                 let start_offset = start.datetime().offset();
                 let end_datetime = match end.and_local_timezone(*start_offset) {
                     LocalResult::Single(end_datetime) => end_datetime,
-                    _ => return Err(EvaluationError::InvalidType),
+                    _ => return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::InvalidLocalDateTimeFormat,
+                    }),
                 };
 
                 let duration = end_datetime.signed_duration_since(*start.datetime());
@@ -474,7 +526,10 @@ impl ScalarFunction for Between {
                 )))
             }
             (VariableValue::Null, _) | (_, VariableValue::Null) => Ok(VariableValue::Null),
-            _ => Err(EvaluationError::InvalidType),
+            _ => Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
         }
     }
 }
@@ -487,24 +542,21 @@ impl ScalarFunction for InMonths {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 2 {
-            return Err(EvaluationError::InvalidArgumentCount(
-                "in_months".to_string(),
-            ));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         match (&args[0], &args[1]) {
             (VariableValue::Date(start), VariableValue::Date(end)) => {
                 let end_date = end;
                 let start_date = start;
 
-                let (years_diff, months_diff) =
-                    match calculate_year_month(start_date, end_date).await {
-                        Ok((years_diff, months_diff)) => (years_diff, months_diff),
-                        Err(_) => return Err(EvaluationError::InvalidType),
-                    };
+                let (years_diff, months_diff) = calculate_year_month(start_date, end_date);
                 Ok(VariableValue::Duration(Duration::new(
                     ChronoDuration::days(0),
                     years_diff,
@@ -521,11 +573,7 @@ impl ScalarFunction for InMonths {
                 let end_date = end.date();
                 let start_date = start;
 
-                let (years_diff, months_diff) =
-                    match calculate_year_month(start_date, &end_date).await {
-                        Ok((years_diff, months_diff)) => (years_diff, months_diff),
-                        Err(_) => return Err(EvaluationError::InvalidType),
-                    };
+                let (years_diff, months_diff) = calculate_year_month(start_date, &end_date);
                 Ok(VariableValue::Duration(Duration::new(
                     ChronoDuration::days(0),
                     years_diff,
@@ -536,11 +584,7 @@ impl ScalarFunction for InMonths {
                 let end_date = end.datetime().date_naive();
                 let start_date = start;
 
-                let (years_diff, months_diff) =
-                    match calculate_year_month(start_date, &end_date).await {
-                        Ok((years_diff, months_diff)) => (years_diff, months_diff),
-                        Err(_) => return Err(EvaluationError::InvalidType),
-                    };
+                let (years_diff, months_diff) = calculate_year_month(start_date, &end_date);
                 Ok(VariableValue::Duration(Duration::new(
                     ChronoDuration::days(0),
                     years_diff,
@@ -565,11 +609,7 @@ impl ScalarFunction for InMonths {
                 let end_date = end.date();
                 let start_date = start.date();
 
-                let (years_diff, months_diff) =
-                    match calculate_year_month(&start_date, &end_date).await {
-                        Ok((years_diff, months_diff)) => (years_diff, months_diff),
-                        Err(_) => return Err(EvaluationError::InvalidType),
-                    };
+                let (years_diff, months_diff) = calculate_year_month(&start_date, &end_date);
                 Ok(VariableValue::Duration(Duration::new(
                     ChronoDuration::days(0),
                     years_diff,
@@ -584,11 +624,7 @@ impl ScalarFunction for InMonths {
                 let end_date = end;
                 let start_date = start.date();
 
-                let (years_diff, months_diff) =
-                    match calculate_year_month(&start_date, end_date).await {
-                        Ok((years_diff, months_diff)) => (years_diff, months_diff),
-                        Err(_) => return Err(EvaluationError::InvalidType),
-                    };
+                let (years_diff, months_diff) = calculate_year_month(&start_date, end_date);
                 Ok(VariableValue::Duration(Duration::new(
                     ChronoDuration::days(0),
                     years_diff,
@@ -599,11 +635,7 @@ impl ScalarFunction for InMonths {
                 let end_date = end.datetime().date_naive();
                 let start_date = start.date();
 
-                let (years_diff, months_diff) =
-                    match calculate_year_month(&start_date, &end_date).await {
-                        Ok((years_diff, months_diff)) => (years_diff, months_diff),
-                        Err(_) => return Err(EvaluationError::InvalidType),
-                    };
+                let (years_diff, months_diff) = calculate_year_month(&start_date, &end_date);
                 Ok(VariableValue::Duration(Duration::new(
                     ChronoDuration::days(0),
                     years_diff,
@@ -614,11 +646,7 @@ impl ScalarFunction for InMonths {
                 let end_date = end.datetime().fixed_offset().date_naive();
                 let start_date = start.datetime().fixed_offset().date_naive();
 
-                let (years_diff, months_diff) =
-                    match calculate_year_month(&start_date, &end_date).await {
-                        Ok((years_diff, months_diff)) => (years_diff, months_diff),
-                        Err(_) => return Err(EvaluationError::InvalidType),
-                    };
+                let (years_diff, months_diff) = calculate_year_month(&start_date, &end_date); 
                 Ok(VariableValue::Duration(Duration::new(
                     ChronoDuration::days(0),
                     years_diff,
@@ -629,11 +657,7 @@ impl ScalarFunction for InMonths {
                 let end_date = end.date();
                 let start_date = start.datetime().fixed_offset().date_naive();
 
-                let (years_diff, months_diff) =
-                    match calculate_year_month(&start_date, &end_date).await {
-                        Ok((years_diff, months_diff)) => (years_diff, months_diff),
-                        Err(_) => return Err(EvaluationError::InvalidType),
-                    };
+                let (years_diff, months_diff) = calculate_year_month(&start_date, &end_date);
                 Ok(VariableValue::Duration(Duration::new(
                     ChronoDuration::days(0),
                     years_diff,
@@ -644,11 +668,7 @@ impl ScalarFunction for InMonths {
                 let end_date = end;
                 let start_date = start.datetime().fixed_offset().date_naive();
 
-                let (years_diff, months_diff) =
-                    match calculate_year_month(&start_date, end_date).await {
-                        Ok((years_diff, months_diff)) => (years_diff, months_diff),
-                        Err(_) => return Err(EvaluationError::InvalidType),
-                    };
+                let (years_diff, months_diff) = calculate_year_month(&start_date, end_date);
                 Ok(VariableValue::Duration(Duration::new(
                     ChronoDuration::days(0),
                     years_diff,
@@ -659,7 +679,10 @@ impl ScalarFunction for InMonths {
             | (VariableValue::ZonedDateTime(_), VariableValue::ZonedTime(_)) => Ok(
                 VariableValue::Duration(Duration::new(ChronoDuration::days(0), 0, 0)),
             ),
-            _ => Err(EvaluationError::InvalidType),
+            _ => Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
         }
     }
 }
@@ -674,9 +697,12 @@ impl ScalarFunction for InDays {
         _context: &ExpressionEvaluationContext,
         expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 2 {
-            return Err(EvaluationError::InvalidArgumentCount("in_days".to_string()));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
 
         let between = Between {};
@@ -688,7 +714,12 @@ impl ScalarFunction for InDays {
                     VariableValue::Duration(Duration::new(ChronoDuration::days(days), 0, 0));
                 Ok(duration)
             }
-            Err(_error) => Err(EvaluationError::InvalidType),
+            Err(_error) => Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidType {
+                    expected: "Duration".to_string(),
+                },
+            }),
         }
     }
 }
@@ -703,11 +734,12 @@ impl ScalarFunction for InSeconds {
         _context: &ExpressionEvaluationContext,
         expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 2 {
-            return Err(EvaluationError::InvalidArgumentCount(
-                "in_seconds".to_string(),
-            ));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
 
         let between = Between {};
@@ -721,7 +753,10 @@ impl ScalarFunction for InSeconds {
                     .num_nanoseconds()
                 {
                     Some(seconds) => seconds,
-                    None => return Err(EvaluationError::InvalidType),
+                    None => return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::InvalidDurationFormat,
+                    }),
                 };
                 let duration = VariableValue::Duration(Duration::new(
                     ChronoDuration::nanoseconds(seconds),
@@ -730,15 +765,20 @@ impl ScalarFunction for InSeconds {
                 ));
                 Ok(duration)
             }
-            Err(_error) => Err(EvaluationError::InvalidType),
+            Err(_error) => Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidType {
+                    expected: "Duration".to_string(),
+                },
+            }),
         }
     }
 }
 
-async fn calculate_year_month(
+fn calculate_year_month(
     start: &NaiveDate,
     end: &NaiveDate,
-) -> Result<(i64, i64), EvaluationError> {
+) -> (i64, i64) {
     let months_diff = end.month() as i64 - start.month() as i64;
     let years_diff = (end.year() - start.year()) as i64;
 
@@ -749,16 +789,19 @@ async fn calculate_year_month(
         result_month = (years_diff - 1) * 12 + (months_diff + 12);
     }
 
-    Ok((result_month / 12, result_month % 12))
+    (result_month / 12, result_month % 12)
 }
 
-async fn parse_duration_input(duration_str: &str) -> Result<Duration, EvaluationError> {
+async fn parse_duration_input(duration_str: &str) -> Result<Duration, FunctionError> {
     let mut duration_result = ChronoDuration::days(0);
 
     //Durtion string must start with 'P'
     let duration = match duration_str.strip_prefix('P') {
         Some(duration) => duration,
-        None => return Err(EvaluationError::ParseError),
+        None => return Err(FunctionError {
+            function_name: "Duration".to_string(),
+            error: FunctionEvaluationError::InvalidDurationFormat,
+        }),
     };
 
     let date_duration = duration.split('T').next();
@@ -784,7 +827,10 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, Evaluation
                             if let Ok(years) = substring.parse::<i64>() {
                                 duration_years = years;
                             } else {
-                                return Err(EvaluationError::ParseError);
+                                return Err(FunctionError {
+                                    function_name: "Duration".to_string(),
+                                    error: FunctionEvaluationError::InvalidDurationFormat,
+                                });
                             }
                         }
                         if matched_value.contains('M') {
@@ -792,7 +838,10 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, Evaluation
                             if let Ok(months) = substring.parse::<i64>() {
                                 duration_months = months;
                             } else {
-                                return Err(EvaluationError::ParseError);
+                                return Err(FunctionError {
+                                    function_name: "Duration".to_string(),
+                                    error: FunctionEvaluationError::InvalidDurationFormat,
+                                });
                             }
                         }
                         if matched_value.contains('W') {
@@ -800,7 +849,10 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, Evaluation
                             if let Ok(weeks) = substring.parse::<i64>() {
                                 duration_result += ChronoDuration::weeks(weeks);
                             } else {
-                                return Err(EvaluationError::ParseError);
+                                return Err(FunctionError {
+                                    function_name: "Duration".to_string(),
+                                    error: FunctionEvaluationError::InvalidDurationFormat,
+                                });
                             }
                         }
                         if matched_value.contains('D') {
@@ -811,12 +863,18 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, Evaluation
                                         (days * 86400000000000.0) as i64,
                                     );
                                 } else {
-                                    return Err(EvaluationError::ParseError);
+                                    return Err(FunctionError {
+                                        function_name: "Duration".to_string(),
+                                        error: FunctionEvaluationError::InvalidDurationFormat,
+                                    });
                                 }
                             } else if let Ok(days) = substring.parse::<i64>() {
                                 duration_result += ChronoDuration::days(days);
                             } else {
-                                return Err(EvaluationError::ParseError);
+                                return Err(FunctionError {
+                                    function_name: "Duration".to_string(),
+                                    error: FunctionEvaluationError::InvalidDurationFormat,
+                                });
                             }
                         }
                     }
@@ -832,22 +890,34 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, Evaluation
 
             let iso_duration = match time_duration_string.parse::<IsoDuration>() {
                 Ok(iso_duration) => iso_duration,
-                Err(_) => return Err(EvaluationError::ParseError),
+                Err(_) => return Err(FunctionError {
+                    function_name: "Duration".to_string(),
+                    error: FunctionEvaluationError::InvalidDurationFormat,
+                }),
             };
             let seconds = match iso_duration.num_seconds() {
                 Some(seconds) => seconds,
-                None => return Err(EvaluationError::ParseError),
+                None => return Err(FunctionError {
+                    function_name: "Duration".to_string(),
+                    error: FunctionEvaluationError::InvalidDurationFormat,
+                }),
             };
 
             if time_duration_string.contains('.') {
                 let mut fract_string = match time_duration_string.split('.').last() {
                     Some(fract_string) => fract_string,
-                    None => return Err(EvaluationError::ParseError),
+                    None => return Err(FunctionError {
+                        function_name: "Duration".to_string(),
+                        error: FunctionEvaluationError::InvalidDurationFormat,
+                    }),
                 };
                 fract_string = &fract_string[..fract_string.len() - 1];
                 let nanoseconds = match fract_string.parse::<i64>() {
                     Ok(nanoseconds) => nanoseconds,
-                    Err(_) => return Err(EvaluationError::ParseError),
+                    Err(_) => return Err(FunctionError {
+                        function_name: "Duration".to_string(),
+                        error: FunctionEvaluationError::InvalidDurationFormat,
+                    }),
                 };
                 duration_result += ChronoDuration::nanoseconds(nanoseconds * 100_000_000_i64);
             }

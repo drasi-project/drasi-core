@@ -2,7 +2,7 @@ use crate::evaluation::context::QueryVariables;
 use crate::evaluation::functions::FunctionRegistry;
 use crate::evaluation::variable_value::integer::Integer;
 use crate::evaluation::variable_value::VariableValue;
-use crate::evaluation::{EvaluationError, InstantQueryClock};
+use crate::evaluation::{FunctionError,EvaluationError, FunctionEvaluationError, InstantQueryClock};
 use crate::evaluation::{ExpressionEvaluationContext, ExpressionEvaluator};
 use crate::in_memory_index::in_memory_result_index::InMemoryResultIndex;
 use std::sync::Arc;
@@ -230,7 +230,7 @@ async fn test_list_indexing_string_indexing() {
             .evaluate_expression(&context, &expr)
             .await
             .unwrap_err(),
-        EvaluationError::InvalidType
+        EvaluationError::InvalidExpression,
     ));
 }
 
@@ -253,7 +253,7 @@ async fn test_list_indexing_null_indexing() {
             .evaluate_expression(&context, &expr)
             .await
             .unwrap_err(),
-        EvaluationError::InvalidType
+        EvaluationError::InvalidExpression,
     ));
 }
 
@@ -276,7 +276,7 @@ async fn test_list_indexing_float_indexing() {
             .evaluate_expression(&context, &expr)
             .await
             .unwrap_err(),
-        EvaluationError::InvalidType
+        EvaluationError::InvalidExpression
     ));
 }
 

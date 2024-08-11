@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use drasi_query_ast::ast;
 
 use crate::evaluation::functions::ScalarFunction;
-use crate::evaluation::{EvaluationError, ExpressionEvaluationContext};
+use crate::evaluation::{FunctionError, FunctionEvaluationError, ExpressionEvaluationContext};
 
 #[derive(Debug)]
 pub struct ToFloat {}
@@ -15,11 +15,12 @@ impl ScalarFunction for ToFloat {
         _context: &ExpressionEvaluationContext,
         expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
-            return Err(EvaluationError::InvalidArgumentCount(
-                expression.name.to_string(),
-            ));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         match &args[0] {
             VariableValue::Null => Ok(VariableValue::Null),
@@ -36,9 +37,9 @@ impl ScalarFunction for ToFloat {
                     Ok(VariableValue::Null)
                 }
             }
-            _ => Err(EvaluationError::FunctionError {
+            _ => Err(FunctionError {
                 function_name: expression.name.to_string(),
-                error: Box::new(EvaluationError::InvalidType),
+                error: FunctionEvaluationError::InvalidArgument(0),
             }),
         }
     }
@@ -54,11 +55,12 @@ impl ScalarFunction for ToFloatOrNull {
         _context: &ExpressionEvaluationContext,
         expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
-            return Err(EvaluationError::InvalidArgumentCount(
-                expression.name.to_string(),
-            ));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         match &args[0] {
             VariableValue::Null => Ok(VariableValue::Null),
