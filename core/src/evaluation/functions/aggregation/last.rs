@@ -46,12 +46,12 @@ impl AggregatingFunction for Last {
                 super::ValueAccumulator::Value(value) => value,
                 _ => return Err(FunctionError {
                     function_name: "Last".to_string(),
-                    error: FunctionEvaluationError::InvalidAccumulator,
+                    error: FunctionEvaluationError::CorruptData,
                 }),
             },
             _ => return Err(FunctionError {
                 function_name: "Last".to_string(),
-                error: FunctionEvaluationError::InvalidAccumulator,
+                error: FunctionEvaluationError::CorruptData,
             }),
         };
 
@@ -83,12 +83,12 @@ impl AggregatingFunction for Last {
                 super::ValueAccumulator::Value(value) => value,
                 _ => return Err(FunctionError {
                     function_name: "Last".to_string(),
-                    error: FunctionEvaluationError::InvalidAccumulator,
+                    error: FunctionEvaluationError::CorruptData,
                 }),
             },
             _ => return Err(FunctionError {
                 function_name: "Last".to_string(),
-                error: FunctionEvaluationError::InvalidAccumulator,
+                error: FunctionEvaluationError::CorruptData,
             }),
         };
 
@@ -107,12 +107,12 @@ impl AggregatingFunction for Last {
                 super::ValueAccumulator::Value(value) => value,
                 _ => return Err(FunctionError {
                     function_name: "Last".to_string(),
-                    error: FunctionEvaluationError::InvalidAccumulator,
+                    error: FunctionEvaluationError::CorruptData,
                 }),
             },
             _ => return Err(FunctionError {
                 function_name: "Last".to_string(),
-                error: FunctionEvaluationError::InvalidAccumulator,
+                error: FunctionEvaluationError::CorruptData,
             }),
         };
         Ok((&value.clone()).into())

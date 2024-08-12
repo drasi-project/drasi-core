@@ -51,12 +51,12 @@ impl AggregatingFunction for Avg {
                 ValueAccumulator::Avg { sum, count } => (sum, count),
                 _ => return Err(FunctionError {
                     function_name: "Avg".to_string(),
-                    error: FunctionEvaluationError::InvalidAccumulator,
+                    error: FunctionEvaluationError::CorruptData,
                 }),
             },
             _ => return Err(FunctionError {
                 function_name: "Avg".to_string(),
-                error: FunctionEvaluationError::InvalidAccumulator,
+                error: FunctionEvaluationError::CorruptData,
             }),
         };
 
@@ -134,12 +134,12 @@ impl AggregatingFunction for Avg {
                 ValueAccumulator::Avg { sum, count } => (sum, count),
                 _ => return Err(FunctionError {
                     function_name: "Avg".to_string(),
-                    error: FunctionEvaluationError::InvalidAccumulator,
+                    error: FunctionEvaluationError::CorruptData,
                 }),
             },
             _ => return Err(FunctionError {
                 function_name: "Avg".to_string(),
-                error: FunctionEvaluationError::InvalidAccumulator,
+                error: FunctionEvaluationError::CorruptData,
             }),
         };
 
@@ -236,12 +236,12 @@ impl AggregatingFunction for Avg {
                 ValueAccumulator::Avg { sum, count } => (sum, count),
                 _ => return Err(FunctionError {
                     function_name: "Avg".to_string(),
-                    error: FunctionEvaluationError::InvalidAccumulator,
+                    error: FunctionEvaluationError::CorruptData,
                 }),
             },
             _ => return Err(FunctionError {
                 function_name: "Avg".to_string(),
-                error: FunctionEvaluationError::InvalidAccumulator,
+                error: FunctionEvaluationError::CorruptData,
             }),
         };
 

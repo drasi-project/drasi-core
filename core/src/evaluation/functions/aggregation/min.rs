@@ -60,7 +60,7 @@ impl AggregatingFunction for Min {
             Accumulator::LazySortedSet(accumulator) => accumulator,
             _ => return Err(FunctionError {
                 function_name: "Min".to_string(),
-                error: FunctionEvaluationError::InvalidAccumulator,
+                error: FunctionEvaluationError::CorruptData,
             }),
         };
 
@@ -239,7 +239,7 @@ impl AggregatingFunction for Min {
             Accumulator::LazySortedSet(accumulator) => accumulator,
             _ => return Err(FunctionError {
                 function_name: "Min".to_string(),
-                error: FunctionEvaluationError::InvalidAccumulator,
+                error: FunctionEvaluationError::CorruptData,
             }),
         };
 
@@ -421,7 +421,7 @@ impl AggregatingFunction for Min {
             Accumulator::LazySortedSet(accumulator) => accumulator,
             _ => return Err(FunctionError {
                 function_name: "Min".to_string(),
-                error: FunctionEvaluationError::InvalidAccumulator,
+                error: FunctionEvaluationError::CorruptData,
             }),
         };
 

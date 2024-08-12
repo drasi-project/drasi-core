@@ -1193,14 +1193,14 @@ impl ScalarFunction for ClockFunction {
                 Some(tz) => tz,
                 None => return Err(FunctionError {
                     function_name: expression.name.to_string(),
-                    error: FunctionEvaluationError::InvalidClock,
+                    error: FunctionEvaluationError::InvalidArgument(0),
                 }),
             };
             let date_time = match tz.timestamp_millis_opt(timestamp as i64) {
                 LocalResult::Single(dt) => dt.fixed_offset(),
                 _ => return Err(FunctionError {
                     function_name: expression.name.to_string(),
-                    error: FunctionEvaluationError::InvalidClock,
+                    error: FunctionEvaluationError::InvalidArgument(0),
                 }),
             };
 

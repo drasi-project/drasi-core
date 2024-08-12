@@ -230,7 +230,7 @@ async fn test_list_indexing_string_indexing() {
             .evaluate_expression(&context, &expr)
             .await
             .unwrap_err(),
-        EvaluationError::InvalidExpression,
+        EvaluationError::InvalidType { expected: _ },
     ));
 }
 
@@ -253,7 +253,7 @@ async fn test_list_indexing_null_indexing() {
             .evaluate_expression(&context, &expr)
             .await
             .unwrap_err(),
-        EvaluationError::InvalidExpression,
+        EvaluationError::InvalidType { expected: _ },
     ));
 }
 
@@ -276,7 +276,7 @@ async fn test_list_indexing_float_indexing() {
             .evaluate_expression(&context, &expr)
             .await
             .unwrap_err(),
-        EvaluationError::InvalidExpression
+        EvaluationError::InvalidType { expected: _ },
     ));
 }
 

@@ -48,12 +48,12 @@ impl AggregatingFunction for Count {
                 super::ValueAccumulator::Count { value } => value,
                 _ => return Err(FunctionError {
                     function_name: "Count".to_string(),
-                    error: FunctionEvaluationError::InvalidAccumulator,
+                    error: FunctionEvaluationError::CorruptData,
                 }),
             },
             _ => return Err(FunctionError {
                 function_name: "Count".to_string(),
-                error: FunctionEvaluationError::InvalidAccumulator,
+                error: FunctionEvaluationError::CorruptData,
             }),
         };
 
@@ -83,12 +83,12 @@ impl AggregatingFunction for Count {
                 super::ValueAccumulator::Count { value } => value,
                 _ => return Err(FunctionError {
                     function_name: "Count".to_string(),
-                    error: FunctionEvaluationError::InvalidAccumulator,
+                    error: FunctionEvaluationError::CorruptData,
                 }),
             },
             _ => return Err(FunctionError {
                 function_name: "Count".to_string(),
-                error: FunctionEvaluationError::InvalidAccumulator,
+                error: FunctionEvaluationError::CorruptData,
             }),
         };
 
@@ -113,12 +113,12 @@ impl AggregatingFunction for Count {
                 super::ValueAccumulator::Count { value } => value,
                 _ => return Err(FunctionError {
                     function_name: "Count".to_string(),
-                    error: FunctionEvaluationError::InvalidAccumulator,
+                    error: FunctionEvaluationError::CorruptData,
                 }),
             },
             _ => return Err(FunctionError {
                 function_name: "Count".to_string(),
-                error: FunctionEvaluationError::InvalidAccumulator,
+                error: FunctionEvaluationError::CorruptData,
             }),
         };
         Ok(VariableValue::Integer(Integer::from(*value)))

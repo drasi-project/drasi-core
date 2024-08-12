@@ -51,12 +51,12 @@ impl AggregatingFunction for Sum {
                 super::ValueAccumulator::Sum { value } => value,
                 _ => return Err(FunctionError {
                     function_name: "Sum".to_string(),
-                    error: FunctionEvaluationError::InvalidAccumulator,
+                    error: FunctionEvaluationError::CorruptData,
                 }),
             },
             _ => return Err(FunctionError {
                 function_name: "Sum".to_string(),
-                error: FunctionEvaluationError::InvalidAccumulator,
+                error: FunctionEvaluationError::CorruptData,
             }),
         };
 
@@ -132,12 +132,12 @@ impl AggregatingFunction for Sum {
                 super::ValueAccumulator::Sum { value } => value,
                 _ => return Err(FunctionError {
                     function_name: "Sum".to_string(),
-                    error: FunctionEvaluationError::InvalidAccumulator,
+                    error: FunctionEvaluationError::CorruptData,
                 }),
             },
             _ => return Err(FunctionError {
                 function_name: "Sum".to_string(),
-                error: FunctionEvaluationError::InvalidAccumulator,
+                error: FunctionEvaluationError::CorruptData,
             }),
         };
 
@@ -213,12 +213,12 @@ impl AggregatingFunction for Sum {
                 super::ValueAccumulator::Sum { value } => value,
                 _ => return Err(FunctionError {
                     function_name: "Sum".to_string(),
-                    error: FunctionEvaluationError::InvalidAccumulator,
+                    error: FunctionEvaluationError::CorruptData,
                 }),
             },
             _ => return Err(FunctionError {
                 function_name: "Sum".to_string(),
-                error: FunctionEvaluationError::InvalidAccumulator,
+                error: FunctionEvaluationError::CorruptData,
             }),
         };
 

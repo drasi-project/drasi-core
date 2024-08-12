@@ -33,8 +33,13 @@ pub enum EvaluationError {
     },  
     OverflowError,
     FunctionError(FunctionError),
+<<<<<<< HEAD
     InvalidState,
     InvalidExpression,
+=======
+    CorruptData,
+    InvalidArgument,
+>>>>>>> feature/remove-unwrap
     UnknownProperty {
         property_name: String,
     },
@@ -67,9 +72,7 @@ pub enum FunctionEvaluationError {
     InvalidDateTimeFormat,
     InvalidLocalDateTimeFormat,
     InvalidDurationFormat,
-    InvalidAccumulator,
-    InvalidState,
-    InvalidClock,
+    CorruptData,
     InvalidAssignmentExpression,
     InvalidReduceExpression,
     InvalidType {
@@ -91,9 +94,7 @@ impl PartialEq for FunctionEvaluationError {
             (FunctionEvaluationError::InvalidDateTimeFormat, FunctionEvaluationError::InvalidDateTimeFormat) => true,
             (FunctionEvaluationError::InvalidLocalDateTimeFormat, FunctionEvaluationError::InvalidLocalDateTimeFormat) => true,
             (FunctionEvaluationError::InvalidDurationFormat, FunctionEvaluationError::InvalidDurationFormat) => true,
-            (FunctionEvaluationError::InvalidAccumulator, FunctionEvaluationError::InvalidAccumulator) => true,
-            (FunctionEvaluationError::InvalidState, FunctionEvaluationError::InvalidState) => true,
-            (FunctionEvaluationError::InvalidClock, FunctionEvaluationError::InvalidClock) => true,
+            (FunctionEvaluationError::CorruptData, FunctionEvaluationError::CorruptData) => true,
             (FunctionEvaluationError::InvalidAssignmentExpression, FunctionEvaluationError::InvalidAssignmentExpression) => true,
             (FunctionEvaluationError::InvalidReduceExpression, FunctionEvaluationError::InvalidReduceExpression) => true,
             (FunctionEvaluationError::InvalidType { .. }, FunctionEvaluationError::InvalidType { .. }) => true,
@@ -117,9 +118,7 @@ impl fmt::Display for FunctionEvaluationError {
             FunctionEvaluationError::InvalidDateTimeFormat => write!(f, "Invalid date-time format"),
             FunctionEvaluationError::InvalidLocalDateTimeFormat => write!(f, "Invalid local date-time format"),
             FunctionEvaluationError::InvalidDurationFormat => write!(f, "Invalid duration format"),
-            FunctionEvaluationError::InvalidAccumulator => write!(f, "Invalid accumulator"),
-            FunctionEvaluationError::InvalidState => write!(f, "Invalid state"),
-            FunctionEvaluationError::InvalidClock => write!(f, "Invalid clock"),
+            FunctionEvaluationError::CorruptData => write!(f, "Invalid accumulator"),
             FunctionEvaluationError::InvalidAssignmentExpression => write!(f, "Invalid assignment expression"),
             FunctionEvaluationError::InvalidReduceExpression => write!(f, "Invalid reduce expression"),
             FunctionEvaluationError::InvalidType { expected } => write!(f, "Invalid type, expected: {}", expected),

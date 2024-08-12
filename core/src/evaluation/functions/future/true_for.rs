@@ -91,7 +91,7 @@ impl ScalarFunction for TrueFor {
             Some(evaluator) => evaluator,
             None => return Err(FunctionError {
                 function_name: expression.name.to_string(),
-                error: FunctionEvaluationError::InvalidState,
+                error: FunctionEvaluationError::CorruptData,
             }),
         };
 
@@ -182,7 +182,7 @@ impl ScalarFunction for TrueFor {
             },
             Ok(_) => return Err(FunctionError {
                 function_name: expression.name.to_string(),
-                error: FunctionEvaluationError::InvalidAccumulator,
+                error: FunctionEvaluationError::CorruptData,
             }),
             Err(e) => return Err(FunctionError {
                 function_name: expression.name.to_string(),

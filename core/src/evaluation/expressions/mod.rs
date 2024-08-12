@@ -161,7 +161,7 @@ impl ExpressionEvaluator {
                     VariableValue::ZonedDateTime(ZonedDateTime::new(
                         match local_datetime.and_local_timezone(*UTC_FIXED_OFFSET) {
                             LocalResult::Single(dt) => dt,
-                            _ => return Err(EvaluationError::InvalidExpression),
+                            _ => return Err(EvaluationError::InvalidType { expected: "DateTime".to_string() }),
                         },
                         None,
                     ))
@@ -1281,7 +1281,7 @@ impl ExpressionEvaluator {
                 let e1 = self.evaluate_expression(context, e1).await?;
                 match self.evaluate_expression(context, e2).await? {
                     VariableValue::List(a) => VariableValue::Bool(a.contains(&e1)),
-                    _ => return Err(EvaluationError::InvalidExpression),
+                    _ => return Err(EvaluationError::InvalidType { expected: "List".to_string() }),
                 }
             }
             ast::BinaryExpression::Modulo(e1, e2) => {
@@ -1421,7 +1421,7 @@ impl ExpressionEvaluator {
 
                         return Ok(element);
                     }
-                    _ => return Err(EvaluationError::InvalidExpression),
+                    _ => return Err(EvaluationError::InvalidType{ expected: "Integer or ListRange".to_string() }),
                 }
             }
         };
@@ -1679,7 +1679,7 @@ impl ExpressionEvaluator {
                 }
                 Ok(VariableValue::List(result))
             }
-            _ => Err(EvaluationError::InvalidExpression),
+            _ => Err(EvaluationError::InvalidType { expected: "List".to_string() }),
         }
     }
 
