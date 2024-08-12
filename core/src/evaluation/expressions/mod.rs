@@ -213,14 +213,14 @@ impl ExpressionEvaluator {
                         {
                             Some(v) => VariableValue::Integer(v.into()),
                             None => {
-                                return Err(EvaluationError::PropertyRetrievalError { property_name: (*key).to_string() })
+                                return Err(EvaluationError::UnknownProperty { property_name: (*key).to_string() })
                             }
                         },
                         VariableValue::LocalTime(t) => {
                             match get_local_time_property(*t, (*key).to_string()).await {
                                 Some(v) => VariableValue::Integer(v.into()),
                                 None => {
-                                    return Err(EvaluationError::PropertyRetrievalError { property_name: (*key).to_string() })
+                                    return Err(EvaluationError::UnknownProperty { property_name: (*key).to_string() })
                                 }
                             }
                         }
@@ -243,7 +243,7 @@ impl ExpressionEvaluator {
                                     }
                                 }
                                 None => {
-                                    return Err(EvaluationError::PropertyRetrievalError { property_name: (*key).to_string() })
+                                    return Err(EvaluationError::UnknownProperty { property_name: (*key).to_string() })
                                 }
                             }
                         }
@@ -251,7 +251,7 @@ impl ExpressionEvaluator {
                             match get_local_datetime_property(*t, (*key).to_string()).await {
                                 Some(v) => VariableValue::Integer(v.into()),
                                 None => {
-                                    return Err(EvaluationError::PropertyRetrievalError { property_name: (*key).to_string() })
+                                    return Err(EvaluationError::UnknownProperty { property_name: (*key).to_string() })
                                 }
                             }
                         }
@@ -274,7 +274,7 @@ impl ExpressionEvaluator {
                                     }
                                 }
                                 None => {
-                                    return Err(EvaluationError::PropertyRetrievalError { property_name: (*key).to_string() })
+                                    return Err(EvaluationError::UnknownProperty { property_name: (*key).to_string() })
                                 }
                             }
                         }
@@ -282,7 +282,7 @@ impl ExpressionEvaluator {
                             match get_duration_property(d.clone(), (*key).to_string()).await {
                                 Some(v) => VariableValue::Integer(v.into()),
                                 None => {
-                                    return Err(EvaluationError::PropertyRetrievalError { property_name: (*key).to_string() })
+                                    return Err(EvaluationError::UnknownProperty { property_name: (*key).to_string() })
                                 }
                             }
                         }

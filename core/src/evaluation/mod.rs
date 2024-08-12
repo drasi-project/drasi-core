@@ -37,7 +37,7 @@ pub enum EvaluationError {
     InvalidState,
     InvalidArgument,
     InvalidExpression,
-    PropertyRetrievalError {
+    UnknownProperty {
         property_name: String,
     },
 }
