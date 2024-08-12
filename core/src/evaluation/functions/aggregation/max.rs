@@ -64,7 +64,7 @@ impl AggregatingFunction for Max {
             Accumulator::LazySortedSet(accumulator) => accumulator,
             _ => return Err(FunctionError {
                 function_name: "Max".to_string(),
-                error: FunctionEvaluationError::InvalidAccumulator,
+                error: FunctionEvaluationError::CorruptData,
             }),
         };
 
@@ -83,7 +83,7 @@ impl AggregatingFunction for Max {
                         Some(f) => f,
                         None => return Err(FunctionError {
                             function_name: "Max".to_string(),
-                            error: FunctionEvaluationError::InvalidAccumulator,
+                            error: FunctionEvaluationError::CorruptData,
                         }),
                     })),
                     Ok(None) => Ok(VariableValue::Null),
@@ -107,7 +107,7 @@ impl AggregatingFunction for Max {
                         Some(f) => f,
                         None => return Err(FunctionError {
                             function_name: "Max".to_string(),
-                            error: FunctionEvaluationError::InvalidAccumulator,
+                            error: FunctionEvaluationError::CorruptData,
                         }),
                     })),
                     Ok(None) => Ok(VariableValue::Null),
@@ -246,7 +246,7 @@ impl AggregatingFunction for Max {
             Accumulator::LazySortedSet(accumulator) => accumulator,
             _ => return Err(FunctionError {
                 function_name: "Max".to_string(),
-                error: FunctionEvaluationError::InvalidAccumulator,
+                error: FunctionEvaluationError::CorruptData,
             }),
         };
 
@@ -265,7 +265,7 @@ impl AggregatingFunction for Max {
                         Some(f) => f,
                         None => return Err(FunctionError {
                             function_name: "Max".to_string(),
-                            error: FunctionEvaluationError::InvalidAccumulator,
+                            error: FunctionEvaluationError::CorruptData,
                         }),
                     })),
                     Ok(None) => Ok(VariableValue::Null),
@@ -289,7 +289,7 @@ impl AggregatingFunction for Max {
                         Some(f) => f,
                         None => return Err(FunctionError {
                             function_name: "Max".to_string(),
-                            error: FunctionEvaluationError::InvalidAccumulator,
+                            error: FunctionEvaluationError::CorruptData,
                         }),
                     })),
                     Ok(None) => Ok(VariableValue::Null),
@@ -429,7 +429,7 @@ impl AggregatingFunction for Max {
             Accumulator::LazySortedSet(accumulator) => accumulator,
             _ => return Err(FunctionError {
                 function_name: "Max".to_string(),
-                error: FunctionEvaluationError::InvalidAccumulator,
+                error: FunctionEvaluationError::CorruptData,
             }),
         };
 

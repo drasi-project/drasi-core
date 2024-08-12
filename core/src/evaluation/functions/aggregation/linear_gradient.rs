@@ -62,12 +62,12 @@ impl AggregatingFunction for LinearGradient {
                 } => (count, mean_x, mean_y, m2, cov),
                 _ => return Err(FunctionError {
                     function_name: "LinearGradient".to_string(),
-                    error: FunctionEvaluationError::InvalidAccumulator,
+                    error: FunctionEvaluationError::CorruptData,
                 }),
             },
             _ => return Err(FunctionError {
                 function_name: "LinearGradient".to_string(),
-                error: FunctionEvaluationError::InvalidAccumulator,
+                error: FunctionEvaluationError::CorruptData,
             }),
         };
 
@@ -126,12 +126,12 @@ impl AggregatingFunction for LinearGradient {
                 } => (count, mean_x, mean_y, m2, cov),
                 _ => return Err(FunctionError {
                     function_name: "LinearGradient".to_string(),
-                    error: FunctionEvaluationError::InvalidAccumulator,
+                    error: FunctionEvaluationError::CorruptData,
                 }),
             },
             _ => return Err(FunctionError {
                 function_name: "LinearGradient".to_string(),
-                error: FunctionEvaluationError::InvalidAccumulator,
+                error: FunctionEvaluationError::CorruptData,
             }),
         };
 
@@ -199,12 +199,12 @@ impl AggregatingFunction for LinearGradient {
                 } => (count, mean_x, mean_y, m2, cov),
                 _ => return Err(FunctionError {
                     function_name: "LinearGradient".to_string(),
-                    error: FunctionEvaluationError::InvalidAccumulator,
+                    error: FunctionEvaluationError::CorruptData,
                 }),
             },
             _ => return Err(FunctionError {
                 function_name: "LinearGradient".to_string(),
-                error: FunctionEvaluationError::InvalidAccumulator,
+                error: FunctionEvaluationError::CorruptData,
             }),
         };
 
