@@ -26,8 +26,24 @@ impl ScalarFunction for Range {
             2 => match (&args[0], &args[1]) {
                 (VariableValue::Integer(start), VariableValue::Integer(end)) => {
                     let mut range = Vec::new();
-                    let start = start.as_i64().unwrap();
-                    let end = end.as_i64().unwrap();
+                    let start = match start.as_i64() {
+                        Some(i) => i,
+                        None => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::OverflowError,
+                            })
+                        }
+                    };
+                    let end = match end.as_i64() {
+                        Some(i) => i,
+                        None => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::OverflowError,
+                            })
+                        }
+                    };
                     for i in start..end + 1 {
                         range.push(VariableValue::Integer(i.into()));
                     }
@@ -49,9 +65,33 @@ impl ScalarFunction for Range {
                     VariableValue::Integer(step),
                 ) => {
                     let mut range = Vec::new();
-                    let start = start.as_i64().unwrap();
-                    let end = end.as_i64().unwrap();
-                    let step = step.as_i64().unwrap();
+                    let start = match start.as_i64() {
+                        Some(i) => i,
+                        None => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::OverflowError,
+                            })
+                        }
+                    };
+                    let end = match end.as_i64() {
+                        Some(i) => i,
+                        None => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::OverflowError,
+                            })
+                        }
+                    };
+                    let step = match step.as_i64() {
+                        Some(i) => i,
+                        None => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::OverflowError,
+                            })
+                        }
+                    };
                     for i in (start..end + 1).step_by(step as usize) {
                         range.push(VariableValue::Integer(i.into()));
                     }

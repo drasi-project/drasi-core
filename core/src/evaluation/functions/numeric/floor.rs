@@ -28,11 +28,43 @@ impl ScalarFunction for Floor {
             VariableValue::Null => Ok(VariableValue::Null),
             VariableValue::Integer(n) => {
                 Ok(VariableValue::Float(
-                    Float::from_f64(n.as_i64().unwrap() as f64).unwrap(),
+                    match Float::from_f64(match n.as_i64() {
+                        Some(i) => i as f64,
+                        None => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::OverflowError,
+                            })
+                        }
+                    }) {
+                        Some(f) => f,
+                        None => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::OverflowError,
+                            })
+                        }
+                    }
                 )) // floor always return a float
             }
             VariableValue::Float(n) => Ok(VariableValue::Float(
-                Float::from_f64(n.as_f64().unwrap().floor()).unwrap(),
+                match Float::from_f64(match n.as_f64() {
+                    Some(f) => f.floor(),
+                    None => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                }) {
+                    Some(f) => f,
+                    None => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                }
             )),
             _ => Err(FunctionError {
                 function_name: expression.name.to_string(),

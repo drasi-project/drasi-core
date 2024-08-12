@@ -31,10 +31,22 @@ impl ScalarFunction for DrasiStdevP {
                 for element in l {
                     match element {
                         VariableValue::Integer(i) => {
-                            cleaned_list.push(i.as_i64().unwrap() as f64);
+                            cleaned_list.push(match i.as_i64() {
+                                Some(i) => i as f64,
+                                None => return Err(FunctionError {
+                                    function_name: expression.name.to_string(),
+                                    error: FunctionEvaluationError::OverflowError,
+                                }),
+                            });    
                         }
                         VariableValue::Float(f) => {
-                            cleaned_list.push(f.as_f64().unwrap());
+                            cleaned_list.push(match f.as_f64() {
+                                Some(f) => f,
+                                None => return Err(FunctionError {
+                                    function_name: expression.name.to_string(),
+                                    error: FunctionEvaluationError::OverflowError,
+                                }),
+                            });
                         }
                         VariableValue::Null => {
                             continue;

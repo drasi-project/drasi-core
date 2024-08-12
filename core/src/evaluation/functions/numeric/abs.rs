@@ -26,10 +26,35 @@ impl ScalarFunction for Abs {
         match &args[0] {
             VariableValue::Null => Ok(VariableValue::Null),
             VariableValue::Integer(n) => {
-                Ok(VariableValue::Integer(n.as_i64().unwrap().abs().into()))
+                Ok(VariableValue::Integer(match n.as_i64() {
+                    Some(i) => i.abs().into(),
+                    None => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                })
+                )
             }
             VariableValue::Float(n) => Ok(VariableValue::Float(
-                Float::from_f64(n.as_f64().unwrap().abs()).unwrap(),
+                match Float::from_f64(match n.as_f64() {
+                    Some(f) => f.abs(),
+                    None => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                }) {
+                    Some(f) => f,
+                    None => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                }
             )),
             _ => Err(FunctionError {
                 function_name: expression.name.to_string(),

@@ -25,7 +25,15 @@ impl ScalarFunction for Sign {
         match &args[0] {
             VariableValue::Null => Ok(VariableValue::Null),
             VariableValue::Integer(n) => {
-                let f = n.as_i64().unwrap();
+                let f = match n.as_i64() {
+                    Some(i) => i,
+                    None => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                };
                 if f > 0 {
                     Ok(VariableValue::Integer(Integer::from(1)))
                 } else if f < 0 {
@@ -35,7 +43,15 @@ impl ScalarFunction for Sign {
                 }
             }
             VariableValue::Float(n) => {
-                let f = n.as_f64().unwrap();
+                let f = match n.as_f64() {
+                    Some(f) => f,
+                    None => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                };
                 if f > 0.0 {
                     Ok(VariableValue::Integer(Integer::from(1)))
                 } else if f < 0.0 {

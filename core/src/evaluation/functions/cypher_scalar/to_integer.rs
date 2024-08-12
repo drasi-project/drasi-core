@@ -26,7 +26,15 @@ impl ScalarFunction for ToInteger {
             VariableValue::Null => Ok(VariableValue::Null),
             VariableValue::Integer(i) => Ok(VariableValue::Integer(i.clone())),
             VariableValue::Float(f) => Ok(VariableValue::Integer(
-                (f.as_f64().unwrap().floor() as i64).into(),
+                (match f.as_f64() {
+                    Some(f) => f.floor() as i64,
+                    None => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                }).into(),
             )),
             VariableValue::Bool(b) => {
                 if *b {
@@ -73,7 +81,15 @@ impl ScalarFunction for ToIntegerOrNull {
             VariableValue::Null => Ok(VariableValue::Null),
             VariableValue::Integer(i) => Ok(VariableValue::Integer(i.clone())),
             VariableValue::Float(f) => Ok(VariableValue::Integer(
-                (f.as_f64().unwrap().floor() as i64).into(),
+                (match f.as_f64() {
+                    Some(f) => f.floor() as i64,
+                    None => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                }).into(),
             )),
             VariableValue::Bool(b) => {
                 if *b {

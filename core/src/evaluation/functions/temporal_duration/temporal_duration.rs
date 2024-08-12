@@ -67,43 +67,123 @@ impl ScalarFunction for DurationFunc {
                 }
 
                 let year = match o.get("years") {
-                    Some(f) => f.as_f64().unwrap(),
+                    Some(f) => match f.as_f64() {
+                        Some(f) => f,
+                        None => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::OverflowError,
+                            })
+                        }
+                    },
                     _ => 0.0,
                 };
                 let week = match o.get("weeks") {
-                    Some(f) => f.as_f64().unwrap(),
+                    Some(f) => match f.as_f64() {
+                        Some(f) => f,
+                        None => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::InvalidArgument(0),
+                            })
+                        }
+                    },
                     _ => 0.0,
                 };
                 let month = match o.get("months") {
-                    Some(f) => f.as_f64().unwrap() + year.fract() * 12.0,
+                    Some(f) => match f.as_f64() {
+                        Some(f) => f + year.fract() * 12.0,
+                        None => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::InvalidArgument(0),
+                            })
+                        }
+                    },
                     _ => year.fract() * 12.0,
                 };
                 let day = match o.get("days") {
-                    Some(f) => f.as_f64().unwrap() + month.fract() * 30.0,
+                    Some(f) => match f.as_f64() {
+                        Some(f) => f + month.fract() * 30.0,
+                        None => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::InvalidArgument(0),
+                            })
+                        }
+                    },
                     _ => month.fract() * 30.0,
                 };
                 let hour = match o.get("hours") {
-                    Some(f) => f.as_f64().unwrap() + day.fract() * 24.0,
+                    Some(f) => match f.as_f64() {
+                        Some(f) => f + day.fract() * 24.0,
+                        None => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::InvalidArgument(0),
+                            })
+                        }
+                    },
                     _ => day.fract() * 24.0,
                 };
                 let minute = match o.get("minutes") {
-                    Some(f) => f.as_f64().unwrap() + hour.fract() * 60.0,
+                    Some(f) => match f.as_f64() {
+                        Some(f) => f + hour.fract() * 60.0,
+                        None => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::InvalidArgument(0),
+                            })
+                        }
+                    },
                     _ => hour.fract() * 60.0,
                 };
                 let second = match o.get("seconds") {
-                    Some(f) => f.as_f64().unwrap() + minute.fract() * 60.0,
+                    Some(f) => match f.as_f64() {
+                        Some(f) => f + minute.fract() * 60.0,
+                        None => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::InvalidArgument(0),
+                            })
+                        }
+                    },
                     _ => minute.fract() * 60.0,
                 };
                 let millisecond = match o.get("milliseconds") {
-                    Some(f) => f.as_f64().unwrap() + second.fract() * 1000.0,
+                    Some(f) => match f.as_f64() {
+                        Some(f) => f + second.fract() * 1000.0,
+                        None => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::InvalidArgument(0),
+                            })
+                        }
+                    },
                     _ => second.fract() * 1000.0,
                 };
                 let microsecond = match o.get("microseconds") {
-                    Some(f) => f.as_f64().unwrap() + millisecond.fract() * 1000.0,
+                    Some(f) => match f.as_f64() {
+                        Some(f) => f + millisecond.fract() * 1000.0,
+                        None => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::InvalidArgument(0),
+                            })
+                        }
+                    },
                     _ => millisecond.fract() * 1000.0,
                 };
                 let nanosecond = match o.get("nanoseconds") {
-                    Some(f) => f.as_f64().unwrap() + microsecond.fract() * 1000.0,
+                    Some(f) => match f.as_f64() {
+                        Some(f) => f + microsecond.fract() * 1000.0,
+                        None => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::InvalidArgument(0),
+                            })
+                        }
+                    },
                     _ => microsecond.fract() * 1000.0,
                 };
 
@@ -163,7 +243,10 @@ impl ScalarFunction for Between {
                 )))
             }
             (VariableValue::Date(start), VariableValue::LocalDateTime(end)) => {
-                let start_datetime = start.and_hms_opt(0, 0, 0).unwrap();
+                let start_datetime = match start.and_hms_opt(0, 0, 0) {
+                    Some(start_time) => start_time,
+                    None => unreachable!(),
+                };
                 let duration = end.signed_duration_since(start_datetime);
                 Ok(VariableValue::Duration(Duration::new(
                     ChronoDuration::from(duration),
@@ -258,7 +341,10 @@ impl ScalarFunction for Between {
                 )))
             }
             (VariableValue::ZonedTime(start), VariableValue::ZonedTime(end)) => {
-                let dummy_date = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
+                let dummy_date = match NaiveDate::from_ymd_opt(2020, 1, 1) {
+                    Some(date) => date,
+                    None => unreachable!(),
+                };
                 let start_datetime = match dummy_date
                     .and_time(*start.time())
                     .and_local_timezone(*start.offset())
@@ -374,7 +460,10 @@ impl ScalarFunction for Between {
                 )))
             }
             (VariableValue::LocalDateTime(start), VariableValue::Date(end)) => {
-                let end_datetime = end.and_hms_opt(0, 0, 0).unwrap();
+                let end_datetime = match end.and_hms_opt(0, 0, 0) {
+                    Some(end_time) => end_time,
+                    None => unreachable!(),
+                };
                 let duration = end_datetime.signed_duration_since(*start);
                 Ok(VariableValue::Duration(Duration::new(
                     ChronoDuration::from(duration),
@@ -448,15 +537,15 @@ impl ScalarFunction for Between {
             (VariableValue::ZonedDateTime(start), VariableValue::Date(end)) => {
                 let start_datetime = start.datetime();
                 let end_datetime = match end
-                    .and_hms_opt(0, 0, 0)
-                    .unwrap()
-                    .and_local_timezone(*start_datetime.offset())
-                {
-                    LocalResult::Single(end_datetime) => end_datetime,
-                    _ => return Err(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidDateTimeFormat,
-                    }),
+                    .and_hms_opt(0, 0, 0) {
+                    Some(end_time) => match end_time.and_local_timezone(*start_datetime.offset()) {
+                        LocalResult::Single(end_datetime) => end_datetime,
+                        _ => return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidDateTimeFormat,
+                        }),
+                    },
+                    None => unreachable!(),
                 };
                 let duration = end_datetime.signed_duration_since(start_datetime);
                 Ok(VariableValue::Duration(Duration::new(
@@ -709,7 +798,13 @@ impl ScalarFunction for InDays {
         let result = between.call(_context, expression, args.clone()).await;
         match result {
             Ok(return_value) => {
-                let days = return_value.as_duration().unwrap().duration().num_days();
+                let days = match return_value.as_duration(){
+                    Some(duration) => duration.duration().num_days(),
+                    None => return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::InvalidDurationFormat,
+                    }),
+                };
                 let duration =
                     VariableValue::Duration(Duration::new(ChronoDuration::days(days), 0, 0));
                 Ok(duration)
@@ -746,13 +841,14 @@ impl ScalarFunction for InSeconds {
         let result = between.call(_context, expression, args.clone()).await;
         match result {
             Ok(return_value) => {
-                let seconds = match return_value
-                    .as_duration()
-                    .unwrap()
-                    .duration()
-                    .num_nanoseconds()
-                {
-                    Some(seconds) => seconds,
+                let seconds = match return_value.as_duration() {
+                    Some(duration) => match duration.duration().num_nanoseconds() {
+                        Some(seconds) => seconds,
+                        None => return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidDurationFormat,
+                        }),
+                    }
                     None => return Err(FunctionError {
                         function_name: expression.name.to_string(),
                         error: FunctionEvaluationError::InvalidDurationFormat,
@@ -816,7 +912,15 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, FunctionEr
     match date_duration {
         Some(date_duration) => {
             let pattern = r"(\d{1,19}Y)?(\d{1,19}M)?(\d{1,19}W)?(\d{1,19}(?:\.\d{1,9})?D)?";
-            let re = Regex::new(pattern).unwrap();
+            let re = match Regex::new(pattern) {
+                Ok(re) => re,
+                Err(_) => return Err(FunctionError {
+                    function_name: "Duration".to_string(),
+                    error: FunctionEvaluationError::InvalidType {
+                        expected: "a valid regex".to_string(),
+                    },
+                }),
+            };
 
             if let Some(cap) = re.captures(date_duration) {
                 for part in cap.iter().skip(1) {

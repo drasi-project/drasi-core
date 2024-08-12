@@ -25,6 +25,14 @@ impl ScalarFunction for Rand {
             });
         }
         let mut rng = rand::thread_rng();
-        Ok(VariableValue::Float(Float::from_f64(rng.gen()).unwrap()))
+        Ok(VariableValue::Float(match Float::from_f64(rng.gen()) {
+            Some(f) => f,
+            None => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::OverflowError,
+                })
+            }
+        }))
     }
 }

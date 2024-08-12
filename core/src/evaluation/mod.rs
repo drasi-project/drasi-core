@@ -24,7 +24,6 @@ pub enum EvaluationError {
     },
     UnknownIdentifier(String),
     UnknownFunction(String), // Unknown Cypher function 
-    InvalidArgumentCount(String), 
     IndexError(IndexError),
     MiddlewareError(MiddlewareError),
     ParseError,
@@ -35,7 +34,6 @@ pub enum EvaluationError {
     OverflowError,
     FunctionError(FunctionError),
     InvalidState,
-    InvalidArgument,
     InvalidExpression,
     UnknownProperty {
         property_name: String,
