@@ -69,7 +69,6 @@ pub enum FunctionEvaluationError {
     InvalidLocalDateTimeFormat,
     InvalidDurationFormat,
     CorruptData,
-    InvalidClock,
     InvalidAssignmentExpression,
     InvalidReduceExpression,
     InvalidType {
@@ -92,7 +91,6 @@ impl PartialEq for FunctionEvaluationError {
             (FunctionEvaluationError::InvalidLocalDateTimeFormat, FunctionEvaluationError::InvalidLocalDateTimeFormat) => true,
             (FunctionEvaluationError::InvalidDurationFormat, FunctionEvaluationError::InvalidDurationFormat) => true,
             (FunctionEvaluationError::CorruptData, FunctionEvaluationError::CorruptData) => true,
-            (FunctionEvaluationError::InvalidClock, FunctionEvaluationError::InvalidClock) => true,
             (FunctionEvaluationError::InvalidAssignmentExpression, FunctionEvaluationError::InvalidAssignmentExpression) => true,
             (FunctionEvaluationError::InvalidReduceExpression, FunctionEvaluationError::InvalidReduceExpression) => true,
             (FunctionEvaluationError::InvalidType { .. }, FunctionEvaluationError::InvalidType { .. }) => true,
@@ -117,7 +115,6 @@ impl fmt::Display for FunctionEvaluationError {
             FunctionEvaluationError::InvalidLocalDateTimeFormat => write!(f, "Invalid local date-time format"),
             FunctionEvaluationError::InvalidDurationFormat => write!(f, "Invalid duration format"),
             FunctionEvaluationError::CorruptData => write!(f, "Invalid accumulator"),
-            FunctionEvaluationError::InvalidClock => write!(f, "Invalid clock"),
             FunctionEvaluationError::InvalidAssignmentExpression => write!(f, "Invalid assignment expression"),
             FunctionEvaluationError::InvalidReduceExpression => write!(f, "Invalid reduce expression"),
             FunctionEvaluationError::InvalidType { expected } => write!(f, "Invalid type, expected: {}", expected),
