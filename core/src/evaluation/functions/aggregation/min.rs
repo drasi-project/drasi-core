@@ -198,7 +198,7 @@ impl AggregatingFunction for Min {
                         LocalResult::Single(dt) => dt,
                         _ => return Err(FunctionError {
                             function_name: "Min".to_string(),
-                            error: FunctionEvaluationError::InvalidTimeFormat,
+                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid Time".to_string() },
                         }),
                     };
                 let duration_since_epoch = epoch_datetime.timestamp_millis() as f64;
@@ -379,7 +379,7 @@ impl AggregatingFunction for Min {
                         LocalResult::Single(dt) => dt,
                         _ => return Err(FunctionError {
                             function_name: "Min".to_string(),
-                            error: FunctionEvaluationError::InvalidTimeFormat,
+                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid Time".to_string() },
                         }),
                     };
                 let duration_since_epoch = epoch_datetime.timestamp_millis() as f64;
@@ -477,7 +477,7 @@ impl AggregatingFunction for Min {
                         LocalResult::Single(dt) => dt,
                         _ => return Err(FunctionError {
                             function_name: "Min".to_string(),
-                            error: FunctionEvaluationError::InvalidTimeFormat,
+                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid Time".to_string() },
                         }),
                     };
                 Ok(VariableValue::ZonedTime(ZonedTime::new(

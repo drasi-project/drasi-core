@@ -87,14 +87,14 @@ impl ScalarFunction for Date {
                                 Ok(tz) => tz,
                                 Err(_) => return Err(FunctionError {
                                     function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::InvalidDateFormat,
+                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid Date".to_string() },
                                 }),
                             };
                             tz
                         }
                         None => return Err(FunctionError {
                             function_name: expression.name.to_string(),
-                            error: FunctionEvaluationError::InvalidDateFormat,
+                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid Date".to_string() },
                         }),
                     };
                     let local: chrono::DateTime<Tz> = Local::now().with_timezone(&tz);
@@ -105,7 +105,7 @@ impl ScalarFunction for Date {
                     Some(date) => Ok(date),
                     None => Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidDateFormat,
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid Date".to_string() },
                     }),
                 }
             }
@@ -147,7 +147,7 @@ impl ScalarFunction for LocalTime {
                     Ok(result_time) => Ok(VariableValue::LocalTime(result_time)),
                     _ => Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidLocalTimeFormat,
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid LocalTime".to_string() },
                     }),
                 }
             }
@@ -178,7 +178,7 @@ impl ScalarFunction for LocalTime {
                     Some(time) => Ok(time),
                     None => Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidLocalTimeFormat,
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid LocalTime".to_string() },
                     }),
                 }
             }
@@ -222,7 +222,7 @@ impl ScalarFunction for LocalDateTime {
                     Ok(result_datetime) => Ok(VariableValue::LocalDateTime(result_datetime)),
                     _ => Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidLocalDateTimeFormat,
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid LocalDateTime".to_string() },
                     }),
                 }
             }
@@ -266,14 +266,14 @@ impl ScalarFunction for LocalDateTime {
                                 Ok(tz) => tz,
                                 Err(_) => return Err(FunctionError {
                                     function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::InvalidLocalDateTimeFormat,
+                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid LocalDateTime".to_string() },
                                 }),
                             };
                             tz
                         }
                         None => return Err(FunctionError {
                             function_name: expression.name.to_string(),
-                            error: FunctionEvaluationError::InvalidLocalDateTimeFormat,
+                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid LocalDateTime".to_string() },
                         }),
                     };
 
@@ -340,7 +340,7 @@ impl ScalarFunction for Time {
                     Ok(result_time) => Ok(VariableValue::ZonedTime(result_time)),
                     _ => Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidTimeFormat,
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid Time".to_string() },
                     }),
                 }
             }
@@ -378,7 +378,7 @@ impl ScalarFunction for Time {
                             Some(tz) => tz,
                             None => return Err(FunctionError {
                                 function_name: expression.name.to_string(),
-                                error: FunctionEvaluationError::InvalidTimeFormat,
+                                error: FunctionEvaluationError::InvalidFormat { expected: "A valid Time".to_string() },
                             }),
                         }
                     }
@@ -403,7 +403,7 @@ impl ScalarFunction for Time {
                             Some(time) => time,
                             None => return Err(FunctionError {
                                 function_name: expression.name.to_string(),
-                                error: FunctionEvaluationError::InvalidTimeFormat,
+                                error: FunctionEvaluationError::InvalidFormat { expected: "A valid Time".to_string() },
                             }),
                         };
                         let datetime = dummy_date.and_time(local_time);
@@ -411,7 +411,7 @@ impl ScalarFunction for Time {
                             LocalResult::Single(zoned_datetime) => zoned_datetime.fixed_offset(),
                             _ => return Err(FunctionError {
                                 function_name: expression.name.to_string(),
-                                error: FunctionEvaluationError::InvalidTimeFormat,
+                                error: FunctionEvaluationError::InvalidFormat { expected: "A valid Time".to_string() },
                             }),
                         };
                         let zoned_time = zoned_datetime.time();
@@ -426,7 +426,7 @@ impl ScalarFunction for Time {
                                 Ok(offset) => offset,
                                 Err(_) => return Err(FunctionError {
                                     function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::InvalidTimeFormat,
+                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid Time".to_string() },
                                 }),
                             };
                             return Ok(VariableValue::ZonedTime(ZonedTime::new(
@@ -439,7 +439,7 @@ impl ScalarFunction for Time {
                     }
                     None => Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidTimeFormat,
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid Time".to_string() },
                     }),
                 }
             }
@@ -485,7 +485,7 @@ impl ScalarFunction for DateTime {
                     Ok(result_time) => Ok(VariableValue::ZonedDateTime(result_time)),
                     _ => Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidDateTimeFormat,
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
                     }),
                 }
             }
@@ -527,7 +527,7 @@ impl ScalarFunction for DateTime {
                         Some(datetime) => datetime,
                         None => return Err(FunctionError {
                             function_name: expression.name.to_string(),
-                            error: FunctionEvaluationError::InvalidDateTimeFormat,
+                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
                         }),
                     };
 
@@ -540,7 +540,7 @@ impl ScalarFunction for DateTime {
                             Some(tz) => tz,
                             None => return Err(FunctionError {
                                 function_name: expression.name.to_string(),
-                                error: FunctionEvaluationError::InvalidDateTimeFormat,
+                                error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
                             }),
                         }
                     }
@@ -553,7 +553,7 @@ impl ScalarFunction for DateTime {
                         LocalResult::Single(zoned_time) => zoned_time.fixed_offset(),
                         _ => return Err(FunctionError {
                             function_name: expression.name.to_string(),
-                            error: FunctionEvaluationError::InvalidDateTimeFormat,
+                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
                         }),
                     };
                     return Ok(VariableValue::ZonedDateTime(ZonedDateTime::new(
@@ -564,7 +564,7 @@ impl ScalarFunction for DateTime {
                     Some(date) => date.as_date().unwrap(),
                     None => return Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidDateTimeFormat,
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
                     }),
                 };
                 let result = create_time_from_componet(o.clone()).await;
@@ -574,7 +574,7 @@ impl ScalarFunction for DateTime {
                             Some(time) => time,
                             None => return Err(FunctionError {
                                 function_name: expression.name.to_string(),
-                                error: FunctionEvaluationError::InvalidDateTimeFormat,
+                                error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
                             }),
                         };
                         let datetime = naive_date.and_time(local_time);
@@ -587,14 +587,14 @@ impl ScalarFunction for DateTime {
                                 Ok(offset) => offset,
                                 Err(_) => return Err(FunctionError {
                                     function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::InvalidDateTimeFormat,
+                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
                                 }),
                             };
                             let datetime_offset = match datetime.and_local_timezone(offset) {
                                 LocalResult::Single(offset) => offset.fixed_offset(),
                                 _ => return Err(FunctionError {
                                     function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::InvalidDateTimeFormat,
+                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
                                 }),
                             };
                             return Ok(VariableValue::ZonedDateTime(ZonedDateTime::new(
@@ -606,7 +606,7 @@ impl ScalarFunction for DateTime {
                             LocalResult::Single(zoned_datetime) => zoned_datetime.fixed_offset(),
                             _ => return Err(FunctionError {
                                 function_name: expression.name.to_string(),
-                                error: FunctionEvaluationError::InvalidDateTimeFormat,
+                                error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
                             }),
                         };
                         return Ok(VariableValue::ZonedDateTime(ZonedDateTime::new(
@@ -616,7 +616,7 @@ impl ScalarFunction for DateTime {
                     }
                     None => Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidDateTimeFormat,
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
                     }),
                 }
             }
@@ -927,7 +927,7 @@ impl ScalarFunction for Truncate {
                         LocalResult::Single(dt) => dt,
                         _ => return Err(FunctionError {
                             function_name: expression.name.to_string(),
-                            error: FunctionEvaluationError::InvalidDateTimeFormat,
+                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
                         }),
                     };
                 let zoned_date_time = ZonedDateTime::new(truncated_date_time, timezone);
@@ -973,7 +973,7 @@ impl ScalarFunction for Truncate {
                                 Some(tz) => tz,
                                 None => return Err(FunctionError {
                                     function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::InvalidDateTimeFormat,
+                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
                                 }),
                             }
                         }
@@ -984,7 +984,7 @@ impl ScalarFunction for Truncate {
                         LocalResult::Single(dt) => dt,
                         _ => return Err(FunctionError {
                             function_name: expression.name.to_string(),
-                            error: FunctionEvaluationError::InvalidDateTimeFormat,
+                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
                         }),
                     };
                     let datetime_fixed_offset = datetime_tz.fixed_offset();
@@ -1000,7 +1000,7 @@ impl ScalarFunction for Truncate {
                         LocalResult::Single(dt) => dt,
                         _ => return Err(FunctionError {
                             function_name: expression.name.to_string(),
-                            error: FunctionEvaluationError::InvalidDateTimeFormat,
+                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
                         }),
                     };
                 let zoned_date_time = ZonedDateTime::new(truncated_date_time, timezone);
@@ -1146,7 +1146,7 @@ async fn truncate_date(unit: String, date: NaiveDate) -> Result<NaiveDate, Funct
             let date_string = format!("{}-1-1", year);
             let date = match NaiveDate::parse_from_str(&date_string, "%Y-%W-%u") {
                 Ok(date) => date,
-                Err(_) =>  return Err(FunctionEvaluationError::InvalidDateFormat),
+                Err(_) =>  return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid Date".to_string() }),
             };
             Ok(date)
         }
@@ -1232,7 +1232,7 @@ async fn truncate_date_with_map(
             let date_string = format!("{}-1-1", year);
             let date = match NaiveDate::parse_from_str(&date_string, "%Y-%W-%u") {
                 Ok(date) => date,
-                Err(_) => return Err(FunctionEvaluationError::InvalidDateFormat),
+                Err(_) => return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid Date".to_string() }),
             };
             truncated_date = date;
         }
@@ -1240,7 +1240,7 @@ async fn truncate_date_with_map(
             truncated_date = NaiveDate::from_ymd_opt(year, month, day).unwrap();
         }
         _ => {
-            return Err(FunctionEvaluationError::InvalidDateFormat);
+            return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid Date".to_string() });
         }
     };
 
@@ -1436,7 +1436,7 @@ async fn parse_date_string(date_str: &str) -> Result<NaiveDate, FunctionEvaluati
             return Ok(date);
         }
 
-        return Err(FunctionEvaluationError::InvalidDateFormat);
+        return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid Date".to_string() });
     }
 
     // YYYYDDD
@@ -1446,7 +1446,7 @@ async fn parse_date_string(date_str: &str) -> Result<NaiveDate, FunctionEvaluati
             return Ok(date);
         }
     }
-    Err(FunctionEvaluationError::InvalidDateFormat)
+    Err(FunctionEvaluationError::InvalidFormat { expected: "A valid Date".to_string() })
 }
 
 async fn date_str_formatter(input: &str) -> Result<String, FunctionEvaluationError> {
@@ -1505,38 +1505,38 @@ async fn date_str_formatter(input: &str) -> Result<String, FunctionEvaluationErr
 async fn parse_quarter_date(date_str: &str) -> Result<String, FunctionEvaluationError> {
     let parts: Vec<&str> = date_str.split('-').collect();
     if parts.len() < 2 {
-        return Err(FunctionEvaluationError::InvalidDateFormat);
+        return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid Date".to_string() });
     }
 
     let year = match parts[0].parse::<i32>() {
         Ok(y) => y,
-        Err(_) => return Err(FunctionEvaluationError::InvalidDateFormat),
+        Err(_) => return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid Date".to_string() }),
     };
     let quarter = match parts[1].chars().nth(1) {
         Some(q) => {
             if q.is_ascii_digit() {
                 match q.to_digit(10) {
                     Some(q) => q as i32,
-                    None => return Err(FunctionEvaluationError::InvalidDateFormat),
+                    None => return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid Date".to_string() }),
                 }
             } else {
-                return Err(FunctionEvaluationError::InvalidDateFormat);
+                return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid Date".to_string() });
             }
         }
-        None => return Err(FunctionEvaluationError::InvalidDateFormat),
+        None => return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid Date".to_string() }),
     };
 
     if !(1..=4).contains(&quarter) {
-        return Err(FunctionEvaluationError::InvalidDateFormat);
+        return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid Date".to_string() });
     }
 
     let day_of_quarter = match parts[2].parse::<i32>() {
         Ok(d) => d,
-        Err(_) => return Err(FunctionEvaluationError::InvalidDateFormat),
+        Err(_) => return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid Date".to_string() }),
     };
 
     if !(1..=92).contains(&day_of_quarter) {
-        return Err(FunctionEvaluationError::InvalidDateFormat);
+        return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid Date".to_string() });
     }
 
     let month = match quarter {
@@ -1551,7 +1551,7 @@ async fn parse_quarter_date(date_str: &str) -> Result<String, FunctionEvaluation
 
     let date = match temp_date.checked_add_days(Days::new(day_of_quarter as u64 - 1)) {
         Some(d) => d,
-        None => return Err(FunctionEvaluationError::InvalidDateFormat),
+        None => return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid Date".to_string() }),
     };
 
     let date_format = date.to_string();
@@ -1565,7 +1565,7 @@ async fn parse_local_time_input(input: &str) -> Result<chrono::NaiveTime, Functi
     if contains_fractional_seconds {
         let time = match NaiveTime::parse_from_str(&input_string, "%H%M%S%.f") {
             Ok(t) => t,
-            Err(_) => return Err(FunctionEvaluationError::InvalidLocalTimeFormat),
+            Err(_) => return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid LocalTime".to_string() }),
         };
         return Ok(time);
     }
@@ -1578,7 +1578,7 @@ async fn parse_local_time_input(input: &str) -> Result<chrono::NaiveTime, Functi
     }
     let time = match NaiveTime::parse_from_str(&input_string, "%H%M%S") {
         Ok(t) => t,
-        Err(_) => return Err(FunctionEvaluationError::InvalidLocalTimeFormat),
+        Err(_) => return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid LocalTime".to_string() }),
     };
     Ok(time)
 }
@@ -1588,12 +1588,12 @@ async fn parse_local_date_time_input(input: &str) -> Result<NaiveDateTime, Funct
 
     let date_string = match input_string.split('T').next() {
         Some(date) => date,
-        None => return Err(FunctionEvaluationError::InvalidLocalDateTimeFormat),
+        None => return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid LocalDateTime".to_string() }),
     };
 
     let time_string = match input_string.split('T').last() {
         Some(time) => time,
-        None =>  return Err(FunctionEvaluationError::InvalidLocalDateTimeFormat),
+        None =>  return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid LocalDateTime".to_string() }),
     };
 
     let naive_date = parse_date_string(date_string).await?;
@@ -1613,12 +1613,12 @@ async fn parse_zoned_time_input(input: &str) -> Result<ZonedTime, FunctionEvalua
         .next()
     {
         Some(time) => time,
-        None => return Err(FunctionEvaluationError::InvalidTimeFormat),
+        None => return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid Time".to_string() }),
     };
 
     let timezone = match extract_timezone(&input_string).await {
         Some(tz) => tz,
-        None => return Err(FunctionEvaluationError::InvalidTimeFormat),
+        None => return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid Time".to_string() }),
     };
 
     if is_utc {
@@ -1626,13 +1626,13 @@ async fn parse_zoned_time_input(input: &str) -> Result<ZonedTime, FunctionEvalua
         if contains_frac {
             let naive_time = match NaiveTime::parse_from_str(time_string, "%H%M%S%.f") {
                 Ok(t) => t,
-                Err(_) => return Err(FunctionEvaluationError::InvalidTimeFormat),
+                Err(_) => return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid Time".to_string() }),
             };
             return Ok(ZonedTime::new(naive_time, offset));
         }
         let naive_time = match NaiveTime::parse_from_str(time_string, "%H%M%S") {
             Ok(t) => t,
-            Err(_) => return Err(FunctionEvaluationError::InvalidTimeFormat),
+            Err(_) => return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid Time".to_string() }),
         };
         return Ok(ZonedTime::new(naive_time, offset));
     }
@@ -1641,13 +1641,13 @@ async fn parse_zoned_time_input(input: &str) -> Result<ZonedTime, FunctionEvalua
 
     let offset = match FixedOffset::from_str(timezone) {
         Ok(o) => o,
-        Err(_) => return Err(FunctionEvaluationError::InvalidTimeFormat),
+        Err(_) => return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid Time".to_string() }),
     };
 
     if contains_frac {
         let naive_time = match NaiveTime::parse_from_str(time_string, "%H%M%S%.f") {
             Ok(t) => t,
-            Err(_) => return Err(FunctionEvaluationError::InvalidTimeFormat),
+            Err(_) => return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid Time".to_string() }),
         };
         let zoned_time = ZonedTime::new(naive_time, offset);
         return Ok(zoned_time);
@@ -1672,13 +1672,13 @@ async fn parse_zoned_date_time_input(input: &str) -> Result<ZonedDateTime, Funct
 
     let date_part = match input.split('T').next() {
         Some(date) => date.replace('-', ""),
-        None => return Err(FunctionEvaluationError::InvalidDateTimeFormat),
+        None => return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() }),
     };
     let date_string = date_part.as_str();
 
     let timezone_part = match input.split('T').last() {
         Some(timezone) => timezone.replace(':', ""),
-        None => return Err(FunctionEvaluationError::InvalidDateTimeFormat),
+        None => return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() }),
     };
     let timezone_string = timezone_part.as_str();
 
@@ -1687,11 +1687,11 @@ async fn parse_zoned_date_time_input(input: &str) -> Result<ZonedDateTime, Funct
         .next()
     {
         Some(time) => time,
-        None => return Err(FunctionEvaluationError::InvalidDateTimeFormat),
+        None => return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() }),
     };
     let timezone = match extract_timezone(timezone_string).await {
         Some(tz) => tz,
-        None => return Err(FunctionEvaluationError::InvalidDateTimeFormat),
+        None => return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() }),
     };
 
     let naive_date= parse_date_string(date_string).await?;
@@ -1704,7 +1704,7 @@ async fn parse_zoned_date_time_input(input: &str) -> Result<ZonedDateTime, Funct
             FixedOffset::east_opt(0).unwrap(),
         ) {
             LocalResult::Single(dt) => dt,
-            _ => return Err(FunctionEvaluationError::InvalidDateTimeFormat),
+            _ => return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() }),
         };
         let zoned_date_time = ZonedDateTime::new(date_time, None);
         return Ok(zoned_date_time);
@@ -1713,11 +1713,11 @@ async fn parse_zoned_date_time_input(input: &str) -> Result<ZonedDateTime, Funct
     if timezone.contains('[') && timezone.contains(']') {
         let tz = match handle_iana_timezone(timezone).await {
             Some(t) => t,
-            _err => return Err(FunctionEvaluationError::InvalidDateTimeFormat),
+            _err => return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() }),
         };
         let date_time = match NaiveDateTime::and_local_timezone(&naive_date_time, tz) {
             LocalResult::Single(dt) => dt,
-            _ => return Err(FunctionEvaluationError::InvalidDateTimeFormat),
+            _ => return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() }),
         };
         let date_time_offset = date_time.fixed_offset();
         let zoned_date_time = ZonedDateTime::new(date_time_offset, Some(timezone.to_string()));
@@ -1727,12 +1727,12 @@ async fn parse_zoned_date_time_input(input: &str) -> Result<ZonedDateTime, Funct
     let offset = match FixedOffset::from_str(timezone) {
         Ok(o) => o,
         Err(_) => {
-            return Err(FunctionEvaluationError::InvalidDateTimeFormat);
+            return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() });
         }
     };
     let date_time = match NaiveDateTime::and_local_timezone(&naive_date_time, offset) {
         LocalResult::Single(dt) => dt,
-        _ => return Err(FunctionEvaluationError::InvalidDateTimeFormat),
+        _ => return Err(FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() }),
     };
     let zoned_date_time = ZonedDateTime::new(date_time, None);
     Ok(zoned_date_time)
