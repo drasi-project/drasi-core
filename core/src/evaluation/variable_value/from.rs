@@ -173,7 +173,7 @@ impl From<Value> for VariableValue {
                 if let Some(n) = num.as_i64() {
                     VariableValue::Integer(n.into())
                 } else {
-                    VariableValue::Float(Float::from_f64(num.as_f64().unwrap()).unwrap())
+                    VariableValue::Float(Float::from_f64(num.as_f64().unwrap_or_default()).unwrap_or_default())
                 }
             }
             Value::String(s) => VariableValue::String(s),

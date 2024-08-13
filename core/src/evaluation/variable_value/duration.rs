@@ -3,6 +3,8 @@ use core::fmt::{self, Display};
 use std::hash::Hash;
 use std::ops;
 
+use crate::evaluation::EvaluationError;
+
 #[derive(Clone, Eq, Hash)]
 pub struct Duration {
     duration: ChronoDuration,
@@ -15,33 +17,6 @@ pub struct Duration {
     // 1 year could be 365 or 366 days depending on the starting date.
 }
 
-impl ops::Add<Duration> for Duration {
-    type Output = Duration;
-    fn add(self, duration2: Duration) -> Duration {
-        let new_duration = self.duration().checked_add(duration2.duration()).unwrap();
-        let mut year = self.year() + duration2.year();
-        let mut month = self.month() + duration2.month();
-        if month > 12 {
-            year += 1;
-            month -= 12;
-        }
-        Duration::new(new_duration, year, month)
-    }
-}
-
-impl ops::Sub<Duration> for Duration {
-    type Output = Duration;
-    fn sub(self, duration2: Duration) -> Duration {
-        let new_duration = self.duration().checked_sub(duration2.duration()).unwrap();
-        let mut year = self.year() - duration2.year();
-        let mut month = self.month() - duration2.month();
-        if month < 1 {
-            year -= 1;
-            month += 12;
-        }
-        Duration::new(new_duration, year, month)
-    }
-}
 
 impl PartialEq for Duration {
     fn eq(&self, other: &Self) -> bool {
@@ -65,6 +40,34 @@ impl Duration {
             year,
             month,
         }
+    }
+
+    pub fn try_add(&self, duration2: &Duration) -> Result<Duration, EvaluationError> {
+        let new_duration = match self.duration.checked_add(duration2.duration()) {
+            Some(d) => d,
+            None => return Err(EvaluationError::OverflowError),
+        };
+        let mut year = self.year + duration2.year;
+        let mut month = self.month + duration2.month;
+        if month > 12 {
+            year += 1;
+            month -= 12;
+        }
+        Ok(Duration::new(new_duration, year, month))
+    }
+
+    pub fn try_sub(&self, duration2: &Duration) -> Result<Duration, EvaluationError> {
+        let new_duration = match self.duration.checked_sub(duration2.duration()) {
+            Some(d) => d,
+            None => return Err(EvaluationError::OverflowError),
+        };
+        let mut year = self.year - duration2.year;
+        let mut month = self.month - duration2.month;
+        if month < 1 {
+            year -= 1;
+            month += 12;
+        }
+        Ok(Duration::new(new_duration, year, month))
     }
 
     pub fn duration(&self) -> &ChronoDuration {

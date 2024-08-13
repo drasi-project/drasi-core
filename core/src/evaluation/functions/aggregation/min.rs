@@ -2,7 +2,7 @@ use std::{fmt::Debug, sync::Arc};
 
 use crate::{
     evaluation::{
-        temporal_constants, variable_value::zoned_datetime::ZonedDateTime, FunctionError, FunctionEvaluationError,
+        temporal_constants, variable_value::zoned_datetime::ZonedDateTime, EvaluationError, FunctionError, FunctionEvaluationError,
     },
     interface::ResultIndex,
 };
@@ -118,7 +118,21 @@ impl AggregatingFunction for Min {
                 accumulator.insert(value).await;
                 match accumulator.get_head().await {
                     Ok(Some(head)) => Ok(VariableValue::ZonedDateTime(
-                        ZonedDateTime::from_epoch_millis(head as u64),
+                        match ZonedDateTime::from_epoch_millis((head * -1.0) as u64) {
+                            Ok(zdt) => zdt,
+                            Err(e) => match e {
+                                EvaluationError::OverflowError => return Err(FunctionError {
+                                    function_name: "Min".to_string(),
+                                    error: FunctionEvaluationError::OverflowError,
+                                }),
+                                _ => {
+                                    return Err(FunctionError {
+                                        function_name: "Min".to_string(),
+                                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime component".to_string() },
+                                    });
+                                }
+                            },
+                        },
                     )),
                     Ok(None) => Ok(VariableValue::Null),
                     Err(e) => Err(FunctionError {
@@ -297,7 +311,21 @@ impl AggregatingFunction for Min {
                 accumulator.remove(value).await;
                 match accumulator.get_head().await {
                     Ok(Some(head)) => Ok(VariableValue::ZonedDateTime(
-                        ZonedDateTime::from_epoch_millis(head as u64),
+                        match ZonedDateTime::from_epoch_millis(head as u64) {
+                            Ok(zdt) => zdt,
+                            Err(e) => match e {
+                                EvaluationError::OverflowError => return Err(FunctionError {
+                                    function_name: "Min".to_string(),
+                                    error: FunctionEvaluationError::OverflowError,
+                                }),
+                                _ => {
+                                    return Err(FunctionError {
+                                        function_name: "Min".to_string(),
+                                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime component".to_string() },
+                                    });
+                                }
+                            },
+                        },
                     )),
                     Ok(None) => Ok(VariableValue::Null),
                     Err(e) => Err(FunctionError {
@@ -445,7 +473,21 @@ impl AggregatingFunction for Min {
             })),
             VariableValue::Integer(_) => Ok(VariableValue::Integer((value as i64).into())),
             VariableValue::ZonedDateTime(_) => Ok(VariableValue::ZonedDateTime(
-                ZonedDateTime::from_epoch_millis(value as u64),
+                match ZonedDateTime::from_epoch_millis(value as u64) {
+                    Ok(zdt) => zdt,
+                    Err(e) => match e {
+                        EvaluationError::OverflowError => return Err(FunctionError {
+                            function_name: "Min".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        }),
+                        _ => {
+                            return Err(FunctionError {
+                                function_name: "Min".to_string(),
+                                error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime component".to_string() },
+                            });
+                        }
+                    },
+                },
             )),
             VariableValue::Duration(_) => Ok(VariableValue::Duration(Duration::new(
                 ChronoDuration::milliseconds(value as i64),

@@ -10,8 +10,8 @@ impl Serialize for VariableValue {
         match self {
             VariableValue::Null => serializer.serialize_unit(),
             VariableValue::Bool(v) => serializer.serialize_bool(*v),
-            VariableValue::Integer(v) => serializer.serialize_i64(v.as_i64().unwrap()),
-            VariableValue::Float(v) => serializer.serialize_f64(v.as_f64().unwrap()),
+            VariableValue::Integer(v) => serializer.serialize_i64(v.as_i64().unwrap_or_default()),
+            VariableValue::Float(v) => serializer.serialize_f64(v.as_f64().unwrap_or_default()),
             VariableValue::String(s) => serializer.serialize_str(s),
             VariableValue::List(v) => v.serialize(serializer),
             VariableValue::Object(m) => {

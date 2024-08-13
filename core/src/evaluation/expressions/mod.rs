@@ -20,6 +20,7 @@ use crate::evaluation::variable_value::{ListRange, RangeBound};
 use crate::interface::{ResultKey, ResultOwner};
 use crate::{evaluation::variable_value::VariableValue, interface::ResultIndex};
 
+use super::variable_value::duration;
 use super::{
     context::{ExpressionEvaluationContext, SideEffects},
     functions::{aggregation::Accumulator, Function, FunctionRegistry},
@@ -1141,7 +1142,10 @@ impl ExpressionEvaluator {
                             ))
                         }),
                     (VariableValue::Duration(duration1), VariableValue::Duration(duration2)) => {
-                        VariableValue::Duration(duration1 + duration2)
+                        VariableValue::Duration(match duration1.try_add(&duration2) {
+                            Ok(d) => d,
+                            Err(e) => return Err(e),
+                        })
                     }
                     _ => VariableValue::Null,
                 }
@@ -1200,7 +1204,10 @@ impl ExpressionEvaluator {
                             ))
                         }),
                     (VariableValue::Duration(duration1), VariableValue::Duration(duration2)) => {
-                        VariableValue::Duration(duration1 - duration2)
+                        VariableValue::Duration(match duration1.try_sub(&duration2) {
+                            Ok(d) => d,
+                            Err(e) => return Err(e),
+                        })
                     }
                     _ => VariableValue::Null,
                 }
