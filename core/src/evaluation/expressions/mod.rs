@@ -1620,19 +1620,25 @@ impl ExpressionEvaluator {
                     let variable = match *var.clone() {
                         ast::Expression::UnaryExpression(exp) => match exp {
                             ast::UnaryExpression::Identifier(ident) => ident,
-                            _ => return Err( FunctionEvaluationError::InvalidAssignmentExpression),
+                            _ => return Err( FunctionEvaluationError::InvalidType {
+                                expected: "Identifier expression".to_string(),
+                            }),
                         },
-                        _ => return Err(FunctionEvaluationError::InvalidAssignmentExpression),
+                        _ => return Err(FunctionEvaluationError::InvalidType {
+                            expected: "Unary expression".to_string(),
+                        }),
                     };
                     let value = match self.evaluate_expression(context, val).await {
                         Ok(value) => value,
-                        Err(_) => return Err(FunctionEvaluationError::InvalidAssignmentExpression),
+                        Err(_) => return Err(FunctionEvaluationError::InvalidType { expected: "valid identifier expresssion".to_string() }),
                     };
                     Ok((variable, value))
                 }
-                _ => Err(FunctionEvaluationError::InvalidAssignmentExpression),
+                _ => Err(FunctionEvaluationError::InvalidType {
+                    expected: "Eq expression".to_string(),
+                }),
             },
-            _ => Err(FunctionEvaluationError::InvalidAssignmentExpression),
+            _ => Err(FunctionEvaluationError::InvalidType { expected: "Binary expression".to_string() }),
         }
     }
 

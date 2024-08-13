@@ -70,9 +70,11 @@ impl LazyScalarFunction for Reduce {
             .reduce_iterator_expression(&context, iterator, accumulator_name)
             .await {
                 Ok(value) => value,
-                Err(e) => return Err(FunctionError {
+                Err(_e) => return Err(FunctionError {
                     function_name: expression.name.to_string(),
-                    error: FunctionEvaluationError::InvalidReduceExpression,
+                    error: FunctionEvaluationError::InvalidType {
+                        expected: "Valid reduce expression".to_string(),
+                    },
                 }),
             };
 

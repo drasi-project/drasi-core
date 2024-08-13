@@ -28,7 +28,7 @@ impl ScalarFunction for Timestamp {
             Err(e) => {
                 return Err(FunctionError {
                     function_name: "timestamp".to_string(),
-                    error: FunctionEvaluationError::InvalidDurationFormat,
+                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid Duration".to_string() },
                 });
             }
         };
