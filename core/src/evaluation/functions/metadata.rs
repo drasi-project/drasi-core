@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::evaluation::{variable_value::{zoned_datetime::ZonedDateTime, VariableValue}, EvaluationError};
+use crate::evaluation::variable_value::{zoned_datetime::ZonedDateTime, VariableValue};
 use async_trait::async_trait;
 use drasi_query_ast::ast;
 
@@ -70,23 +70,7 @@ impl ScalarFunction for ChangeDateTime {
         }
         match &args[0] {
             VariableValue::Element(e) => Ok(VariableValue::ZonedDateTime(
-                match ZonedDateTime::from_epoch_millis(e.get_effective_from()) {
-                    Ok(dt) => dt,
-                    Err(e) => match e { 
-                        EvaluationError::OverflowError => {
-                            return Err(FunctionError {
-                                function_name: expression.name.to_string(),
-                                error: FunctionEvaluationError::OverflowError,
-                            });
-                        },
-                        _ => {
-                            return Err(FunctionError {
-                                function_name: expression.name.to_string(),
-                                error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime component".to_string() },
-                            });
-                        }
-                    }
-                },
+                ZonedDateTime::from_epoch_millis(e.get_effective_from()),
             )),
             _ => Err(FunctionError {
                 function_name: expression.name.to_string(),

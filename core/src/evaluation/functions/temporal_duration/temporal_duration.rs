@@ -536,11 +536,9 @@ impl ScalarFunction for Between {
             }
             (VariableValue::ZonedDateTime(start), VariableValue::Date(end)) => {
                 let start_datetime = start.datetime();
-                let end_naive_datetime = match end.and_hms_opt(0, 0, 0) {
-                    Some(end_time) => end_time,
-                    None => unreachable!(),
-                };
-                let end_datetime = match end_naive_datetime
+                let end_datetime = match end
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap()
                     .and_local_timezone(*start_datetime.offset())
                 {
                     LocalResult::Single(end_datetime) => end_datetime,

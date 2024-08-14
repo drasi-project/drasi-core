@@ -620,26 +620,17 @@ impl QueryPartEvaluator {
         snapshot: Option<QueryVariables>,
         change_context: &ChangeContext,
     ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
-        let before_in = match before_in {
-            Some(before_in) => before_in,
-            None => return Ok(vec![QueryPartEvaluationContext::Aggregation {
+        if before_in.is_none() || before_out.is_none() {
+            return Ok(vec![QueryPartEvaluationContext::Aggregation {
                 before: before_out,
                 after: after_out,
                 grouping_keys,
                 default_before: false,
                 default_after: false,
-            }]),
-        };
-        let before_out =  match before_out {
-            Some(before_out) => before_out,
-            None => return Ok(vec![QueryPartEvaluationContext::Aggregation {
-                before: before_out,
-                after: after_out,
-                grouping_keys,
-                default_before: false,
-                default_after: false,
-            }]),
-        };
+            }]);
+        }
+        let before_in = before_in.unwrap();
+        let before_out = before_out.unwrap();
 
         let mut grouping_match = true;
         for gk in &grouping_keys {

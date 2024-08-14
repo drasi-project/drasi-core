@@ -2,9 +2,11 @@ use std::{fmt::Debug, sync::Arc};
 
 use crate::{
     evaluation::{
-        temporal_constants, variable_value::{
+        temporal_constants,
+        variable_value::{
             duration::Duration, zoned_datetime::ZonedDateTime, zoned_time::ZonedTime,
-        }, EvaluationError, FunctionError, FunctionEvaluationError
+        },
+        {FunctionError, FunctionEvaluationError},
     },
     interface::ResultIndex,
 };
@@ -120,21 +122,7 @@ impl AggregatingFunction for Max {
                 accumulator.insert(value * -1.0).await;
                 match accumulator.get_head().await {
                     Ok(Some(head)) => Ok(VariableValue::ZonedDateTime(
-                        match ZonedDateTime::from_epoch_millis((head * -1.0) as u64) {
-                            Ok(zdt) => zdt,
-                            Err(e) => match e {
-                                EvaluationError::OverflowError => return Err(FunctionError {
-                                    function_name: "Max".to_string(),
-                                    error: FunctionEvaluationError::OverflowError,
-                                }),
-                                _ => {
-                                    return Err(FunctionError {
-                                        function_name: "Max".to_string(),
-                                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime component".to_string() },
-                                    });
-                                }
-                            },
-                        },
+                        ZonedDateTime::from_epoch_millis((head * -1.0) as u64),
                     )),
                     Ok(None) => Ok(VariableValue::Null),
                     Err(e) => Err(FunctionError {
@@ -316,21 +304,7 @@ impl AggregatingFunction for Max {
                 accumulator.remove(value * -1.0).await;
                 match accumulator.get_head().await {
                     Ok(Some(head)) => Ok(VariableValue::ZonedDateTime(
-                        match ZonedDateTime::from_epoch_millis((head * -1.0) as u64) {
-                            Ok(zdt) => zdt,
-                            Err(e) => match e {
-                                EvaluationError::OverflowError => return Err(FunctionError {
-                                    function_name: "Max".to_string(),
-                                    error: FunctionEvaluationError::OverflowError,
-                                }),
-                                _ => {
-                                    return Err(FunctionError {
-                                        function_name: "Max".to_string(),
-                                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime component".to_string() },
-                                    });
-                                }
-                            },
-                        }
+                        ZonedDateTime::from_epoch_millis((head * -1.0) as u64),
                     )),
                     Ok(None) => Ok(VariableValue::Null),
                     Err(e) => Err(FunctionError {
@@ -478,21 +452,7 @@ impl AggregatingFunction for Max {
             })),
             VariableValue::Integer(_) => Ok(VariableValue::Integer((value as i64).into())),
             VariableValue::ZonedDateTime(_) => Ok(VariableValue::ZonedDateTime(
-                match ZonedDateTime::from_epoch_millis(value as u64) {
-                    Ok(zdt) => zdt,
-                    Err(e) => match e {
-                        EvaluationError::OverflowError => return Err(FunctionError {
-                            function_name: "Max".to_string(),
-                            error: FunctionEvaluationError::OverflowError,
-                        }),
-                        _ => {
-                            return Err(FunctionError {
-                                function_name: "Max".to_string(),
-                                error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime component".to_string() },
-                            });
-                        }
-                    },
-                },
+                ZonedDateTime::from_epoch_millis(value as u64),
             )),
             VariableValue::Duration(_) => Ok(VariableValue::Duration(Duration::new(
                 ChronoDuration::milliseconds(value as i64),

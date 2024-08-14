@@ -81,10 +81,7 @@ impl PartialEq<VariableValue> for String {
 
 impl PartialEq<Float> for VariableValue {
     fn eq(&self, other: &Float) -> bool {
-        eq_f64(self, match other.as_f64() {
-            Some(f) => f,
-            None => return false,
-        })
+        eq_f64(self, other.as_f64().unwrap())
     }
 }
 
@@ -122,16 +119,10 @@ impl PartialEq<VariableValue> for VariableValue {
             (VariableValue::Float(n), VariableValue::Float(m)) => n == m,
             (VariableValue::Integer(n), VariableValue::Float(m)) => n
                 .as_i64()
-                .map_or(false, |n| n as f64 == match m.as_f64() {
-                    Some(f) => f,
-                    None => return false,
-                }),
+                .map_or(false, |n| n as f64 == m.as_f64().unwrap()),
             (VariableValue::Float(n), VariableValue::Integer(m)) => m
                 .as_i64()
-                .map_or(false, |m| m as f64 == match n.as_f64() {
-                    Some(f) => f,
-                    None => return false,
-                }),
+                .map_or(false, |m| m as f64 == n.as_f64().unwrap()),
             (VariableValue::Bool(n), VariableValue::Bool(m)) => n == m,
             (VariableValue::String(n), VariableValue::String(m)) => n == m,
             (VariableValue::List(list1), VariableValue::List(list2)) => list1 == list2,
