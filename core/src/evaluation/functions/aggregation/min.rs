@@ -199,8 +199,7 @@ impl AggregatingFunction for Min {
                         _ => return Err(FunctionError {
                             function_name: "Min".to_string(),
                             error: FunctionEvaluationError::InvalidFormat { expected: 
-                                "A valid string representation of a zoned time or a map of zoned time components. \n\
-                                Examples include: time('214032.142Z'), time('21:40:32+01:00'), time('214032-0100'), time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'})".to_string() },
+                                temporal_constants::INVALID_ZONED_TIME_FORMAT_ERROR.to_string() },
                         }),
                     };
                 let duration_since_epoch = epoch_datetime.timestamp_millis() as f64;
@@ -382,8 +381,7 @@ impl AggregatingFunction for Min {
                         _ => return Err(FunctionError {
                             function_name: "Min".to_string(),
                             error: FunctionEvaluationError::InvalidFormat { expected: 
-                                "A valid string representation of a zoned time or a map of zoned time components. \n\
-                                Examples include: time('214032.142Z'), time('21:40:32+01:00'), time('214032-0100'), time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'})".to_string() },
+                                temporal_constants::INVALID_ZONED_TIME_FORMAT_ERROR.to_string() },
                         }),
                     };
                 let duration_since_epoch = epoch_datetime.timestamp_millis() as f64;
@@ -482,8 +480,7 @@ impl AggregatingFunction for Min {
                         _ => return Err(FunctionError {
                             function_name: "Min".to_string(),
                             error: FunctionEvaluationError::InvalidFormat { expected: 
-                                "A valid string representation of a zoned time or a map of zoned time components. \n\
-                                Examples include: time('214032.142Z'), time('21:40:32+01:00'), time('214032-0100'), time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'})".to_string() },
+                                temporal_constants::INVALID_ZONED_TIME_FORMAT_ERROR.to_string() },
                         }),
                     };
                 Ok(VariableValue::ZonedTime(ZonedTime::new(
