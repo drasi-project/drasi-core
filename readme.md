@@ -154,9 +154,4 @@ The drasi-core library is one component of an early release of Drasi which enabl
 
 ## Contributing
 
-Enable the local git hooks and your development machine
-
-```
-chmod +x .githooks/pre-commit
-git config core.hooksPath .githooks
-```
+Please see the [Contribution guide](CONTRIBUTING.md)
