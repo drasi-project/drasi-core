@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use async_recursion::async_recursion;
 use chrono::{
-    Datelike, Duration, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Weekday, LocalResult
+    Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Weekday, LocalResult
 };
 use drasi_query_ast::ast;
 
@@ -23,7 +23,7 @@ use crate::{evaluation::variable_value::VariableValue, interface::ResultIndex};
 use super::{
     context::{ExpressionEvaluationContext, SideEffects},
     functions::{aggregation::Accumulator, Function, FunctionRegistry},
-    EvaluationError, FunctionError, FunctionEvaluationError
+    EvaluationError, FunctionEvaluationError
 };
 
 pub struct ExpressionEvaluator {

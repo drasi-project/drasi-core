@@ -4,7 +4,7 @@ use drasi_query_ast::ast;
 
 use super::text;
 use crate::evaluation::context::QueryVariables;
-use crate::evaluation::functions::{Function, ScalarFunction};
+use crate::evaluation::functions::{ScalarFunction};
 use crate::evaluation::variable_value::VariableValue;
 use crate::evaluation::{FunctionError,FunctionEvaluationError, ExpressionEvaluationContext, InstantQueryClock};
 

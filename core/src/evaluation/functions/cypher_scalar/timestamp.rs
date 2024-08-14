@@ -25,7 +25,7 @@ impl ScalarFunction for Timestamp {
         let now = std::time::SystemTime::now();
         let since_epoch = match now.duration_since(std::time::UNIX_EPOCH) {
             Ok(d) => d,
-            Err(e) => {
+            Err(_e) => {
                 return Err(FunctionError {
                     function_name: "timestamp".to_string(),
                     error: FunctionEvaluationError::InvalidFormat { expected: "A valid Duration".to_string() },

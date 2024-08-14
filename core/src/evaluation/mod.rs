@@ -102,6 +102,11 @@ impl fmt::Display for FunctionEvaluationError {
     }
 }
 
+impl fmt::Display for FunctionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Function: {}, Error: {}", self.function_name, self.error)
+    }
+}
 
 #[derive(Debug)]
 pub enum OutOfRangeType {

@@ -19,7 +19,7 @@ use crate::evaluation::{
     variable_value::float::Float, variable_value::VariableValue, ExpressionEvaluationContext,
 };
 
-use chrono::{DateTime, Duration as ChronoDuration, FixedOffset, LocalResult};
+use chrono::{DateTime, Duration as ChronoDuration, LocalResult};
 
 use super::{super::AggregatingFunction, lazy_sorted_set::LazySortedSet, Accumulator};
 

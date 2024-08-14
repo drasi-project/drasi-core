@@ -220,7 +220,7 @@ impl ScalarFunction for Left {
                 let result = original.chars().take(len).collect::<String>();
                 Ok(VariableValue::String(result))
             }
-            (VariableValue::String(original), _) => return Err(FunctionError {
+            (VariableValue::String(_original), _) => return Err(FunctionError {
                 function_name: expression.name.to_string(),
                 error: FunctionEvaluationError::InvalidArgument(1),
             }),

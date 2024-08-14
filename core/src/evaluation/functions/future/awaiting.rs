@@ -3,7 +3,7 @@ use drasi_query_ast::ast;
 
 use crate::evaluation::{
     functions::ScalarFunction, variable_value::VariableValue, FunctionError,
-    ExpressionEvaluationContext, FunctionEvaluationError,
+    ExpressionEvaluationContext,
 };
 
 pub struct Awaiting {}

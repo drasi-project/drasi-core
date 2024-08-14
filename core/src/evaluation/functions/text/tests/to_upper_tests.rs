@@ -6,7 +6,7 @@ use super::text;
 use crate::evaluation::context::QueryVariables;
 use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::variable_value::VariableValue;
-use crate::evaluation::{EvaluationError, ExpressionEvaluationContext, FunctionError, FunctionEvaluationError, InstantQueryClock};
+use crate::evaluation::{ExpressionEvaluationContext, FunctionError, FunctionEvaluationError, InstantQueryClock};
 
 fn get_func_expr() -> ast::FunctionExpression {
     ast::FunctionExpression {

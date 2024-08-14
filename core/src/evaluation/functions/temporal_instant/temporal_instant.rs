@@ -14,7 +14,6 @@ use chrono::{
 use chrono_tz::Tz;
 use log::error;
 use std::collections::{BTreeMap, HashSet};
-use std::f32::consts::E;
 use std::str::FromStr;
 
 use regex::Regex;
@@ -108,7 +107,7 @@ impl ScalarFunction for Date {
                     Ok(date) => Ok(date),
                     Err(e) => Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid Date".to_string() },
+                        error: e,
                     }),
                 }
             }
@@ -181,7 +180,7 @@ impl ScalarFunction for LocalTime {
                     Ok(time) => Ok(time),
                     Err(e) => Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid LocalTime".to_string() },
+                        error: e,
                     }),
                 }
             }
@@ -463,7 +462,7 @@ impl ScalarFunction for Time {
                     }
                     Err(e) => Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid Time".to_string() },
+                        error: e,
                     }),
                 }
             }
@@ -600,7 +599,7 @@ impl ScalarFunction for DateTime {
                     }
                     Err(e) => return Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
+                        error: e,
                     }),
                 };
                 let result = create_time_from_componet(o.clone()).await;
@@ -652,7 +651,7 @@ impl ScalarFunction for DateTime {
                     }
                     Err(e) => Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
+                        error: e,
                     }),
                 }
             }
