@@ -9,7 +9,7 @@ use drasi_core::{
 use shared_tests::QueryTestConfig;
 use uuid::Uuid;
 
-use crate::{
+use drasi_index_rocksdb::{
     element_index::{self, RocksDbElementIndex},
     future_queue::RocksDbFutureQueue,
     result_index::RocksDbResultIndex,

@@ -15,7 +15,7 @@ use drasi_core::{
 use shared_tests::QueryTestConfig;
 use uuid::Uuid;
 
-use crate::{
+use drasi_index_garnet::{
     element_index::GarnetElementIndex, future_queue::GarnetFutureQueue,
     result_index::GarnetResultIndex,
 };
