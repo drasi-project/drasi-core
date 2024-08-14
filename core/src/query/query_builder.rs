@@ -138,11 +138,8 @@ impl QueryBuilder {
         &self.joins
     }
 
-    pub async fn build(self) -> Result<ContinuousQuery, QueryBuilderError> {
-        match self.try_build().await {
-            Ok(query) => Ok(query),
-            Err(e) => Err(e),
-        }
+    pub async fn build(self) -> ContinuousQuery {
+        self.try_build().await.unwrap()
     }
 
     pub async fn try_build(mut self) -> Result<ContinuousQuery, QueryBuilderError> {

@@ -355,10 +355,7 @@ impl InMemoryElementIndex {
             .entry((query_join.id.clone(), value_hash))
             .or_default();
 
-        let did_remove = match partial_joins.get_mut(join_key) {
-            Some(elements) => elements.remove(old_element),
-            None => false,
-        };
+        let did_remove = partial_joins.get_mut(join_key).unwrap().remove(old_element);
 
         if did_remove {
             for qjk2 in &query_join.keys {
@@ -574,10 +571,7 @@ impl ElementArchiveIndex for InMemoryElementIndex {
             Some(archive) => match from {
                 TimestampBound::Included(from) => archive.get_range(from, to),
                 TimestampBound::StartFromPrevious(from) => {
-                    let initial_start = match archive.retrieve_previous_start_timestamp(from) {
-                        None => 0,
-                        Some(v) => v,
-                    };
+                    let initial_start = archive.retrieve_previous_start_timestamp(from).unwrap();
                     archive.get_range(initial_start, to)
                 }
             },
