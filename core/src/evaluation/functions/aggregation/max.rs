@@ -204,7 +204,8 @@ impl AggregatingFunction for Max {
                         LocalResult::Single(dt) => dt,
                         _ => return Err(FunctionError {
                             function_name: "Max".to_string(),
-                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid Time".to_string() },
+                            error: FunctionEvaluationError::InvalidFormat { expected: 
+                                temporal_constants::INVALID_ZONED_TIME_FORMAT_ERROR.to_string() },
                         }),
                     };
                 let duration_since_epoch = epoch_datetime.timestamp_millis() as f64;
@@ -386,7 +387,8 @@ impl AggregatingFunction for Max {
                         LocalResult::Single(dt) => dt,
                         _ => return Err(FunctionError {
                             function_name: "Max".to_string(),
-                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid Time".to_string() },
+                            error: FunctionEvaluationError::InvalidFormat { expected: 
+                                temporal_constants::INVALID_ZONED_TIME_FORMAT_ERROR.to_string() },
                         }),
                     };
                 let duration_since_epoch = epoch_datetime.timestamp_millis() as f64;
@@ -484,7 +486,8 @@ impl AggregatingFunction for Max {
                         LocalResult::Single(dt) => dt,
                         _ => return Err(FunctionError {
                             function_name: "Max".to_string(),
-                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid Time".to_string() },
+                            error: FunctionEvaluationError::InvalidFormat { expected: 
+                                temporal_constants::INVALID_ZONED_TIME_FORMAT_ERROR.to_string() },
                         }),
                     };
                 Ok(VariableValue::ZonedTime(ZonedTime::new(
