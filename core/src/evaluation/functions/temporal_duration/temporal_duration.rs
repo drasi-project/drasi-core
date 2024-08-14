@@ -273,7 +273,8 @@ impl ScalarFunction for Between {
                     LocalResult::Single(start_datetime) => start_datetime,
                     _ => return Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid Datetime".to_string() },
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})".to_string() },
                     }),
                 };
                 let end_datetime = end.datetime().fixed_offset();
@@ -330,7 +331,8 @@ impl ScalarFunction for Between {
                     LocalResult::Single(start_datetime) => start_datetime,
                     _ => return Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid Datetime".to_string() },
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})".to_string() },
                     }),
                 };
                 let duration = end_datetime.signed_duration_since(start_datetime);
@@ -406,7 +408,8 @@ impl ScalarFunction for Between {
                     LocalResult::Single(end_datetime) => end_datetime,
                     _ => return Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid LocalDateTime".to_string() },
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a local datetime or a map of local datetime components.\n\
+                                Examples include: localdatetime('2015-07-21T21:40:32.142'), localdatetime('2015202T21'), localdatetime({year: 1984, week: 10, dayOfWeek: 3,hour: 12, minute: 31, second: 14, millisecond: 645})".to_string() },
                     }),
                 };
                 let start_datetime = match end
@@ -417,7 +420,8 @@ impl ScalarFunction for Between {
                     LocalResult::Single(start_datetime) => start_datetime,
                     _ => return Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})".to_string() },
                     }),
                 };
 
@@ -438,7 +442,8 @@ impl ScalarFunction for Between {
                     LocalResult::Single(start_datetime) => start_datetime,
                     _ => return Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})".to_string() },
                     }),
                 };
 
@@ -491,14 +496,17 @@ impl ScalarFunction for Between {
                     LocalResult::Single(end_datetime) => end_datetime,
                     _ => return Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid Time".to_string() },
+                        error: FunctionEvaluationError::InvalidFormat { expected: 
+                                "A valid string representation of a zoned time or a map of zoned time components. \n\
+                                Examples include: time('214032.142Z'), time('21:40:32+01:00'), time('214032-0100'), time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'})".to_string() },
                     }),
                 };
                 let start_datetime = match start.and_local_timezone(*offset) {
                     LocalResult::Single(start_datetime) => start_datetime,
                     _ => return Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid LocalDateTime".to_string() },
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a local datetime or a map of local datetime components.\n\
+                                Examples include: localdatetime('2015-07-21T21:40:32.142'), localdatetime('2015202T21'), localdatetime({year: 1984, week: 10, dayOfWeek: 3,hour: 12, minute: 31, second: 14, millisecond: 645})".to_string() },
                     }),
                 };
 
@@ -515,7 +523,8 @@ impl ScalarFunction for Between {
                     LocalResult::Single(start_datetime) => start_datetime,
                     _ => return Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})".to_string() },
                     }),
                 };
 
@@ -544,7 +553,8 @@ impl ScalarFunction for Between {
                     LocalResult::Single(end_datetime) => end_datetime,
                     _ => return Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})".to_string() },
                     }),
                 };
                 let duration = end_datetime.signed_duration_since(start_datetime);
@@ -564,7 +574,8 @@ impl ScalarFunction for Between {
                     LocalResult::Single(end_datetime) => end_datetime,
                     _ => return Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})".to_string() },
                     }),
                 };
                 let duration = end_datetime.signed_duration_since(start_datetime);
@@ -584,7 +595,8 @@ impl ScalarFunction for Between {
                     LocalResult::Single(end_datetime) => end_datetime,
                     _ => return Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})".to_string() },
                     }),
                 };
 
@@ -603,7 +615,8 @@ impl ScalarFunction for Between {
                     LocalResult::Single(end_datetime) => end_datetime,
                     _ => return Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid LocalDateTime".to_string() },
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a local datetime or a map of local datetime components.\n\
+                                Examples include: localdatetime('2015-07-21T21:40:32.142'), localdatetime('2015202T21'), localdatetime({year: 1984, week: 10, dayOfWeek: 3,hour: 12, minute: 31, second: 14, millisecond: 645})".to_string() },
                     }),
                 };
 
@@ -802,7 +815,8 @@ impl ScalarFunction for InDays {
                     Some(duration) => duration.duration().num_days(),
                     None => return Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid Duration".to_string() },
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a duration or a map of duration components \n\
+                        Examples include: duration({days: 14, hours:16, minutes: 12}), duration({minutes: 1.5, seconds: 1, nanoseconds: 123456789}), duration('P14DT16H12M'), duration('PT0.75M'),".to_string() },
                     }),
                 };
                 let duration =
@@ -846,12 +860,14 @@ impl ScalarFunction for InSeconds {
                         Some(seconds) => seconds,
                         None => return Err(FunctionError {
                             function_name: expression.name.to_string(),
-                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid Duration".to_string() },
+                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a duration or a map of duration components \n\
+                        Examples include: duration({days: 14, hours:16, minutes: 12}), duration({minutes: 1.5, seconds: 1, nanoseconds: 123456789}), duration('P14DT16H12M'), duration('PT0.75M'),".to_string() },
                         }),
                     }
                     None => return Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid Duration".to_string() },
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a duration or a map of duration components \n\
+                        Examples include: duration({days: 14, hours:16, minutes: 12}), duration({minutes: 1.5, seconds: 1, nanoseconds: 123456789}), duration('P14DT16H12M'), duration('PT0.75M'),".to_string() },
                     }),
                 };
                 let duration = VariableValue::Duration(Duration::new(
@@ -896,7 +912,8 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, FunctionEr
         Some(duration) => duration,
         None => return Err(FunctionError {
             function_name: "Duration".to_string(),
-            error: FunctionEvaluationError::InvalidFormat { expected: "A valid Duration".to_string() },
+            error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a duration or a map of duration components \n\
+                        Examples include: duration({days: 14, hours:16, minutes: 12}), duration({minutes: 1.5, seconds: 1, nanoseconds: 123456789}), duration('P14DT16H12M'), duration('PT0.75M'),".to_string() },
         }),
     };
 
@@ -933,7 +950,8 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, FunctionEr
                             } else {
                                 return Err(FunctionError {
                                     function_name: "Duration".to_string(),
-                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid Duration".to_string() },
+                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a duration or a map of duration components \n\
+                        Examples include: duration({days: 14, hours:16, minutes: 12}), duration({minutes: 1.5, seconds: 1, nanoseconds: 123456789}), duration('P14DT16H12M'), duration('PT0.75M'),".to_string() },
                                 });
                             }
                         }
@@ -944,7 +962,8 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, FunctionEr
                             } else {
                                 return Err(FunctionError {
                                     function_name: "Duration".to_string(),
-                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid Duration".to_string() },
+                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a duration or a map of duration components \n\
+                        Examples include: duration({days: 14, hours:16, minutes: 12}), duration({minutes: 1.5, seconds: 1, nanoseconds: 123456789}), duration('P14DT16H12M'), duration('PT0.75M'),".to_string() },
                                 });
                             }
                         }
@@ -955,7 +974,8 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, FunctionEr
                             } else {
                                 return Err(FunctionError {
                                     function_name: "Duration".to_string(),
-                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid Duration".to_string() },
+                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a duration or a map of duration components \n\
+                        Examples include: duration({days: 14, hours:16, minutes: 12}), duration({minutes: 1.5, seconds: 1, nanoseconds: 123456789}), duration('P14DT16H12M'), duration('PT0.75M'),".to_string() },
                                 });
                             }
                         }
@@ -969,7 +989,8 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, FunctionEr
                                 } else {
                                     return Err(FunctionError {
                                         function_name: "Duration".to_string(),
-                                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid Duration".to_string() },
+                                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a duration or a map of duration components \n\
+                        Examples include: duration({days: 14, hours:16, minutes: 12}), duration({minutes: 1.5, seconds: 1, nanoseconds: 123456789}), duration('P14DT16H12M'), duration('PT0.75M'),".to_string() },
                                     });
                                 }
                             } else if let Ok(days) = substring.parse::<i64>() {
@@ -977,7 +998,8 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, FunctionEr
                             } else {
                                 return Err(FunctionError {
                                     function_name: "Duration".to_string(),
-                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid Duration".to_string() },
+                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a duration or a map of duration components \n\
+                        Examples include: duration({days: 14, hours:16, minutes: 12}), duration({minutes: 1.5, seconds: 1, nanoseconds: 123456789}), duration('P14DT16H12M'), duration('PT0.75M'),".to_string() },
                                 });
                             }
                         }
@@ -996,14 +1018,16 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, FunctionEr
                 Ok(iso_duration) => iso_duration,
                 Err(_) => return Err(FunctionError {
                     function_name: "Duration".to_string(),
-                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid Duration".to_string() },
+                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a duration or a map of duration components \n\
+                        Examples include: duration({days: 14, hours:16, minutes: 12}), duration({minutes: 1.5, seconds: 1, nanoseconds: 123456789}), duration('P14DT16H12M'), duration('PT0.75M'),".to_string() },
                 }),
             };
             let seconds = match iso_duration.num_seconds() {
                 Some(seconds) => seconds,
                 None => return Err(FunctionError {
                     function_name: "Duration".to_string(),
-                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid Duration".to_string() },
+                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a duration or a map of duration components \n\
+                        Examples include: duration({days: 14, hours:16, minutes: 12}), duration({minutes: 1.5, seconds: 1, nanoseconds: 123456789}), duration('P14DT16H12M'), duration('PT0.75M'),".to_string() },
                 }),
             };
 
@@ -1012,7 +1036,8 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, FunctionEr
                     Some(fract_string) => fract_string,
                     None => return Err(FunctionError {
                         function_name: "Duration".to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid Duration".to_string() },
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a duration or a map of duration components \n\
+                        Examples include: duration({days: 14, hours:16, minutes: 12}), duration({minutes: 1.5, seconds: 1, nanoseconds: 123456789}), duration('P14DT16H12M'), duration('PT0.75M'),".to_string() },
                     }),
                 };
                 fract_string = &fract_string[..fract_string.len() - 1];
@@ -1020,7 +1045,8 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, FunctionEr
                     Ok(nanoseconds) => nanoseconds,
                     Err(_) => return Err(FunctionError {
                         function_name: "Duration".to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid Duration".to_string() },
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a duration or a map of duration components \n\
+                        Examples include: duration({days: 14, hours:16, minutes: 12}), duration({minutes: 1.5, seconds: 1, nanoseconds: 123456789}), duration('P14DT16H12M'), duration('PT0.75M'),".to_string() },
                     }),
                 };
                 duration_result += ChronoDuration::nanoseconds(nanoseconds * 100_000_000_i64);

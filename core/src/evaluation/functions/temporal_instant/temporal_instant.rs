@@ -79,36 +79,12 @@ impl ScalarFunction for Date {
                         error: FunctionEvaluationError::InvalidArgument(0),
                     });
                 }
-                if o.get("timezone").is_some() {
-                    let tz = match o.get("timezone") {
-                        Some(tz) => {
-                            let tz_str = match tz.as_str() {
-                                Some(tz_str) => tz_str,
-                                None => "UTC",
-                            };
-                            let tz: Tz = match tz_str.parse() {
-                                Ok(tz) => tz,
-                                Err(_) => return Err(FunctionError {
-                                    function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid Date".to_string() },
-                                }),
-                            };
-                            tz
-                        }
-                        None => return Err(FunctionError {
-                            function_name: expression.name.to_string(),
-                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid Date".to_string() },
-                        }),
-                    };
-                    let local: chrono::DateTime<Tz> = Local::now().with_timezone(&tz);
-                    return Ok(VariableValue::Date(local.date_naive()));
-                }
                 let result = create_date_from_componet(o.clone()).await;
                 match result {
                     Ok(date) => Ok(date),
                     Err(e) => Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid Date".to_string() },
+                        error: e,
                     }),
                 }
             }
@@ -150,7 +126,8 @@ impl ScalarFunction for LocalTime {
                     Ok(result_time) => Ok(VariableValue::LocalTime(result_time)),
                     _ => Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid LocalTime".to_string() },
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a local time or a map of local time components.\n\
+                                Examples include: localtime('21:40:32.142'), localtime('214032.142'), localtime({hour: 12, minute: 31, second: 14, nanosecond: 789, millisecond: 123, microsecond: 456})".to_string() },
                     }),
                 }
             }
@@ -181,7 +158,8 @@ impl ScalarFunction for LocalTime {
                     Ok(time) => Ok(time),
                     Err(e) => Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid LocalTime".to_string() },
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a local time or a map of local time components.\n\
+                                Examples include: localtime('21:40:32.142'), localtime('214032.142'), localtime({hour: 12, minute: 31, second: 14, nanosecond: 789, millisecond: 123, microsecond: 456})".to_string() },
                     }),
                 }
             }
@@ -225,7 +203,8 @@ impl ScalarFunction for LocalDateTime {
                     Ok(result_datetime) => Ok(VariableValue::LocalDateTime(result_datetime)),
                     _ => Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid LocalDateTime".to_string() },
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a local datetime or a map of local datetime components.\n\
+                                Examples include: localdatetime('2015-07-21T21:40:32.142'), localdatetime('2015202T21'), localdatetime({year: 1984, week: 10, dayOfWeek: 3,hour: 12, minute: 31, second: 14, millisecond: 645})".to_string() },
                     }),
                 }
             }
@@ -268,21 +247,24 @@ impl ScalarFunction for LocalDateTime {
                                 Some(tz_str) => tz_str,
                                 None => return Err(FunctionError {
                                     function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid LocalDateTime".to_string() },
+                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a local datetime or a map of local datetime components.\n\
+                                Examples include: localdatetime('2015-07-21T21:40:32.142'), localdatetime('2015202T21'), localdatetime({year: 1984, week: 10, dayOfWeek: 3,hour: 12, minute: 31, second: 14, millisecond: 645})".to_string() },
                                 }),
                             };
                             let tz: Tz = match tz_str.parse() {
                                 Ok(tz) => tz,
                                 Err(_) => return Err(FunctionError {
                                     function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid LocalDateTime".to_string() },
+                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a local datetime or a map of local datetime components.\n\
+                                Examples include: localdatetime('2015-07-21T21:40:32.142'), localdatetime('2015202T21'), localdatetime({year: 1984, week: 10, dayOfWeek: 3,hour: 12, minute: 31, second: 14, millisecond: 645})".to_string() },
                                 }),
                             };
                             tz
                         }
                         None => return Err(FunctionError {
                             function_name: expression.name.to_string(),
-                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid LocalDateTime".to_string() },
+                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a local datetime or a map of local datetime components.\n\
+                                Examples include: localdatetime('2015-07-21T21:40:32.142'), localdatetime('2015202T21'), localdatetime({year: 1984, week: 10, dayOfWeek: 3,hour: 12, minute: 31, second: 14, millisecond: 645})".to_string() },
                         }),
                     };
 
@@ -309,7 +291,8 @@ impl ScalarFunction for LocalDateTime {
                     None => {
                         return Err(FunctionError {
                             function_name: expression.name.to_string(),
-                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid LocalDateTime".to_string() },
+                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a local datetime or a map of local datetime components.\n\
+                                Examples include: localdatetime('2015-07-21T21:40:32.142'), localdatetime('2015202T21'), localdatetime({year: 1984, week: 10, dayOfWeek: 3,hour: 12, minute: 31, second: 14, millisecond: 645})".to_string() },
                         })
                     }
                 };
@@ -364,7 +347,9 @@ impl ScalarFunction for Time {
                     Ok(result_time) => Ok(VariableValue::ZonedTime(result_time)),
                     _ => Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid Time".to_string() },
+                        error: FunctionEvaluationError::InvalidFormat { expected: 
+                                "A valid string representation of a zoned time or a map of zoned time components. \n\
+                                Examples include: time('214032.142Z'), time('21:40:32+01:00'), time('214032-0100'), time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'})".to_string() },
                     }),
                 }
             }
@@ -402,7 +387,9 @@ impl ScalarFunction for Time {
                             Some(tz) => tz,
                             None => return Err(FunctionError {
                                 function_name: expression.name.to_string(),
-                                error: FunctionEvaluationError::InvalidFormat { expected: "A valid Time".to_string() },
+                                error: FunctionEvaluationError::InvalidFormat { expected: 
+                                "A valid string representation of a zoned time or a map of zoned time components. \n\
+                                Examples include: time('214032.142Z'), time('21:40:32+01:00'), time('214032-0100'), time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'})".to_string() },
                             }),
                         }
                     }
@@ -427,7 +414,9 @@ impl ScalarFunction for Time {
                             Some(time) => time,
                             None => return Err(FunctionError {
                                 function_name: expression.name.to_string(),
-                                error: FunctionEvaluationError::InvalidFormat { expected: "A valid Time".to_string() },
+                                error: FunctionEvaluationError::InvalidFormat { expected: 
+                                "A valid string representation of a zoned time or a map of zoned time components. \n\
+                                Examples include: time('214032.142Z'), time('21:40:32+01:00'), time('214032-0100'), time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'})".to_string() },
                             }),
                         };
                         let datetime = dummy_date.and_time(local_time);
@@ -435,7 +424,9 @@ impl ScalarFunction for Time {
                             LocalResult::Single(zoned_datetime) => zoned_datetime.fixed_offset(),
                             _ => return Err(FunctionError {
                                 function_name: expression.name.to_string(),
-                                error: FunctionEvaluationError::InvalidFormat { expected: "A valid Time".to_string() },
+                                error: FunctionEvaluationError::InvalidFormat { expected: 
+                                "A valid string representation of a zoned time or a map of zoned time components. \n\
+                                Examples include: time('214032.142Z'), time('21:40:32+01:00'), time('214032-0100'), time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'})".to_string() },
                             }),
                         };
                         let zoned_time = zoned_datetime.time();
@@ -450,7 +441,9 @@ impl ScalarFunction for Time {
                                 Ok(offset) => offset,
                                 Err(_) => return Err(FunctionError {
                                     function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid Time".to_string() },
+                                    error: FunctionEvaluationError::InvalidFormat { expected: 
+                                "A valid string representation of a zoned time or a map of zoned time components. \n\
+                                Examples include: time('214032.142Z'), time('21:40:32+01:00'), time('214032-0100'), time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'})".to_string() },
                                 }),
                             };
                             return Ok(VariableValue::ZonedTime(ZonedTime::new(
@@ -463,7 +456,9 @@ impl ScalarFunction for Time {
                     }
                     Err(e) => Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid Time".to_string() },
+                        error: FunctionEvaluationError::InvalidFormat { expected: 
+                                "A valid string representation of a zoned time or a map of zoned time components. \n\
+                                Examples include: time('214032.142Z'), time('21:40:32+01:00'), time('214032-0100'), time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'})".to_string() },
                     }),
                 }
             }
@@ -509,7 +504,8 @@ impl ScalarFunction for DateTime {
                     Ok(result_time) => Ok(VariableValue::ZonedDateTime(result_time)),
                     _ => Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})".to_string() },
                     }),
                 }
             }
@@ -551,7 +547,8 @@ impl ScalarFunction for DateTime {
                         Some(datetime) => datetime,
                         None => return Err(FunctionError {
                             function_name: expression.name.to_string(),
-                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
+                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})".to_string() },
                         }),
                     };
 
@@ -563,14 +560,16 @@ impl ScalarFunction for DateTime {
                             Some(tz_str) => tz_str,
                             None => return Err(FunctionError {
                                 function_name: expression.name.to_string(),
-                                error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
+                                error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})".to_string() },
                             }),
                         };
                         match handle_iana_timezone(tz_str).await {
                             Some(tz) => tz,
                             None => return Err(FunctionError {
                                 function_name: expression.name.to_string(),
-                                error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
+                                error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})".to_string() },
                             }),
                         }
                     }
@@ -583,7 +582,8 @@ impl ScalarFunction for DateTime {
                         LocalResult::Single(zoned_time) => zoned_time.fixed_offset(),
                         _ => return Err(FunctionError {
                             function_name: expression.name.to_string(),
-                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
+                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})".to_string() },
                         }),
                     };
                     return Ok(VariableValue::ZonedDateTime(ZonedDateTime::new(
@@ -595,12 +595,13 @@ impl ScalarFunction for DateTime {
                         Some(date) => date,
                         None => return Err(FunctionError {
                             function_name: expression.name.to_string(),
-                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid Date".to_string() },
+                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})".to_string() },
                         }),
                     }
                     Err(e) => return Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
+                        error: e,
                     }),
                 };
                 let result = create_time_from_componet(o.clone()).await;
@@ -610,7 +611,8 @@ impl ScalarFunction for DateTime {
                             Some(time) => time,
                             None => return Err(FunctionError {
                                 function_name: expression.name.to_string(),
-                                error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
+                                error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})".to_string() },
                             }),
                         };
                         let datetime = naive_date.and_time(local_time);
@@ -623,14 +625,16 @@ impl ScalarFunction for DateTime {
                                 Ok(offset) => offset,
                                 Err(_) => return Err(FunctionError {
                                     function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
+                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})".to_string() },
                                 }),
                             };
                             let datetime_offset = match datetime.and_local_timezone(offset) {
                                 LocalResult::Single(offset) => offset.fixed_offset(),
                                 _ => return Err(FunctionError {
                                     function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
+                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})".to_string() },
                                 }),
                             };
                             return Ok(VariableValue::ZonedDateTime(ZonedDateTime::new(
@@ -642,7 +646,8 @@ impl ScalarFunction for DateTime {
                             LocalResult::Single(zoned_datetime) => zoned_datetime.fixed_offset(),
                             _ => return Err(FunctionError {
                                 function_name: expression.name.to_string(),
-                                error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
+                                error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})".to_string() },
                             }),
                         };
                         return Ok(VariableValue::ZonedDateTime(ZonedDateTime::new(
@@ -652,7 +657,8 @@ impl ScalarFunction for DateTime {
                     }
                     Err(e) => Err(FunctionError {
                         function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
+                        error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})".to_string() },
                     }),
                 }
             }
@@ -1023,7 +1029,8 @@ impl ScalarFunction for Truncate {
                         LocalResult::Single(dt) => dt,
                         _ => return Err(FunctionError {
                             function_name: expression.name.to_string(),
-                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
+                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})".to_string() },
                         }),
                     };
                 let zoned_date_time = ZonedDateTime::new(truncated_date_time, timezone);
@@ -1068,14 +1075,16 @@ impl ScalarFunction for Truncate {
                                 Some(tz_str) => tz_str,
                                 None => return Err(FunctionError {
                                     function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
+                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})".to_string() },
                                 }),
                             };
                             match handle_iana_timezone(tz_str).await {
                                 Some(tz) => tz,
                                 None => return Err(FunctionError {
                                     function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
+                                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})".to_string() },
                                 }),
                             }
                         }
@@ -1086,7 +1095,8 @@ impl ScalarFunction for Truncate {
                         LocalResult::Single(dt) => dt,
                         _ => return Err(FunctionError {
                             function_name: expression.name.to_string(),
-                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
+                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})".to_string() },
                         }),
                     };
                     let datetime_fixed_offset = datetime_tz.fixed_offset();
@@ -1095,12 +1105,14 @@ impl ScalarFunction for Truncate {
                             Some(tz_str) => tz_str,
                             None => return Err(FunctionError {
                                 function_name: expression.name.to_string(),
-                                error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
+                                error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})".to_string() },
                             }),
                         },
                         None => return Err(FunctionError {
                             function_name: expression.name.to_string(),
-                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
+                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})".to_string() },
                         }),
                     };
                     let zoned_date_time = ZonedDateTime::new(
@@ -1114,7 +1126,8 @@ impl ScalarFunction for Truncate {
                         LocalResult::Single(dt) => dt,
                         _ => return Err(FunctionError {
                             function_name: expression.name.to_string(),
-                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid DateTime".to_string() },
+                            error: FunctionEvaluationError::InvalidFormat { expected: "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})".to_string() },
                         }),
                     };
                 let zoned_date_time = ZonedDateTime::new(truncated_date_time, timezone);

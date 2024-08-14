@@ -24,16 +24,22 @@ impl ScalarFunction for Timestamp {
         }
         let now = std::time::SystemTime::now();
         let since_epoch = match now.duration_since(std::time::UNIX_EPOCH) {
-            Ok(d) => d,
-            Err(e) => {
+            Ok(d) => if d.as_millis() > i64::MAX as u128 {
                 return Err(FunctionError {
-                    function_name: "timestamp".to_string(),
-                    error: FunctionEvaluationError::InvalidFormat { expected: "A valid Duration".to_string() },
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::OverflowError,
                 });
+            } else {
+                d.as_millis() as i64
+            },
+            Err(_e) => {
+                // This should never happen, since duration_since will ony return an error if the time is before the UNIX_EPOCH
+                // return a zero duration this case
+                0
             }
         };
         Ok(VariableValue::Integer(
-            (since_epoch.as_millis() as i64).into(),
+            (since_epoch).into(),
         ))
     }
 }
