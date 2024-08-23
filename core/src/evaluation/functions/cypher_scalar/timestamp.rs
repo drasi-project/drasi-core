@@ -24,12 +24,7 @@ impl ScalarFunction for Timestamp {
         }
         let now = std::time::SystemTime::now();
         let since_epoch = match now.duration_since(std::time::UNIX_EPOCH) {
-<<<<<<< HEAD
-            Ok(d) => d,
-            Err(_e) => {
-=======
             Ok(d) => if d.as_millis() > i64::MAX as u128 {
->>>>>>> feature/remove-unwrap-scalar-functions
                 return Err(FunctionError {
                     function_name: expression.name.to_string(),
                     error: FunctionEvaluationError::OverflowError,
