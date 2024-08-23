@@ -1,6 +1,9 @@
 use std::{fmt::Debug, sync::Arc};
 
-use crate::{evaluation::EvaluationError, interface::ResultIndex};
+use crate::{
+    evaluation::{FunctionError, FunctionEvaluationError},
+    interface::ResultIndex,
+};
 
 use async_trait::async_trait;
 
@@ -38,27 +41,72 @@ impl AggregatingFunction for Sum {
         _context: &ExpressionEvaluationContext,
         args: Vec<VariableValue>,
         accumulator: &mut Accumulator,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
-            return Err(EvaluationError::InvalidArgumentCount("Sum".to_string()));
+            return Err(FunctionError {
+                function_name: "Sum".to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
 
         let accumulator = match accumulator {
             Accumulator::Value(accumulator) => match accumulator {
                 super::ValueAccumulator::Sum { value } => value,
-                _ => return Err(EvaluationError::InvalidType),
+                _ => {
+                    return Err(FunctionError {
+                        function_name: "Sum".to_string(),
+                        error: FunctionEvaluationError::CorruptData,
+                    })
+                }
             },
-            _ => return Err(EvaluationError::InvalidType),
+            _ => {
+                return Err(FunctionError {
+                    function_name: "Sum".to_string(),
+                    error: FunctionEvaluationError::CorruptData,
+                })
+            }
         };
 
         match &args[0] {
             VariableValue::Float(n) => {
-                *accumulator += n.as_f64().unwrap();
-                Ok(VariableValue::Float(Float::from_f64(*accumulator).unwrap()))
+                *accumulator += match n.as_f64() {
+                    Some(n) => n,
+                    None => {
+                        return Err(FunctionError {
+                            function_name: "Sum".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                };
+                Ok(VariableValue::Float(match Float::from_f64(*accumulator) {
+                    Some(n) => n,
+                    None => {
+                        return Err(FunctionError {
+                            function_name: "Sum".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                }))
             }
             VariableValue::Integer(n) => {
-                *accumulator += n.as_i64().unwrap() as f64;
-                Ok(VariableValue::Float(Float::from_f64(*accumulator).unwrap()))
+                *accumulator += match n.as_i64() {
+                    Some(n) => n as f64,
+                    None => {
+                        return Err(FunctionError {
+                            function_name: "Sum".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                };
+                Ok(VariableValue::Float(match Float::from_f64(*accumulator) {
+                    Some(n) => n,
+                    None => {
+                        return Err(FunctionError {
+                            function_name: "Sum".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                }))
             }
             VariableValue::Duration(d) => {
                 *accumulator += d.duration().num_milliseconds() as f64;
@@ -68,8 +116,19 @@ impl AggregatingFunction for Sum {
                     0,
                 )))
             }
-            VariableValue::Null => Ok(VariableValue::Float(Float::from_f64(*accumulator).unwrap())),
-            _ => Err(EvaluationError::InvalidType),
+            VariableValue::Null => Ok(VariableValue::Float(match Float::from_f64(*accumulator) {
+                Some(n) => n,
+                None => {
+                    return Err(FunctionError {
+                        function_name: "Sum".to_string(),
+                        error: FunctionEvaluationError::OverflowError,
+                    })
+                }
+            })),
+            _ => Err(FunctionError {
+                function_name: "Sum".to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
         }
     }
 
@@ -78,26 +137,71 @@ impl AggregatingFunction for Sum {
         _context: &ExpressionEvaluationContext,
         args: Vec<VariableValue>,
         accumulator: &mut Accumulator,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
-            return Err(EvaluationError::InvalidArgumentCount("Sum".to_string()));
+            return Err(FunctionError {
+                function_name: "Sum".to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         let accumulator = match accumulator {
             Accumulator::Value(accumulator) => match accumulator {
                 super::ValueAccumulator::Sum { value } => value,
-                _ => return Err(EvaluationError::InvalidType),
+                _ => {
+                    return Err(FunctionError {
+                        function_name: "Sum".to_string(),
+                        error: FunctionEvaluationError::CorruptData,
+                    })
+                }
             },
-            _ => return Err(EvaluationError::InvalidType),
+            _ => {
+                return Err(FunctionError {
+                    function_name: "Sum".to_string(),
+                    error: FunctionEvaluationError::CorruptData,
+                })
+            }
         };
 
         match &args[0] {
             VariableValue::Float(n) => {
-                *accumulator -= n.as_f64().unwrap();
-                Ok(VariableValue::Float(Float::from_f64(*accumulator).unwrap()))
+                *accumulator -= match n.as_f64() {
+                    Some(n) => n,
+                    None => {
+                        return Err(FunctionError {
+                            function_name: "Sum".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                };
+                Ok(VariableValue::Float(match Float::from_f64(*accumulator) {
+                    Some(n) => n,
+                    None => {
+                        return Err(FunctionError {
+                            function_name: "Sum".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                }))
             }
             VariableValue::Integer(n) => {
-                *accumulator -= n.as_i64().unwrap() as f64;
-                Ok(VariableValue::Float(Float::from_f64(*accumulator).unwrap()))
+                *accumulator -= match n.as_i64() {
+                    Some(n) => n as f64,
+                    None => {
+                        return Err(FunctionError {
+                            function_name: "Sum".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                };
+                Ok(VariableValue::Float(match Float::from_f64(*accumulator) {
+                    Some(n) => n,
+                    None => {
+                        return Err(FunctionError {
+                            function_name: "Sum".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                }))
             }
             VariableValue::Duration(d) => {
                 *accumulator -= d.duration().num_milliseconds() as f64;
@@ -107,8 +211,19 @@ impl AggregatingFunction for Sum {
                     0,
                 )))
             }
-            VariableValue::Null => Ok(VariableValue::Float(Float::from_f64(*accumulator).unwrap())),
-            _ => Err(EvaluationError::InvalidType),
+            VariableValue::Null => Ok(VariableValue::Float(match Float::from_f64(*accumulator) {
+                Some(n) => n,
+                None => {
+                    return Err(FunctionError {
+                        function_name: "Sum".to_string(),
+                        error: FunctionEvaluationError::OverflowError,
+                    })
+                }
+            })),
+            _ => Err(FunctionError {
+                function_name: "Sum".to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
         }
     }
 
@@ -117,24 +232,53 @@ impl AggregatingFunction for Sum {
         _context: &ExpressionEvaluationContext,
         args: Vec<VariableValue>,
         accumulator: &Accumulator,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
-            return Err(EvaluationError::InvalidArgumentCount("Sum".to_string()));
+            return Err(FunctionError {
+                function_name: "Sum".to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         let accumulator_value = match accumulator {
             Accumulator::Value(accumulator) => match accumulator {
                 super::ValueAccumulator::Sum { value } => value,
-                _ => return Err(EvaluationError::InvalidType),
+                _ => {
+                    return Err(FunctionError {
+                        function_name: "Sum".to_string(),
+                        error: FunctionEvaluationError::CorruptData,
+                    })
+                }
             },
-            _ => return Err(EvaluationError::InvalidType),
+            _ => {
+                return Err(FunctionError {
+                    function_name: "Sum".to_string(),
+                    error: FunctionEvaluationError::CorruptData,
+                })
+            }
         };
 
         match &args[0] {
             VariableValue::Float(_) => Ok(VariableValue::Float(
-                Float::from_f64(*accumulator_value).unwrap(),
+                match Float::from_f64(*accumulator_value) {
+                    Some(n) => n,
+                    None => {
+                        return Err(FunctionError {
+                            function_name: "Sum".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                },
             )),
             VariableValue::Integer(_) => Ok(VariableValue::Float(
-                Float::from_f64(*accumulator_value).unwrap(),
+                match Float::from_f64(*accumulator_value) {
+                    Some(n) => n,
+                    None => {
+                        return Err(FunctionError {
+                            function_name: "Sum".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                },
             )),
             VariableValue::Duration(_) => Ok(VariableValue::Duration(Duration::new(
                 ChronoDuration::milliseconds(*accumulator_value as i64),
@@ -142,9 +286,20 @@ impl AggregatingFunction for Sum {
                 0,
             ))),
             VariableValue::Null => Ok(VariableValue::Float(
-                Float::from_f64(*accumulator_value).unwrap(),
+                match Float::from_f64(*accumulator_value) {
+                    Some(n) => n,
+                    None => {
+                        return Err(FunctionError {
+                            function_name: "Sum".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                },
             )),
-            _ => Err(EvaluationError::InvalidType),
+            _ => Err(FunctionError {
+                function_name: "Sum".to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
         }
     }
 }
