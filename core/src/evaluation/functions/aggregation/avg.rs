@@ -1,6 +1,9 @@
 use std::{fmt::Debug, sync::Arc};
 
-use crate::{evaluation::{FunctionError, FunctionEvaluationError}, interface::ResultIndex};
+use crate::{
+    evaluation::{FunctionError, FunctionEvaluationError},
+    interface::ResultIndex,
+};
 
 use async_trait::async_trait;
 
@@ -49,15 +52,19 @@ impl AggregatingFunction for Avg {
         let (sum, count) = match accumulator {
             Accumulator::Value(accumulator) => match accumulator {
                 ValueAccumulator::Avg { sum, count } => (sum, count),
-                _ => return Err(FunctionError {
+                _ => {
+                    return Err(FunctionError {
+                        function_name: "Avg".to_string(),
+                        error: FunctionEvaluationError::CorruptData,
+                    })
+                }
+            },
+            _ => {
+                return Err(FunctionError {
                     function_name: "Avg".to_string(),
                     error: FunctionEvaluationError::CorruptData,
-                }),
-            },
-            _ => return Err(FunctionError {
-                function_name: "Avg".to_string(),
-                error: FunctionEvaluationError::CorruptData,
-            }),
+                })
+            }
         };
 
         match &args[0] {
@@ -65,10 +72,12 @@ impl AggregatingFunction for Avg {
                 *count += 1;
                 *sum += match n.as_f64() {
                     Some(n) => n,
-                    None => return Err(FunctionError {
-                        function_name: "Avg".to_string(),
-                        error: FunctionEvaluationError::OverflowError,
-                    }),
+                    None => {
+                        return Err(FunctionError {
+                            function_name: "Avg".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
                 };
                 let avg = *sum / *count as f64;
 
@@ -80,10 +89,12 @@ impl AggregatingFunction for Avg {
                 *count += 1;
                 *sum += match n.as_i64() {
                     Some(n) => n as f64,
-                    None => return Err(FunctionError {
-                        function_name: "Avg".to_string(),
-                        error: FunctionEvaluationError::OverflowError,
-                    }),
+                    None => {
+                        return Err(FunctionError {
+                            function_name: "Avg".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
                 };
                 let avg = *sum / *count as f64;
 
@@ -132,15 +143,19 @@ impl AggregatingFunction for Avg {
         let (sum, count) = match accumulator {
             Accumulator::Value(accumulator) => match accumulator {
                 ValueAccumulator::Avg { sum, count } => (sum, count),
-                _ => return Err(FunctionError {
+                _ => {
+                    return Err(FunctionError {
+                        function_name: "Avg".to_string(),
+                        error: FunctionEvaluationError::CorruptData,
+                    })
+                }
+            },
+            _ => {
+                return Err(FunctionError {
                     function_name: "Avg".to_string(),
                     error: FunctionEvaluationError::CorruptData,
-                }),
-            },
-            _ => return Err(FunctionError {
-                function_name: "Avg".to_string(),
-                error: FunctionEvaluationError::CorruptData,
-            }),
+                })
+            }
         };
 
         match &args[0] {
@@ -148,10 +163,12 @@ impl AggregatingFunction for Avg {
                 *count -= 1;
                 *sum -= match n.as_f64() {
                     Some(n) => n,
-                    None => return Err(FunctionError {
-                        function_name: "Avg".to_string(),
-                        error: FunctionEvaluationError::OverflowError,
-                    }),
+                    None => {
+                        return Err(FunctionError {
+                            function_name: "Avg".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
                 };
 
                 if *count == 0 {
@@ -170,10 +187,12 @@ impl AggregatingFunction for Avg {
                 *count -= 1;
                 *sum -= match n.as_i64() {
                     Some(n) => n as f64,
-                    None => return Err(FunctionError {
-                        function_name: "Avg".to_string(),
-                        error: FunctionEvaluationError::OverflowError,
-                    }),
+                    None => {
+                        return Err(FunctionError {
+                            function_name: "Avg".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
                 };
 
                 if *count == 0 {
@@ -234,15 +253,19 @@ impl AggregatingFunction for Avg {
         let (sum, count) = match accumulator {
             Accumulator::Value(accumulator) => match accumulator {
                 ValueAccumulator::Avg { sum, count } => (sum, count),
-                _ => return Err(FunctionError {
+                _ => {
+                    return Err(FunctionError {
+                        function_name: "Avg".to_string(),
+                        error: FunctionEvaluationError::CorruptData,
+                    })
+                }
+            },
+            _ => {
+                return Err(FunctionError {
                     function_name: "Avg".to_string(),
                     error: FunctionEvaluationError::CorruptData,
-                }),
-            },
-            _ => return Err(FunctionError {
-                function_name: "Avg".to_string(),
-                error: FunctionEvaluationError::CorruptData,
-            }),
+                })
+            }
         };
 
         if *count == 0 {
@@ -254,8 +277,12 @@ impl AggregatingFunction for Avg {
         let avg = *sum / *count as f64;
 
         match &args[0] {
-            VariableValue::Float(_) => Ok(VariableValue::Float(Float::from_f64(avg).unwrap_or_default())),
-            VariableValue::Integer(_) => Ok(VariableValue::Float(Float::from_f64(avg).unwrap_or_default())),
+            VariableValue::Float(_) => Ok(VariableValue::Float(
+                Float::from_f64(avg).unwrap_or_default(),
+            )),
+            VariableValue::Integer(_) => Ok(VariableValue::Float(
+                Float::from_f64(avg).unwrap_or_default(),
+            )),
             VariableValue::Duration(_) => Ok(VariableValue::Duration(Duration::new(
                 ChronoDuration::milliseconds(avg as i64),
                 0,

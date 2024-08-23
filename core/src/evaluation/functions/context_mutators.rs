@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use drasi_query_ast::ast;
 
-use crate::evaluation::{context::SideEffects, FunctionError, ExpressionEvaluationContext};
+use crate::evaluation::{context::SideEffects, ExpressionEvaluationContext, FunctionError};
 
 use super::ContextMutatorFunction;
 

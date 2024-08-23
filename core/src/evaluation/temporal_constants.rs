@@ -10,9 +10,8 @@ lazy_static! {
         Some(time) => time,
         None => unreachable!(),
     };
-    pub static ref EPOCH_MIDNIGHT_NAIVE_DATETIME: NaiveDateTime = {
-        NaiveDateTime::new(*EPOCH_NAIVE_DATE, *MIDNIGHT_NAIVE_TIME)
-    };
+    pub static ref EPOCH_MIDNIGHT_NAIVE_DATETIME: NaiveDateTime =
+        NaiveDateTime::new(*EPOCH_NAIVE_DATE, *MIDNIGHT_NAIVE_TIME);
     pub static ref UTC_FIXED_OFFSET: chrono::FixedOffset = match chrono::FixedOffset::east_opt(0) {
         Some(offset) => offset,
         None => unreachable!(),

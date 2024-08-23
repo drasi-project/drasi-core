@@ -4,7 +4,7 @@ use drasi_query_ast::ast;
 use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::variable_value::float::Float;
 use crate::evaluation::variable_value::VariableValue;
-use crate::evaluation::{FunctionError, FunctionEvaluationError, ExpressionEvaluationContext};
+use crate::evaluation::{ExpressionEvaluationContext, FunctionError, FunctionEvaluationError};
 
 #[derive(Debug)]
 pub struct Floor {}
@@ -43,7 +43,7 @@ impl ScalarFunction for Floor {
                                 error: FunctionEvaluationError::OverflowError,
                             })
                         }
-                    }
+                    },
                 )) // floor always return a float
             }
             VariableValue::Float(n) => Ok(VariableValue::Float(
@@ -63,7 +63,7 @@ impl ScalarFunction for Floor {
                             error: FunctionEvaluationError::OverflowError,
                         })
                     }
-                }
+                },
             )),
             _ => Err(FunctionError {
                 function_name: expression.name.to_string(),

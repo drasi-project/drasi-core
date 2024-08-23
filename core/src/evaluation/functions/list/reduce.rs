@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use crate::evaluation::functions::LazyScalarFunction;
 use crate::evaluation::variable_value::VariableValue;
-use crate::evaluation::{FunctionError, FunctionEvaluationError, ExpressionEvaluationContext, ExpressionEvaluator};
+use crate::evaluation::{
+    ExpressionEvaluationContext, ExpressionEvaluator, FunctionError, FunctionEvaluationError,
+};
 use drasi_query_ast::ast::{self, Expression};
 
 pub struct Reduce {
@@ -44,22 +46,27 @@ impl LazyScalarFunction for Reduce {
         let initializer = &args[0];
         let iterator = match &args[1] {
             Expression::IteratorExpression(i) => i,
-            _ => return Err(FunctionError {
-                function_name: expression.name.to_string(),
-                error: FunctionEvaluationError::InvalidArgument(1),
-            }),
+            _ => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(1),
+                })
+            }
         };
 
         let (accumulator_name, accumulator) = match self
             .evaluator
             .evaluate_assignment(context, initializer)
-            .await {
-                Ok((name, value)) => (name, value),
-                Err(e) => return Err(FunctionError {
+            .await
+        {
+            Ok((name, value)) => (name, value),
+            Err(e) => {
+                return Err(FunctionError {
                     function_name: expression.name.to_string(),
                     error: e,
-                }),
-            };
+                })
+            }
+        };
 
         let mut query_variables = context.clone_variables(); //Retrieve the query variables from the global context
         query_variables.insert(accumulator_name.to_string().into(), accumulator);
@@ -68,15 +75,18 @@ impl LazyScalarFunction for Reduce {
         let result = match self
             .evaluator
             .reduce_iterator_expression(&context, iterator, accumulator_name)
-            .await {
-                Ok(value) => value,
-                Err(_e) => return Err(FunctionError {
+            .await
+        {
+            Ok(value) => value,
+            Err(_e) => {
+                return Err(FunctionError {
                     function_name: expression.name.to_string(),
                     error: FunctionEvaluationError::InvalidType {
                         expected: "Valid reduce expression".to_string(),
                     },
-                }),
-            };
+                })
+            }
+        };
 
         Ok(result)
     }

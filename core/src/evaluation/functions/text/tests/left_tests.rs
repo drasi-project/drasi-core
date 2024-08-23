@@ -4,9 +4,11 @@ use drasi_query_ast::ast;
 
 use super::text;
 use crate::evaluation::context::QueryVariables;
-use crate::evaluation::functions::{ScalarFunction};
+use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::variable_value::VariableValue;
-use crate::evaluation::{FunctionError,FunctionEvaluationError, ExpressionEvaluationContext, InstantQueryClock};
+use crate::evaluation::{
+    ExpressionEvaluationContext, FunctionError, FunctionEvaluationError, InstantQueryClock,
+};
 
 fn get_func_expr() -> ast::FunctionExpression {
     ast::FunctionExpression {
@@ -50,7 +52,13 @@ async fn test_left_invalid_inputs() {
         VariableValue::String("drasi".to_string()),
     ];
     let result = left.call(&context, &get_func_expr(), args.clone()).await;
-    assert!(matches!(result.unwrap_err(), FunctionError { function_name: _, error: FunctionEvaluationError::InvalidArgument(1) }));
+    assert!(matches!(
+        result.unwrap_err(),
+        FunctionError {
+            function_name: _,
+            error: FunctionEvaluationError::InvalidArgument(1)
+        }
+    ));
 }
 
 #[tokio::test]
@@ -66,7 +74,13 @@ async fn test_left_invalid_input_value() {
     ];
     let result = left.call(&context, &get_func_expr(), args.clone()).await;
     let error = result.unwrap_err();
-    assert!(matches!(error,  FunctionError { function_name: _, error: FunctionEvaluationError::OverflowError }));
+    assert!(matches!(
+        error,
+        FunctionError {
+            function_name: _,
+            error: FunctionEvaluationError::OverflowError
+        }
+    ));
 }
 
 #[tokio::test]
@@ -140,8 +154,11 @@ async fn test_left_null() {
     ];
 
     let result = left.call(&context, &get_func_expr(), args.clone()).await;
-    assert!(matches!(result.unwrap_err(), FunctionError {
-        function_name: _,
-        error: FunctionEvaluationError::InvalidArgument(1)
-    }));
+    assert!(matches!(
+        result.unwrap_err(),
+        FunctionError {
+            function_name: _,
+            error: FunctionEvaluationError::InvalidArgument(1)
+        }
+    ));
 }

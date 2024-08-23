@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use drasi_query_ast::ast;
 
 use crate::evaluation::functions::ScalarFunction;
-use crate::evaluation::{FunctionError, FunctionEvaluationError, ExpressionEvaluationContext};
+use crate::evaluation::{ExpressionEvaluationContext, FunctionError, FunctionEvaluationError};
 
 #[derive(Debug)]
 pub struct ToInteger {}
@@ -34,7 +34,8 @@ impl ScalarFunction for ToInteger {
                             error: FunctionEvaluationError::OverflowError,
                         })
                     }
-                }).into(),
+                })
+                .into(),
             )),
             VariableValue::Bool(b) => {
                 if *b {
@@ -89,7 +90,8 @@ impl ScalarFunction for ToIntegerOrNull {
                             error: FunctionEvaluationError::OverflowError,
                         })
                     }
-                }).into(),
+                })
+                .into(),
             )),
             VariableValue::Bool(b) => {
                 if *b {

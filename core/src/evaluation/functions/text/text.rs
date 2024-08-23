@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use drasi_query_ast::ast;
 
 use crate::evaluation::functions::ScalarFunction;
-use crate::evaluation::{FunctionError, FunctionEvaluationError, ExpressionEvaluationContext};
+use crate::evaluation::{ExpressionEvaluationContext, FunctionError, FunctionEvaluationError};
 
 #[derive(Debug, PartialEq)]
 pub struct ToUpper {}
@@ -209,10 +209,12 @@ impl ScalarFunction for Left {
                         }
                         l as usize
                     }
-                    None => return Err(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidArgument(1),
-                    }),
+                    None => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidArgument(1),
+                        })
+                    }
                 };
                 if len > original.len() {
                     return Ok(VariableValue::String(original.to_string()));
@@ -220,10 +222,12 @@ impl ScalarFunction for Left {
                 let result = original.chars().take(len).collect::<String>();
                 Ok(VariableValue::String(result))
             }
-            (VariableValue::String(_original), _) => return Err(FunctionError {
-                function_name: expression.name.to_string(),
-                error: FunctionEvaluationError::InvalidArgument(1),
-            }),
+            (VariableValue::String(_original), _) => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(1),
+                })
+            }
             _ => Err(FunctionError {
                 function_name: expression.name.to_string(),
                 error: FunctionEvaluationError::InvalidArgument(0),
@@ -263,10 +267,12 @@ impl ScalarFunction for Right {
                         }
                         l as usize
                     }
-                    None => return Err(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidArgument(1),
-                    }),
+                    None => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidArgument(1),
+                        })
+                    }
                 };
                 if len > original.len() {
                     return Ok(VariableValue::String(original.to_string()));
@@ -275,10 +281,12 @@ impl ScalarFunction for Right {
                 let result = original[start_index..].to_string();
                 Ok(VariableValue::String(result))
             }
-            (VariableValue::String(_), _) => return Err(FunctionError {
-                function_name: expression.name.to_string(),
-                error: FunctionEvaluationError::InvalidArgument(1),
-            }),
+            (VariableValue::String(_), _) => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(1),
+                })
+            }
             _ => Err(FunctionError {
                 function_name: expression.name.to_string(),
                 error: FunctionEvaluationError::InvalidArgument(0),
@@ -316,23 +324,22 @@ impl ScalarFunction for Replace {
                 let result = original.replace(search, replace);
                 return Ok(VariableValue::String(result));
             }
-            
+
             (VariableValue::Null, _, _) => Ok(VariableValue::Null),
             (_, VariableValue::Null, _) => Ok(VariableValue::Null),
             (_, _, VariableValue::Null) => Ok(VariableValue::Null),
-            (VariableValue::String(_), VariableValue::String(_), _) => Err(FunctionError{
+            (VariableValue::String(_), VariableValue::String(_), _) => Err(FunctionError {
                 function_name: expression.name.to_string(),
                 error: FunctionEvaluationError::InvalidArgument(2),
             }),
-            (_, VariableValue::String(_), _) =>  Err(FunctionError{
+            (_, VariableValue::String(_), _) => Err(FunctionError {
                 function_name: expression.name.to_string(),
                 error: FunctionEvaluationError::InvalidArgument(0),
             }),
-            _ => Err(FunctionError{
+            _ => Err(FunctionError {
                 function_name: expression.name.to_string(),
                 error: FunctionEvaluationError::InvalidArgument(0),
             }),
-            
         }
     }
 }
@@ -379,10 +386,12 @@ impl ScalarFunction for Split {
                 for delimiter in delimiters {
                     match delimiter {
                         VariableValue::String(s) => delimiters_vector.push(s),
-                        _ => return Err(FunctionError {
-                            function_name: expression.name.to_string(),
-                            error: FunctionEvaluationError::InvalidArgument(1),
-                        }),
+                        _ => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::InvalidArgument(1),
+                            })
+                        }
                     }
                 }
                 for c in original.chars() {
@@ -442,15 +451,19 @@ impl ScalarFunction for Substring {
                         if s < 0 {
                             return Err(FunctionError {
                                 function_name: expression.name.to_string(),
-                                error: FunctionEvaluationError::InvalidType { expected: "positive integer".to_string() },
+                                error: FunctionEvaluationError::InvalidType {
+                                    expected: "positive integer".to_string(),
+                                },
                             });
                         }
                         s as usize
                     }
-                    None => return Err(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidArgument(1),
-                    }),
+                    None => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidArgument(1),
+                        })
+                    }
                 };
                 if start_index > original.len() {
                     return Err(FunctionError {
@@ -459,7 +472,7 @@ impl ScalarFunction for Substring {
                     });
                 }
                 return Ok(VariableValue::String(original[start_index..].to_string()));
-            },
+            }
             (VariableValue::String(_), _, None) => {
                 return Err(FunctionError {
                     function_name: expression.name.to_string(),
@@ -471,21 +484,24 @@ impl ScalarFunction for Substring {
                 VariableValue::Integer(start),
                 Some(VariableValue::Integer(length)),
             ) => {
-
                 let start_index = match start.as_i64() {
                     Some(s) => {
                         if s < 0 {
                             return Err(FunctionError {
                                 function_name: expression.name.to_string(),
-                                error: FunctionEvaluationError::InvalidType { expected: "positive integer".to_string() },
+                                error: FunctionEvaluationError::InvalidType {
+                                    expected: "positive integer".to_string(),
+                                },
                             });
                         }
                         s as usize
                     }
-                    None => return Err(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidArgument(1),
-                    }),
+                    None => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidArgument(1),
+                        })
+                    }
                 };
 
                 let len = match length.as_i64() {
@@ -493,15 +509,19 @@ impl ScalarFunction for Substring {
                         if l < 0 {
                             return Err(FunctionError {
                                 function_name: expression.name.to_string(),
-                                error: FunctionEvaluationError::InvalidType { expected: "positive integer".to_string() },
+                                error: FunctionEvaluationError::InvalidType {
+                                    expected: "positive integer".to_string(),
+                                },
                             });
                         }
                         l as usize
                     }
-                    None => return Err(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidArgument(2),
-                    }),
+                    None => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidArgument(2),
+                        })
+                    }
                 };
                 if start_index > original.len() || start_index + len - start_index > original.len()
                 {
@@ -516,16 +536,18 @@ impl ScalarFunction for Substring {
                     original[start_index..start_index + len].to_string(),
                 ));
             }
-            (VariableValue::String(_), VariableValue::Integer(_), _ ) => {
+            (VariableValue::String(_), VariableValue::Integer(_), _) => {
                 return Err(FunctionError {
                     function_name: expression.name.to_string(),
                     error: FunctionEvaluationError::InvalidArgument(2),
                 });
             }
-            _ => return Err(FunctionError {
-                function_name: expression.name.to_string(),
-                error: FunctionEvaluationError::InvalidArgument(0),
-            }),
+            _ => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(0),
+                })
+            }
         }
     }
 }
@@ -563,10 +585,12 @@ impl ScalarFunction for ToString {
                 return Ok(VariableValue::String(result));
             }
             VariableValue::Null => return Ok(VariableValue::Null),
-            _ => return Err(FunctionError {
-                function_name: expression.name.to_string(),
-                error: FunctionEvaluationError::InvalidArgument(0),
-            }),
+            _ => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(0),
+                })
+            }
         }
     }
 }
@@ -607,10 +631,12 @@ impl ScalarFunction for ToStringOrNull {
                 // For objects should return null
                 return Ok(VariableValue::Null);
             }
-            _ => return Err(FunctionError {
-                function_name: expression.name.to_string(),
-                error: FunctionEvaluationError::InvalidArgument(0),
-            }),
+            _ => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(0),
+                })
+            }
         }
     }
 }

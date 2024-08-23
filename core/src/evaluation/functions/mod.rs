@@ -25,7 +25,7 @@ use self::{
     text::RegisterTextFunctions,
 };
 
-use super::{FunctionError, ExpressionEvaluationContext};
+use super::{ExpressionEvaluationContext, FunctionError};
 
 pub mod aggregation;
 pub mod context_mutators;

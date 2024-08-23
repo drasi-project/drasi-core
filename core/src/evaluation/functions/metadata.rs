@@ -4,7 +4,7 @@ use crate::evaluation::variable_value::{zoned_datetime::ZonedDateTime, VariableV
 use async_trait::async_trait;
 use drasi_query_ast::ast;
 
-use crate::evaluation::{FunctionError, FunctionEvaluationError, ExpressionEvaluationContext};
+use crate::evaluation::{ExpressionEvaluationContext, FunctionError, FunctionEvaluationError};
 
 use super::{Function, FunctionRegistry, ScalarFunction};
 

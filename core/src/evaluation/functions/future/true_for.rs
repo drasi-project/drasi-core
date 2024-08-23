@@ -5,9 +5,9 @@ use crate::evaluation::context::SideEffects;
 use crate::evaluation::functions::aggregation::ValueAccumulator;
 use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::variable_value::VariableValue;
-use crate::evaluation::{FunctionError, FunctionEvaluationError};
 use crate::evaluation::ExpressionEvaluationContext;
 use crate::evaluation::ExpressionEvaluator;
+use crate::evaluation::{FunctionError, FunctionEvaluationError};
 use crate::interface::ResultIndex;
 use crate::interface::ResultKey;
 use crate::interface::ResultOwner;
@@ -63,36 +63,44 @@ impl ScalarFunction for TrueFor {
         let condition = match &args[0] {
             VariableValue::Bool(b) => b,
             VariableValue::Null => return Ok(VariableValue::Null),
-            _ => return Err(FunctionError {
-                function_name: expression.name.to_string(),
-                error: FunctionEvaluationError::InvalidArgument(0),
-            }),
+            _ => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(0),
+                })
+            }
         };
 
         let duration = match &args[1] {
             VariableValue::Duration(d) => *d.duration(),
             VariableValue::Integer(n) => match n.as_i64() {
                 Some(ms) => Duration::milliseconds(ms),
-                None => return Err(FunctionError {
-                    function_name: expression.name.to_string(),
-                    error: FunctionEvaluationError::OverflowError,
-                }),
+                None => {
+                    return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::OverflowError,
+                    })
+                }
             },
             VariableValue::Null => return Ok(VariableValue::Null),
-            _ => return Err(FunctionError{
-                function_name: expression.name.to_string(),
-                error: FunctionEvaluationError::InvalidArgument(1),
-            }),
+            _ => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(1),
+                })
+            }
         };
 
         let group_signature = context.get_input_grouping_hash();
 
         let expression_evaluator = match self.expression_evaluator.upgrade() {
             Some(evaluator) => evaluator,
-            None => return Err(FunctionError {
-                function_name: expression.name.to_string(),
-                error: FunctionEvaluationError::CorruptData,
-            }),
+            None => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::CorruptData,
+                })
+            }
         };
 
         let result_key = match context.get_output_grouping_key() {
@@ -102,13 +110,18 @@ impl ScalarFunction for TrueFor {
                     grouping_vals.push(
                         match expression_evaluator
                             .evaluate_expression(context, group_expression)
-                            .await {
-                                Ok(val) => val,
-                                Err(_e) => return Err(FunctionError {
+                            .await
+                        {
+                            Ok(val) => val,
+                            Err(_e) => {
+                                return Err(FunctionError {
                                     function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::InvalidType { expected: "VariableValue".to_string() }
-                                }),
-                            },
+                                    error: FunctionEvaluationError::InvalidType {
+                                        expected: "VariableValue".to_string(),
+                                    },
+                                })
+                            }
+                        },
                     );
                 }
                 ResultKey::GroupBy(Arc::new(grouping_vals))
@@ -118,25 +131,33 @@ impl ScalarFunction for TrueFor {
 
         if !*condition {
             if let SideEffects::Apply = context.get_side_effects() {
-                match self.result_index
+                match self
+                    .result_index
                     .set(result_key.clone(), result_owner, None)
-                    .await {
-                        Ok(()) => (),
-                        Err(e) => return Err(FunctionError {
+                    .await
+                {
+                    Ok(()) => (),
+                    Err(e) => {
+                        return Err(FunctionError {
                             function_name: expression.name.to_string(),
                             error: FunctionEvaluationError::IndexError(e),
-                        }),
+                        })
                     }
+                }
 
-                match self.future_queue
+                match self
+                    .future_queue
                     .remove(expression.position_in_query, group_signature)
-                    .await {
-                        Ok(()) => (),
-                        Err(e) => return Err(FunctionError {
+                    .await
+                {
+                    Ok(()) => (),
+                    Err(e) => {
+                        return Err(FunctionError {
                             function_name: expression.name.to_string(),
                             error: FunctionEvaluationError::IndexError(e),
-                        }),
+                        })
                     }
+                }
             }
             return Ok(VariableValue::Bool(*condition));
         }
@@ -146,22 +167,27 @@ impl ScalarFunction for TrueFor {
                 timestamp: since_timestamp,
             })) => {
                 if let SideEffects::RevertForDelete = context.get_side_effects() {
-                    match self.result_index
+                    match self
+                        .result_index
                         .set(result_key.clone(), result_owner, None)
-                        .await {
-                            Ok(()) => (),
-                            Err(e) => return Err(FunctionError {
+                        .await
+                    {
+                        Ok(()) => (),
+                        Err(e) => {
+                            return Err(FunctionError {
                                 function_name: expression.name.to_string(),
                                 error: FunctionEvaluationError::IndexError(e),
-                            }),
+                            })
                         }
+                    }
                 }
 
                 since_timestamp + duration.num_milliseconds() as u64
-            },
+            }
             Ok(None) => {
                 if let SideEffects::Apply = context.get_side_effects() {
-                    match self.result_index
+                    match self
+                        .result_index
                         .set(
                             result_key.clone(),
                             result_owner,
@@ -169,44 +195,56 @@ impl ScalarFunction for TrueFor {
                                 timestamp: context.get_transaction_time(),
                             }),
                         )
-                        .await {
-                            Ok(()) => (),
-                            Err(e) => return Err(FunctionError {
+                        .await
+                    {
+                        Ok(()) => (),
+                        Err(e) => {
+                            return Err(FunctionError {
                                 function_name: expression.name.to_string(),
                                 error: FunctionEvaluationError::IndexError(e),
-                            }),
+                            })
                         }
+                    }
                 }
 
                 context.get_transaction_time() + duration.num_milliseconds() as u64
-            },
-            Ok(_) => return Err(FunctionError {
-                function_name: expression.name.to_string(),
-                error: FunctionEvaluationError::CorruptData,
-            }),
-            Err(e) => return Err(FunctionError {
-                function_name: expression.name.to_string(),
-                error: FunctionEvaluationError::IndexError(e)
-            }),
+            }
+            Ok(_) => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::CorruptData,
+                })
+            }
+            Err(e) => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::IndexError(e),
+                })
+            }
         };
 
         if due_time <= context.get_realtime() {
             if let SideEffects::Apply = context.get_side_effects() {
-                match self.future_queue
+                match self
+                    .future_queue
                     .remove(expression.position_in_query, group_signature)
-                    .await {
-                        Ok(()) => (),
-                        Err(e) => return Err(FunctionError {
+                    .await
+                {
+                    Ok(()) => (),
+                    Err(e) => {
+                        return Err(FunctionError {
                             function_name: expression.name.to_string(),
                             error: FunctionEvaluationError::IndexError(e),
-                        }),
+                        })
                     }
+                }
             }
             return Ok(VariableValue::Bool(*condition));
         }
 
         if let SideEffects::Apply = context.get_side_effects() {
-            match self.future_queue
+            match self
+                .future_queue
                 .push(
                     PushType::IfNotExists,
                     expression.position_in_query,
@@ -215,13 +253,16 @@ impl ScalarFunction for TrueFor {
                     context.get_transaction_time(),
                     due_time,
                 )
-                .await {
-                    Ok(_) => (),
-                    Err(e) => return Err(FunctionError {
+                .await
+            {
+                Ok(_) => (),
+                Err(e) => {
+                    return Err(FunctionError {
                         function_name: expression.name.to_string(),
                         error: FunctionEvaluationError::IndexError(e),
-                    }),
+                    })
                 }
+            }
         }
 
         Ok(VariableValue::Awaiting)

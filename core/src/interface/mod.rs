@@ -48,7 +48,9 @@ impl PartialEq for IndexError {
             (IndexError::IOError, IndexError::IOError) => true,
             (IndexError::NotSupported, IndexError::NotSupported) => true,
             (IndexError::CorruptedData, IndexError::CorruptedData) => true,
-            (IndexError::ConnectionFailed(a), IndexError::ConnectionFailed(b)) => a.to_string() == b.to_string(),
+            (IndexError::ConnectionFailed(a), IndexError::ConnectionFailed(b)) => {
+                a.to_string() == b.to_string()
+            }
             (IndexError::UnknownStore(a), IndexError::UnknownStore(b)) => a == b,
             (IndexError::Other(a), IndexError::Other(b)) => a.to_string() == b.to_string(),
             _ => false,

@@ -1,6 +1,9 @@
 use std::{fmt::Debug, sync::Arc};
 
-use crate::{evaluation::{FunctionError, FunctionEvaluationError}, interface::ResultIndex};
+use crate::{
+    evaluation::{FunctionError, FunctionEvaluationError},
+    interface::ResultIndex,
+};
 
 use async_trait::async_trait;
 
@@ -46,15 +49,19 @@ impl AggregatingFunction for Count {
         let value = match accumulator {
             Accumulator::Value(accumulator) => match accumulator {
                 super::ValueAccumulator::Count { value } => value,
-                _ => return Err(FunctionError {
+                _ => {
+                    return Err(FunctionError {
+                        function_name: "Count".to_string(),
+                        error: FunctionEvaluationError::CorruptData,
+                    })
+                }
+            },
+            _ => {
+                return Err(FunctionError {
                     function_name: "Count".to_string(),
                     error: FunctionEvaluationError::CorruptData,
-                }),
-            },
-            _ => return Err(FunctionError {
-                function_name: "Count".to_string(),
-                error: FunctionEvaluationError::CorruptData,
-            }),
+                })
+            }
         };
 
         match &args[0] {
@@ -81,17 +88,20 @@ impl AggregatingFunction for Count {
         let value = match accumulator {
             Accumulator::Value(accumulator) => match accumulator {
                 super::ValueAccumulator::Count { value } => value,
-                _ => return Err(FunctionError {
+                _ => {
+                    return Err(FunctionError {
+                        function_name: "Count".to_string(),
+                        error: FunctionEvaluationError::CorruptData,
+                    })
+                }
+            },
+            _ => {
+                return Err(FunctionError {
                     function_name: "Count".to_string(),
                     error: FunctionEvaluationError::CorruptData,
-                }),
-            },
-            _ => return Err(FunctionError {
-                function_name: "Count".to_string(),
-                error: FunctionEvaluationError::CorruptData,
-            }),
+                })
+            }
         };
-
 
         match &args[0] {
             VariableValue::Null => Ok(VariableValue::Integer(Integer::from(*value))),
@@ -111,15 +121,19 @@ impl AggregatingFunction for Count {
         let value = match accumulator {
             Accumulator::Value(accumulator) => match accumulator {
                 super::ValueAccumulator::Count { value } => value,
-                _ => return Err(FunctionError {
+                _ => {
+                    return Err(FunctionError {
+                        function_name: "Count".to_string(),
+                        error: FunctionEvaluationError::CorruptData,
+                    })
+                }
+            },
+            _ => {
+                return Err(FunctionError {
                     function_name: "Count".to_string(),
                     error: FunctionEvaluationError::CorruptData,
-                }),
-            },
-            _ => return Err(FunctionError {
-                function_name: "Count".to_string(),
-                error: FunctionEvaluationError::CorruptData,
-            }),
+                })
+            }
         };
         Ok(VariableValue::Integer(Integer::from(*value)))
     }

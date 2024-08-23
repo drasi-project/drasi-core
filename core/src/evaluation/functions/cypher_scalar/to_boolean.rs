@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use drasi_query_ast::ast;
 
 use crate::evaluation::functions::ScalarFunction;
-use crate::evaluation::{FunctionError, FunctionEvaluationError, ExpressionEvaluationContext};
+use crate::evaluation::{ExpressionEvaluationContext, FunctionError, FunctionEvaluationError};
 
 #[derive(Debug)]
 pub struct ToBoolean {}
@@ -24,12 +24,14 @@ impl ScalarFunction for ToBoolean {
         }
         match &args[0] {
             VariableValue::Null => Ok(VariableValue::Null),
-            VariableValue::Integer(i) => Ok(VariableValue::Bool( match i.as_i64() {
+            VariableValue::Integer(i) => Ok(VariableValue::Bool(match i.as_i64() {
                 Some(i) => i != 0,
-                None => return Err(FunctionError {
-                    function_name: expression.name.to_string(),
-                    error: FunctionEvaluationError::OverflowError,
-                })
+                None => {
+                    return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::OverflowError,
+                    })
+                }
             })),
             VariableValue::String(s) => {
                 let s = s.to_lowercase();
@@ -67,12 +69,14 @@ impl ScalarFunction for ToBooleanOrNull {
         }
         match &args[0] {
             VariableValue::Null => Ok(VariableValue::Null),
-            VariableValue::Integer(i) => Ok(VariableValue::Bool(match i.as_i64() { 
+            VariableValue::Integer(i) => Ok(VariableValue::Bool(match i.as_i64() {
                 Some(i) => i != 0,
-                None => return Err(FunctionError {
-                    function_name: expression.name.to_string(),
-                    error: FunctionEvaluationError::OverflowError,
-                })
+                None => {
+                    return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::OverflowError,
+                    })
+                }
             })),
             VariableValue::String(s) => {
                 if (s == "true") || (s == "false") {

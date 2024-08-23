@@ -5,7 +5,7 @@ use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::variable_value::float::Float;
 use crate::evaluation::variable_value::integer::Integer;
 use crate::evaluation::variable_value::VariableValue;
-use crate::evaluation::{FunctionError, FunctionEvaluationError, ExpressionEvaluationContext};
+use crate::evaluation::{ExpressionEvaluationContext, FunctionError, FunctionEvaluationError};
 use std::collections::HashSet;
 
 extern crate round;
@@ -52,7 +52,7 @@ impl ScalarFunction for Round {
                                     error: FunctionEvaluationError::OverflowError,
                                 })
                             }
-                        }
+                        },
                     )),
                     VariableValue::Float(n) => {
                         let input_as_f64 = match n.as_f64() {
@@ -75,7 +75,7 @@ impl ScalarFunction for Round {
                                             error: FunctionEvaluationError::OverflowError,
                                         })
                                     }
-                                }
+                                },
                             ));
                         }
                         Ok(VariableValue::Float(
@@ -95,7 +95,7 @@ impl ScalarFunction for Round {
                                         error: FunctionEvaluationError::OverflowError,
                                     })
                                 }
-                            }
+                            },
                         ))
                     }
                     _ => Err(FunctionError {
@@ -126,7 +126,8 @@ impl ScalarFunction for Round {
                                     error: FunctionEvaluationError::OverflowError,
                                 })
                             }
-                        } > std::f64::MAX / multiplier {
+                        } > std::f64::MAX / multiplier
+                        {
                             return Ok(VariableValue::Float(n.clone()));
                         }
                         let intermediate_value = match n.as_f64() {
@@ -145,14 +146,14 @@ impl ScalarFunction for Round {
                             let rounded_value = intermediate_value.trunc() / multiplier;
                             return Ok(VariableValue::Float(
                                 match Float::from_f64(rounded_value) {
-                                Some(f) => f,
-                                None => {
-                                    return Err(FunctionError {
-                                        function_name: expression.name.to_string(),
-                                        error: FunctionEvaluationError::OverflowError,
-                                    })
-                                }
-                            },
+                                    Some(f) => f,
+                                    None => {
+                                        return Err(FunctionError {
+                                            function_name: expression.name.to_string(),
+                                            error: FunctionEvaluationError::OverflowError,
+                                        })
+                                    }
+                                },
                             ));
                         }
                         let rounded_value = (match n.as_f64() {
@@ -163,29 +164,29 @@ impl ScalarFunction for Round {
                                     error: FunctionEvaluationError::OverflowError,
                                 })
                             }
-                        } * multiplier).round() / multiplier;
-                        Ok(VariableValue::Float(
-                            match Float::from_f64(rounded_value) {
-                                Some(f) => f,
-                                None => {
-                                    return Err(FunctionError {
-                                        function_name: expression.name.to_string(),
-                                        error: FunctionEvaluationError::OverflowError,
-                                    })
-                                }
-                            },
-                        ))
+                        } * multiplier)
+                            .round()
+                            / multiplier;
+                        Ok(VariableValue::Float(match Float::from_f64(rounded_value) {
+                            Some(f) => f,
+                            None => {
+                                return Err(FunctionError {
+                                    function_name: expression.name.to_string(),
+                                    error: FunctionEvaluationError::OverflowError,
+                                })
+                            }
+                        }))
                     }
                     (VariableValue::Integer(n), VariableValue::Integer(_p)) => {
                         Ok(VariableValue::Integer(Integer::from(match n.as_i64() {
-                        Some(i) => i,
-                        None => {
-                            return Err(FunctionError {
-                                function_name: expression.name.to_string(),
-                                error: FunctionEvaluationError::OverflowError,
-                            })
-                        }
-                    })))
+                            Some(i) => i,
+                            None => {
+                                return Err(FunctionError {
+                                    function_name: expression.name.to_string(),
+                                    error: FunctionEvaluationError::OverflowError,
+                                })
+                            }
+                        })))
                     }
                     (VariableValue::Float(_n), _) => {
                         return Err(FunctionError {
@@ -198,7 +199,7 @@ impl ScalarFunction for Round {
                             function_name: expression.name.to_string(),
                             error: FunctionEvaluationError::InvalidArgument(1),
                         });
-                    },
+                    }
                     _ => {
                         return Err(FunctionError {
                             function_name: expression.name.to_string(),
@@ -242,28 +243,31 @@ impl ScalarFunction for Round {
                                     error: FunctionEvaluationError::OverflowError,
                                 })
                             }
-                        }.is_sign_positive();
+                        }
+                        .is_sign_positive();
                         match mode.as_str() {
                             "UP" => {
                                 if is_positive {
-                                    let result =
-                                        round_up(match n.as_f64() {
-                            Some(f) => f,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::OverflowError,
-                                })
-                            }
-                        }, match p.as_i64() {
-                            Some(i) => i as i32,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::OverflowError,
-                                })
-                            }
-                        });
+                                    let result = round_up(
+                                        match n.as_f64() {
+                                            Some(f) => f,
+                                            None => {
+                                                return Err(FunctionError {
+                                                    function_name: expression.name.to_string(),
+                                                    error: FunctionEvaluationError::OverflowError,
+                                                })
+                                            }
+                                        },
+                                        match p.as_i64() {
+                                            Some(i) => i as i32,
+                                            None => {
+                                                return Err(FunctionError {
+                                                    function_name: expression.name.to_string(),
+                                                    error: FunctionEvaluationError::OverflowError,
+                                                })
+                                            }
+                                        },
+                                    );
                                     return Ok(VariableValue::Float(
                                         match Float::from_f64(result) {
                                             Some(f) => f,
@@ -277,24 +281,26 @@ impl ScalarFunction for Round {
                                     ));
                                 } else {
                                     //Cypher being weird :)
-                                    let result =
-                                        round_down(match n.as_f64() {
-                            Some(f) => f,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::OverflowError,
-                                })
-                            }
-                        }, match p.as_i64() {
-                            Some(i) => i as i32,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::OverflowError,
-                                })
-                            }
-                        });
+                                    let result = round_down(
+                                        match n.as_f64() {
+                                            Some(f) => f,
+                                            None => {
+                                                return Err(FunctionError {
+                                                    function_name: expression.name.to_string(),
+                                                    error: FunctionEvaluationError::OverflowError,
+                                                })
+                                            }
+                                        },
+                                        match p.as_i64() {
+                                            Some(i) => i as i32,
+                                            None => {
+                                                return Err(FunctionError {
+                                                    function_name: expression.name.to_string(),
+                                                    error: FunctionEvaluationError::OverflowError,
+                                                })
+                                            }
+                                        },
+                                    );
                                     return Ok(VariableValue::Float(
                                         match Float::from_f64(result) {
                                             Some(f) => f,
@@ -310,24 +316,26 @@ impl ScalarFunction for Round {
                             }
                             "DOWN" => {
                                 if is_positive {
-                                    let result =
-                                        round_down(match n.as_f64() {
-                            Some(f) => f,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::OverflowError,
-                                })
-                            }
-                        }, match p.as_i64() {
-                            Some(i) => i as i32,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::OverflowError,
-                                })
-                            }
-                        });
+                                    let result = round_down(
+                                        match n.as_f64() {
+                                            Some(f) => f,
+                                            None => {
+                                                return Err(FunctionError {
+                                                    function_name: expression.name.to_string(),
+                                                    error: FunctionEvaluationError::OverflowError,
+                                                })
+                                            }
+                                        },
+                                        match p.as_i64() {
+                                            Some(i) => i as i32,
+                                            None => {
+                                                return Err(FunctionError {
+                                                    function_name: expression.name.to_string(),
+                                                    error: FunctionEvaluationError::OverflowError,
+                                                })
+                                            }
+                                        },
+                                    );
                                     return Ok(VariableValue::Float(
                                         match Float::from_f64(result) {
                                             Some(f) => f,
@@ -340,24 +348,26 @@ impl ScalarFunction for Round {
                                         },
                                     ));
                                 } else {
-                                    let result =
-                                        round_up(match n.as_f64() {
-                            Some(f) => f,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::OverflowError,
-                                })
-                            }
-                        }, match p.as_i64() {
-                            Some(i) => i as i32,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::OverflowError,
-                                })
-                            }
-                        });
+                                    let result = round_up(
+                                        match n.as_f64() {
+                                            Some(f) => f,
+                                            None => {
+                                                return Err(FunctionError {
+                                                    function_name: expression.name.to_string(),
+                                                    error: FunctionEvaluationError::OverflowError,
+                                                })
+                                            }
+                                        },
+                                        match p.as_i64() {
+                                            Some(i) => i as i32,
+                                            None => {
+                                                return Err(FunctionError {
+                                                    function_name: expression.name.to_string(),
+                                                    error: FunctionEvaluationError::OverflowError,
+                                                })
+                                            }
+                                        },
+                                    );
                                     return Ok(VariableValue::Float(
                                         match Float::from_f64(result) {
                                             Some(f) => f,
@@ -372,281 +382,292 @@ impl ScalarFunction for Round {
                                 }
                             }
                             "CEILING" => {
-                                let result =
-                                    round_up(match n.as_f64() {
-                            Some(f) => f,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::OverflowError,
-                                })
-                            }
-                        }, match p.as_i64() {
-                            Some(i) => i as i32,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::OverflowError,
-                                })
-                            }
-                        });
+                                let result = round_up(
+                                    match n.as_f64() {
+                                        Some(f) => f,
+                                        None => {
+                                            return Err(FunctionError {
+                                                function_name: expression.name.to_string(),
+                                                error: FunctionEvaluationError::OverflowError,
+                                            })
+                                        }
+                                    },
+                                    match p.as_i64() {
+                                        Some(i) => i as i32,
+                                        None => {
+                                            return Err(FunctionError {
+                                                function_name: expression.name.to_string(),
+                                                error: FunctionEvaluationError::OverflowError,
+                                            })
+                                        }
+                                    },
+                                );
                                 return Ok(VariableValue::Float(match Float::from_f64(result) {
-                                            Some(f) => f,
-                                            None => {
-                                                return Err(FunctionError {
-                                                    function_name: expression.name.to_string(),
-                                                    error: FunctionEvaluationError::OverflowError,
-                                                })
-                                            }
-                                        }));
+                                    Some(f) => f,
+                                    None => {
+                                        return Err(FunctionError {
+                                            function_name: expression.name.to_string(),
+                                            error: FunctionEvaluationError::OverflowError,
+                                        })
+                                    }
+                                }));
                             }
                             "FLOOR" => {
-                                let result =
-                                    round_down(match n.as_f64() {
-                            Some(f) => f,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::OverflowError,
-                                })
-                            }
-                        }, match p.as_i64() {
-                            Some(i) => i as i32,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::OverflowError,
-                                })
-                            }
-                        });
+                                let result = round_down(
+                                    match n.as_f64() {
+                                        Some(f) => f,
+                                        None => {
+                                            return Err(FunctionError {
+                                                function_name: expression.name.to_string(),
+                                                error: FunctionEvaluationError::OverflowError,
+                                            })
+                                        }
+                                    },
+                                    match p.as_i64() {
+                                        Some(i) => i as i32,
+                                        None => {
+                                            return Err(FunctionError {
+                                                function_name: expression.name.to_string(),
+                                                error: FunctionEvaluationError::OverflowError,
+                                            })
+                                        }
+                                    },
+                                );
                                 return Ok(VariableValue::Float(match Float::from_f64(result) {
-                                            Some(f) => f,
-                                            None => {
-                                                return Err(FunctionError {
-                                                    function_name: expression.name.to_string(),
-                                                    error: FunctionEvaluationError::OverflowError,
-                                                })
-                                            }
-                                        }));
+                                    Some(f) => f,
+                                    None => {
+                                        return Err(FunctionError {
+                                            function_name: expression.name.to_string(),
+                                            error: FunctionEvaluationError::OverflowError,
+                                        })
+                                    }
+                                }));
                             }
                             "HALF_UP" => {
                                 let multiplier = 10.0_f64.powi(match p.as_i64() {
-                            Some(i) => i as i32,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::OverflowError,
-                                })
-                            }
-                        });
+                                    Some(i) => i as i32,
+                                    None => {
+                                        return Err(FunctionError {
+                                            function_name: expression.name.to_string(),
+                                            error: FunctionEvaluationError::OverflowError,
+                                        })
+                                    }
+                                });
                                 if match n.as_f64() {
-                            Some(f) => f,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::OverflowError,
-                                })
-                            }
-                        } > std::f64::MAX / multiplier {
+                                    Some(f) => f,
+                                    None => {
+                                        return Err(FunctionError {
+                                            function_name: expression.name.to_string(),
+                                            error: FunctionEvaluationError::OverflowError,
+                                        })
+                                    }
+                                } > std::f64::MAX / multiplier
+                                {
                                     return Ok(VariableValue::Float(n.clone()));
                                 }
                                 let intermediate_value = match n.as_f64() {
-                            Some(f) => f,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::OverflowError,
-                                })
-                            }
-                        } * multiplier;
+                                    Some(f) => f,
+                                    None => {
+                                        return Err(FunctionError {
+                                            function_name: expression.name.to_string(),
+                                            error: FunctionEvaluationError::OverflowError,
+                                        })
+                                    }
+                                } * multiplier;
                                 if intermediate_value.fract() == 0.5 {
                                     let rounded_value =
                                         (intermediate_value.trunc() + 1.0) / multiplier;
                                     return Ok(VariableValue::Float(
                                         match Float::from_f64(rounded_value) {
-                                Some(f) => f,
-                                None => {
-                                    return Err(FunctionError {
-                                        function_name: expression.name.to_string(),
-                                        error: FunctionEvaluationError::OverflowError,
-                                    })
-                                }
-                            },
+                                            Some(f) => f,
+                                            None => {
+                                                return Err(FunctionError {
+                                                    function_name: expression.name.to_string(),
+                                                    error: FunctionEvaluationError::OverflowError,
+                                                })
+                                            }
+                                        },
                                     ));
                                 } else if intermediate_value.fract() == -0.5 {
                                     let rounded_value =
                                         (intermediate_value.trunc() - 1.0) / multiplier;
                                     return Ok(VariableValue::Float(
                                         match Float::from_f64(rounded_value) {
-                                Some(f) => f,
-                                None => {
-                                    return Err(FunctionError {
-                                        function_name: expression.name.to_string(),
-                                        error: FunctionEvaluationError::OverflowError,
-                                    })
-                                }
-                            },
+                                            Some(f) => f,
+                                            None => {
+                                                return Err(FunctionError {
+                                                    function_name: expression.name.to_string(),
+                                                    error: FunctionEvaluationError::OverflowError,
+                                                })
+                                            }
+                                        },
                                     ));
                                 }
-                                let rounded_value =
-                                    (match n.as_f64() {
-                            Some(f) => f,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::OverflowError,
-                                })
-                            }
-                        } * multiplier).round() / multiplier;
+                                let rounded_value = (match n.as_f64() {
+                                    Some(f) => f,
+                                    None => {
+                                        return Err(FunctionError {
+                                            function_name: expression.name.to_string(),
+                                            error: FunctionEvaluationError::OverflowError,
+                                        })
+                                    }
+                                } * multiplier)
+                                    .round()
+                                    / multiplier;
                                 return Ok(VariableValue::Float(
                                     match Float::from_f64(rounded_value) {
-                                Some(f) => f,
-                                None => {
-                                    return Err(FunctionError {
-                                        function_name: expression.name.to_string(),
-                                        error: FunctionEvaluationError::OverflowError,
-                                    })
-                                }
-                            },
+                                        Some(f) => f,
+                                        None => {
+                                            return Err(FunctionError {
+                                                function_name: expression.name.to_string(),
+                                                error: FunctionEvaluationError::OverflowError,
+                                            })
+                                        }
+                                    },
                                 ));
                             }
                             "HALF_DOWN" => {
                                 let multiplier = 10.0_f64.powi(match p.as_i64() {
-                            Some(i) => i as i32,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::OverflowError,
-                                })
-                            }
-                        });
+                                    Some(i) => i as i32,
+                                    None => {
+                                        return Err(FunctionError {
+                                            function_name: expression.name.to_string(),
+                                            error: FunctionEvaluationError::OverflowError,
+                                        })
+                                    }
+                                });
                                 if match n.as_f64() {
-                            Some(f) => f,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::OverflowError,
-                                })
-                            }
-                        } > std::f64::MAX / multiplier {
+                                    Some(f) => f,
+                                    None => {
+                                        return Err(FunctionError {
+                                            function_name: expression.name.to_string(),
+                                            error: FunctionEvaluationError::OverflowError,
+                                        })
+                                    }
+                                } > std::f64::MAX / multiplier
+                                {
                                     return Ok(VariableValue::Float(n.clone()));
                                 }
                                 let intermediate_value = match n.as_f64() {
-                            Some(f) => f,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::OverflowError,
-                                })
-                            }
-                        } * multiplier;
+                                    Some(f) => f,
+                                    None => {
+                                        return Err(FunctionError {
+                                            function_name: expression.name.to_string(),
+                                            error: FunctionEvaluationError::OverflowError,
+                                        })
+                                    }
+                                } * multiplier;
                                 if intermediate_value.fract() == 0.5 {
                                     let rounded_value = (intermediate_value.trunc()) / multiplier;
                                     return Ok(VariableValue::Float(
                                         match Float::from_f64(rounded_value) {
-                                Some(f) => f,
-                                None => {
-                                    return Err(FunctionError {
-                                        function_name: expression.name.to_string(),
-                                        error: FunctionEvaluationError::OverflowError,
-                                    })
-                                }
-                            },
+                                            Some(f) => f,
+                                            None => {
+                                                return Err(FunctionError {
+                                                    function_name: expression.name.to_string(),
+                                                    error: FunctionEvaluationError::OverflowError,
+                                                })
+                                            }
+                                        },
                                     ));
                                 } else if intermediate_value.fract() == -0.5 {
                                     let rounded_value = (intermediate_value.trunc()) / multiplier;
                                     return Ok(VariableValue::Float(
                                         match Float::from_f64(rounded_value) {
-                                Some(f) => f,
-                                None => {
-                                    return Err(FunctionError {
-                                        function_name: expression.name.to_string(),
-                                        error: FunctionEvaluationError::OverflowError,
-                                    })
-                                }
-                            },
+                                            Some(f) => f,
+                                            None => {
+                                                return Err(FunctionError {
+                                                    function_name: expression.name.to_string(),
+                                                    error: FunctionEvaluationError::OverflowError,
+                                                })
+                                            }
+                                        },
                                     ));
                                 }
-                                let rounded_value =
-                                    (match n.as_f64() {
-                            Some(f) => f,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::OverflowError,
-                                })
-                            }
-                        } * multiplier).round() / multiplier;
+                                let rounded_value = (match n.as_f64() {
+                                    Some(f) => f,
+                                    None => {
+                                        return Err(FunctionError {
+                                            function_name: expression.name.to_string(),
+                                            error: FunctionEvaluationError::OverflowError,
+                                        })
+                                    }
+                                } * multiplier)
+                                    .round()
+                                    / multiplier;
                                 return Ok(VariableValue::Float(
                                     match Float::from_f64(rounded_value) {
-                                Some(f) => f,
-                                None => {
-                                    return Err(FunctionError {
-                                        function_name: expression.name.to_string(),
-                                        error: FunctionEvaluationError::OverflowError,
-                                    })
-                                }
-                            },
+                                        Some(f) => f,
+                                        None => {
+                                            return Err(FunctionError {
+                                                function_name: expression.name.to_string(),
+                                                error: FunctionEvaluationError::OverflowError,
+                                            })
+                                        }
+                                    },
                                 ));
                             }
                             "HALF_EVEN" => {
                                 let multiplier = 10.0_f64.powi(match p.as_i64() {
-                            Some(i) => i as i32,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::OverflowError,
-                                })
-                            }
-                        });
+                                    Some(i) => i as i32,
+                                    None => {
+                                        return Err(FunctionError {
+                                            function_name: expression.name.to_string(),
+                                            error: FunctionEvaluationError::OverflowError,
+                                        })
+                                    }
+                                });
                                 if match n.as_f64() {
-                            Some(f) => f,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::OverflowError,
-                                })
-                            }
-                        } > std::f64::MAX / multiplier {
+                                    Some(f) => f,
+                                    None => {
+                                        return Err(FunctionError {
+                                            function_name: expression.name.to_string(),
+                                            error: FunctionEvaluationError::OverflowError,
+                                        })
+                                    }
+                                } > std::f64::MAX / multiplier
+                                {
                                     return Ok(VariableValue::Float(n.clone()));
                                 }
                                 let intermediate_value = match n.as_f64() {
-                            Some(f) => f,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::OverflowError,
-                                })
-                            }
-                        } * multiplier;
+                                    Some(f) => f,
+                                    None => {
+                                        return Err(FunctionError {
+                                            function_name: expression.name.to_string(),
+                                            error: FunctionEvaluationError::OverflowError,
+                                        })
+                                    }
+                                } * multiplier;
                                 if intermediate_value.fract() == 0.5 {
                                     if intermediate_value.trunc() % 2.0 == 0.0 {
                                         let rounded_value =
                                             (intermediate_value.trunc()) / multiplier;
                                         return Ok(VariableValue::Float(
                                             match Float::from_f64(rounded_value) {
-                                Some(f) => f,
-                                None => {
-                                    return Err(FunctionError {
-                                        function_name: expression.name.to_string(),
-                                        error: FunctionEvaluationError::OverflowError,
-                                    })
-                                }
-                            },
+                                                Some(f) => f,
+                                                None => {
+                                                    return Err(FunctionError {
+                                                        function_name: expression.name.to_string(),
+                                                        error:
+                                                            FunctionEvaluationError::OverflowError,
+                                                    })
+                                                }
+                                            },
                                         ));
                                     } else {
                                         let rounded_value =
                                             (intermediate_value.trunc() + 1.0) / multiplier;
                                         return Ok(VariableValue::Float(
                                             match Float::from_f64(rounded_value) {
-                                Some(f) => f,
-                                None => {
-                                    return Err(FunctionError {
-                                        function_name: expression.name.to_string(),
-                                        error: FunctionEvaluationError::OverflowError,
-                                    })
-                                }
-                            },
+                                                Some(f) => f,
+                                                None => {
+                                                    return Err(FunctionError {
+                                                        function_name: expression.name.to_string(),
+                                                        error:
+                                                            FunctionEvaluationError::OverflowError,
+                                                    })
+                                                }
+                                            },
                                         ));
                                     }
                                 } else if intermediate_value.fract() == -0.5 {
@@ -655,57 +676,62 @@ impl ScalarFunction for Round {
                                             (intermediate_value.trunc()) / multiplier;
                                         return Ok(VariableValue::Float(
                                             match Float::from_f64(rounded_value) {
-                                Some(f) => f,
-                                None => {
-                                    return Err(FunctionError {
-                                        function_name: expression.name.to_string(),
-                                        error: FunctionEvaluationError::OverflowError,
-                                    })
-                                }
-                            },
+                                                Some(f) => f,
+                                                None => {
+                                                    return Err(FunctionError {
+                                                        function_name: expression.name.to_string(),
+                                                        error:
+                                                            FunctionEvaluationError::OverflowError,
+                                                    })
+                                                }
+                                            },
                                         ));
                                     } else {
                                         let rounded_value =
                                             (intermediate_value.trunc() - 1.0) / multiplier;
                                         return Ok(VariableValue::Float(
                                             match Float::from_f64(rounded_value) {
-                                Some(f) => f,
-                                None => {
-                                    return Err(FunctionError {
-                                        function_name: expression.name.to_string(),
-                                        error: FunctionEvaluationError::OverflowError,
-                                    })
-                                }
-                            },
+                                                Some(f) => f,
+                                                None => {
+                                                    return Err(FunctionError {
+                                                        function_name: expression.name.to_string(),
+                                                        error:
+                                                            FunctionEvaluationError::OverflowError,
+                                                    })
+                                                }
+                                            },
                                         ));
                                     }
                                 }
-                                let rounded_value =
-                                    (match n.as_f64() {
-                            Some(f) => f,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::OverflowError,
-                                })
-                            }
-                        } * multiplier).round() / multiplier;
+                                let rounded_value = (match n.as_f64() {
+                                    Some(f) => f,
+                                    None => {
+                                        return Err(FunctionError {
+                                            function_name: expression.name.to_string(),
+                                            error: FunctionEvaluationError::OverflowError,
+                                        })
+                                    }
+                                } * multiplier)
+                                    .round()
+                                    / multiplier;
                                 return Ok(VariableValue::Float(
                                     match Float::from_f64(rounded_value) {
-                                Some(f) => f,
-                                None => {
-                                    return Err(FunctionError {
-                                        function_name: expression.name.to_string(),
-                                        error: FunctionEvaluationError::OverflowError,
-                                    })
-                                }
-                            },
+                                        Some(f) => f,
+                                        None => {
+                                            return Err(FunctionError {
+                                                function_name: expression.name.to_string(),
+                                                error: FunctionEvaluationError::OverflowError,
+                                            })
+                                        }
+                                    },
                                 ));
                             }
-                            _ => return Err(FunctionError {
-                                function_name: expression.name.to_string(),
-                                error: FunctionEvaluationError::InvalidArgument(2),
-                            }),
+                            _ => {
+                                return Err(FunctionError {
+                                    function_name: expression.name.to_string(),
+                                    error: FunctionEvaluationError::InvalidArgument(2),
+                                })
+                            }
                         }
                     }
                     (
@@ -727,7 +753,7 @@ impl ScalarFunction for Round {
                     }),
                 }
             }
-            _ => unreachable!()
+            _ => unreachable!(),
         }
     }
 }

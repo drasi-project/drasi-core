@@ -8,7 +8,9 @@ use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::variable_value::float::Float;
 use crate::evaluation::variable_value::integer::Integer;
 use crate::evaluation::variable_value::VariableValue;
-use crate::evaluation::{FunctionError, FunctionEvaluationError, ExpressionEvaluationContext, InstantQueryClock};
+use crate::evaluation::{
+    ExpressionEvaluationContext, FunctionError, FunctionEvaluationError, InstantQueryClock,
+};
 
 fn get_func_expr() -> ast::FunctionExpression {
     ast::FunctionExpression {
@@ -33,7 +35,7 @@ async fn round_too_few_args() {
         FunctionError {
             function_name: _,
             error: FunctionEvaluationError::InvalidArgumentCount,
-        } 
+        }
     ));
 }
 

@@ -1,6 +1,10 @@
 use std::{fmt::Debug, sync::Arc};
 
-use crate::{evaluation::{FunctionError, FunctionEvaluationError}, interface::ResultIndex, models::ElementValue};
+use crate::{
+    evaluation::{FunctionError, FunctionEvaluationError},
+    interface::ResultIndex,
+    models::ElementValue,
+};
 
 use async_trait::async_trait;
 
@@ -44,23 +48,31 @@ impl AggregatingFunction for Last {
         let value = match accumulator {
             Accumulator::Value(accumulator) => match accumulator {
                 super::ValueAccumulator::Value(value) => value,
-                _ => return Err(FunctionError {
+                _ => {
+                    return Err(FunctionError {
+                        function_name: "Last".to_string(),
+                        error: FunctionEvaluationError::CorruptData,
+                    })
+                }
+            },
+            _ => {
+                return Err(FunctionError {
                     function_name: "Last".to_string(),
                     error: FunctionEvaluationError::CorruptData,
-                }),
-            },
-            _ => return Err(FunctionError {
-                function_name: "Last".to_string(),
-                error: FunctionEvaluationError::CorruptData,
-            }),
+                })
+            }
         };
 
         *value = match (&args[0]).try_into() {
             Ok(value) => value,
-            Err(_) => return Err(FunctionError {
-                function_name: "Last".to_string(),
-                error: FunctionEvaluationError::InvalidType { expected: "ElementValue".to_string() },
-            }),
+            Err(_) => {
+                return Err(FunctionError {
+                    function_name: "Last".to_string(),
+                    error: FunctionEvaluationError::InvalidType {
+                        expected: "ElementValue".to_string(),
+                    },
+                })
+            }
         };
 
         Ok((&value.clone()).into())
@@ -81,15 +93,19 @@ impl AggregatingFunction for Last {
         let value = match accumulator {
             Accumulator::Value(accumulator) => match accumulator {
                 super::ValueAccumulator::Value(value) => value,
-                _ => return Err(FunctionError {
+                _ => {
+                    return Err(FunctionError {
+                        function_name: "Last".to_string(),
+                        error: FunctionEvaluationError::CorruptData,
+                    })
+                }
+            },
+            _ => {
+                return Err(FunctionError {
                     function_name: "Last".to_string(),
                     error: FunctionEvaluationError::CorruptData,
-                }),
-            },
-            _ => return Err(FunctionError {
-                function_name: "Last".to_string(),
-                error: FunctionEvaluationError::CorruptData,
-            }),
+                })
+            }
         };
 
         *value = ElementValue::Null;
@@ -105,15 +121,19 @@ impl AggregatingFunction for Last {
         let value = match accumulator {
             Accumulator::Value(accumulator) => match accumulator {
                 super::ValueAccumulator::Value(value) => value,
-                _ => return Err(FunctionError {
+                _ => {
+                    return Err(FunctionError {
+                        function_name: "Last".to_string(),
+                        error: FunctionEvaluationError::CorruptData,
+                    })
+                }
+            },
+            _ => {
+                return Err(FunctionError {
                     function_name: "Last".to_string(),
                     error: FunctionEvaluationError::CorruptData,
-                }),
-            },
-            _ => return Err(FunctionError {
-                function_name: "Last".to_string(),
-                error: FunctionEvaluationError::CorruptData,
-            }),
+                })
+            }
         };
         Ok((&value.clone()).into())
     }

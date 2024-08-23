@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use drasi_query_ast::ast;
 
 use crate::evaluation::functions::ScalarFunction;
-use crate::evaluation::{FunctionError, ExpressionEvaluationContext};
+use crate::evaluation::{ExpressionEvaluationContext, FunctionError};
 
 #[derive(Debug)]
 pub struct Coalesce {}

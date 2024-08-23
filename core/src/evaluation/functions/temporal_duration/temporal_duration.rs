@@ -2,10 +2,10 @@ use async_trait::async_trait;
 use drasi_query_ast::ast;
 
 use crate::evaluation::functions::ScalarFunction;
+use crate::evaluation::temporal_constants;
 use crate::evaluation::variable_value::duration::Duration;
 use crate::evaluation::variable_value::VariableValue;
-use crate::evaluation::{FunctionError, FunctionEvaluationError, ExpressionEvaluationContext};
-use crate::evaluation::temporal_constants;
+use crate::evaluation::{ExpressionEvaluationContext, FunctionError, FunctionEvaluationError};
 
 use chrono::{Datelike, Duration as ChronoDuration, LocalResult, NaiveDate};
 use iso8601_duration::Duration as IsoDuration;
@@ -271,10 +271,15 @@ impl ScalarFunction for Between {
                 };
                 let start_datetime = match start_time.and_local_timezone(*end.datetime().offset()) {
                     LocalResult::Single(start_datetime) => start_datetime,
-                    _ => return Err(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR.to_string() },
-                    }),
+                    _ => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidFormat {
+                                expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR
+                                    .to_string(),
+                            },
+                        })
+                    }
                 };
                 let end_datetime = end.datetime().fixed_offset();
                 let duration = end_datetime.signed_duration_since(start_datetime);
@@ -328,10 +333,15 @@ impl ScalarFunction for Between {
                     .and_local_timezone(*end_datetime.offset())
                 {
                     LocalResult::Single(start_datetime) => start_datetime,
-                    _ => return Err(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR.to_string() },
-                    }),
+                    _ => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidFormat {
+                                expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR
+                                    .to_string(),
+                            },
+                        })
+                    }
                 };
                 let duration = end_datetime.signed_duration_since(start_datetime);
                 Ok(VariableValue::Duration(Duration::new(
@@ -350,20 +360,24 @@ impl ScalarFunction for Between {
                     .and_local_timezone(*start.offset())
                 {
                     LocalResult::Single(start_datetime) => start_datetime,
-                    _ => return Err(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidArgument(0),
-                    }),
+                    _ => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidArgument(0),
+                        })
+                    }
                 };
                 let end_datetime = match dummy_date
                     .and_time(*end.time())
                     .and_local_timezone(*end.offset())
                 {
                     LocalResult::Single(end_datetime) => end_datetime,
-                    _ => return Err(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidArgument(1),
-                    }),
+                    _ => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidArgument(1),
+                        })
+                    }
                 };
 
                 let start_time = start_datetime.fixed_offset();
@@ -404,10 +418,15 @@ impl ScalarFunction for Between {
                     .and_local_timezone(*start_offset)
                 {
                     LocalResult::Single(end_datetime) => end_datetime,
-                    _ => return Err(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: temporal_constants::INVALID_LOCAL_DATETIME_FORMAT_ERROR.to_string() },
-                    }),
+                    _ => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidFormat {
+                                expected: temporal_constants::INVALID_LOCAL_DATETIME_FORMAT_ERROR
+                                    .to_string(),
+                            },
+                        })
+                    }
                 };
                 let start_datetime = match end
                     .date()
@@ -415,10 +434,15 @@ impl ScalarFunction for Between {
                     .and_local_timezone(*start_offset)
                 {
                     LocalResult::Single(start_datetime) => start_datetime,
-                    _ => return Err(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR.to_string() },
-                    }),
+                    _ => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidFormat {
+                                expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR
+                                    .to_string(),
+                            },
+                        })
+                    }
                 };
 
                 let duration = end_datetime.signed_duration_since(start_datetime);
@@ -436,10 +460,15 @@ impl ScalarFunction for Between {
                     .and_local_timezone(*start.offset())
                 {
                     LocalResult::Single(start_datetime) => start_datetime,
-                    _ => return Err(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR.to_string() },
-                    }),
+                    _ => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidFormat {
+                                expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR
+                                    .to_string(),
+                            },
+                        })
+                    }
                 };
 
                 let fixed_start_datetime = start_datetime.fixed_offset();
@@ -489,18 +518,27 @@ impl ScalarFunction for Between {
                     .and_local_timezone(*offset)
                 {
                     LocalResult::Single(end_datetime) => end_datetime,
-                    _ => return Err(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: 
-                                temporal_constants::INVALID_ZONED_TIME_FORMAT_ERROR.to_string() },
-                    }),
+                    _ => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidFormat {
+                                expected: temporal_constants::INVALID_ZONED_TIME_FORMAT_ERROR
+                                    .to_string(),
+                            },
+                        })
+                    }
                 };
                 let start_datetime = match start.and_local_timezone(*offset) {
                     LocalResult::Single(start_datetime) => start_datetime,
-                    _ => return Err(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: temporal_constants::INVALID_LOCAL_DATETIME_FORMAT_ERROR.to_string() },
-                    }),
+                    _ => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidFormat {
+                                expected: temporal_constants::INVALID_LOCAL_DATETIME_FORMAT_ERROR
+                                    .to_string(),
+                            },
+                        })
+                    }
                 };
 
                 let duration = end_datetime.signed_duration_since(start_datetime);
@@ -514,10 +552,15 @@ impl ScalarFunction for Between {
                 let start_offset = end.datetime().offset();
                 let start_datetime = match start.and_local_timezone(*start_offset) {
                     LocalResult::Single(start_datetime) => start_datetime,
-                    _ => return Err(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR.to_string() },
-                    }),
+                    _ => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidFormat {
+                                expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR
+                                    .to_string(),
+                            },
+                        })
+                    }
                 };
 
                 let duration = end.datetime().signed_duration_since(start_datetime);
@@ -543,10 +586,15 @@ impl ScalarFunction for Between {
                     .and_local_timezone(*start_datetime.offset())
                 {
                     LocalResult::Single(end_datetime) => end_datetime,
-                    _ => return Err(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR.to_string() },
-                    }),
+                    _ => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidFormat {
+                                expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR
+                                    .to_string(),
+                            },
+                        })
+                    }
                 };
                 let duration = end_datetime.signed_duration_since(start_datetime);
                 Ok(VariableValue::Duration(Duration::new(
@@ -563,10 +611,15 @@ impl ScalarFunction for Between {
                     .and_local_timezone(*start_datetime.offset())
                 {
                     LocalResult::Single(end_datetime) => end_datetime,
-                    _ => return Err(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR.to_string() },
-                    }),
+                    _ => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidFormat {
+                                expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR
+                                    .to_string(),
+                            },
+                        })
+                    }
                 };
                 let duration = end_datetime.signed_duration_since(start_datetime);
                 Ok(VariableValue::Duration(Duration::new(
@@ -583,10 +636,15 @@ impl ScalarFunction for Between {
                     .and_local_timezone(*end.offset())
                 {
                     LocalResult::Single(end_datetime) => end_datetime,
-                    _ => return Err(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR.to_string() },
-                    }),
+                    _ => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidFormat {
+                                expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR
+                                    .to_string(),
+                            },
+                        })
+                    }
                 };
 
                 let fixed_end_datetime = end_datetime.fixed_offset();
@@ -602,10 +660,15 @@ impl ScalarFunction for Between {
                 let start_offset = start.datetime().offset();
                 let end_datetime = match end.and_local_timezone(*start_offset) {
                     LocalResult::Single(end_datetime) => end_datetime,
-                    _ => return Err(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: temporal_constants::INVALID_LOCAL_DATETIME_FORMAT_ERROR.to_string() },
-                    }),
+                    _ => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidFormat {
+                                expected: temporal_constants::INVALID_LOCAL_DATETIME_FORMAT_ERROR
+                                    .to_string(),
+                            },
+                        })
+                    }
                 };
 
                 let duration = end_datetime.signed_duration_since(*start.datetime());
@@ -736,7 +799,7 @@ impl ScalarFunction for InMonths {
                 let end_date = end.datetime().fixed_offset().date_naive();
                 let start_date = start.datetime().fixed_offset().date_naive();
 
-                let (years_diff, months_diff) = calculate_year_month(&start_date, &end_date); 
+                let (years_diff, months_diff) = calculate_year_month(&start_date, &end_date);
                 Ok(VariableValue::Duration(Duration::new(
                     ChronoDuration::days(0),
                     years_diff,
@@ -799,12 +862,17 @@ impl ScalarFunction for InDays {
         let result = between.call(_context, expression, args.clone()).await;
         match result {
             Ok(return_value) => {
-                let days = match return_value.as_duration(){
+                let days = match return_value.as_duration() {
                     Some(duration) => duration.duration().num_days(),
-                    None => return Err(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR.to_string() },
-                    }),
+                    None => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidFormat {
+                                expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR
+                                    .to_string(),
+                            },
+                        })
+                    }
                 };
                 let duration =
                     VariableValue::Duration(Duration::new(ChronoDuration::days(days), 0, 0));
@@ -845,15 +913,25 @@ impl ScalarFunction for InSeconds {
                 let seconds = match return_value.as_duration() {
                     Some(duration) => match duration.duration().num_nanoseconds() {
                         Some(seconds) => seconds,
-                        None => return Err(FunctionError {
+                        None => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::InvalidFormat {
+                                    expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR
+                                        .to_string(),
+                                },
+                            })
+                        }
+                    },
+                    None => {
+                        return Err(FunctionError {
                             function_name: expression.name.to_string(),
-                            error: FunctionEvaluationError::InvalidFormat { expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR.to_string() },
-                        }),
+                            error: FunctionEvaluationError::InvalidFormat {
+                                expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR
+                                    .to_string(),
+                            },
+                        })
                     }
-                    None => return Err(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR.to_string() },
-                    }),
                 };
                 let duration = VariableValue::Duration(Duration::new(
                     ChronoDuration::nanoseconds(seconds),
@@ -872,10 +950,7 @@ impl ScalarFunction for InSeconds {
     }
 }
 
-fn calculate_year_month(
-    start: &NaiveDate,
-    end: &NaiveDate,
-) -> (i64, i64) {
+fn calculate_year_month(start: &NaiveDate, end: &NaiveDate) -> (i64, i64) {
     let months_diff = end.month() as i64 - start.month() as i64;
     let years_diff = (end.year() - start.year()) as i64;
 
@@ -895,10 +970,14 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, FunctionEr
     //Durtion string must start with 'P'
     let duration = match duration_str.strip_prefix('P') {
         Some(duration) => duration,
-        None => return Err(FunctionError {
-            function_name: "Duration".to_string(),
-            error: FunctionEvaluationError::InvalidFormat { expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR.to_string() },
-        }),
+        None => {
+            return Err(FunctionError {
+                function_name: "Duration".to_string(),
+                error: FunctionEvaluationError::InvalidFormat {
+                    expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR.to_string(),
+                },
+            })
+        }
     };
 
     let date_duration = duration.split('T').next();
@@ -915,12 +994,14 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, FunctionEr
             let pattern = r"(\d{1,19}Y)?(\d{1,19}M)?(\d{1,19}W)?(\d{1,19}(?:\.\d{1,9})?D)?";
             let re = match Regex::new(pattern) {
                 Ok(re) => re,
-                Err(_) => return Err(FunctionError {
-                    function_name: "Duration".to_string(),
-                    error: FunctionEvaluationError::InvalidType {
-                        expected: "a valid regex".to_string(),
-                    },
-                }),
+                Err(_) => {
+                    return Err(FunctionError {
+                        function_name: "Duration".to_string(),
+                        error: FunctionEvaluationError::InvalidType {
+                            expected: "a valid regex".to_string(),
+                        },
+                    })
+                }
             };
 
             if let Some(cap) = re.captures(date_duration) {
@@ -934,7 +1015,10 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, FunctionEr
                             } else {
                                 return Err(FunctionError {
                                     function_name: "Duration".to_string(),
-                                    error: FunctionEvaluationError::InvalidFormat { expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR.to_string() },
+                                    error: FunctionEvaluationError::InvalidFormat {
+                                        expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR
+                                            .to_string(),
+                                    },
                                 });
                             }
                         }
@@ -945,7 +1029,10 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, FunctionEr
                             } else {
                                 return Err(FunctionError {
                                     function_name: "Duration".to_string(),
-                                    error: FunctionEvaluationError::InvalidFormat { expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR.to_string() },
+                                    error: FunctionEvaluationError::InvalidFormat {
+                                        expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR
+                                            .to_string(),
+                                    },
                                 });
                             }
                         }
@@ -956,7 +1043,10 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, FunctionEr
                             } else {
                                 return Err(FunctionError {
                                     function_name: "Duration".to_string(),
-                                    error: FunctionEvaluationError::InvalidFormat { expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR.to_string() },
+                                    error: FunctionEvaluationError::InvalidFormat {
+                                        expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR
+                                            .to_string(),
+                                    },
                                 });
                             }
                         }
@@ -970,7 +1060,11 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, FunctionEr
                                 } else {
                                     return Err(FunctionError {
                                         function_name: "Duration".to_string(),
-                                        error: FunctionEvaluationError::InvalidFormat { expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR.to_string() },
+                                        error: FunctionEvaluationError::InvalidFormat {
+                                            expected:
+                                                temporal_constants::INVALID_DURATION_FORMAT_ERROR
+                                                    .to_string(),
+                                        },
                                     });
                                 }
                             } else if let Ok(days) = substring.parse::<i64>() {
@@ -978,7 +1072,10 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, FunctionEr
                             } else {
                                 return Err(FunctionError {
                                     function_name: "Duration".to_string(),
-                                    error: FunctionEvaluationError::InvalidFormat { expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR.to_string() },
+                                    error: FunctionEvaluationError::InvalidFormat {
+                                        expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR
+                                            .to_string(),
+                                    },
                                 });
                             }
                         }
@@ -995,34 +1092,52 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, FunctionEr
 
             let iso_duration = match time_duration_string.parse::<IsoDuration>() {
                 Ok(iso_duration) => iso_duration,
-                Err(_) => return Err(FunctionError {
-                    function_name: "Duration".to_string(),
-                    error: FunctionEvaluationError::InvalidFormat { expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR.to_string() },
-                }),
+                Err(_) => {
+                    return Err(FunctionError {
+                        function_name: "Duration".to_string(),
+                        error: FunctionEvaluationError::InvalidFormat {
+                            expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR.to_string(),
+                        },
+                    })
+                }
             };
             let seconds = match iso_duration.num_seconds() {
                 Some(seconds) => seconds,
-                None => return Err(FunctionError {
-                    function_name: "Duration".to_string(),
-                    error: FunctionEvaluationError::InvalidFormat { expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR.to_string() },
-                }),
+                None => {
+                    return Err(FunctionError {
+                        function_name: "Duration".to_string(),
+                        error: FunctionEvaluationError::InvalidFormat {
+                            expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR.to_string(),
+                        },
+                    })
+                }
             };
 
             if time_duration_string.contains('.') {
                 let mut fract_string = match time_duration_string.split('.').last() {
                     Some(fract_string) => fract_string,
-                    None => return Err(FunctionError {
-                        function_name: "Duration".to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR.to_string() },
-                    }),
+                    None => {
+                        return Err(FunctionError {
+                            function_name: "Duration".to_string(),
+                            error: FunctionEvaluationError::InvalidFormat {
+                                expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR
+                                    .to_string(),
+                            },
+                        })
+                    }
                 };
                 fract_string = &fract_string[..fract_string.len() - 1];
                 let nanoseconds = match fract_string.parse::<i64>() {
                     Ok(nanoseconds) => nanoseconds,
-                    Err(_) => return Err(FunctionError {
-                        function_name: "Duration".to_string(),
-                        error: FunctionEvaluationError::InvalidFormat { expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR.to_string() },
-                    }),
+                    Err(_) => {
+                        return Err(FunctionError {
+                            function_name: "Duration".to_string(),
+                            error: FunctionEvaluationError::InvalidFormat {
+                                expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR
+                                    .to_string(),
+                            },
+                        })
+                    }
                 };
                 duration_result += ChronoDuration::nanoseconds(nanoseconds * 100_000_000_i64);
             }
