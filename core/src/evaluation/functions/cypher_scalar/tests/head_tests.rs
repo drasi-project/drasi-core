@@ -6,7 +6,9 @@ use crate::evaluation::context::QueryVariables;
 use crate::evaluation::functions::cypher_scalar::head::Head;
 use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::variable_value::VariableValue;
-use crate::evaluation::{EvaluationError, ExpressionEvaluationContext, InstantQueryClock};
+use crate::evaluation::{
+    ExpressionEvaluationContext, FunctionError, FunctionEvaluationError, InstantQueryClock,
+};
 
 fn get_func_expr() -> ast::FunctionExpression {
     ast::FunctionExpression {
@@ -57,6 +59,9 @@ async fn test_head_multiple_args() {
     let result = head.call(&context, &get_func_expr(), args.clone()).await;
     assert!(matches!(
         result.unwrap_err(),
-        EvaluationError::InvalidArgumentCount(_)
+        FunctionError {
+            function_name: _,
+            error: FunctionEvaluationError::InvalidArgumentCount
+        }
     ));
 }

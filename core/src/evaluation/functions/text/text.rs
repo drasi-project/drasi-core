@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use drasi_query_ast::ast;
 
 use crate::evaluation::functions::ScalarFunction;
-use crate::evaluation::{EvaluationError, ExpressionEvaluationContext};
+use crate::evaluation::{ExpressionEvaluationContext, FunctionError, FunctionEvaluationError};
 
 #[derive(Debug, PartialEq)]
 pub struct ToUpper {}
@@ -13,16 +13,22 @@ impl ScalarFunction for ToUpper {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
-            return Err(EvaluationError::InvalidArgumentCount("toUpper".to_string()));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         match &args[0] {
             VariableValue::String(s) => Ok(VariableValue::String(s.to_uppercase())),
             VariableValue::Null => Ok(VariableValue::Null),
-            _ => Err(EvaluationError::InvalidType),
+            _ => Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
         }
     }
 }
@@ -35,16 +41,22 @@ impl ScalarFunction for ToLower {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
-            return Err(EvaluationError::InvalidArgumentCount("toLower".to_string()));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         match &args[0] {
             VariableValue::String(s) => Ok(VariableValue::String(s.to_lowercase())),
             VariableValue::Null => Ok(VariableValue::Null),
-            _ => Err(EvaluationError::InvalidType),
+            _ => Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
         }
     }
 }
@@ -57,16 +69,22 @@ impl ScalarFunction for Trim {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
-            return Err(EvaluationError::InvalidArgumentCount("trim".to_string()));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         match &args[0] {
             VariableValue::String(s) => Ok(VariableValue::String(s.trim().to_string())),
             VariableValue::Null => Ok(VariableValue::Null),
-            _ => Err(EvaluationError::InvalidType),
+            _ => Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
         }
     }
 }
@@ -79,16 +97,22 @@ impl ScalarFunction for LTrim {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
-            return Err(EvaluationError::InvalidArgumentCount("ltrim".to_string()));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         match &args[0] {
             VariableValue::String(s) => Ok(VariableValue::String(s.trim_start().to_string())),
             VariableValue::Null => Ok(VariableValue::Null),
-            _ => Err(EvaluationError::InvalidType),
+            _ => Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
         }
     }
 }
@@ -101,16 +125,22 @@ impl ScalarFunction for RTrim {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
-            return Err(EvaluationError::InvalidArgumentCount("rtrim".to_string()));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         match &args[0] {
             VariableValue::String(s) => Ok(VariableValue::String(s.trim_end().to_string())),
             VariableValue::Null => Ok(VariableValue::Null),
-            _ => Err(EvaluationError::InvalidType),
+            _ => Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
         }
     }
 }
@@ -123,11 +153,14 @@ impl ScalarFunction for Reverse {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
-            return Err(EvaluationError::InvalidArgumentCount("reverse".to_string()));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         match &args[0] {
             VariableValue::String(s) => Ok(VariableValue::String(s.chars().rev().collect())),
@@ -137,7 +170,10 @@ impl ScalarFunction for Reverse {
                 Ok(VariableValue::List(l))
             }
             VariableValue::Null => Ok(VariableValue::Null),
-            _ => Err(EvaluationError::InvalidType),
+            _ => Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
         }
     }
 }
@@ -150,11 +186,14 @@ impl ScalarFunction for Left {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 2 {
-            return Err(EvaluationError::InvalidArgumentCount("left".to_string()));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         match (&args[0], &args[1]) {
             (VariableValue::Null, VariableValue::Integer(_length)) => Ok(VariableValue::Null),
@@ -163,11 +202,19 @@ impl ScalarFunction for Left {
                 let len = match length.as_i64() {
                     Some(l) => {
                         if l <= 0 {
-                            return Err(EvaluationError::InvalidType);
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::OverflowError,
+                            });
                         }
                         l as usize
                     }
-                    None => return Err(EvaluationError::InvalidType),
+                    None => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidArgument(1),
+                        })
+                    }
                 };
                 if len > original.len() {
                     return Ok(VariableValue::String(original.to_string()));
@@ -175,8 +222,16 @@ impl ScalarFunction for Left {
                 let result = original.chars().take(len).collect::<String>();
                 Ok(VariableValue::String(result))
             }
-            (_, VariableValue::Null) => return Err(EvaluationError::InvalidType),
-            _ => Err(EvaluationError::InvalidType),
+            (VariableValue::String(_original), _) => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(1),
+                })
+            }
+            _ => Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
         }
     }
 }
@@ -189,11 +244,14 @@ impl ScalarFunction for Right {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 2 {
-            return Err(EvaluationError::InvalidArgumentCount("right".to_string()));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         match (&args[0], &args[1]) {
             (VariableValue::Null, VariableValue::Integer(_length)) => Ok(VariableValue::Null),
@@ -202,11 +260,19 @@ impl ScalarFunction for Right {
                 let len = match length.as_i64() {
                     Some(l) => {
                         if l <= 0 {
-                            return Err(EvaluationError::InvalidType);
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::OverflowError,
+                            });
                         }
                         l as usize
                     }
-                    None => return Err(EvaluationError::InvalidType),
+                    None => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidArgument(1),
+                        })
+                    }
                 };
                 if len > original.len() {
                     return Ok(VariableValue::String(original.to_string()));
@@ -215,8 +281,16 @@ impl ScalarFunction for Right {
                 let result = original[start_index..].to_string();
                 Ok(VariableValue::String(result))
             }
-            (_, VariableValue::Null) => return Err(EvaluationError::InvalidType),
-            _ => Err(EvaluationError::InvalidType),
+            (VariableValue::String(_), _) => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(1),
+                })
+            }
+            _ => Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
         }
     }
 }
@@ -229,11 +303,14 @@ impl ScalarFunction for Replace {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 3 {
-            return Err(EvaluationError::InvalidArgumentCount("replace".to_string()));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         match (&args[0], &args[1], &args[2]) {
             (
@@ -247,10 +324,22 @@ impl ScalarFunction for Replace {
                 let result = original.replace(search, replace);
                 return Ok(VariableValue::String(result));
             }
+
             (VariableValue::Null, _, _) => Ok(VariableValue::Null),
             (_, VariableValue::Null, _) => Ok(VariableValue::Null),
             (_, _, VariableValue::Null) => Ok(VariableValue::Null),
-            _ => Err(EvaluationError::InvalidType),
+            (VariableValue::String(_), VariableValue::String(_), _) => Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgument(2),
+            }),
+            (_, VariableValue::String(_), _) => Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
+            _ => Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
         }
     }
 }
@@ -263,18 +352,24 @@ impl ScalarFunction for Split {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 2 {
-            return Err(EvaluationError::InvalidArgumentCount("split".to_string()));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         match (&args[0], &args[1]) {
             (VariableValue::Null, _) => Ok(VariableValue::Null),
             (_, VariableValue::Null) => Ok(VariableValue::Null),
             (VariableValue::String(original), VariableValue::String(separator)) => {
                 if separator.is_empty() {
-                    return Err(EvaluationError::InvalidType);
+                    return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::InvalidArgument(1),
+                    });
                 }
                 let result = original
                     .split(separator)
@@ -291,7 +386,12 @@ impl ScalarFunction for Split {
                 for delimiter in delimiters {
                     match delimiter {
                         VariableValue::String(s) => delimiters_vector.push(s),
-                        _ => return Err(EvaluationError::InvalidType),
+                        _ => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::InvalidArgument(1),
+                            })
+                        }
                     }
                 }
                 for c in original.chars() {
@@ -309,7 +409,10 @@ impl ScalarFunction for Split {
                 }
                 return Ok(VariableValue::List(result));
             }
-            _ => Err(EvaluationError::InvalidType),
+            _ => Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
         }
     }
 }
@@ -322,74 +425,129 @@ impl ScalarFunction for Substring {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() < 2 || args.len() > 3 {
-            return Err(EvaluationError::InvalidArgumentCount(
-                "substring".to_string(),
-            ));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         match (&args[0], &args[1], &args.get(2)) {
             (VariableValue::Null, _, _) => Ok(VariableValue::Null),
-            (_, VariableValue::Null, _) => Err(EvaluationError::InvalidType),
-            (_, _, Some(VariableValue::Null)) => Err(EvaluationError::InvalidType),
+            (_, VariableValue::Null, _) => Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgument(1),
+            }),
+            (_, _, Some(VariableValue::Null)) => Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgument(2),
+            }),
             (VariableValue::String(original), VariableValue::Integer(start), None) => {
                 // Handle case with two arguments
-                if !start.is_i64() {
-                    return Err(EvaluationError::InvalidType);
-                }
                 let start_index = match start.as_i64() {
                     Some(s) => {
                         if s < 0 {
-                            return Err(EvaluationError::InvalidType);
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::InvalidType {
+                                    expected: "positive integer".to_string(),
+                                },
+                            });
                         }
                         s as usize
                     }
-                    None => return Err(EvaluationError::InvalidType),
+                    None => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidArgument(1),
+                        })
+                    }
                 };
                 if start_index > original.len() {
-                    return Err(EvaluationError::InvalidType);
+                    return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::InvalidArgument(1),
+                    });
                 }
                 return Ok(VariableValue::String(original[start_index..].to_string()));
+            }
+            (VariableValue::String(_), _, None) => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(1),
+                });
             }
             (
                 VariableValue::String(original),
                 VariableValue::Integer(start),
                 Some(VariableValue::Integer(length)),
             ) => {
-                // Handle cases with three arguments
-                if !start.is_i64() || !length.is_i64() {
-                    return Err(EvaluationError::InvalidType);
-                }
                 let start_index = match start.as_i64() {
                     Some(s) => {
                         if s < 0 {
-                            return Err(EvaluationError::InvalidType);
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::InvalidType {
+                                    expected: "positive integer".to_string(),
+                                },
+                            });
                         }
                         s as usize
                     }
-                    None => return Err(EvaluationError::InvalidType),
+                    None => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidArgument(1),
+                        })
+                    }
                 };
 
                 let len = match length.as_i64() {
                     Some(l) => {
                         if l < 0 {
-                            return Err(EvaluationError::InvalidType);
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::InvalidType {
+                                    expected: "positive integer".to_string(),
+                                },
+                            });
                         }
                         l as usize
                     }
-                    None => return Err(EvaluationError::InvalidType),
+                    None => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::InvalidArgument(2),
+                        })
+                    }
                 };
                 if start_index > original.len() || start_index + len - start_index > original.len()
                 {
-                    return Err(EvaluationError::InvalidType);
+                    return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::InvalidType {
+                            expected: "Valid index or length".to_string(),
+                        },
+                    });
                 }
                 return Ok(VariableValue::String(
                     original[start_index..start_index + len].to_string(),
                 ));
             }
-            _ => return Err(EvaluationError::InvalidType),
+            (VariableValue::String(_), VariableValue::Integer(_), _) => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(2),
+                });
+            }
+            _ => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(0),
+                })
+            }
         }
     }
 }
@@ -401,13 +559,14 @@ impl ScalarFunction for ToString {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
-            return Err(EvaluationError::InvalidArgumentCount(
-                "to_string".to_string(),
-            ));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         match &args[0] {
             VariableValue::Integer(n) => return Ok(VariableValue::String(n.to_string())),
@@ -426,7 +585,12 @@ impl ScalarFunction for ToString {
                 return Ok(VariableValue::String(result));
             }
             VariableValue::Null => return Ok(VariableValue::Null),
-            _ => return Err(EvaluationError::InvalidType),
+            _ => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(0),
+                })
+            }
         }
     }
 }
@@ -438,13 +602,14 @@ impl ScalarFunction for ToStringOrNull {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
-            return Err(EvaluationError::InvalidArgumentCount(
-                "to_string_or_null".to_string(),
-            ));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         match &args[0] {
             VariableValue::Null => return Ok(VariableValue::Null),
@@ -466,7 +631,12 @@ impl ScalarFunction for ToStringOrNull {
                 // For objects should return null
                 return Ok(VariableValue::Null);
             }
-            _ => return Err(EvaluationError::InvalidType),
+            _ => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(0),
+                })
+            }
         }
     }
 }

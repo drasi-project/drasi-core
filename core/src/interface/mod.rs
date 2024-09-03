@@ -42,6 +42,21 @@ pub enum IndexError {
     Other(Box<dyn std::error::Error + Send + Sync>),
 }
 
+impl PartialEq for IndexError {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (IndexError::IOError, IndexError::IOError) => true,
+            (IndexError::NotSupported, IndexError::NotSupported) => true,
+            (IndexError::CorruptedData, IndexError::CorruptedData) => true,
+            (IndexError::ConnectionFailed(a), IndexError::ConnectionFailed(b)) => {
+                a.to_string() == b.to_string()
+            }
+            (IndexError::UnknownStore(a), IndexError::UnknownStore(b)) => a == b,
+            (IndexError::Other(a), IndexError::Other(b)) => a.to_string() == b.to_string(),
+            _ => false,
+        }
+    }
+}
 // impl<E: std::error::Error + 'static> From<E> for IndexError {
 //   fn from(e: E) -> Self {
 //     IndexError::Other(Box::new(e))

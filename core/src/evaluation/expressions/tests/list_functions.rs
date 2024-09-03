@@ -4,7 +4,8 @@ use crate::evaluation::variable_value::float::Float;
 use crate::evaluation::variable_value::integer::Integer;
 use crate::evaluation::variable_value::VariableValue;
 use crate::evaluation::{
-    EvaluationError, ExpressionEvaluationContext, ExpressionEvaluator, InstantQueryClock,
+    EvaluationError, ExpressionEvaluationContext, ExpressionEvaluator, FunctionError,
+    FunctionEvaluationError, InstantQueryClock,
 };
 use crate::in_memory_index::in_memory_result_index::InMemoryResultIndex;
 
@@ -52,14 +53,12 @@ async fn test_list_tail_multiple_arguments() {
         .await
         .unwrap_err();
 
-    let _err = Box::new(EvaluationError::InvalidArgumentCount("tail".to_string()));
-
     assert!(matches!(
         result,
-        EvaluationError::FunctionError {
+        EvaluationError::FunctionError(FunctionError {
             function_name: _name,
-            error: _err
-        }
+            error: FunctionEvaluationError::InvalidArgumentCount
+        })
     ));
 }
 
@@ -150,14 +149,12 @@ async fn test_list_reverse_multiple_arguments() {
         .await
         .unwrap_err();
 
-    let _err = Box::new(EvaluationError::InvalidArgumentCount("reverse".to_string()));
-
     assert!(matches!(
         result,
-        EvaluationError::FunctionError {
-            function_name: _name,
-            error: _err
-        }
+        EvaluationError::FunctionError(FunctionError {
+            function_name: _,
+            error: FunctionEvaluationError::InvalidArgumentCount
+        })
     ));
 }
 
@@ -239,14 +236,12 @@ async fn test_list_range_invalid_arg_count() {
         .await
         .unwrap_err();
 
-    let _err = Box::new(EvaluationError::InvalidArgumentCount("range".to_string()));
-
     assert!(matches!(
         result,
-        EvaluationError::FunctionError {
-            function_name: _name,
-            error: _err
-        }
+        EvaluationError::FunctionError(FunctionError {
+            function_name: _,
+            error: FunctionEvaluationError::InvalidArgumentCount
+        })
     ));
 
     let expr = "range(2)";
@@ -258,9 +253,9 @@ async fn test_list_range_invalid_arg_count() {
 
     assert!(matches!(
         result,
-        EvaluationError::FunctionError {
-            function_name: _name,
-            error: _err
-        }
+        EvaluationError::FunctionError(FunctionError {
+            function_name: _,
+            error: FunctionEvaluationError::InvalidArgumentCount
+        })
     ));
 }

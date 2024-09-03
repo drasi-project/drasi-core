@@ -6,7 +6,9 @@ use super::text;
 use crate::evaluation::context::QueryVariables;
 use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::variable_value::VariableValue;
-use crate::evaluation::{EvaluationError, ExpressionEvaluationContext, InstantQueryClock};
+use crate::evaluation::{
+    ExpressionEvaluationContext, FunctionError, FunctionEvaluationError, InstantQueryClock,
+};
 
 fn get_func_expr() -> ast::FunctionExpression {
     ast::FunctionExpression {
@@ -46,7 +48,10 @@ async fn test_to_upper_too_many_args() {
         .await;
     assert!(matches!(
         result.unwrap_err(),
-        EvaluationError::InvalidArgumentCount(_)
+        FunctionError {
+            function_name: _,
+            error: FunctionEvaluationError::InvalidArgumentCount
+        }
     ));
 }
 
@@ -63,7 +68,10 @@ async fn test_to_upper_too_few_args() {
         .await;
     assert!(matches!(
         result.unwrap_err(),
-        EvaluationError::InvalidArgumentCount(_)
+        FunctionError {
+            function_name: _,
+            error: FunctionEvaluationError::InvalidArgumentCount
+        }
     ));
 }
 
@@ -78,7 +86,13 @@ async fn test_to_upper_invalid_args() {
     let result = to_upper
         .call(&context, &get_func_expr(), args.clone())
         .await;
-    assert!(matches!(result.unwrap_err(), EvaluationError::InvalidType));
+    assert!(matches!(
+        result.unwrap_err(),
+        FunctionError {
+            function_name: _,
+            error: FunctionEvaluationError::InvalidArgument(0)
+        }
+    ));
 }
 
 #[tokio::test]

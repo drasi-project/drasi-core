@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use drasi_query_ast::ast;
 
 use crate::evaluation::functions::ScalarFunction;
-use crate::evaluation::{EvaluationError, ExpressionEvaluationContext};
+use crate::evaluation::{ExpressionEvaluationContext, FunctionError, FunctionEvaluationError};
 
 #[derive(Debug)]
 pub struct Range {}
@@ -15,24 +15,48 @@ impl ScalarFunction for Range {
         _context: &ExpressionEvaluationContext,
         expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() < 2 || args.len() > 3 {
-            return Err(EvaluationError::InvalidArgumentCount(
-                expression.name.to_string(),
-            ));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         match args.len() {
             2 => match (&args[0], &args[1]) {
                 (VariableValue::Integer(start), VariableValue::Integer(end)) => {
                     let mut range = Vec::new();
-                    let start = start.as_i64().unwrap();
-                    let end = end.as_i64().unwrap();
+                    let start = match start.as_i64() {
+                        Some(i) => i,
+                        None => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::OverflowError,
+                            })
+                        }
+                    };
+                    let end = match end.as_i64() {
+                        Some(i) => i,
+                        None => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::OverflowError,
+                            })
+                        }
+                    };
                     for i in start..end + 1 {
                         range.push(VariableValue::Integer(i.into()));
                     }
                     Ok(VariableValue::List(range))
                 }
-                _ => Err(EvaluationError::InvalidType),
+                (VariableValue::Integer(_), _) => Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(1),
+                }),
+                _ => Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(0),
+                }),
             },
             3 => match (&args[0], &args[1], &args[2]) {
                 (
@@ -41,15 +65,54 @@ impl ScalarFunction for Range {
                     VariableValue::Integer(step),
                 ) => {
                     let mut range = Vec::new();
-                    let start = start.as_i64().unwrap();
-                    let end = end.as_i64().unwrap();
-                    let step = step.as_i64().unwrap();
+                    let start = match start.as_i64() {
+                        Some(i) => i,
+                        None => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::OverflowError,
+                            })
+                        }
+                    };
+                    let end = match end.as_i64() {
+                        Some(i) => i,
+                        None => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::OverflowError,
+                            })
+                        }
+                    };
+                    let step = match step.as_i64() {
+                        Some(i) => i,
+                        None => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::OverflowError,
+                            })
+                        }
+                    };
                     for i in (start..end + 1).step_by(step as usize) {
                         range.push(VariableValue::Integer(i.into()));
                     }
                     Ok(VariableValue::List(range))
                 }
-                _ => Err(EvaluationError::InvalidType),
+                (VariableValue::Integer(_), VariableValue::Integer(_), _) => Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(2),
+                }),
+                (_, VariableValue::Integer(_), VariableValue::Integer(_)) => Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(0),
+                }),
+                (VariableValue::Integer(_), _, VariableValue::Integer(_)) => Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(1),
+                }),
+                _ => Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(0),
+                }),
             },
             _ => unreachable!(),
         }

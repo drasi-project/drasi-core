@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use drasi_query_ast::ast;
 
 use crate::evaluation::functions::ScalarFunction;
-use crate::evaluation::{EvaluationError, ExpressionEvaluationContext};
+use crate::evaluation::{ExpressionEvaluationContext, FunctionError};
 
 #[derive(Debug)]
 pub struct Coalesce {}
@@ -15,7 +15,7 @@ impl ScalarFunction for Coalesce {
         _context: &ExpressionEvaluationContext,
         _expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         for arg in args {
             if arg != VariableValue::Null {
                 return Ok(arg);

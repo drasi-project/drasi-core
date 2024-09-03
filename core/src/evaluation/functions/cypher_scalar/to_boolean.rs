@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use drasi_query_ast::ast;
 
 use crate::evaluation::functions::ScalarFunction;
-use crate::evaluation::{EvaluationError, ExpressionEvaluationContext};
+use crate::evaluation::{ExpressionEvaluationContext, FunctionError, FunctionEvaluationError};
 
 #[derive(Debug)]
 pub struct ToBoolean {}
@@ -15,15 +15,24 @@ impl ScalarFunction for ToBoolean {
         _context: &ExpressionEvaluationContext,
         expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
-            return Err(EvaluationError::InvalidArgumentCount(
-                expression.name.to_string(),
-            ));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         match &args[0] {
             VariableValue::Null => Ok(VariableValue::Null),
-            VariableValue::Integer(i) => Ok(VariableValue::Bool(i.as_i64().unwrap() != 0)),
+            VariableValue::Integer(i) => Ok(VariableValue::Bool(match i.as_i64() {
+                Some(i) => i != 0,
+                None => {
+                    return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::OverflowError,
+                    })
+                }
+            })),
             VariableValue::String(s) => {
                 let s = s.to_lowercase();
                 if (s == "true") || (s == "false") {
@@ -33,9 +42,9 @@ impl ScalarFunction for ToBoolean {
                 }
             }
             VariableValue::Bool(b) => Ok(VariableValue::Bool(*b)),
-            _ => Err(EvaluationError::FunctionError {
+            _ => Err(FunctionError {
                 function_name: expression.name.to_string(),
-                error: Box::new(EvaluationError::InvalidType),
+                error: FunctionEvaluationError::InvalidArgument(0),
             }),
         }
     }
@@ -51,15 +60,24 @@ impl ScalarFunction for ToBooleanOrNull {
         _context: &ExpressionEvaluationContext,
         expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
-            return Err(EvaluationError::InvalidArgumentCount(
-                expression.name.to_string(),
-            ));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         match &args[0] {
             VariableValue::Null => Ok(VariableValue::Null),
-            VariableValue::Integer(i) => Ok(VariableValue::Bool(i.as_i64().unwrap() != 0)),
+            VariableValue::Integer(i) => Ok(VariableValue::Bool(match i.as_i64() {
+                Some(i) => i != 0,
+                None => {
+                    return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::OverflowError,
+                    })
+                }
+            })),
             VariableValue::String(s) => {
                 if (s == "true") || (s == "false") {
                     Ok(VariableValue::Bool(s == "true"))

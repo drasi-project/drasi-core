@@ -7,7 +7,7 @@ use drasi_query_ast::ast;
 use futures::StreamExt;
 
 use crate::{
-    evaluation::{EvaluationError, ExpressionEvaluationContext},
+    evaluation::{ExpressionEvaluationContext, FunctionError, FunctionEvaluationError},
     interface::ElementArchiveIndex,
 };
 
@@ -45,18 +45,24 @@ impl ScalarFunction for GetVersionByTimestamp {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 2 {
-            return Err(EvaluationError::InvalidArgumentCount(
-                "getVersionByTimestamp".to_string(),
-            ));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
 
         let metadata = match &args[0] {
             VariableValue::Element(e) => e.get_metadata(),
-            _ => return Err(EvaluationError::InvalidType),
+            _ => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(0),
+                })
+            }
         };
 
         let timestamp = match &args[1] {
@@ -67,15 +73,34 @@ impl ScalarFunction for GetVersionByTimestamp {
             VariableValue::ZonedDateTime(d) => d.datetime().timestamp_millis() as u64,
             VariableValue::Integer(n) => match n.as_u64() {
                 Some(u) => u,
-                None => return Err(EvaluationError::InvalidType),
+                None => {
+                    return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::OverflowError,
+                    })
+                }
             },
-            _ => return Err(EvaluationError::InvalidType),
+            _ => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(1),
+                })
+            }
         };
 
-        let element = self
+        let element = match self
             .archive_index
             .get_element_as_at(&metadata.reference, timestamp)
-            .await?;
+            .await
+        {
+            Ok(e) => e,
+            Err(e) => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::IndexError(e),
+                })
+            }
+        };
 
         match element {
             Some(e) => Ok(e.to_expression_variable()),
@@ -93,17 +118,23 @@ impl ScalarFunction for GetVersionsByTimeRange {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() < 3 || args.len() > 4 {
-            return Err(EvaluationError::InvalidArgumentCount(
-                "getVersionsByTimeRange".to_string(),
-            ));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         let metadata = match &args[0] {
             VariableValue::Element(e) => e.get_metadata(),
-            _ => return Err(EvaluationError::InvalidType),
+            _ => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(0),
+                })
+            }
         };
 
         let from = match &args[1] {
@@ -114,9 +145,19 @@ impl ScalarFunction for GetVersionsByTimeRange {
             VariableValue::ZonedDateTime(d) => d.datetime().timestamp_millis() as u64,
             VariableValue::Integer(n) => match n.as_u64() {
                 Some(u) => u,
-                None => return Err(EvaluationError::InvalidType),
+                None => {
+                    return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::OverflowError,
+                    })
+                }
             },
-            _ => return Err(EvaluationError::InvalidType),
+            _ => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(1),
+                })
+            }
         };
 
         let to = match &args[2] {
@@ -127,15 +168,30 @@ impl ScalarFunction for GetVersionsByTimeRange {
             VariableValue::ZonedDateTime(d) => d.datetime().timestamp_millis() as u64,
             VariableValue::Integer(n) => match n.as_u64() {
                 Some(u) => u,
-                None => return Err(EvaluationError::InvalidType),
+                None => {
+                    return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::OverflowError,
+                    })
+                }
             },
-            _ => return Err(EvaluationError::InvalidType),
+            _ => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(2),
+                })
+            }
         };
 
         let retrieve_initial_value = match args.get(3) {
             Some(VariableValue::Bool(b)) => *b,
             None => false,
-            _ => return Err(EvaluationError::InvalidType),
+            _ => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(3),
+                })
+            }
         };
 
         let range = match retrieve_initial_value {
@@ -149,10 +205,19 @@ impl ScalarFunction for GetVersionsByTimeRange {
             },
         };
 
-        let mut stream = self
+        let mut stream = match self
             .archive_index
             .get_element_versions(&metadata.reference, range)
-            .await?;
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::IndexError(e),
+                })
+            }
+        };
 
         let mut result = Vec::new();
         while let Some(item) = stream.next().await {
@@ -172,7 +237,12 @@ impl ScalarFunction for GetVersionsByTimeRange {
                         result.push(e.to_expression_variable())
                     }
                 }
-                Err(e) => return Err(EvaluationError::IndexError(e)),
+                Err(e) => {
+                    return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::IndexError(e),
+                    })
+                }
             }
         }
 

@@ -6,7 +6,9 @@ use super::text;
 use crate::evaluation::context::QueryVariables;
 use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::variable_value::VariableValue;
-use crate::evaluation::{EvaluationError, ExpressionEvaluationContext, InstantQueryClock};
+use crate::evaluation::{
+    ExpressionEvaluationContext, FunctionError, FunctionEvaluationError, InstantQueryClock,
+};
 
 fn get_func_expr() -> ast::FunctionExpression {
     ast::FunctionExpression {
@@ -87,7 +89,10 @@ async fn test_substring_too_many_args() {
         .await;
     assert!(matches!(
         result.unwrap_err(),
-        EvaluationError::InvalidArgumentCount(_)
+        FunctionError {
+            function_name: _,
+            error: FunctionEvaluationError::InvalidArgumentCount
+        }
     ));
 }
 
@@ -104,7 +109,10 @@ async fn test_substring_too_few_args() {
         .await;
     assert!(matches!(
         result.unwrap_err(),
-        EvaluationError::InvalidArgumentCount(_)
+        FunctionError {
+            function_name: _,
+            error: FunctionEvaluationError::InvalidArgumentCount
+        }
     ));
 }
 
@@ -122,7 +130,13 @@ async fn test_substring_invalid_input_values() {
     let result = substring
         .call(&context, &get_func_expr(), args.clone())
         .await;
-    assert!(matches!(result.unwrap_err(), EvaluationError::InvalidType));
+    assert!(matches!(
+        result.unwrap_err(),
+        FunctionError {
+            function_name: _,
+            error: FunctionEvaluationError::InvalidArgument(1),
+        }
+    ));
 
     let args = vec![
         VariableValue::String("drasiReactivegraph".to_string()),
@@ -132,7 +146,13 @@ async fn test_substring_invalid_input_values() {
     let result = substring
         .call(&context, &get_func_expr(), args.clone())
         .await;
-    assert!(matches!(result.unwrap_err(), EvaluationError::InvalidType));
+    assert!(matches!(
+        result.unwrap_err(),
+        FunctionError {
+            function_name: _,
+            error: FunctionEvaluationError::InvalidType { expected: _ },
+        }
+    ));
 
     let args = vec![
         VariableValue::String("drasiReactivegraph".to_string()),
@@ -142,7 +162,14 @@ async fn test_substring_invalid_input_values() {
     let result = substring
         .call(&context, &get_func_expr(), args.clone())
         .await;
-    assert!(matches!(result.unwrap_err(), EvaluationError::InvalidType));
+    // Negative start index
+    assert!(matches!(
+        result.unwrap_err(),
+        FunctionError {
+            function_name: _,
+            error: FunctionEvaluationError::InvalidType { expected: _ },
+        }
+    ));
 
     let args = vec![
         VariableValue::String("drasiReactivegraph".to_string()),
@@ -152,7 +179,13 @@ async fn test_substring_invalid_input_values() {
     let result = substring
         .call(&context, &get_func_expr(), args.clone())
         .await;
-    assert!(matches!(result.unwrap_err(), EvaluationError::InvalidType));
+    assert!(matches!(
+        result.unwrap_err(),
+        FunctionError {
+            function_name: _,
+            error: FunctionEvaluationError::InvalidType { expected: _ },
+        }
+    ));
 }
 
 #[tokio::test]
@@ -169,7 +202,13 @@ async fn test_substring_invalid_inputs() {
     let result = substring
         .call(&context, &get_func_expr(), args.clone())
         .await;
-    assert!(matches!(result.unwrap_err(), EvaluationError::InvalidType));
+    assert!(matches!(
+        result.unwrap_err(),
+        FunctionError {
+            function_name: _,
+            error: FunctionEvaluationError::InvalidArgument(1),
+        }
+    ));
 }
 
 #[tokio::test]
@@ -192,5 +231,11 @@ async fn test_substring_null() {
     let result = substring
         .call(&context, &get_func_expr(), args.clone())
         .await;
-    assert!(matches!(result.unwrap_err(), EvaluationError::InvalidType));
+    assert!(matches!(
+        result.unwrap_err(),
+        FunctionError {
+            function_name: _,
+            error: FunctionEvaluationError::InvalidArgument(1),
+        }
+    ));
 }

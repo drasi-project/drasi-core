@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use drasi_query_ast::ast;
 
 use crate::evaluation::{
-    functions::ScalarFunction, variable_value::VariableValue, EvaluationError,
-    ExpressionEvaluationContext,
+    functions::ScalarFunction, variable_value::VariableValue, ExpressionEvaluationContext,
+    FunctionError,
 };
 
 pub struct Awaiting {}
@@ -21,7 +21,7 @@ impl ScalarFunction for Awaiting {
         _context: &ExpressionEvaluationContext,
         _expression: &ast::FunctionExpression,
         _args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         Ok(VariableValue::Awaiting)
     }
 }

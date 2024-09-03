@@ -25,7 +25,7 @@ use self::{
     text::RegisterTextFunctions,
 };
 
-use super::{EvaluationError, ExpressionEvaluationContext, ExpressionEvaluator};
+use super::{ExpressionEvaluationContext, FunctionError};
 
 pub mod aggregation;
 pub mod context_mutators;
@@ -54,7 +54,7 @@ pub trait ScalarFunction: Send + Sync {
         context: &ExpressionEvaluationContext,
         expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError>;
+    ) -> Result<VariableValue, FunctionError>;
 }
 
 #[async_trait]
@@ -64,7 +64,7 @@ pub trait LazyScalarFunction: Send + Sync {
         context: &ExpressionEvaluationContext,
         expression: &ast::FunctionExpression,
         args: &Vec<ast::Expression>,
-    ) -> Result<VariableValue, EvaluationError>;
+    ) -> Result<VariableValue, FunctionError>;
 }
 
 #[async_trait]
@@ -81,19 +81,19 @@ pub trait AggregatingFunction: Debug + Send + Sync {
         context: &ExpressionEvaluationContext,
         args: Vec<VariableValue>,
         accumulator: &mut Accumulator,
-    ) -> Result<VariableValue, EvaluationError>;
+    ) -> Result<VariableValue, FunctionError>;
     async fn revert(
         &self,
         context: &ExpressionEvaluationContext,
         args: Vec<VariableValue>,
         accumulator: &mut Accumulator,
-    ) -> Result<VariableValue, EvaluationError>;
+    ) -> Result<VariableValue, FunctionError>;
     async fn snapshot(
         &self,
         context: &ExpressionEvaluationContext,
         args: Vec<VariableValue>,
         accumulator: &Accumulator,
-    ) -> Result<VariableValue, EvaluationError>;
+    ) -> Result<VariableValue, FunctionError>;
     fn accumulator_is_lazy(&self) -> bool;
 }
 
@@ -103,7 +103,7 @@ pub trait ContextMutatorFunction: Send + Sync {
         &self,
         context: &ExpressionEvaluationContext<'a>,
         expression: &ast::FunctionExpression,
-    ) -> Result<ExpressionEvaluationContext<'a>, EvaluationError>;
+    ) -> Result<ExpressionEvaluationContext<'a>, FunctionError>;
 }
 
 pub struct FunctionRegistry {

@@ -2,7 +2,8 @@ use std::{fmt::Debug, sync::Arc};
 
 use crate::{
     evaluation::{
-        temporal_constants, variable_value::zoned_datetime::ZonedDateTime, EvaluationError,
+        temporal_constants, variable_value::zoned_datetime::ZonedDateTime, FunctionError,
+        FunctionEvaluationError,
     },
     interface::ResultIndex,
 };
@@ -18,7 +19,7 @@ use crate::evaluation::{
 };
 
 use super::{super::AggregatingFunction, lazy_sorted_set::LazySortedSet, Accumulator};
-use chrono::{DateTime, Duration as ChronoDuration, FixedOffset, NaiveTime};
+use chrono::{offset::LocalResult, DateTime, Duration as ChronoDuration};
 
 #[derive(Clone)]
 pub struct Min {}
@@ -48,114 +49,190 @@ impl AggregatingFunction for Min {
         _context: &ExpressionEvaluationContext,
         args: Vec<VariableValue>,
         accumulator: &mut Accumulator,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
-            return Err(EvaluationError::InvalidArgumentCount("Min".to_string()));
+            return Err(FunctionError {
+                function_name: "Min".to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
 
         let accumulator = match accumulator {
             Accumulator::LazySortedSet(accumulator) => accumulator,
-            _ => return Err(EvaluationError::InvalidType),
+            _ => {
+                return Err(FunctionError {
+                    function_name: "Min".to_string(),
+                    error: FunctionEvaluationError::CorruptData,
+                })
+            }
         };
 
         match &args[0] {
             VariableValue::Float(n) => {
-                let value = n.as_f64().unwrap();
+                let value = match n.as_f64() {
+                    Some(n) => n,
+                    None => {
+                        return Err(FunctionError {
+                            function_name: "Min".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                };
                 accumulator.insert(value).await;
-                match accumulator.get_head().await? {
-                    Some(head) => match Float::from_f64(head) {
+                match accumulator.get_head().await {
+                    Ok(Some(head)) => match Float::from_f64(head) {
                         Some(f) => Ok(VariableValue::Float(f)),
-                        None => Err(EvaluationError::InvalidState),
+                        None => Err(FunctionError {
+                            function_name: "Min".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        }),
                     },
-                    None => Ok(VariableValue::Null),
+                    Ok(None) => Ok(VariableValue::Null),
+                    Err(e) => Err(FunctionError {
+                        function_name: "Min".to_string(),
+                        error: FunctionEvaluationError::IndexError(e),
+                    }),
                 }
             }
             VariableValue::Integer(n) => {
-                let value = n.as_i64().unwrap();
+                let value = match n.as_i64() {
+                    Some(n) => n,
+                    None => {
+                        return Err(FunctionError {
+                            function_name: "Min".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                };
                 accumulator.insert(value as f64).await;
-                match accumulator.get_head().await? {
-                    Some(head) => match Float::from_f64(head) {
+                match accumulator.get_head().await {
+                    Ok(Some(head)) => match Float::from_f64(head) {
                         Some(f) => Ok(VariableValue::Float(f)),
-                        None => Err(EvaluationError::InvalidState),
+                        None => Err(FunctionError {
+                            function_name: "Min".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        }),
                     },
-                    None => Ok(VariableValue::Null),
+                    Ok(None) => Ok(VariableValue::Null),
+                    Err(e) => Err(FunctionError {
+                        function_name: "Min".to_string(),
+                        error: FunctionEvaluationError::IndexError(e),
+                    }),
                 }
             }
             VariableValue::ZonedDateTime(zdt) => {
                 let value = zdt.datetime().timestamp_millis() as f64;
                 accumulator.insert(value).await;
-                match accumulator.get_head().await? {
-                    Some(head) => Ok(VariableValue::ZonedDateTime(
+                match accumulator.get_head().await {
+                    Ok(Some(head)) => Ok(VariableValue::ZonedDateTime(
                         ZonedDateTime::from_epoch_millis(head as u64),
                     )),
-                    None => Ok(VariableValue::Null),
+                    Ok(None) => Ok(VariableValue::Null),
+                    Err(e) => Err(FunctionError {
+                        function_name: "Min".to_string(),
+                        error: FunctionEvaluationError::IndexError(e),
+                    }),
                 }
             }
             VariableValue::Duration(d) => {
                 let value = d.duration().num_milliseconds() as f64;
                 accumulator.insert(value).await;
-                match accumulator.get_head().await? {
-                    Some(head) => Ok(VariableValue::Duration(Duration::new(
+                match accumulator.get_head().await {
+                    Ok(Some(head)) => Ok(VariableValue::Duration(Duration::new(
                         ChronoDuration::milliseconds(head as i64),
                         0,
                         0,
                     ))),
-                    None => Ok(VariableValue::Null),
+                    Ok(None) => Ok(VariableValue::Null),
+                    Err(e) => Err(FunctionError {
+                        function_name: "Min".to_string(),
+                        error: FunctionEvaluationError::IndexError(e),
+                    }),
                 }
             }
             VariableValue::Date(d) => {
                 let reference_date = *temporal_constants::EPOCH_NAIVE_DATE;
                 let days_since_epoch = d.signed_duration_since(reference_date).num_days() as f64;
                 accumulator.insert(days_since_epoch).await;
-                match accumulator.get_head().await? {
-                    Some(head) => Ok(VariableValue::Date(
-                        reference_date + ChronoDuration::days((head) as i64),
+                match accumulator.get_head().await {
+                    Ok(Some(head)) => Ok(VariableValue::Date(
+                        reference_date + ChronoDuration::days(head as i64),
                     )),
-                    None => Ok(VariableValue::Null),
+                    Ok(None) => Ok(VariableValue::Null),
+                    Err(e) => Err(FunctionError {
+                        function_name: "Min".to_string(),
+                        error: FunctionEvaluationError::IndexError(e),
+                    }),
                 }
             }
             VariableValue::LocalTime(t) => {
-                let reference_time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+                let reference_time = *temporal_constants::MIDNIGHT_NAIVE_TIME;
                 let seconds_since_midnight =
                     t.signed_duration_since(reference_time).num_milliseconds() as f64;
                 accumulator.insert(seconds_since_midnight).await;
-                match accumulator.get_head().await? {
-                    Some(head) => Ok(VariableValue::LocalTime(
-                        reference_time + ChronoDuration::milliseconds((head) as i64),
+                match accumulator.get_head().await {
+                    Ok(Some(head)) => Ok(VariableValue::LocalTime(
+                        reference_time + ChronoDuration::milliseconds(head as i64),
                     )),
-                    None => Ok(VariableValue::Null),
+                    Ok(None) => Ok(VariableValue::Null),
+                    Err(e) => Err(FunctionError {
+                        function_name: "Min".to_string(),
+                        error: FunctionEvaluationError::IndexError(e),
+                    }),
                 }
             }
             VariableValue::LocalDateTime(dt) => {
                 let duration_since_epoch = dt.and_utc().timestamp_millis() as f64;
                 accumulator.insert(duration_since_epoch).await;
-                match accumulator.get_head().await? {
-                    Some(head) => Ok(VariableValue::LocalDateTime(
+                match accumulator.get_head().await {
+                    Ok(Some(head)) => Ok(VariableValue::LocalDateTime(
                         DateTime::from_timestamp_millis(head as i64)
                             .unwrap_or_default()
                             .naive_local(),
                     )),
-                    None => Ok(VariableValue::Null),
+                    Ok(None) => Ok(VariableValue::Null),
+                    Err(e) => Err(FunctionError {
+                        function_name: "Min".to_string(),
+                        error: FunctionEvaluationError::IndexError(e),
+                    }),
                 }
             }
             VariableValue::ZonedTime(t) => {
                 let epoch_date = *temporal_constants::EPOCH_NAIVE_DATE;
-                let epoch_datetime = epoch_date
+                let epoch_datetime = match epoch_date
                     .and_time(*t.time())
                     .and_local_timezone(*t.offset())
-                    .unwrap();
+                {
+                    LocalResult::Single(dt) => dt,
+                    _ => {
+                        return Err(FunctionError {
+                            function_name: "Min".to_string(),
+                            error: FunctionEvaluationError::InvalidFormat {
+                                expected: temporal_constants::INVALID_ZONED_TIME_FORMAT_ERROR
+                                    .to_string(),
+                            },
+                        })
+                    }
+                };
                 let duration_since_epoch = epoch_datetime.timestamp_millis() as f64;
                 accumulator.insert(duration_since_epoch).await;
-                match accumulator.get_head().await? {
-                    Some(head) => Ok(VariableValue::ZonedTime(ZonedTime::new(
-                        (epoch_datetime + ChronoDuration::milliseconds((head) as i64)).time(),
-                        FixedOffset::east_opt(0).unwrap(),
+                match accumulator.get_head().await {
+                    Ok(Some(head)) => Ok(VariableValue::ZonedTime(ZonedTime::new(
+                        (epoch_datetime + ChronoDuration::milliseconds(head as i64)).time(),
+                        *temporal_constants::UTC_FIXED_OFFSET,
                     ))),
-                    None => Ok(VariableValue::Null),
+                    Ok(None) => Ok(VariableValue::Null),
+                    Err(e) => Err(FunctionError {
+                        function_name: "Min".to_string(),
+                        error: FunctionEvaluationError::IndexError(e),
+                    }),
                 }
             }
             VariableValue::Null => Ok(VariableValue::Null),
-            _ => Err(EvaluationError::InvalidType),
+            _ => Err(FunctionError {
+                function_name: "Min".to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
         }
     }
 
@@ -164,52 +241,104 @@ impl AggregatingFunction for Min {
         _context: &ExpressionEvaluationContext,
         args: Vec<VariableValue>,
         accumulator: &mut Accumulator,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
-            return Err(EvaluationError::InvalidArgumentCount("Min".to_string()));
+            return Err(FunctionError {
+                function_name: "Min".to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         let accumulator = match accumulator {
             Accumulator::LazySortedSet(accumulator) => accumulator,
-            _ => return Err(EvaluationError::InvalidType),
+            _ => {
+                return Err(FunctionError {
+                    function_name: "Min".to_string(),
+                    error: FunctionEvaluationError::CorruptData,
+                })
+            }
         };
 
         match &args[0] {
             VariableValue::Float(n) => {
-                let value = n.as_f64().unwrap();
+                let value = match n.as_f64() {
+                    Some(n) => n,
+                    None => {
+                        return Err(FunctionError {
+                            function_name: "Min".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                };
                 accumulator.remove(value).await;
-                match accumulator.get_head().await? {
-                    Some(head) => Ok(VariableValue::Float(Float::from_f64(head).unwrap())),
-                    None => Ok(VariableValue::Null),
+                match accumulator.get_head().await {
+                    Ok(Some(head)) => match Float::from_f64(head) {
+                        Some(f) => Ok(VariableValue::Float(f)),
+                        None => Err(FunctionError {
+                            function_name: "Min".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        }),
+                    },
+                    Ok(None) => Ok(VariableValue::Null),
+                    Err(e) => Err(FunctionError {
+                        function_name: "Min".to_string(),
+                        error: FunctionEvaluationError::IndexError(e),
+                    }),
                 }
             }
             VariableValue::Integer(n) => {
-                let value = n.as_i64().unwrap();
+                let value = match n.as_i64() {
+                    Some(n) => n,
+                    None => {
+                        return Err(FunctionError {
+                            function_name: "Min".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                };
                 accumulator.remove((value as f64) * 1.0).await;
-                match accumulator.get_head().await? {
-                    Some(head) => Ok(VariableValue::Float(Float::from_f64(head).unwrap())),
-                    None => Ok(VariableValue::Null),
+                match accumulator.get_head().await {
+                    Ok(Some(head)) => match Float::from_f64(head) {
+                        Some(f) => Ok(VariableValue::Float(f)),
+                        None => Err(FunctionError {
+                            function_name: "Min".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        }),
+                    },
+                    Ok(None) => Ok(VariableValue::Null),
+                    Err(e) => Err(FunctionError {
+                        function_name: "Min".to_string(),
+                        error: FunctionEvaluationError::IndexError(e),
+                    }),
                 }
             }
             VariableValue::ZonedDateTime(zdt) => {
                 let value = zdt.datetime().timestamp_millis() as f64;
                 accumulator.remove(value).await;
-                match accumulator.get_head().await? {
-                    Some(head) => Ok(VariableValue::ZonedDateTime(
-                        ZonedDateTime::from_epoch_millis((head) as u64),
+                match accumulator.get_head().await {
+                    Ok(Some(head)) => Ok(VariableValue::ZonedDateTime(
+                        ZonedDateTime::from_epoch_millis(head as u64),
                     )),
-                    None => Ok(VariableValue::Null),
+                    Ok(None) => Ok(VariableValue::Null),
+                    Err(e) => Err(FunctionError {
+                        function_name: "Min".to_string(),
+                        error: FunctionEvaluationError::IndexError(e),
+                    }),
                 }
             }
             VariableValue::Duration(d) => {
                 let value = d.duration().num_milliseconds() as f64;
                 accumulator.remove(value).await;
-                match accumulator.get_head().await? {
-                    Some(head) => Ok(VariableValue::Duration(Duration::new(
-                        ChronoDuration::milliseconds((head) as i64),
+                match accumulator.get_head().await {
+                    Ok(Some(head)) => Ok(VariableValue::Duration(Duration::new(
+                        ChronoDuration::milliseconds(head as i64),
                         0,
                         0,
                     ))),
-                    None => Ok(VariableValue::Null),
+                    Ok(None) => Ok(VariableValue::Null),
+                    Err(e) => Err(FunctionError {
+                        function_name: "Min".to_string(),
+                        error: FunctionEvaluationError::IndexError(e),
+                    }),
                 }
             }
             VariableValue::Date(d) => {
@@ -217,11 +346,15 @@ impl AggregatingFunction for Min {
                 let reference_date = *temporal_constants::EPOCH_NAIVE_DATE;
                 let days_since_epoch = d.signed_duration_since(reference_date).num_days() as f64;
                 accumulator.remove(days_since_epoch).await;
-                match accumulator.get_head().await? {
-                    Some(head) => Ok(VariableValue::Date(
-                        reference_date + ChronoDuration::days((head) as i64),
+                match accumulator.get_head().await {
+                    Ok(Some(head)) => Ok(VariableValue::Date(
+                        reference_date + ChronoDuration::days(head as i64),
                     )),
-                    None => Ok(VariableValue::Null),
+                    Ok(None) => Ok(VariableValue::Null),
+                    Err(e) => Err(FunctionError {
+                        function_name: "Min".to_string(),
+                        error: FunctionEvaluationError::IndexError(e),
+                    }),
                 }
             }
             VariableValue::LocalTime(t) => {
@@ -230,43 +363,69 @@ impl AggregatingFunction for Min {
                     t.signed_duration_since(reference_time).num_milliseconds() as f64;
                 accumulator.remove(duration_since_midnight).await;
 
-                match accumulator.get_head().await? {
-                    Some(head) => Ok(VariableValue::LocalTime(
-                        reference_time + ChronoDuration::milliseconds((head) as i64),
+                match accumulator.get_head().await {
+                    Ok(Some(head)) => Ok(VariableValue::LocalTime(
+                        reference_time + ChronoDuration::milliseconds(head as i64),
                     )),
-                    None => Ok(VariableValue::Null),
+                    Ok(None) => Ok(VariableValue::Null),
+                    Err(e) => Err(FunctionError {
+                        function_name: "Min".to_string(),
+                        error: FunctionEvaluationError::IndexError(e),
+                    }),
                 }
             }
             VariableValue::LocalDateTime(dt) => {
                 let duration_since_epoch = dt.and_utc().timestamp_millis() as f64;
                 accumulator.remove(duration_since_epoch).await;
-                match accumulator.get_head().await? {
-                    Some(head) => Ok(VariableValue::LocalDateTime(
+                match accumulator.get_head().await {
+                    Ok(Some(head)) => Ok(VariableValue::LocalDateTime(
                         DateTime::from_timestamp_millis(head as i64)
                             .unwrap_or_default()
                             .naive_local(),
                     )),
-                    None => Ok(VariableValue::Null),
+                    Ok(None) => Ok(VariableValue::Null),
+                    Err(e) => Err(FunctionError {
+                        function_name: "Min".to_string(),
+                        error: FunctionEvaluationError::IndexError(e),
+                    }),
                 }
             }
             VariableValue::ZonedTime(t) => {
                 let epoch_date = *temporal_constants::EPOCH_NAIVE_DATE;
-                let epoch_datetime = epoch_date
+                let epoch_datetime = match epoch_date
                     .and_time(*t.time())
                     .and_local_timezone(*t.offset())
-                    .unwrap();
+                {
+                    LocalResult::Single(dt) => dt,
+                    _ => {
+                        return Err(FunctionError {
+                            function_name: "Min".to_string(),
+                            error: FunctionEvaluationError::InvalidFormat {
+                                expected: temporal_constants::INVALID_ZONED_TIME_FORMAT_ERROR
+                                    .to_string(),
+                            },
+                        })
+                    }
+                };
                 let duration_since_epoch = epoch_datetime.timestamp_millis() as f64;
                 accumulator.remove(duration_since_epoch).await;
-                match accumulator.get_head().await? {
-                    Some(head) => Ok(VariableValue::ZonedTime(ZonedTime::new(
-                        (epoch_datetime + ChronoDuration::milliseconds((head) as i64)).time(),
-                        FixedOffset::east_opt(0).unwrap(),
+                match accumulator.get_head().await {
+                    Ok(Some(head)) => Ok(VariableValue::ZonedTime(ZonedTime::new(
+                        (epoch_datetime + ChronoDuration::milliseconds(head as i64)).time(),
+                        *temporal_constants::UTC_FIXED_OFFSET,
                     ))),
-                    None => Ok(VariableValue::Null),
+                    Ok(None) => Ok(VariableValue::Null),
+                    Err(e) => Err(FunctionError {
+                        function_name: "Min".to_string(),
+                        error: FunctionEvaluationError::IndexError(e),
+                    }),
                 }
             }
             VariableValue::Null => Ok(VariableValue::Null),
-            _ => Err(EvaluationError::InvalidType),
+            _ => Err(FunctionError {
+                function_name: "Min".to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
         }
     }
 
@@ -275,23 +434,45 @@ impl AggregatingFunction for Min {
         _context: &ExpressionEvaluationContext,
         args: Vec<VariableValue>,
         accumulator: &Accumulator,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
-            return Err(EvaluationError::InvalidArgumentCount("Min".to_string()));
+            return Err(FunctionError {
+                function_name: "Min".to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
 
         let accumulator = match accumulator {
             Accumulator::LazySortedSet(accumulator) => accumulator,
-            _ => return Err(EvaluationError::InvalidType),
+            _ => {
+                return Err(FunctionError {
+                    function_name: "Min".to_string(),
+                    error: FunctionEvaluationError::CorruptData,
+                })
+            }
         };
 
-        let value = match accumulator.get_head().await? {
-            Some(head) => head,
-            None => return Ok(VariableValue::Null),
+        let value = match accumulator.get_head().await {
+            Ok(Some(head)) => head,
+            Ok(None) => return Ok(VariableValue::Null),
+            Err(e) => {
+                return Err(FunctionError {
+                    function_name: "Min".to_string(),
+                    error: FunctionEvaluationError::IndexError(e),
+                })
+            }
         };
 
         return match &args[0] {
-            VariableValue::Float(_) => Ok(VariableValue::Float(Float::from_f64(value).unwrap())),
+            VariableValue::Float(_) => Ok(VariableValue::Float(match Float::from_f64(value) {
+                Some(f) => f,
+                None => {
+                    return Err(FunctionError {
+                        function_name: "Min".to_string(),
+                        error: FunctionEvaluationError::OverflowError,
+                    })
+                }
+            })),
             VariableValue::Integer(_) => Ok(VariableValue::Integer((value as i64).into())),
             VariableValue::ZonedDateTime(_) => Ok(VariableValue::ZonedDateTime(
                 ZonedDateTime::from_epoch_millis(value as u64),
@@ -320,17 +501,31 @@ impl AggregatingFunction for Min {
             )),
             VariableValue::ZonedTime(_) => {
                 let epoch_date = *temporal_constants::EPOCH_NAIVE_DATE;
-                let epoch_datetime = epoch_date
+                let epoch_datetime = match epoch_date
                     .and_time(*temporal_constants::MIDNIGHT_NAIVE_TIME)
-                    .and_local_timezone(FixedOffset::east_opt(0).unwrap())
-                    .unwrap();
+                    .and_local_timezone(*temporal_constants::UTC_FIXED_OFFSET)
+                {
+                    LocalResult::Single(dt) => dt,
+                    _ => {
+                        return Err(FunctionError {
+                            function_name: "Min".to_string(),
+                            error: FunctionEvaluationError::InvalidFormat {
+                                expected: temporal_constants::INVALID_ZONED_TIME_FORMAT_ERROR
+                                    .to_string(),
+                            },
+                        })
+                    }
+                };
                 Ok(VariableValue::ZonedTime(ZonedTime::new(
                     (epoch_datetime + ChronoDuration::milliseconds(value as i64)).time(),
-                    FixedOffset::east_opt(0).unwrap(),
+                    *temporal_constants::UTC_FIXED_OFFSET,
                 )))
             }
             VariableValue::Null => Ok(VariableValue::Null),
-            _ => Err(EvaluationError::InvalidType),
+            _ => Err(FunctionError {
+                function_name: "Min".to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
         };
     }
 }

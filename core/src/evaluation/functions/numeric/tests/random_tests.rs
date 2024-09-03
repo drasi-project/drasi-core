@@ -7,7 +7,9 @@ use crate::evaluation::functions::numeric::Rand;
 use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::variable_value::integer::Integer;
 use crate::evaluation::variable_value::VariableValue;
-use crate::evaluation::{EvaluationError, ExpressionEvaluationContext, InstantQueryClock};
+use crate::evaluation::{
+    ExpressionEvaluationContext, FunctionError, FunctionEvaluationError, InstantQueryClock,
+};
 
 #[tokio::test]
 async fn rand_too_many_args() {
@@ -28,7 +30,10 @@ async fn rand_too_many_args() {
     let result = rand.call(&context, &func_expr, args.clone()).await;
     assert!(matches!(
         result.unwrap_err(),
-        EvaluationError::InvalidArgumentCount(_)
+        FunctionError {
+            function_name: _,
+            error: FunctionEvaluationError::InvalidArgumentCount
+        }
     ));
 }
 

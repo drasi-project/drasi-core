@@ -8,7 +8,9 @@ use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::variable_value::float::Float;
 use crate::evaluation::variable_value::integer::Integer;
 use crate::evaluation::variable_value::VariableValue;
-use crate::evaluation::{EvaluationError, ExpressionEvaluationContext, InstantQueryClock};
+use crate::evaluation::{
+    ExpressionEvaluationContext, FunctionError, FunctionEvaluationError, InstantQueryClock,
+};
 
 fn get_func_expr() -> ast::FunctionExpression {
     ast::FunctionExpression {
@@ -30,7 +32,10 @@ async fn sign_too_few_args() {
     let result = sign.call(&context, &get_func_expr(), args.clone()).await;
     assert!(matches!(
         result.unwrap_err(),
-        EvaluationError::InvalidArgumentCount(_)
+        FunctionError {
+            function_name: _,
+            error: FunctionEvaluationError::InvalidArgumentCount
+        }
     ));
 }
 
@@ -49,7 +54,10 @@ async fn sign_too_many_args() {
     let result = sign.call(&context, &get_func_expr(), args.clone()).await;
     assert!(matches!(
         result.unwrap_err(),
-        EvaluationError::InvalidArgumentCount(_)
+        FunctionError {
+            function_name: _,
+            error: FunctionEvaluationError::InvalidArgumentCount
+        }
     ));
 }
 
