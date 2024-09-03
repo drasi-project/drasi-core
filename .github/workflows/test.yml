@@ -17,7 +17,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     permissions:
+      contents: read
+      issues: read
       checks: write
+      pull-requests: write
     services:
       redis:
         image: redis:7-alpine
