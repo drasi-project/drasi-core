@@ -12,8 +12,6 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
-    permissions:
-      checks: write
     services:
       redis:
         image: redis:7-alpine
