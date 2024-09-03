@@ -4,7 +4,7 @@ use crate::evaluation::variable_value::{zoned_datetime::ZonedDateTime, VariableV
 use async_trait::async_trait;
 use drasi_query_ast::ast;
 
-use crate::evaluation::{EvaluationError, ExpressionEvaluationContext};
+use crate::evaluation::{ExpressionEvaluationContext, FunctionError, FunctionEvaluationError};
 
 use super::{Function, FunctionRegistry, ScalarFunction};
 
@@ -30,19 +30,23 @@ impl ScalarFunction for ElementId {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
-            return Err(EvaluationError::InvalidArgumentCount(
-                "elementId".to_string(),
-            ));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         match &args[0] {
             VariableValue::Element(e) => Ok(VariableValue::String(
                 e.get_reference().element_id.to_string(),
             )),
-            _ => Err(EvaluationError::InvalidType),
+            _ => Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
         }
     }
 }
@@ -57,17 +61,21 @@ impl ScalarFunction for ChangeDateTime {
         _context: &ExpressionEvaluationContext,
         expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
-            return Err(EvaluationError::InvalidArgumentCount(
-                expression.name.to_string(),
-            ));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         match &args[0] {
             VariableValue::Element(e) => Ok(VariableValue::ZonedDateTime(
                 ZonedDateTime::from_epoch_millis(e.get_effective_from()),
             )),
-            _ => Err(EvaluationError::InvalidType),
+            _ => Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
         }
     }
 }

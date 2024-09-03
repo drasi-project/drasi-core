@@ -1,6 +1,9 @@
 use std::{fmt::Debug, sync::Arc};
 
-use crate::{evaluation::EvaluationError, interface::ResultIndex};
+use crate::{
+    evaluation::{FunctionError, FunctionEvaluationError},
+    interface::ResultIndex,
+};
 
 use async_trait::async_trait;
 
@@ -38,23 +41,44 @@ impl AggregatingFunction for Avg {
         _context: &ExpressionEvaluationContext,
         args: Vec<VariableValue>,
         accumulator: &mut Accumulator,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
-            return Err(EvaluationError::InvalidArgumentCount("avg".to_string()));
+            return Err(FunctionError {
+                function_name: "Avg".to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
 
         let (sum, count) = match accumulator {
             Accumulator::Value(accumulator) => match accumulator {
                 ValueAccumulator::Avg { sum, count } => (sum, count),
-                _ => return Err(EvaluationError::InvalidType),
+                _ => {
+                    return Err(FunctionError {
+                        function_name: "Avg".to_string(),
+                        error: FunctionEvaluationError::CorruptData,
+                    })
+                }
             },
-            _ => return Err(EvaluationError::InvalidType),
+            _ => {
+                return Err(FunctionError {
+                    function_name: "Avg".to_string(),
+                    error: FunctionEvaluationError::CorruptData,
+                })
+            }
         };
 
         match &args[0] {
             VariableValue::Float(n) => {
                 *count += 1;
-                *sum += n.as_f64().unwrap();
+                *sum += match n.as_f64() {
+                    Some(n) => n,
+                    None => {
+                        return Err(FunctionError {
+                            function_name: "Avg".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                };
                 let avg = *sum / *count as f64;
 
                 Ok(VariableValue::Float(
@@ -63,7 +87,15 @@ impl AggregatingFunction for Avg {
             }
             VariableValue::Integer(n) => {
                 *count += 1;
-                *sum += n.as_i64().unwrap() as f64;
+                *sum += match n.as_i64() {
+                    Some(n) => n as f64,
+                    None => {
+                        return Err(FunctionError {
+                            function_name: "Avg".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                };
                 let avg = *sum / *count as f64;
 
                 Ok(VariableValue::Float(
@@ -89,7 +121,10 @@ impl AggregatingFunction for Avg {
                     Float::from_f64(avg).unwrap_or_default(),
                 ))
             }
-            _ => Err(EvaluationError::InvalidType),
+            _ => Err(FunctionError {
+                function_name: "Avg".to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
         }
     }
 
@@ -98,22 +133,43 @@ impl AggregatingFunction for Avg {
         _context: &ExpressionEvaluationContext,
         args: Vec<VariableValue>,
         accumulator: &mut Accumulator,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
-            return Err(EvaluationError::InvalidArgumentCount("Avg".to_string()));
+            return Err(FunctionError {
+                function_name: "Avg".to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         let (sum, count) = match accumulator {
             Accumulator::Value(accumulator) => match accumulator {
                 ValueAccumulator::Avg { sum, count } => (sum, count),
-                _ => return Err(EvaluationError::InvalidType),
+                _ => {
+                    return Err(FunctionError {
+                        function_name: "Avg".to_string(),
+                        error: FunctionEvaluationError::CorruptData,
+                    })
+                }
             },
-            _ => return Err(EvaluationError::InvalidType),
+            _ => {
+                return Err(FunctionError {
+                    function_name: "Avg".to_string(),
+                    error: FunctionEvaluationError::CorruptData,
+                })
+            }
         };
 
         match &args[0] {
             VariableValue::Float(n) => {
                 *count -= 1;
-                *sum -= n.as_f64().unwrap();
+                *sum -= match n.as_f64() {
+                    Some(n) => n,
+                    None => {
+                        return Err(FunctionError {
+                            function_name: "Avg".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                };
 
                 if *count == 0 {
                     return Ok(VariableValue::Float(
@@ -129,7 +185,15 @@ impl AggregatingFunction for Avg {
             }
             VariableValue::Integer(n) => {
                 *count -= 1;
-                *sum -= n.as_i64().unwrap() as f64;
+                *sum -= match n.as_i64() {
+                    Some(n) => n as f64,
+                    None => {
+                        return Err(FunctionError {
+                            function_name: "Avg".to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                };
 
                 if *count == 0 {
                     return Ok(VariableValue::Float(
@@ -167,7 +231,10 @@ impl AggregatingFunction for Avg {
                     Float::from_f64(avg).unwrap_or_default(),
                 ))
             }
-            _ => Err(EvaluationError::InvalidType),
+            _ => Err(FunctionError {
+                function_name: "Avg".to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
         }
     }
 
@@ -176,16 +243,29 @@ impl AggregatingFunction for Avg {
         _context: &ExpressionEvaluationContext,
         args: Vec<VariableValue>,
         accumulator: &Accumulator,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
-            return Err(EvaluationError::InvalidArgumentCount("Avg".to_string()));
+            return Err(FunctionError {
+                function_name: "Avg".to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
         let (sum, count) = match accumulator {
             Accumulator::Value(accumulator) => match accumulator {
                 ValueAccumulator::Avg { sum, count } => (sum, count),
-                _ => return Err(EvaluationError::InvalidType),
+                _ => {
+                    return Err(FunctionError {
+                        function_name: "Avg".to_string(),
+                        error: FunctionEvaluationError::CorruptData,
+                    })
+                }
             },
-            _ => return Err(EvaluationError::InvalidType),
+            _ => {
+                return Err(FunctionError {
+                    function_name: "Avg".to_string(),
+                    error: FunctionEvaluationError::CorruptData,
+                })
+            }
         };
 
         if *count == 0 {
@@ -197,14 +277,21 @@ impl AggregatingFunction for Avg {
         let avg = *sum / *count as f64;
 
         match &args[0] {
-            VariableValue::Float(_) => Ok(VariableValue::Float(Float::from_f64(avg).unwrap())),
-            VariableValue::Integer(_) => Ok(VariableValue::Float(Float::from_f64(avg).unwrap())),
+            VariableValue::Float(_) => Ok(VariableValue::Float(
+                Float::from_f64(avg).unwrap_or_default(),
+            )),
+            VariableValue::Integer(_) => Ok(VariableValue::Float(
+                Float::from_f64(avg).unwrap_or_default(),
+            )),
             VariableValue::Duration(_) => Ok(VariableValue::Duration(Duration::new(
                 ChronoDuration::milliseconds(avg as i64),
                 0,
                 0,
             ))),
-            _ => Err(EvaluationError::InvalidType),
+            _ => Err(FunctionError {
+                function_name: "Avg".to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
         }
     }
 }

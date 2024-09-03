@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use crate::evaluation::functions::LazyScalarFunction;
 use crate::evaluation::variable_value::VariableValue;
-use crate::evaluation::{EvaluationError, ExpressionEvaluationContext, ExpressionEvaluator};
+use crate::evaluation::{
+    ExpressionEvaluationContext, ExpressionEvaluator, FunctionError, FunctionEvaluationError,
+};
 use drasi_query_ast::ast::{self, Expression};
 
 pub struct Reduce {
@@ -31,32 +33,60 @@ impl LazyScalarFunction for Reduce {
     async fn call(
         &self,
         context: &ExpressionEvaluationContext,
-        _expression: &ast::FunctionExpression,
+        expression: &ast::FunctionExpression,
         args: &Vec<ast::Expression>,
-    ) -> Result<VariableValue, EvaluationError> {
+    ) -> Result<VariableValue, FunctionError> {
         if args.len() != 2 {
-            return Err(EvaluationError::InvalidArgumentCount("reduce".to_string()));
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
         }
 
         let initializer = &args[0];
         let iterator = match &args[1] {
             Expression::IteratorExpression(i) => i,
-            _ => return Err(EvaluationError::InvalidType),
+            _ => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(1),
+                })
+            }
         };
 
-        let (accumulator_name, accumulator) = self
+        let (accumulator_name, accumulator) = match self
             .evaluator
             .evaluate_assignment(context, initializer)
-            .await?;
+            .await
+        {
+            Ok((name, value)) => (name, value),
+            Err(e) => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: e,
+                })
+            }
+        };
 
         let mut query_variables = context.clone_variables(); //Retrieve the query variables from the global context
         query_variables.insert(accumulator_name.to_string().into(), accumulator);
 
         let context = ExpressionEvaluationContext::new(&query_variables, context.get_clock());
-        let result = self
+        let result = match self
             .evaluator
             .reduce_iterator_expression(&context, iterator, accumulator_name)
-            .await?;
+            .await
+        {
+            Ok(value) => value,
+            Err(_e) => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidType {
+                        expected: "Valid reduce expression".to_string(),
+                    },
+                })
+            }
+        };
 
         Ok(result)
     }

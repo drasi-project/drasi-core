@@ -6,11 +6,13 @@ use std::sync::Arc;
 
 use async_recursion::async_recursion;
 use chrono::{
-    Datelike, Duration, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Weekday,
+    Datelike, Duration, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Weekday,
 };
 use drasi_query_ast::ast;
 
-use crate::evaluation::temporal_constants;
+use crate::evaluation::temporal_constants::{
+    self, EPOCH_MIDNIGHT_NAIVE_DATETIME, MIDNIGHT_NAIVE_TIME, UTC_FIXED_OFFSET,
+};
 use crate::evaluation::variable_value::duration::Duration as DurationStruct;
 use crate::evaluation::variable_value::float::Float;
 use crate::evaluation::variable_value::integer::Integer;
@@ -23,7 +25,7 @@ use crate::{evaluation::variable_value::VariableValue, interface::ResultIndex};
 use super::{
     context::{ExpressionEvaluationContext, SideEffects},
     functions::{aggregation::Accumulator, Function, FunctionRegistry},
-    EvaluationError,
+    EvaluationError, FunctionEvaluationError,
 };
 
 pub struct ExpressionEvaluator {
@@ -134,33 +136,37 @@ impl ExpressionEvaluator {
                 ast::Literal::Null => VariableValue::Null,
                 ast::Literal::Date(_) => VariableValue::Date(*temporal_constants::EPOCH_NAIVE_DATE),
                 ast::Literal::Integer(i) => VariableValue::Integer(Integer::from(
-                    serde_json::Number::from(*i).as_i64().unwrap(),
-                )), //NOte might need to consider both integer and float situations
+                    match serde_json::Number::from(*i).as_i64() {
+                        Some(n) => n,
+                        None => return Err(EvaluationError::ParseError),
+                    },
+                )),
                 ast::Literal::Real(r) => match serde_json::Number::from_f64(*r) {
-                    Some(n) => VariableValue::Float(Float::from(n.as_f64().unwrap())),
+                    Some(n) => VariableValue::Float(Float::from(match n.as_f64() {
+                        Some(n) => n,
+                        None => return Err(EvaluationError::ParseError),
+                    })),
                     None => VariableValue::Null,
                 },
-                ast::Literal::LocalTime(_t) => {
-                    VariableValue::LocalTime(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
-                }
+                ast::Literal::LocalTime(_t) => VariableValue::LocalTime(*MIDNIGHT_NAIVE_TIME),
                 ast::Literal::ZonedTime(_t) => VariableValue::ZonedTime(ZonedTime::new(
-                    NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
-                    FixedOffset::east_opt(0).unwrap(),
+                    *MIDNIGHT_NAIVE_TIME,
+                    *UTC_FIXED_OFFSET,
                 )),
-                ast::Literal::LocalDateTime(_dt) => VariableValue::LocalDateTime(
-                    NaiveDate::from_ymd_opt(1970, 1, 1)
-                        .unwrap()
-                        .and_hms_opt(0, 0, 0)
-                        .unwrap(),
-                ),
+                ast::Literal::LocalDateTime(_dt) => {
+                    VariableValue::LocalDateTime(*EPOCH_MIDNIGHT_NAIVE_DATETIME)
+                }
                 ast::Literal::ZonedDateTime(_dt) => {
+                    let local_datetime = *EPOCH_MIDNIGHT_NAIVE_DATETIME;
                     VariableValue::ZonedDateTime(ZonedDateTime::new(
-                        NaiveDate::from_ymd_opt(1970, 1, 1)
-                            .unwrap()
-                            .and_hms_opt(0, 0, 0)
-                            .unwrap()
-                            .and_local_timezone(FixedOffset::east_opt(0).unwrap())
-                            .unwrap(),
+                        match local_datetime.and_local_timezone(*UTC_FIXED_OFFSET) {
+                            LocalResult::Single(dt) => dt,
+                            _ => {
+                                return Err(EvaluationError::InvalidType {
+                                    expected: "DateTime".to_string(),
+                                })
+                            }
+                        },
                         None,
                     ))
                 }
@@ -172,12 +178,18 @@ impl ExpressionEvaluator {
                     for (key, value) in o {
                         let val = match value {
                             ast::Literal::Integer(i) => VariableValue::Integer(Integer::from(
-                                serde_json::Number::from(*i).as_i64().unwrap(),
+                                match serde_json::Number::from(*i).as_i64() {
+                                    Some(n) => n,
+                                    None => return Err(EvaluationError::ParseError),
+                                },
                             )),
                             ast::Literal::Text(s) => VariableValue::String(s.to_string()),
                             ast::Literal::Real(r) => match serde_json::Number::from_f64(*r) {
-                                Some(n) => VariableValue::Float(Float::from(n.as_f64().unwrap())),
-                                None => VariableValue::Null,
+                                Some(n) => VariableValue::Float(Float::from(match n.as_f64() {
+                                    Some(n) => n,
+                                    None => return Err(EvaluationError::OverflowError),
+                                })),
+                                None => return Err(EvaluationError::ParseError),
                             },
                             _ => VariableValue::Null,
                         };
@@ -200,21 +212,23 @@ impl ExpressionEvaluator {
                             Some(v) => v.clone(),
                             None => VariableValue::Null,
                         },
-                        VariableValue::Date(d) => match get_date_property(*d, (*key).to_string())
-                            .await
-                        {
-                            Some(v) => VariableValue::Integer(v.into()),
-                            None => {
-                                return Err(EvaluationError::UnknownFunction((*key).to_string()))
+                        VariableValue::Date(d) => {
+                            match get_date_property(*d, (*key).to_string()).await {
+                                Some(v) => VariableValue::Integer(v.into()),
+                                None => {
+                                    return Err(EvaluationError::UnknownProperty {
+                                        property_name: (*key).to_string(),
+                                    })
+                                }
                             }
-                        },
+                        }
                         VariableValue::LocalTime(t) => {
                             match get_local_time_property(*t, (*key).to_string()).await {
                                 Some(v) => VariableValue::Integer(v.into()),
                                 None => {
-                                    return Err(EvaluationError::UnknownFunction(
-                                        (*key).to_string(),
-                                    ))
+                                    return Err(EvaluationError::UnknownProperty {
+                                        property_name: (*key).to_string(),
+                                    })
                                 }
                             }
                         }
@@ -237,9 +251,9 @@ impl ExpressionEvaluator {
                                     }
                                 }
                                 None => {
-                                    return Err(EvaluationError::UnknownFunction(
-                                        (*key).to_string(),
-                                    ))
+                                    return Err(EvaluationError::UnknownProperty {
+                                        property_name: (*key).to_string(),
+                                    })
                                 }
                             }
                         }
@@ -247,9 +261,9 @@ impl ExpressionEvaluator {
                             match get_local_datetime_property(*t, (*key).to_string()).await {
                                 Some(v) => VariableValue::Integer(v.into()),
                                 None => {
-                                    return Err(EvaluationError::UnknownFunction(
-                                        (*key).to_string(),
-                                    ))
+                                    return Err(EvaluationError::UnknownProperty {
+                                        property_name: (*key).to_string(),
+                                    })
                                 }
                             }
                         }
@@ -272,9 +286,9 @@ impl ExpressionEvaluator {
                                     }
                                 }
                                 None => {
-                                    return Err(EvaluationError::UnknownFunction(
-                                        (*key).to_string(),
-                                    ))
+                                    return Err(EvaluationError::UnknownProperty {
+                                        property_name: (*key).to_string(),
+                                    })
                                 }
                             }
                         }
@@ -282,9 +296,9 @@ impl ExpressionEvaluator {
                             match get_duration_property(d.clone(), (*key).to_string()).await {
                                 Some(v) => VariableValue::Integer(v.into()),
                                 None => {
-                                    return Err(EvaluationError::UnknownFunction(
-                                        (*key).to_string(),
-                                    ))
+                                    return Err(EvaluationError::UnknownProperty {
+                                        property_name: (*key).to_string(),
+                                    })
                                 }
                             }
                         }
@@ -402,35 +416,41 @@ impl ExpressionEvaluator {
                 (Some(start), Some(end)) => {
                     let start = self.evaluate_expression(context, start).await?;
                     if !start.is_i64() {
-                        return Err(EvaluationError::InvalidType);
+                        return Err(EvaluationError::OverflowError);
                     }
                     let end = self.evaluate_expression(context, end).await?;
                     if !end.is_i64() {
-                        return Err(EvaluationError::InvalidType);
+                        return Err(EvaluationError::OverflowError);
                     }
                     VariableValue::ListRange(ListRange {
-                        start: RangeBound::Index(start.as_i64().unwrap()),
-                        end: RangeBound::Index(end.as_i64().unwrap()),
+                        start: RangeBound::Index(match start.as_i64() {
+                            Some(n) => n,
+                            None => return Err(EvaluationError::OverflowError),
+                        }),
+                        end: RangeBound::Index(match end.as_i64() {
+                            Some(n) => n,
+                            None => return Err(EvaluationError::OverflowError),
+                        }),
                     })
                 }
                 (Some(start), None) => {
                     let start = self.evaluate_expression(context, start).await?;
-                    if !start.is_i64() {
-                        return Err(EvaluationError::InvalidType);
-                    }
                     VariableValue::ListRange(ListRange {
-                        start: RangeBound::Index(start.as_i64().unwrap()),
+                        start: RangeBound::Index(match start.as_i64() {
+                            Some(n) => n,
+                            None => return Err(EvaluationError::OverflowError),
+                        }),
                         end: RangeBound::Unbounded,
                     })
                 }
                 (None, Some(end)) => {
                     let end = self.evaluate_expression(context, end).await?;
-                    if !end.is_i64() {
-                        return Err(EvaluationError::InvalidType);
-                    }
                     VariableValue::ListRange(ListRange {
                         start: RangeBound::Unbounded,
-                        end: RangeBound::Index(end.as_i64().unwrap()),
+                        end: RangeBound::Index(match end.as_i64() {
+                            Some(n) => n,
+                            None => return Err(EvaluationError::OverflowError),
+                        }),
                     })
                 }
                 (None, None) => VariableValue::ListRange(ListRange {
@@ -507,12 +527,26 @@ impl ExpressionEvaluator {
                 (VariableValue::Float(n1), VariableValue::Float(n2)) => {
                     VariableValue::Bool(n1 != n2)
                 }
-                (VariableValue::Float(n1), VariableValue::Integer(n2)) => {
-                    VariableValue::Bool(n1 != n2.as_i64().unwrap() as f64)
-                }
-                (VariableValue::Integer(n1), VariableValue::Float(n2)) => {
-                    VariableValue::Bool(n2 != n1.as_i64().unwrap() as f64)
-                }
+                (VariableValue::Float(n1), VariableValue::Integer(n2)) => VariableValue::Bool(
+                    n1 != match n2.as_i64() {
+                        Some(n) => n as f64,
+                        None => {
+                            return Err(EvaluationError::InvalidType {
+                                expected: "Integer".to_string(),
+                            })
+                        }
+                    },
+                ),
+                (VariableValue::Integer(n1), VariableValue::Float(n2)) => VariableValue::Bool(
+                    n2 != match n1.as_i64() {
+                        Some(n) => n as f64,
+                        None => {
+                            return Err(EvaluationError::InvalidType {
+                                expected: "Integer".to_string(),
+                            })
+                        }
+                    },
+                ),
                 (VariableValue::String(s1), VariableValue::String(s2)) => {
                     VariableValue::Bool(s1 != s2)
                 }
@@ -568,7 +602,7 @@ impl ExpressionEvaluator {
                     VariableValue::Bool(dt1 < dt2)
                 }
                 (VariableValue::LocalDateTime(dt1), VariableValue::Date(date2)) => {
-                    let dt2 = NaiveDateTime::new(date2, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt2 = NaiveDateTime::new(date2, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(dt1 < dt2)
                 }
                 (VariableValue::LocalDateTime(dt1), VariableValue::LocalTime(time2)) => {
@@ -580,25 +614,43 @@ impl ExpressionEvaluator {
                     VariableValue::Bool(dt1 < dt2)
                 }
                 (VariableValue::Date(date1), VariableValue::LocalDateTime(dt2)) => {
-                    let dt1 = NaiveDateTime::new(date1, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt1 = NaiveDateTime::new(date1, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(dt1 < dt2)
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::ZonedTime(time2)) => {
-                    let dt1 =
-                        NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time())
-                            .and_local_timezone(*time1.offset())
-                            .unwrap();
-                    let dt2 =
-                        NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time2.time())
-                            .and_local_timezone(*time2.offset())
-                            .unwrap();
+                    let dt1 = match NaiveDateTime::new(
+                        *temporal_constants::EPOCH_NAIVE_DATE,
+                        *time1.time(),
+                    )
+                    .and_local_timezone(*time1.offset())
+                    {
+                        LocalResult::Single(dt) => dt,
+                        _ => {
+                            return Err(EvaluationError::InvalidType {
+                                expected: "Time".to_string(),
+                            })
+                        }
+                    };
+                    let dt2 = match NaiveDateTime::new(
+                        *temporal_constants::EPOCH_NAIVE_DATE,
+                        *time2.time(),
+                    )
+                    .and_local_timezone(*time2.offset())
+                    {
+                        LocalResult::Single(dt) => dt,
+                        _ => {
+                            return Err(EvaluationError::InvalidType {
+                                expected: "Time".to_string(),
+                            })
+                        }
+                    };
                     VariableValue::Bool(dt1 < dt2)
                 }
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::ZonedDateTime(zdt2)) => {
                     VariableValue::Bool(zdt1.datetime() < zdt2.datetime())
                 }
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::Date(date2)) => {
-                    let dt2 = NaiveDateTime::new(date2, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt2 = NaiveDateTime::new(date2, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(zdt1.datetime() < &dt2.and_utc())
                 }
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::LocalDateTime(dt2)) => {
@@ -611,22 +663,33 @@ impl ExpressionEvaluator {
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::ZonedTime(time2)) => {
                     let dt2 =
                         NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time2.time());
-                    VariableValue::Bool(
-                        zdt1.datetime() < &dt2.and_local_timezone(*time2.offset()).unwrap(),
-                    )
+                    let zdt2 = match dt2.and_local_timezone(*time2.offset()) {
+                        LocalResult::Single(dt) => dt,
+                        _ => {
+                            return Err(EvaluationError::InvalidType {
+                                expected: "Time".to_string(),
+                            })
+                        }
+                    };
+                    VariableValue::Bool(zdt1.datetime() < &zdt2)
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::ZonedDateTime(zdt2)) => {
                     let dt1 =
                         NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time());
-                    VariableValue::Bool(
-                        dt1.and_local_timezone(zdt2.datetime().timezone()).unwrap()
-                            < *zdt2.datetime(),
-                    )
+                    let zdt1 = match dt1.and_local_timezone(*time1.offset()) {
+                        LocalResult::Single(dt) => dt,
+                        _ => {
+                            return Err(EvaluationError::InvalidType {
+                                expected: "DateTiie".to_string(),
+                            })
+                        }
+                    };
+                    VariableValue::Bool(zdt1 < *zdt2.datetime())
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::Date(date2)) => {
                     let dt1 =
                         NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time());
-                    let dt2 = NaiveDateTime::new(date2, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt2 = NaiveDateTime::new(date2, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(dt1 < dt2)
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::LocalDateTime(dt2)) => {
@@ -682,7 +745,7 @@ impl ExpressionEvaluator {
                     VariableValue::Bool(dt1 <= dt2)
                 }
                 (VariableValue::LocalDateTime(dt1), VariableValue::Date(date2)) => {
-                    let dt2 = NaiveDateTime::new(date2, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt2 = NaiveDateTime::new(date2, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(dt1 <= dt2)
                 }
                 (VariableValue::LocalDateTime(dt1), VariableValue::LocalTime(time2)) => {
@@ -694,22 +757,40 @@ impl ExpressionEvaluator {
                     VariableValue::Bool(dt1 <= dt2)
                 }
                 (VariableValue::Date(date1), VariableValue::LocalDateTime(dt2)) => {
-                    let dt1 = NaiveDateTime::new(date1, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt1 = NaiveDateTime::new(date1, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(dt1 <= dt2)
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::ZonedTime(time2)) => {
-                    let dt1 =
-                        NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time())
-                            .and_local_timezone(*time1.offset())
-                            .unwrap();
-                    let dt2 =
-                        NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time2.time())
-                            .and_local_timezone(*time2.offset())
-                            .unwrap();
+                    let dt1 = match NaiveDateTime::new(
+                        *temporal_constants::EPOCH_NAIVE_DATE,
+                        *time1.time(),
+                    )
+                    .and_local_timezone(*time1.offset())
+                    {
+                        LocalResult::Single(dt) => dt,
+                        _ => {
+                            return Err(EvaluationError::InvalidType {
+                                expected: "Time".to_string(),
+                            })
+                        }
+                    };
+                    let dt2 = match NaiveDateTime::new(
+                        *temporal_constants::EPOCH_NAIVE_DATE,
+                        *time2.time(),
+                    )
+                    .and_local_timezone(*time2.offset())
+                    {
+                        LocalResult::Single(dt) => dt,
+                        _ => {
+                            return Err(EvaluationError::InvalidType {
+                                expected: "Time".to_string(),
+                            })
+                        }
+                    };
                     VariableValue::Bool(dt1 <= dt2)
                 }
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::Date(date2)) => {
-                    let dt2 = NaiveDateTime::new(date2, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt2 = NaiveDateTime::new(date2, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(zdt1.datetime() <= &dt2.and_utc())
                 }
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::LocalDateTime(dt2)) => {
@@ -722,22 +803,33 @@ impl ExpressionEvaluator {
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::ZonedTime(time2)) => {
                     let dt2 =
                         NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time2.time());
-                    VariableValue::Bool(
-                        zdt1.datetime() <= &dt2.and_local_timezone(*time2.offset()).unwrap(),
-                    )
+                    let zdt2 = match dt2.and_local_timezone(*time2.offset()) {
+                        LocalResult::Single(dt) => dt,
+                        _ => {
+                            return Err(EvaluationError::InvalidType {
+                                expected: "Time".to_string(),
+                            })
+                        }
+                    };
+                    VariableValue::Bool(zdt1.datetime() <= &zdt2)
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::ZonedDateTime(zdt2)) => {
                     let dt1 =
                         NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time());
-                    VariableValue::Bool(
-                        dt1.and_local_timezone(zdt2.datetime().timezone()).unwrap()
-                            <= *zdt2.datetime(),
-                    )
+                    let zdt1 = match dt1.and_local_timezone(*time1.offset()) {
+                        LocalResult::Single(dt) => dt,
+                        _ => {
+                            return Err(EvaluationError::InvalidType {
+                                expected: "DateTime".to_string(),
+                            })
+                        }
+                    };
+                    VariableValue::Bool(zdt1 <= *zdt2.datetime())
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::Date(date2)) => {
                     let dt1 =
                         NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time());
-                    let dt2 = NaiveDateTime::new(date2, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt2 = NaiveDateTime::new(date2, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(dt1 <= dt2)
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::LocalDateTime(dt2)) => {
@@ -790,7 +882,7 @@ impl ExpressionEvaluator {
                     VariableValue::Bool(dt1 > dt2)
                 }
                 (VariableValue::LocalDateTime(dt1), VariableValue::Date(date2)) => {
-                    let dt2 = NaiveDateTime::new(date2, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt2 = NaiveDateTime::new(date2, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(dt1 > dt2)
                 }
                 (VariableValue::LocalDateTime(dt1), VariableValue::LocalTime(time2)) => {
@@ -802,25 +894,44 @@ impl ExpressionEvaluator {
                     VariableValue::Bool(dt1 > dt2)
                 }
                 (VariableValue::Date(date1), VariableValue::LocalDateTime(dt2)) => {
-                    let dt1 = NaiveDateTime::new(date1, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt1 = NaiveDateTime::new(date1, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(dt1 > dt2)
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::ZonedTime(time2)) => {
-                    let dt1 =
-                        NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time())
-                            .and_local_timezone(*time1.offset())
-                            .unwrap();
-                    let dt2 =
-                        NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time2.time())
-                            .and_local_timezone(*time2.offset())
-                            .unwrap();
+                    let dt1 = match NaiveDateTime::new(
+                        *temporal_constants::EPOCH_NAIVE_DATE,
+                        *time1.time(),
+                    )
+                    .and_local_timezone(*time1.offset())
+                    {
+                        LocalResult::Single(dt) => dt,
+                        _ => {
+                            return Err(EvaluationError::InvalidType {
+                                expected: "Time".to_string(),
+                            })
+                        }
+                    };
+                    let dt2 = match NaiveDateTime::new(
+                        *temporal_constants::EPOCH_NAIVE_DATE,
+                        *time2.time(),
+                    )
+                    .and_local_timezone(*time2.offset())
+                    {
+                        LocalResult::Single(dt) => dt,
+                        _ => {
+                            return Err(EvaluationError::InvalidType {
+                                expected: "Time".to_string(),
+                            })
+                        }
+                    };
+
                     VariableValue::Bool(dt1 > dt2)
                 }
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::ZonedDateTime(zdt2)) => {
                     VariableValue::Bool(zdt1.datetime() > zdt2.datetime())
                 }
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::Date(date2)) => {
-                    let dt2 = NaiveDateTime::new(date2, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt2 = NaiveDateTime::new(date2, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(zdt1.datetime() > &dt2.and_utc())
                 }
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::LocalDateTime(dt2)) => {
@@ -833,22 +944,33 @@ impl ExpressionEvaluator {
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::ZonedTime(time2)) => {
                     let dt2 =
                         NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time2.time());
-                    VariableValue::Bool(
-                        zdt1.datetime() > &dt2.and_local_timezone(*time2.offset()).unwrap(),
-                    )
+                    let zdt2 = match dt2.and_local_timezone(*time2.offset()) {
+                        LocalResult::Single(dt) => dt,
+                        _ => {
+                            return Err(EvaluationError::InvalidType {
+                                expected: "Time".to_string(),
+                            })
+                        }
+                    };
+                    VariableValue::Bool(zdt1.datetime() > &zdt2)
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::ZonedDateTime(zdt2)) => {
                     let dt1 =
                         NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time());
-                    VariableValue::Bool(
-                        dt1.and_local_timezone(zdt2.datetime().timezone()).unwrap()
-                            > *zdt2.datetime(),
-                    )
+                    let zdt1 = match dt1.and_local_timezone(*time1.offset()) {
+                        LocalResult::Single(dt) => dt,
+                        _ => {
+                            return Err(EvaluationError::InvalidType {
+                                expected: "Time".to_string(),
+                            })
+                        }
+                    };
+                    VariableValue::Bool(zdt1 > *zdt2.datetime())
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::Date(date2)) => {
                     let dt1 =
                         NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time());
-                    let dt2 = NaiveDateTime::new(date2, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt2 = NaiveDateTime::new(date2, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(dt1 > dt2)
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::LocalDateTime(dt2)) => {
@@ -857,21 +979,27 @@ impl ExpressionEvaluator {
                     VariableValue::Bool(dt1 > dt2)
                 }
                 (VariableValue::Date(date1), VariableValue::ZonedDateTime(zdt2)) => {
-                    let dt1 = NaiveDateTime::new(date1, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt1 = NaiveDateTime::new(date1, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(&dt1.and_utc() > zdt2.datetime())
                 }
                 (VariableValue::Date(date1), VariableValue::LocalTime(time2)) => {
-                    let dt1 = NaiveDateTime::new(date1, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt1 = NaiveDateTime::new(date1, *MIDNIGHT_NAIVE_TIME);
                     let dt2 = NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, time2);
                     VariableValue::Bool(dt1 > dt2)
                 }
                 (VariableValue::Date(date1), VariableValue::ZonedTime(time2)) => {
-                    let dt1 = NaiveDateTime::new(date1, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt1 = NaiveDateTime::new(date1, *MIDNIGHT_NAIVE_TIME);
                     let dt2 =
                         NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time2.time());
-                    VariableValue::Bool(
-                        &dt1.and_utc() > &dt2.and_local_timezone(*time2.offset()).unwrap(),
-                    )
+                    let zdt2 = match dt2.and_local_timezone(*time2.offset()) {
+                        LocalResult::Single(dt) => dt,
+                        _ => {
+                            return Err(EvaluationError::InvalidType {
+                                expected: "Time".to_string(),
+                            })
+                        }
+                    };
+                    VariableValue::Bool(dt1.and_utc() > zdt2)
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::LocalTime(time2)) => {
                     let dt1 =
@@ -918,7 +1046,7 @@ impl ExpressionEvaluator {
                     VariableValue::Bool(dt1 >= dt2)
                 }
                 (VariableValue::LocalDateTime(dt1), VariableValue::Date(date2)) => {
-                    let dt2 = NaiveDateTime::new(date2, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt2 = NaiveDateTime::new(date2, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(dt1 >= dt2)
                 }
                 (VariableValue::LocalDateTime(dt1), VariableValue::LocalTime(time2)) => {
@@ -930,14 +1058,14 @@ impl ExpressionEvaluator {
                     VariableValue::Bool(dt1 >= dt2)
                 }
                 (VariableValue::Date(date1), VariableValue::LocalDateTime(dt2)) => {
-                    let dt1 = NaiveDateTime::new(date1, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt1 = NaiveDateTime::new(date1, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(dt1 >= dt2)
                 }
                 (VariableValue::LocalDateTime(dt1), VariableValue::ZonedDateTime(zdt2)) => {
                     VariableValue::Bool(dt1 >= zdt2.datetime().naive_utc())
                 }
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::Date(date2)) => {
-                    let dt2 = NaiveDateTime::new(date2, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt2 = NaiveDateTime::new(date2, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(zdt1.datetime() >= &dt2.and_utc())
                 }
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::LocalDateTime(dt2)) => {
@@ -950,22 +1078,33 @@ impl ExpressionEvaluator {
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::ZonedTime(time2)) => {
                     let dt2 =
                         NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time2.time());
-                    VariableValue::Bool(
-                        zdt1.datetime() >= &dt2.and_local_timezone(*time2.offset()).unwrap(),
-                    )
+                    let zdt2 = match dt2.and_local_timezone(*time2.offset()) {
+                        LocalResult::Single(dt) => dt,
+                        _ => {
+                            return Err(EvaluationError::InvalidType {
+                                expected: "Time".to_string(),
+                            })
+                        }
+                    };
+                    VariableValue::Bool(zdt1.datetime() >= &zdt2)
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::ZonedDateTime(zdt2)) => {
                     let dt1 =
                         NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time());
-                    VariableValue::Bool(
-                        dt1.and_local_timezone(zdt2.datetime().timezone()).unwrap()
-                            >= *zdt2.datetime(),
-                    )
+                    let zdt1 = match dt1.and_local_timezone(zdt2.datetime().timezone()) {
+                        LocalResult::Single(dt) => dt,
+                        _ => {
+                            return Err(EvaluationError::InvalidType {
+                                expected: "Time".to_string(),
+                            })
+                        }
+                    };
+                    VariableValue::Bool(zdt1 >= *zdt2.datetime())
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::Date(date2)) => {
                     let dt1 =
                         NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time());
-                    let dt2 = NaiveDateTime::new(date2, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                    let dt2 = NaiveDateTime::new(date2, *MIDNIGHT_NAIVE_TIME);
                     VariableValue::Bool(dt1 >= dt2)
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::LocalDateTime(dt2)) => {
@@ -980,14 +1119,32 @@ impl ExpressionEvaluator {
                     VariableValue::Bool(dt1 >= dt2)
                 }
                 (VariableValue::ZonedTime(time1), VariableValue::ZonedTime(time2)) => {
-                    let dt1 =
-                        NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time1.time())
-                            .and_local_timezone(*time1.offset())
-                            .unwrap();
-                    let dt2 =
-                        NaiveDateTime::new(*temporal_constants::EPOCH_NAIVE_DATE, *time2.time())
-                            .and_local_timezone(*time2.offset())
-                            .unwrap();
+                    let dt1 = match NaiveDateTime::new(
+                        *temporal_constants::EPOCH_NAIVE_DATE,
+                        *time1.time(),
+                    )
+                    .and_local_timezone(*time1.offset())
+                    {
+                        LocalResult::Single(dt) => dt,
+                        _ => {
+                            return Err(EvaluationError::InvalidType {
+                                expected: "Time".to_string(),
+                            })
+                        }
+                    };
+                    let dt2 = match NaiveDateTime::new(
+                        *temporal_constants::EPOCH_NAIVE_DATE,
+                        *time2.time(),
+                    )
+                    .and_local_timezone(*time2.offset())
+                    {
+                        LocalResult::Single(dt) => dt,
+                        _ => {
+                            return Err(EvaluationError::InvalidType {
+                                expected: "Time".to_string(),
+                            })
+                        }
+                    };
                     VariableValue::Bool(dt1 >= dt2)
                 }
                 (VariableValue::Duration(d1), VariableValue::Duration(d2)) => {
@@ -1176,37 +1333,37 @@ impl ExpressionEvaluator {
                 let n2 = self.evaluate_expression(context, e2).await?;
                 match (n1, n2) {
                     (VariableValue::Integer(n1), VariableValue::Integer(n2)) => {
-                        let m1 = n1.as_i64().ok_or(EvaluationError::InvalidType)?;
-                        let m2 = n2.as_i64().ok_or(EvaluationError::InvalidType)?;
+                        let m1 = n1.as_i64().ok_or(EvaluationError::OverflowError)?;
+                        let m2 = n2.as_i64().ok_or(EvaluationError::OverflowError)?;
                         if m2 == 0 {
-                            VariableValue::Null
+                            return Err(EvaluationError::DivideByZero);
                         } else {
                             VariableValue::Float(Float::from(m1 as f64 / m2 as f64))
                         }
                     }
                     (VariableValue::Float(n1), VariableValue::Float(n2)) => {
-                        let m1 = n1.as_f64().ok_or(EvaluationError::InvalidType)?;
-                        let m2 = n2.as_f64().ok_or(EvaluationError::InvalidType)?;
+                        let m1 = n1.as_f64().ok_or(EvaluationError::OverflowError)?;
+                        let m2 = n2.as_f64().ok_or(EvaluationError::OverflowError)?;
                         if m2 == 0.0 {
-                            VariableValue::Null
+                            return Err(EvaluationError::DivideByZero);
                         } else {
                             VariableValue::Float(Float::from(m1 / m2))
                         }
                     }
                     (VariableValue::Float(n1), VariableValue::Integer(n2)) => {
-                        let m1 = n1.as_f64().ok_or(EvaluationError::InvalidType)?;
-                        let m2 = n2.as_i64().ok_or(EvaluationError::InvalidType)?;
+                        let m1 = n1.as_f64().ok_or(EvaluationError::OverflowError)?;
+                        let m2 = n2.as_i64().ok_or(EvaluationError::OverflowError)?;
                         if m2 == 0 {
-                            VariableValue::Null
+                            return Err(EvaluationError::DivideByZero);
                         } else {
                             VariableValue::Float(Float::from(m1 / m2 as f64))
                         }
                     }
                     (VariableValue::Integer(n1), VariableValue::Float(n2)) => {
-                        let m1 = n1.as_i64().ok_or(EvaluationError::InvalidType)?;
-                        let m2 = n2.as_f64().ok_or(EvaluationError::InvalidType)?;
+                        let m1 = n1.as_i64().ok_or(EvaluationError::OverflowError)?;
+                        let m2 = n2.as_f64().ok_or(EvaluationError::OverflowError)?;
                         if m2 == 0.0 {
-                            VariableValue::Null
+                            return Err(EvaluationError::DivideByZero);
                         } else {
                             VariableValue::Float(Float::from(m1 as f64 / m2))
                         }
@@ -1218,7 +1375,11 @@ impl ExpressionEvaluator {
                 let e1 = self.evaluate_expression(context, e1).await?;
                 match self.evaluate_expression(context, e2).await? {
                     VariableValue::List(a) => VariableValue::Bool(a.contains(&e1)),
-                    _ => return Err(EvaluationError::InvalidType),
+                    _ => {
+                        return Err(EvaluationError::InvalidType {
+                            expected: "List".to_string(),
+                        })
+                    }
                 }
             }
             ast::BinaryExpression::Modulo(e1, e2) => {
@@ -1260,7 +1421,7 @@ impl ExpressionEvaluator {
                                 n2.as_i64()
                                     .unwrap_or_default()
                                     .try_into()
-                                    .map_err(|_| EvaluationError::InvalidType)?,
+                                    .map_err(|_| EvaluationError::OverflowError)?,
                             ),
                         ))
                     }
@@ -1291,7 +1452,11 @@ impl ExpressionEvaluator {
                 let subject = self.evaluate_expression(context, e1).await?;
                 let label = match self.evaluate_expression(context, e2).await? {
                     VariableValue::String(s) => Arc::from(s),
-                    _ => return Err(EvaluationError::InvalidType),
+                    _ => {
+                        return Err(EvaluationError::InvalidType {
+                            expected: "String".to_string(),
+                        })
+                    }
                 };
 
                 match subject {
@@ -1304,7 +1469,14 @@ impl ExpressionEvaluator {
             ast::BinaryExpression::Index(e1, e2) => {
                 let index_exp = self.evaluate_expression(context, e2).await?;
                 let variable_value_list = self.evaluate_expression(context, e1).await?;
-                let list = variable_value_list.as_array().unwrap();
+                let list = match variable_value_list.as_array() {
+                    Some(list) => list,
+                    None => {
+                        return Err(EvaluationError::InvalidType {
+                            expected: "List".to_string(),
+                        })
+                    }
+                };
                 match index_exp {
                     VariableValue::ListRange(list_range) => {
                         let start_bound = match list_range.start {
@@ -1335,10 +1507,14 @@ impl ExpressionEvaluator {
                         return Ok(VariableValue::List(result));
                     }
                     VariableValue::Integer(index) => {
-                        if !index.is_i64() {
-                            return Err(EvaluationError::InvalidType);
-                        }
-                        let index_i64 = index.as_i64().unwrap();
+                        let index_i64 = match index.as_i64() {
+                            Some(index) => index,
+                            None => {
+                                return Err(EvaluationError::InvalidType {
+                                    expected: "Integer".to_string(),
+                                })
+                            }
+                        };
                         if index_i64 >= list.len() as i64 {
                             return Ok(VariableValue::Null);
                         }
@@ -1347,11 +1523,23 @@ impl ExpressionEvaluator {
                             let element = list[index_i64 as usize].clone();
                             return Ok(element);
                         }
-                        let element = list[index.as_i64().unwrap() as usize].clone();
+                        let index = match index.as_i64() {
+                            Some(index) => index as usize,
+                            None => {
+                                return Err(EvaluationError::InvalidType {
+                                    expected: "Integer".to_string(),
+                                })
+                            }
+                        };
+                        let element = list[index].clone();
 
                         return Ok(element);
                     }
-                    _ => return Err(EvaluationError::InvalidType),
+                    _ => {
+                        return Err(EvaluationError::InvalidType {
+                            expected: "Integer or ListRange".to_string(),
+                        })
+                    }
                 }
             }
         };
@@ -1373,18 +1561,12 @@ impl ExpressionEvaluator {
                     scalar
                         .call(context, expression, values)
                         .await
-                        .map_err(|e| EvaluationError::FunctionError {
-                            function_name: expression.name.to_string(),
-                            error: Box::new(e),
-                        })?
+                        .map_err(|e| EvaluationError::FunctionError(e))?
                 }
                 Function::LazyScalar(scalar) => scalar
                     .call(context, expression, &expression.args)
                     .await
-                    .map_err(|e| EvaluationError::FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: Box::new(e),
-                    })?,
+                    .map_err(|e| EvaluationError::FunctionError(e))?,
                 Function::Aggregating(aggregate) => {
                     let mut values = Vec::new();
                     for arg in &expression.args {
@@ -1431,24 +1613,15 @@ impl ExpressionEvaluator {
                         SideEffects::Apply => aggregate
                             .apply(context, values, &mut accumulator)
                             .await
-                            .map_err(|e| EvaluationError::FunctionError {
-                                function_name: expression.name.to_string(),
-                                error: Box::new(e),
-                            })?,
+                            .map_err(|e| EvaluationError::FunctionError(e))?,
                         SideEffects::RevertForUpdate | SideEffects::RevertForDelete => aggregate
                             .revert(context, values, &mut accumulator)
                             .await
-                            .map_err(|e| EvaluationError::FunctionError {
-                                function_name: expression.name.to_string(),
-                                error: Box::new(e),
-                            })?,
+                            .map_err(|e| EvaluationError::FunctionError(e))?,
                         SideEffects::Snapshot => aggregate
                             .snapshot(context, values, &accumulator)
                             .await
-                            .map_err(|e| EvaluationError::FunctionError {
-                                function_name: expression.name.to_string(),
-                                error: Box::new(e),
-                            })?,
+                            .map_err(|e| EvaluationError::FunctionError(e))?,
                     };
 
                     //println!("{:?} {}{} : {:?}", context.get_side_effects(), expression.name, expression.position_in_query, result);
@@ -1470,7 +1643,12 @@ impl ExpressionEvaluator {
                     if expression.args.is_empty() {
                         VariableValue::Null
                     } else {
-                        let new_context = context_mutator.call(context, expression).await?;
+                        let new_context = match context_mutator.call(context, expression).await {
+                            Ok(new_context) => new_context,
+                            Err(e) => {
+                                return Err(EvaluationError::FunctionError(e));
+                            }
+                        };
 
                         self.evaluate_expression(&new_context, &expression.args[0])
                             .await?
@@ -1553,23 +1731,42 @@ impl ExpressionEvaluator {
         &self,
         context: &ExpressionEvaluationContext<'_>,
         expression: &ast::Expression,
-    ) -> Result<(Arc<str>, VariableValue), EvaluationError> {
+    ) -> Result<(Arc<str>, VariableValue), FunctionEvaluationError> {
         match expression {
             ast::Expression::BinaryExpression(exp) => match exp {
                 ast::BinaryExpression::Eq(var, val) => {
                     let variable = match *var.clone() {
                         ast::Expression::UnaryExpression(exp) => match exp {
                             ast::UnaryExpression::Identifier(ident) => ident,
-                            _ => return Err(EvaluationError::InvalidType),
+                            _ => {
+                                return Err(FunctionEvaluationError::InvalidType {
+                                    expected: "Identifier expression".to_string(),
+                                })
+                            }
                         },
-                        _ => return Err(EvaluationError::InvalidType),
+                        _ => {
+                            return Err(FunctionEvaluationError::InvalidType {
+                                expected: "Unary expression".to_string(),
+                            })
+                        }
                     };
-                    let value = self.evaluate_expression(context, val).await?;
+                    let value = match self.evaluate_expression(context, val).await {
+                        Ok(value) => value,
+                        Err(_) => {
+                            return Err(FunctionEvaluationError::InvalidType {
+                                expected: "valid identifier expresssion".to_string(),
+                            })
+                        }
+                    };
                     Ok((variable, value))
                 }
-                _ => Err(EvaluationError::InvalidType),
+                _ => Err(FunctionEvaluationError::InvalidType {
+                    expected: "Eq expression".to_string(),
+                }),
             },
-            _ => Err(EvaluationError::InvalidType),
+            _ => Err(FunctionEvaluationError::InvalidType {
+                expected: "Binary expression".to_string(),
+            }),
         }
     }
 
@@ -1616,7 +1813,9 @@ impl ExpressionEvaluator {
                 }
                 Ok(VariableValue::List(result))
             }
-            _ => Err(EvaluationError::InvalidType),
+            _ => Err(EvaluationError::InvalidType {
+                expected: "List".to_string(),
+            }),
         }
     }
 
@@ -1667,14 +1866,16 @@ impl ExpressionEvaluator {
                 }
                 Ok(result)
             }
-            _ => Err(EvaluationError::InvalidType),
+            _ => Err(EvaluationError::InvalidType {
+                expected: "List".to_string(),
+            }),
         }
     }
 }
 
 async fn get_date_property(date: NaiveDate, property: String) -> Option<u32> {
     match property.as_str() {
-        "year" => Some(date.year().try_into().unwrap()),
+        "year" => Some(date.year() as u32),
         "month" => Some(date.month()),
         "day" => Some(date.day()),
         "quarter" => Some((date.month() - 1) / 3 + 1),
@@ -1706,22 +1907,27 @@ async fn get_date_property(date: NaiveDate, property: String) -> Option<u32> {
             Some(day_of_week_num)
         }
         "ordinalDay" => Some(date.ordinal()),
-        "weekYear" => Some(date.iso_week().year().try_into().unwrap()),
+        "weekYear" => Some(date.iso_week().year() as u32),
         "dayOfQuarter" => {
             let quarter = (date.month() - 1) / 3 + 1;
-            let start_date =
-                NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1).unwrap();
+            let start_date = match NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1) {
+                Some(date) => date,
+                None => return None,
+            };
+
             let duration = date - start_date;
             let num_days = duration.num_days();
-            Some((num_days + 1).try_into().unwrap())
+            Some((num_days + 1) as u32)
         }
         "quarterDay" => {
             let quarter = (date.month() - 1) / 3 + 1;
-            let start_date =
-                NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1).unwrap();
+            let start_date = match NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1) {
+                Some(date) => date,
+                None => return None,
+            };
             let duration = date - start_date;
             let num_days = duration.num_days();
-            Some((num_days + 1).try_into().unwrap())
+            Some((num_days + 1) as u32)
         }
         _ => None,
     }
@@ -1767,7 +1973,7 @@ async fn get_local_datetime_property(datetime: NaiveDateTime, property: String) 
     let date = datetime.date();
     let time = datetime.time();
     match property.as_str() {
-        "year" => Some(date.year().try_into().unwrap()),
+        "year" => Some(date.year() as u32),
         "month" => Some(date.month()),
         "day" => Some(date.day()),
         "quarter" => Some((date.month() - 1) / 3 + 1),
@@ -1799,22 +2005,26 @@ async fn get_local_datetime_property(datetime: NaiveDateTime, property: String) 
             Some(day_of_week_num)
         }
         "ordinalDay" => Some(date.ordinal()),
-        "weekYear" => Some(date.iso_week().year().try_into().unwrap()),
+        "weekYear" => Some(date.iso_week().year() as u32),
         "dayOfQuarter" => {
             let quarter = (date.month() - 1) / 3 + 1;
-            let start_date =
-                NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1).unwrap();
+            let start_date = match NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1) {
+                Some(date) => date,
+                None => return None,
+            };
             let duration = date - start_date;
             let num_days = duration.num_days();
-            Some((num_days + 1).try_into().unwrap())
+            Some((num_days + 1) as u32)
         }
         "quarterDay" => {
             let quarter = (date.month() - 1) / 3 + 1;
-            let start_date =
-                NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1).unwrap();
+            let start_date = match NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1) {
+                Some(date) => date,
+                None => return None,
+            };
             let duration = date - start_date;
             let num_days = duration.num_days();
-            Some((num_days + 1).try_into().unwrap())
+            Some((num_days + 1) as u32)
         }
         "hour" => Some(time.hour()),
         "minute" => Some(time.minute()),
@@ -1870,16 +2080,20 @@ async fn get_datetime_property(zoned_datetime: ZonedDateTime, property: String) 
         "weekYear" => Some(date.iso_week().year().to_string()),
         "dayOfQuarter" => {
             let quarter = (date.month() - 1) / 3 + 1;
-            let start_date =
-                NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1).unwrap();
+            let start_date = match NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1) {
+                Some(date) => date,
+                None => return None,
+            };
             let duration = date - start_date;
             let num_days = duration.num_days();
             Some((num_days + 1).to_string())
         }
         "quarterDay" => {
             let quarter = (date.month() - 1) / 3 + 1;
-            let start_date =
-                NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1).unwrap();
+            let start_date = match NaiveDate::from_ymd_opt(date.year(), (quarter - 1) * 3 + 1, 1) {
+                Some(date) => date,
+                None => return None,
+            };
             let duration = date - start_date;
             let num_days = duration.num_days();
             Some((num_days + 1).to_string())
@@ -1904,19 +2118,13 @@ async fn get_datetime_property(zoned_datetime: ZonedDateTime, property: String) 
             Some(minutes.to_string())
         }
         "epochMillis" => {
-            let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)
-                .unwrap()
-                .and_hms_opt(0, 0, 0)
-                .unwrap();
+            let epoch = *EPOCH_MIDNIGHT_NAIVE_DATETIME;
             let duration = datetime.naive_utc() - epoch;
             let millis = duration.num_milliseconds();
             Some(millis.to_string())
         }
         "epochSeconds" => {
-            let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)
-                .unwrap()
-                .and_hms_opt(0, 0, 0)
-                .unwrap();
+            let epoch = *EPOCH_MIDNIGHT_NAIVE_DATETIME;
             let duration = datetime.naive_utc() - epoch;
             let seconds = duration.num_seconds();
             Some(seconds.to_string())
@@ -1940,8 +2148,14 @@ async fn get_duration_property(duration_struct: DurationStruct, property: String
         "minutes" => Some(duration.num_minutes()),
         "seconds" => Some(duration.num_seconds()),
         "milliseconds" => Some(duration.num_milliseconds()),
-        "microseconds" => Some(duration.num_microseconds().unwrap()),
-        "nanoseconds" => Some(duration.num_nanoseconds().unwrap()),
+        "microseconds" => Some(match duration.num_microseconds() {
+            Some(micros) => micros,
+            None => 0,
+        }),
+        "nanoseconds" => Some(match duration.num_nanoseconds() {
+            Some(nanos) => nanos,
+            None => 0,
+        }),
         "quartersOfYear" => {
             let quarters = month / 3 + 1;
             Some(quarters)
@@ -1980,11 +2194,17 @@ async fn get_duration_property(duration_struct: DurationStruct, property: String
             Some(millis)
         }
         "microsecondsOfSecond" => {
-            let micros = duration.num_microseconds().unwrap() % 1000000;
+            let micros = match duration.num_microseconds() {
+                Some(micros) => micros,
+                None => 0,
+            } % 1000000;
             Some(micros)
         }
         "nanosecondsOfSecond" => {
-            let nanos = duration.num_nanoseconds().unwrap() % 1000000000;
+            let nanos = match duration.num_nanoseconds() {
+                Some(nanos) => nanos,
+                None => 0,
+            } % 1000000000;
             Some(nanos)
         }
         _ => None,
