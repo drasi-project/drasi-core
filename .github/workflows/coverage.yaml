@@ -9,6 +9,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions: 
+  contents: read
+
+  
 jobs:
   coverage_with_code_cov: 
     runs-on: ubuntu-latest
