@@ -64,7 +64,7 @@ pub async fn remap(config: &(impl QueryTestConfig + Send)) {
                     ],
                     "additionalProperties": {
                         "Id": "7dada2cb-a85a-4f38-bc4a-3d74a22c04b0",
-                        "Source": "netstar.telemetry"
+                        "Source": "telemetry"
                     },
                     "vehicleId": "v1"
                 })),
@@ -111,7 +111,7 @@ pub async fn remap(config: &(impl QueryTestConfig + Send)) {
                     ],
                     "additionalProperties": {
                         "Id": "7dada2cb-a85a-4f38-bc4a-3d74a22c04c2",
-                        "Source": "netstar.telemetry"
+                        "Source": "telemetry"
                     },
                     "vehicleId": "v1"
                 })),
@@ -162,7 +162,7 @@ pub async fn remap(config: &(impl QueryTestConfig + Send)) {
                     ],
                     "additionalProperties": {
                         "Id": "8dada2cb-b85a-4f38-bc4a-3d74a22c04b7",
-                        "Source": "netstar.telemetry"
+                        "Source": "telemetry"
                     },
                     "vehicleId": "v2"
                 })),
