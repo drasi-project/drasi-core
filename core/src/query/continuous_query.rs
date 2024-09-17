@@ -170,7 +170,8 @@ impl ContinuousQuery {
                 if let Some(prev_version) = self
                     .element_index
                     .get_element(element.get_reference())
-                    .await? {
+                    .await?
+                {
                     let prev_timestamp = prev_version.get_effective_from();
                     let before_clock =
                         Arc::new(InstantQueryClock::new(prev_timestamp, clock.get_realtime()));
@@ -231,7 +232,8 @@ impl ContinuousQuery {
                 if let Some(element) = self
                     .element_index
                     .get_element(&future_ref.element_ref)
-                    .await? {
+                    .await?
+                {
                     let prev_timestamp = element.get_effective_from();
                     if prev_timestamp >= future_ref.due_time {
                         // element already processed with due time expired, don't duplicate
@@ -257,12 +259,7 @@ impl ContinuousQuery {
                     result.before_anchor_element = Some(element.clone());
 
                     let after_solutions = self
-                        .resolve_solutions(
-                            base_variables,
-                            element.clone(),
-                            clock.clone(),
-                            false,
-                        )
+                        .resolve_solutions(base_variables, element.clone(), clock.clone(), false)
                         .await?;
                     for (signature, solution) in after_solutions {
                         after_change_solutions.insert(signature, solution);
@@ -595,12 +592,13 @@ impl CollapsedAggregationResults {
 
     fn insert(&mut self, context: QueryPartEvaluationContext) {
         if let QueryPartEvaluationContext::Aggregation {
-                before,
-                after,
-                grouping_keys,
-                default_before,
-                default_after,
-            } = context {
+            before,
+            after,
+            grouping_keys,
+            default_before,
+            default_after,
+        } = context
+        {
             let after_key = extract_grouping_value_hash(&grouping_keys, &after);
             let before_key = match &before {
                 Some(before) => extract_grouping_value_hash(&grouping_keys, before),
@@ -608,24 +606,27 @@ impl CollapsedAggregationResults {
             };
 
             match self.data.remove(&after_key) {
-                Some((existing, before_key)) => if let QueryPartEvaluationContext::Aggregation {
+                Some((existing, before_key)) => {
+                    if let QueryPartEvaluationContext::Aggregation {
                         before: existing_before,
                         ..
-                    } = existing {
-                    self.data.insert(
-                        after_key,
-                        (
-                            QueryPartEvaluationContext::Aggregation {
-                                before: existing_before,
-                                default_before,
-                                default_after,
-                                after,
-                                grouping_keys,
-                            },
-                            before_key,
-                        ),
-                    );
-                },
+                    } = existing
+                    {
+                        self.data.insert(
+                            after_key,
+                            (
+                                QueryPartEvaluationContext::Aggregation {
+                                    before: existing_before,
+                                    default_before,
+                                    default_after,
+                                    after,
+                                    grouping_keys,
+                                },
+                                before_key,
+                            ),
+                        );
+                    }
+                }
                 None => {
                     self.data.insert(
                         after_key,

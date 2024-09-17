@@ -387,7 +387,7 @@ impl ExpressionEvaluator {
                     }
                     _ => VariableValue::Null,
                 }
-            },
+            }
             ast::UnaryExpression::Parameter(p) => match context.get_variable(p.clone()) {
                 Some(v) => v.clone(),
                 None => VariableValue::Null,

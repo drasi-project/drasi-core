@@ -45,7 +45,6 @@ impl ops::Sub<Duration> for Duration {
     }
 }
 
-
 impl Duration {
     pub fn new(duration: ChronoDuration, year: i64, month: i64) -> Self {
         Duration {

@@ -47,7 +47,7 @@ impl AggregatingFunction for Count {
         }
 
         let value = match accumulator {
-            Accumulator::Value(super::ValueAccumulator::Count { value } ) => value,
+            Accumulator::Value(super::ValueAccumulator::Count { value }) => value,
             _ => {
                 return Err(FunctionError {
                     function_name: "Count".to_string(),
@@ -77,14 +77,15 @@ impl AggregatingFunction for Count {
                 error: FunctionEvaluationError::InvalidArgumentCount,
             });
         }
-        let value = if let Accumulator::Value(super::ValueAccumulator::Count { value }) = accumulator {
-            value
-        } else {
-            return Err(FunctionError {
-            function_name: "Count".to_string(),
-            error: FunctionEvaluationError::CorruptData,
-            });
-        };
+        let value =
+            if let Accumulator::Value(super::ValueAccumulator::Count { value }) = accumulator {
+                value
+            } else {
+                return Err(FunctionError {
+                    function_name: "Count".to_string(),
+                    error: FunctionEvaluationError::CorruptData,
+                });
+            };
 
         match &args[0] {
             VariableValue::Null => Ok(VariableValue::Integer(Integer::from(*value))),
@@ -101,14 +102,15 @@ impl AggregatingFunction for Count {
         _args: Vec<VariableValue>,
         accumulator: &Accumulator,
     ) -> Result<VariableValue, FunctionError> {
-        let value = if let Accumulator::Value(super::ValueAccumulator::Count { value }) = accumulator {
-            value
-        } else {
-            return Err(FunctionError {
-            function_name: "Count".to_string(),
-            error: FunctionEvaluationError::CorruptData,
-            });
-        };
+        let value =
+            if let Accumulator::Value(super::ValueAccumulator::Count { value }) = accumulator {
+                value
+            } else {
+                return Err(FunctionError {
+                    function_name: "Count".to_string(),
+                    error: FunctionEvaluationError::CorruptData,
+                });
+            };
         Ok(VariableValue::Integer(Integer::from(*value)))
     }
 }

@@ -56,17 +56,17 @@ impl AggregatingFunction for LinearGradient {
 
         let (count, mean_x, mean_y, m2, cov) = match accumulator {
             Accumulator::Value(ValueAccumulator::LinearGradient {
-            count,
-            mean_x,
-            mean_y,
-            m2,
-            cov,
+                count,
+                mean_x,
+                mean_y,
+                m2,
+                cov,
             }) => (count, mean_x, mean_y, m2, cov),
             _ => {
-            return Err(FunctionError {
-                function_name: "LinearGradient".to_string(),
-                error: FunctionEvaluationError::CorruptData,
-            })
+                return Err(FunctionError {
+                    function_name: "LinearGradient".to_string(),
+                    error: FunctionEvaluationError::CorruptData,
+                })
             }
         };
 
@@ -128,7 +128,7 @@ impl AggregatingFunction for LinearGradient {
                     error: FunctionEvaluationError::CorruptData,
                 });
             }
-        };        
+        };
 
         if let VariableValue::Null = args[0] {
             return Ok(VariableValue::Null);
@@ -198,7 +198,6 @@ impl AggregatingFunction for LinearGradient {
                 });
             }
         };
-        
 
         if *count == 0 {
             return Ok(VariableValue::Null);

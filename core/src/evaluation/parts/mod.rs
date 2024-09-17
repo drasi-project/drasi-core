@@ -46,7 +46,13 @@ impl QueryPartEvaluator {
     ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
         // println!("Evaluating : {:#?}", context);
 
-        let is_return_aggreating = matches!(&part.return_clause, ProjectionClause::GroupBy { grouping: _, aggregates: _ });
+        let is_return_aggreating = matches!(
+            &part.return_clause,
+            ProjectionClause::GroupBy {
+                grouping: _,
+                aggregates: _
+            }
+        );
 
         match context {
             QueryPartEvaluationContext::Adding { after } => {

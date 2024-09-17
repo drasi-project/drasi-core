@@ -94,13 +94,13 @@ impl GarnetElementIndex {
                                     let old_element =
                                         self.get_element_internal(&element_key).await?;
 
-                                        if let Some(StoredElement::Node(old)) = &old_element {
-                                            if let Some(old_value) = old.properties.get(&qjk.property) {
-                                                if old_value == new_value {
-                                                    continue;
-                                                }
+                                    if let Some(StoredElement::Node(old)) = &old_element {
+                                        if let Some(old_value) = old.properties.get(&qjk.property) {
+                                            if old_value == new_value {
+                                                continue;
                                             }
                                         }
+                                    }
 
                                     let pj_key = self.key_formatter.get_partial_join_key(
                                         &qj.id,

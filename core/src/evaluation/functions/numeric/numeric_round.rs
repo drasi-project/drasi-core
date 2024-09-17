@@ -557,7 +557,9 @@ impl ScalarFunction for Round {
                                         })
                                     }
                                 } * multiplier;
-                                if intermediate_value.fract() == 0.5 || intermediate_value.fract() == -0.5 {
+                                if intermediate_value.fract() == 0.5
+                                    || intermediate_value.fract() == -0.5
+                                {
                                     let rounded_value = (intermediate_value.trunc()) / multiplier;
                                     return Ok(VariableValue::Float(
                                         match Float::from_f64(rounded_value) {
@@ -570,7 +572,7 @@ impl ScalarFunction for Round {
                                             }
                                         },
                                     ));
-                                } 
+                                }
                                 let rounded_value = (match n.as_f64() {
                                     Some(f) => f,
                                     None => {

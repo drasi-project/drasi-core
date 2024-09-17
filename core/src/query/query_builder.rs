@@ -86,11 +86,7 @@ impl QueryBuilder {
         self
     }
 
-    pub fn with_source_pipeline(
-        mut self,
-        source: impl Into<String>,
-        pipeline: &[String],
-    ) -> Self {
+    pub fn with_source_pipeline(mut self, source: impl Into<String>, pipeline: &[String]) -> Self {
         let pipeline = pipeline.iter().map(|s| Arc::from(s.as_str())).collect();
         self.source_pipelines
             .insert(Arc::from(source.into()), pipeline);

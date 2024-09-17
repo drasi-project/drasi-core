@@ -54,7 +54,6 @@ impl AggregatingFunction for Last {
                 });
             }
         };
-        
 
         *value = match (&args[0]).try_into() {
             Ok(value) => value,
@@ -86,10 +85,10 @@ impl AggregatingFunction for Last {
         let value = match accumulator {
             Accumulator::Value(super::ValueAccumulator::Value(value)) => value,
             _ => {
-            return Err(FunctionError {
-                function_name: "Last".to_string(),
-                error: FunctionEvaluationError::CorruptData,
-            })
+                return Err(FunctionError {
+                    function_name: "Last".to_string(),
+                    error: FunctionEvaluationError::CorruptData,
+                })
             }
         };
 

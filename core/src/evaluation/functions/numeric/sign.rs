@@ -35,7 +35,9 @@ impl ScalarFunction for Sign {
                     }
                 };
                 match f.partial_cmp(&0) {
-                    Some(std::cmp::Ordering::Greater) => Ok(VariableValue::Integer(Integer::from(1))),
+                    Some(std::cmp::Ordering::Greater) => {
+                        Ok(VariableValue::Integer(Integer::from(1)))
+                    }
                     Some(std::cmp::Ordering::Less) => Ok(VariableValue::Integer(Integer::from(-1))),
                     Some(std::cmp::Ordering::Equal) => Ok(VariableValue::Integer(Integer::from(0))),
                     None => {

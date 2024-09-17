@@ -1,10 +1,8 @@
+use crate::evaluation::temporal_constants::{self, UTC_FIXED_OFFSET};
 use chrono::{DateTime, FixedOffset, TimeZone};
 use core::fmt::{self, Display};
 use serde::{Deserialize, Serialize};
 use std::hash::Hash;
-use crate::evaluation::temporal_constants::{
-    self, UTC_FIXED_OFFSET,
-};
 
 #[derive(Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct ZonedDateTime {

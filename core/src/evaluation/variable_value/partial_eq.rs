@@ -81,10 +81,13 @@ impl PartialEq<VariableValue> for String {
 
 impl PartialEq<Float> for VariableValue {
     fn eq(&self, other: &Float) -> bool {
-        eq_f64(self, match other.as_f64() {
-            Some(n) => n,
-            None => unreachable!(),
-        })
+        eq_f64(
+            self,
+            match other.as_f64() {
+                Some(n) => n,
+                None => unreachable!(),
+            },
+        )
     }
 }
 
@@ -120,18 +123,20 @@ impl PartialEq<VariableValue> for VariableValue {
         match (self, other) {
             (VariableValue::Integer(n), VariableValue::Integer(m)) => n == m,
             (VariableValue::Float(n), VariableValue::Float(m)) => n == m,
-            (VariableValue::Integer(n), VariableValue::Float(m)) => n
-                .as_i64()
-                .map_or(false, |n| n as f64 == match m.as_f64() {
-                    Some(m) => m,
-                    None => unreachable!(),
-                }),
-            (VariableValue::Float(n), VariableValue::Integer(m)) => m
-                .as_i64()
-                .map_or(false, |m| m as f64 == match n.as_f64() {
-                    Some(n) => n,
-                    None => unreachable!(),
-                }),
+            (VariableValue::Integer(n), VariableValue::Float(m)) => n.as_i64().map_or(false, |n| {
+                n as f64
+                    == match m.as_f64() {
+                        Some(m) => m,
+                        None => unreachable!(),
+                    }
+            }),
+            (VariableValue::Float(n), VariableValue::Integer(m)) => m.as_i64().map_or(false, |m| {
+                m as f64
+                    == match n.as_f64() {
+                        Some(n) => n,
+                        None => unreachable!(),
+                    }
+            }),
             (VariableValue::Bool(n), VariableValue::Bool(m)) => n == m,
             (VariableValue::String(n), VariableValue::String(m)) => n == m,
             (VariableValue::List(list1), VariableValue::List(list2)) => list1 == list2,

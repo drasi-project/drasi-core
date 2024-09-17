@@ -52,10 +52,10 @@ impl AggregatingFunction for Avg {
         let (sum, count) = match accumulator {
             Accumulator::Value(ValueAccumulator::Avg { sum, count }) => (sum, count),
             _ => {
-            return Err(FunctionError {
-                function_name: "Avg".to_string(),
-                error: FunctionEvaluationError::CorruptData,
-            })
+                return Err(FunctionError {
+                    function_name: "Avg".to_string(),
+                    error: FunctionEvaluationError::CorruptData,
+                })
             }
         };
 
@@ -237,10 +237,10 @@ impl AggregatingFunction for Avg {
         let (sum, count) = match accumulator {
             Accumulator::Value(ValueAccumulator::Avg { sum, count }) => (sum, count),
             _ => {
-            return Err(FunctionError {
-                function_name: "Avg".to_string(),
-                error: FunctionEvaluationError::CorruptData,
-            })
+                return Err(FunctionError {
+                    function_name: "Avg".to_string(),
+                    error: FunctionEvaluationError::CorruptData,
+                })
             }
         };
 

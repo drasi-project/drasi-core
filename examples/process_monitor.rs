@@ -59,11 +59,10 @@ async fn process_change(query: &ContinuousQuery, change: SourceChange) {
 
 fn sync_data(sys: &mut System) -> Vec<SourceChange> {
     sys.refresh_processes();
-    let now = match std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH) {
-            Ok(n) => n.as_millis() as u64,
-            Err(_) => 0,
-        };
+    let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(n) => n.as_millis() as u64,
+        Err(_) => 0,
+    };
     let result = sys
         .processes()
         .iter()

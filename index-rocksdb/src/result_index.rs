@@ -179,7 +179,7 @@ impl LazySortedSetStore for RocksDbResultIndex {
         let db = self.db.clone();
 
         let task = task::spawn_blocking(move || {
-            let set_cf = db.cf_handle(SETS_CF).expect("sorted-sets cf not found");;
+            let set_cf = db.cf_handle(SETS_CF).expect("sorted-sets cf not found");
             let prefix = set_id.to_be_bytes();
 
             match value {

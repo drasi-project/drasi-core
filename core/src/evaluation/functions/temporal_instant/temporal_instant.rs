@@ -44,7 +44,7 @@ impl ScalarFunction for Date {
         match &args[0] {
             VariableValue::String(s) => {
                 let date_str = s.as_str();
-                
+
                 match parse_date_string(date_str).await {
                     Ok(result_date) => Ok(VariableValue::Date(result_date)),
                     Err(e) => Err(FunctionError {
@@ -2216,10 +2216,7 @@ async fn parse_zoned_time_input(input: &str) -> Result<ZonedTime, FunctionEvalua
     let contains_frac = input.contains('.');
     let is_utc = input.contains('Z');
 
-    let time_string = match input_string
-        .split(['Z', '+', '-'])
-        .next()
-    {
+    let time_string = match input_string.split(['Z', '+', '-']).next() {
         Some(time) => time,
         None => {
             return Err(FunctionEvaluationError::InvalidFormat {
@@ -2327,10 +2324,7 @@ async fn parse_zoned_date_time_input(
     };
     let timezone_string = timezone_part.as_str();
 
-    let time_string = match timezone_string
-        .split(['[', 'Z', '+', '-'])
-        .next()
-    {
+    let time_string = match timezone_string.split(['[', 'Z', '+', '-']).next() {
         Some(time) => time,
         None => {
             return Err(FunctionEvaluationError::InvalidFormat {
