@@ -45,6 +45,7 @@ pub struct ContinuousQuery {
 }
 
 impl ContinuousQuery {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         query: Arc<Query>,
         match_path: Arc<MatchPath>,
@@ -205,31 +206,28 @@ impl ContinuousQuery {
                 result.anchor_element = Some(element);
             }
             SourceChange::Delete { metadata } => {
-                match self.element_index.get_element(&metadata.reference).await? {
-                    Some(element) => {
-                        let prev_timestamp = element.get_effective_from();
-                        let before_clock =
-                            Arc::new(InstantQueryClock::new(prev_timestamp, clock.get_realtime()));
-                        let solutions = self
-                            .resolve_solutions(
-                                base_variables,
-                                element.clone(),
-                                before_clock.clone(),
-                                false,
-                            )
-                            .await?;
-                        for (signature, solution) in solutions {
-                            before_change_solutions.insert(signature, solution);
-                        }
-                        result.before_clock = Some(before_clock);
-                        result.before_anchor_element = Some(element);
-
-                        match self.element_index.delete_element(&metadata.reference).await {
-                            Ok(_) => {}
-                            Err(e) => return Err(EvaluationError::from(e)),
-                        }
+                if let Some(element) = self.element_index.get_element(&metadata.reference).await? {
+                    let prev_timestamp = element.get_effective_from();
+                    let before_clock =
+                        Arc::new(InstantQueryClock::new(prev_timestamp, clock.get_realtime()));
+                    let solutions = self
+                        .resolve_solutions(
+                            base_variables,
+                            element.clone(),
+                            before_clock.clone(),
+                            false,
+                        )
+                        .await?;
+                    for (signature, solution) in solutions {
+                        before_change_solutions.insert(signature, solution);
                     }
-                    None => {}
+                    result.before_clock = Some(before_clock);
+                    result.before_anchor_element = Some(element);
+
+                    match self.element_index.delete_element(&metadata.reference).await {
+                        Ok(_) => {}
+                        Err(e) => return Err(EvaluationError::from(e)),
+                    }
                 }
             }
             SourceChange::Future { future_ref } => {
@@ -414,8 +412,7 @@ impl ContinuousQuery {
         change_context: &ChangeContext,
     ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
         let mut result = Vec::new();
-        let mut contexts = Vec::new();
-        contexts.push((part_context, change_context.clone()));
+        let mut contexts = vec![(part_context, change_context.clone())];
 
         let mut part_num = 0;
 

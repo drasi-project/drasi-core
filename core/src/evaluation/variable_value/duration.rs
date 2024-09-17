@@ -3,7 +3,7 @@ use core::fmt::{self, Display};
 use std::hash::Hash;
 use std::ops;
 
-#[derive(Clone, Eq, Hash)]
+#[derive(Clone, Eq, Hash, PartialEq)]
 pub struct Duration {
     duration: ChronoDuration,
     year: i64,
@@ -43,20 +43,6 @@ impl ops::Sub<Duration> for Duration {
     }
 }
 
-impl PartialEq for Duration {
-    fn eq(&self, other: &Self) -> bool {
-        match (
-            self.duration,
-            other.duration,
-            self.year,
-            other.year,
-            self.month,
-            other.month,
-        ) {
-            (a, b, c, d, e, f) => a == b && c == d && e == f,
-        }
-    }
-}
 
 impl Duration {
     pub fn new(duration: ChronoDuration, year: i64, month: i64) -> Self {

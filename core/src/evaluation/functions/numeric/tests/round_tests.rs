@@ -191,6 +191,7 @@ async fn round_positive_float_down() {
     assert_eq!(result, 1_f64);
 }
 
+#[allow(clippy::approx_constant)]
 #[tokio::test]
 async fn round_positive_float_with_precision() {
     let round = Round {};
@@ -199,7 +200,7 @@ async fn round_positive_float_with_precision() {
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
     let args = vec![
-        VariableValue::Float(Float::from_f64(3.1415926).unwrap()),
+        VariableValue::Float(Float::from_f64(std::f64::consts::PI).unwrap()),
         VariableValue::Integer(Integer::from(3)),
     ];
 

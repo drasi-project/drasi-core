@@ -82,7 +82,7 @@ pub enum ResultKey {
 }
 
 impl ResultKey {
-    pub fn groupby_from_variables(keys: &Vec<String>, variables: &QueryVariables) -> ResultKey {
+    pub fn groupby_from_variables(keys: &[String], variables: &QueryVariables) -> ResultKey {
         let mut grouping_keys = Vec::new();
         for key in keys.iter() {
             grouping_keys.push(

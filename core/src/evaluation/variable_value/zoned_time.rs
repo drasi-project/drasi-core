@@ -2,19 +2,19 @@ use chrono::{FixedOffset, NaiveTime};
 use core::fmt::{self, Display};
 use std::hash::Hash;
 
-#[derive(Clone, Eq, Hash, Copy)]
+#[derive(Clone, Eq, PartialEq, Hash, Copy)]
 pub struct ZonedTime {
     time: NaiveTime,
     offset: FixedOffset,
 }
 
-impl PartialEq for ZonedTime {
-    fn eq(&self, other: &Self) -> bool {
-        match (self.time, other.time, self.offset, other.offset) {
-            (a, b, c, d) => a == b && c == d,
-        }
-    }
-}
+// impl Eq for ZonedTime {
+//     fn eq(&self, other: &Self) -> bool {
+//         match (self.time, other.time, self.offset, other.offset) {
+//             (a, b, c, d) => a == b && c == d,
+//         }
+//     }
+// }
 
 impl core::fmt::Debug for ZonedTime {
     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {

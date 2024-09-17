@@ -89,7 +89,7 @@ impl QueryBuilder {
     pub fn with_source_pipeline(
         mut self,
         source: impl Into<String>,
-        pipeline: &Vec<String>,
+        pipeline: &[String],
     ) -> Self {
         let pipeline = pipeline.iter().map(|s| Arc::from(s.as_str())).collect();
         self.source_pipelines

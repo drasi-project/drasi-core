@@ -60,21 +60,18 @@ impl FutureQueue for InMemoryFutureQueue {
                 }
             }
             PushType::Overwrite => {
-                match data.map.remove(&(position_in_query, group_signature)) {
-                    Some(map) => {
-                        for (due_time, (original_time, element_ref)) in map {
-                            data.queue.remove(&(
-                                position_in_query,
-                                FutureElementRef {
-                                    element_ref: element_ref.clone(),
-                                    original_time,
-                                    due_time,
-                                    group_signature,
-                                },
-                            ));
-                        }
+                if let Some(map) = data.map.remove(&(position_in_query, group_signature)) {
+                    for (due_time, (original_time, element_ref)) in map {
+                        data.queue.remove(&(
+                            position_in_query,
+                            FutureElementRef {
+                                element_ref: element_ref.clone(),
+                                original_time,
+                                due_time,
+                                group_signature,
+                            },
+                        ));
                     }
-                    None => {}
                 };
 
                 true
