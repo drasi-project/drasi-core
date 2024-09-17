@@ -16,6 +16,12 @@ pub struct Reduce {
     evaluator: Lazy<ExpressionEvaluator>,
 }
 
+impl Default for Reduce {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Reduce {
     pub fn new() -> Self {
         Reduce {

@@ -451,7 +451,7 @@ fn test_list_construction() {
         //  testing WITH
         query.parts[0].return_clause,
         ProjectionClause::Item(vec![
-            UnaryExpression::ident("foo".into()),
+            UnaryExpression::ident("foo"),
             UnaryExpression::alias(
                 ListExpression::list(vec![
                     UnaryExpression::literal(Literal::Integer(5)),
@@ -488,7 +488,7 @@ fn test_list_construction_with_comments_in_between_parts() {
         //  testing WITH
         query.parts[0].return_clause,
         ProjectionClause::Item(vec![
-            UnaryExpression::ident("foo".into()),
+            UnaryExpression::ident("foo"),
             UnaryExpression::alias(
                 ListExpression::list(vec![
                     UnaryExpression::literal(Literal::Integer(5)),
@@ -522,7 +522,7 @@ fn test_list_construction_with_comments() {
         //  testing WITH
         query.parts[0].return_clause,
         ProjectionClause::Item(vec![
-            UnaryExpression::ident("foo".into()),
+            UnaryExpression::ident("foo"),
             UnaryExpression::alias(
                 ListExpression::list(vec![
                     UnaryExpression::literal(Literal::Integer(5)),
@@ -608,11 +608,11 @@ fn test_reflex_query_with_comment() {
     assert_eq!(
         query.parts[0].return_clause,
         ProjectionClause::Item(vec![
-            UnaryExpression::ident("val".into()),
+            UnaryExpression::ident("val"),
             UnaryExpression::alias(
                 FunctionExpression::function(
                     "elementId".into(),
-                    vec![UnaryExpression::ident("equip".into())],
+                    vec![UnaryExpression::ident("equip")],
                     195
                 ),
                 "freezerId".into()
@@ -660,7 +660,7 @@ fn where_follows_with_no_alias() {
 
     assert_eq!(
         query.parts[0].return_clause,
-        ProjectionClause::Item(vec![UnaryExpression::ident("a".into())])
+        ProjectionClause::Item(vec![UnaryExpression::ident("a")])
     );
 
     assert_eq!(

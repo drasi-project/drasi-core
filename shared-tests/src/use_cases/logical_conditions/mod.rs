@@ -30,6 +30,7 @@ async fn bootstrap_query(query: &ContinuousQuery) {
     }
 }
 
+#[allow(clippy::print_stdout)]
 pub async fn logical_conditions(config: &(impl QueryTestConfig + Send)) {
     let logical_conditions_query = {
         let mut builder = QueryBuilder::new(queries::logical_conditions_query())

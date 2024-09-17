@@ -38,6 +38,7 @@ async fn main() {
     }
 }
 
+#[allow(clippy::print_stdout)]
 async fn process_change(query: &ContinuousQuery, change: SourceChange) {
     let result = query.process_source_change(change).await.unwrap();
     for context in result {

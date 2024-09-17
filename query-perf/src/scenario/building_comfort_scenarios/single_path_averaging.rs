@@ -62,9 +62,9 @@ impl SinglePathAveragingProjectionScenario {
         let mut model = BuildingComfortModel::new(current_time_ms);
 
         // Add the initial set of buildings to the model.
-        for idx in 0..building_sizes.len() {
+        for building in building_sizes {
             // get the building size at the current index
-            let (_, floor_count, rooms_per_floor) = building_sizes[idx];
+            let (_, floor_count, rooms_per_floor) = building;
             // add the building to the model
             model.add_building_hierarchy(
                 SCENARIO_SOURCE_ID.to_string(),

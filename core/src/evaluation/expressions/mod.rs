@@ -1561,12 +1561,12 @@ impl ExpressionEvaluator {
                     scalar
                         .call(context, expression, values)
                         .await
-                        .map_err(|e| EvaluationError::FunctionError(e))?
+                        .map_err(EvaluationError::FunctionError)?
                 }
                 Function::LazyScalar(scalar) => scalar
                     .call(context, expression, &expression.args)
                     .await
-                    .map_err(|e| EvaluationError::FunctionError(e))?,
+                    .map_err(EvaluationError::FunctionError)?,
                 Function::Aggregating(aggregate) => {
                     let mut values = Vec::new();
                     for arg in &expression.args {
@@ -1613,15 +1613,15 @@ impl ExpressionEvaluator {
                         SideEffects::Apply => aggregate
                             .apply(context, values, &mut accumulator)
                             .await
-                            .map_err(|e| EvaluationError::FunctionError(e))?,
+                            .map_err(EvaluationError::FunctionError)?,
                         SideEffects::RevertForUpdate | SideEffects::RevertForDelete => aggregate
                             .revert(context, values, &mut accumulator)
                             .await
-                            .map_err(|e| EvaluationError::FunctionError(e))?,
+                            .map_err(EvaluationError::FunctionError)?,
                         SideEffects::Snapshot => aggregate
                             .snapshot(context, values, &accumulator)
                             .await
-                            .map_err(|e| EvaluationError::FunctionError(e))?,
+                            .map_err(EvaluationError::FunctionError)?,
                     };
 
                     //println!("{:?} {}{} : {:?}", context.get_side_effects(), expression.name, expression.position_in_query, result);
@@ -2148,14 +2148,8 @@ async fn get_duration_property(duration_struct: DurationStruct, property: String
         "minutes" => Some(duration.num_minutes()),
         "seconds" => Some(duration.num_seconds()),
         "milliseconds" => Some(duration.num_milliseconds()),
-        "microseconds" => Some(match duration.num_microseconds() {
-            Some(micros) => micros,
-            None => 0,
-        }),
-        "nanoseconds" => Some(match duration.num_nanoseconds() {
-            Some(nanos) => nanos,
-            None => 0,
-        }),
+        "microseconds" => Some(duration.num_microseconds().unwrap_or_default()),
+        "nanoseconds" => Some(duration.num_nanoseconds().unwrap_or_default()),
         "quartersOfYear" => {
             let quarters = month / 3 + 1;
             Some(quarters)
@@ -2194,17 +2188,11 @@ async fn get_duration_property(duration_struct: DurationStruct, property: String
             Some(millis)
         }
         "microsecondsOfSecond" => {
-            let micros = match duration.num_microseconds() {
-                Some(micros) => micros,
-                None => 0,
-            } % 1000000;
+            let micros = duration.num_microseconds().unwrap_or_default() % 1000000;
             Some(micros)
         }
         "nanosecondsOfSecond" => {
-            let nanos = match duration.num_nanoseconds() {
-                Some(nanos) => nanos,
-                None => 0,
-            } % 1000000000;
+            let nanos = duration.num_nanoseconds().unwrap_or_default() % 1000000000;
             Some(nanos)
         }
         _ => None,

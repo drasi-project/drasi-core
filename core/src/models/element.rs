@@ -13,7 +13,7 @@ pub struct ElementReference {
     pub element_id: Arc<str>,
 }
 
-impl<'a> ElementReference {
+impl ElementReference {
     pub fn new(source_id: &str, element_id: &str) -> Self {
         ElementReference {
             source_id: Arc::from(source_id),

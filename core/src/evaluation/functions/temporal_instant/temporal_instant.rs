@@ -35,7 +35,7 @@ impl ScalarFunction for Date {
                 error: FunctionEvaluationError::InvalidArgumentCount,
             });
         }
-        if args.len() == 0 {
+        if args.is_empty() {
             // current date
             let local = Local::now();
             let date = local.date_naive();
@@ -44,14 +44,14 @@ impl ScalarFunction for Date {
         match &args[0] {
             VariableValue::String(s) => {
                 let date_str = s.as_str();
-                let date = match parse_date_string(date_str).await {
+                
+                match parse_date_string(date_str).await {
                     Ok(result_date) => Ok(VariableValue::Date(result_date)),
                     Err(e) => Err(FunctionError {
                         function_name: expression.name.to_string(),
                         error: e,
                     }),
-                };
-                date
+                }
             }
             VariableValue::Object(o) => {
                 let valid_keys: HashSet<String> = [
@@ -113,7 +113,7 @@ impl ScalarFunction for LocalTime {
                 error: FunctionEvaluationError::InvalidArgumentCount,
             });
         }
-        if args.len() == 0 {
+        if args.is_empty() {
             let local = Local::now().time();
             return Ok(VariableValue::LocalTime(local));
         }
@@ -189,7 +189,7 @@ impl ScalarFunction for LocalDateTime {
                 error: FunctionEvaluationError::InvalidArgumentCount,
             });
         }
-        if args.len() == 0 {
+        if args.is_empty() {
             // current datetime
             let local = Local::now();
             let datetime = local.naive_local();
@@ -352,7 +352,7 @@ impl ScalarFunction for Time {
                 error: FunctionEvaluationError::InvalidArgumentCount,
             });
         }
-        if args.len() == 0 {
+        if args.is_empty() {
             let local = Local::now().time();
             let timezone = *temporal_constants::UTC_FIXED_OFFSET;
             return Ok(VariableValue::ZonedTime(ZonedTime::new(local, timezone)));
@@ -521,7 +521,7 @@ impl ScalarFunction for DateTime {
             });
         }
 
-        if args.len() == 0 {
+        if args.is_empty() {
             let local = Local::now();
             let datetime = local.with_timezone(&*temporal_constants::UTC_FIXED_OFFSET);
             return Ok(VariableValue::ZonedDateTime(ZonedDateTime::new(
@@ -2217,7 +2217,7 @@ async fn parse_zoned_time_input(input: &str) -> Result<ZonedTime, FunctionEvalua
     let is_utc = input.contains('Z');
 
     let time_string = match input_string
-        .split(|c| c == 'Z' || c == '+' || c == '-')
+        .split(['Z', '+', '-'])
         .next()
     {
         Some(time) => time,
@@ -2328,7 +2328,7 @@ async fn parse_zoned_date_time_input(
     let timezone_string = timezone_part.as_str();
 
     let time_string = match timezone_string
-        .split(|c| c == '[' || c == 'Z' || c == '+' || c == '-')
+        .split(['[', 'Z', '+', '-'])
         .next()
     {
         Some(time) => time,

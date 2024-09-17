@@ -625,7 +625,7 @@ impl ScalarFunction for Round {
                                             error: FunctionEvaluationError::OverflowError,
                                         })
                                     }
-                                } > std::f64::MAX / multiplier
+                                } > f64::MAX / multiplier
                                 {
                                     return Ok(VariableValue::Float(n.clone()));
                                 }

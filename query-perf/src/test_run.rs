@@ -62,6 +62,7 @@ pub struct TestRunConfig {
 }
 
 impl TestRunConfig {
+    #[allow(clippy::print_stdout)]
     pub fn new(args: TestRunArgs) -> TestRunConfig {
         let scenario = args.scenario;
 

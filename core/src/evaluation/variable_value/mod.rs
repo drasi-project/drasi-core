@@ -17,6 +17,7 @@ use zoned_time::ZonedTime;
 
 use crate::models::{Element, ElementMetadata, ElementReference};
 
+#[allow(clippy::derived_hash_with_manual_eq)]
 #[derive(Clone, Hash, Eq, Default)]
 pub enum VariableValue {
     #[default]
@@ -154,11 +155,7 @@ impl VariableValue {
     }
 
     pub fn is_number(&self) -> bool {
-        match *self {
-            VariableValue::Integer(_) => true,
-            VariableValue::Float(_) => true,
-            _ => false,
-        }
+        matches!(*self, VariableValue::Integer(_) | VariableValue::Float(_))
     }
 
     pub fn is_i64(&self) -> bool {

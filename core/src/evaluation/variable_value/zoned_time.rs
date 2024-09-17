@@ -24,9 +24,8 @@ impl core::fmt::Debug for ZonedTime {
 
 impl PartialEq<NaiveTime> for ZonedTime {
     fn eq(&self, other: &NaiveTime) -> bool {
-        match (self.time, *other) {
-            (a, b) => a == b,
-        }
+        let (a, b) = (self.time, *other);
+        a == b
     }
 }
 

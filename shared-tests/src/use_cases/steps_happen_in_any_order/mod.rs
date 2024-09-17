@@ -30,6 +30,7 @@ async fn bootstrap_query(query: &ContinuousQuery) {
     }
 }
 
+#[allow(clippy::print_stdout)]
 pub async fn steps_happen_in_any_order(config: &(impl QueryTestConfig + Send)) {
     let steps_happen_in_any_order_query = {
         let mut builder = QueryBuilder::new(queries::steps_happen_in_any_order_query())

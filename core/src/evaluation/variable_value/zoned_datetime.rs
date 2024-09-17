@@ -3,7 +3,7 @@ use core::fmt::{self, Display};
 use serde::{Deserialize, Serialize};
 use std::hash::Hash;
 
-#[derive(Clone, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct ZonedDateTime {
     datetime: DateTime<FixedOffset>,
     timezone: Option<String>, // timezone is optional; depending on the input
@@ -29,25 +29,6 @@ impl ZonedDateTime {
 
     pub fn timezone(&self) -> &Option<String> {
         &self.timezone
-    }
-}
-
-impl PartialEq for ZonedDateTime {
-    fn eq(&self, other: &Self) -> bool {
-        match (
-            self.datetime,
-            other.datetime,
-            self.timezone.clone(),
-            other.timezone.clone(),
-        ) {
-            (a, b, c, d) => {
-                let utc_time1 = a.with_timezone(&chrono::Utc);
-                let utc_time2 = b.with_timezone(&chrono::Utc);
-                let timezone = c.unwrap_or_default();
-                let other_timezone = d.unwrap_or_default();
-                utc_time1 == utc_time2 && timezone == other_timezone
-            }
-        }
     }
 }
 

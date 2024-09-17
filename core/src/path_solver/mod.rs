@@ -351,7 +351,7 @@ fn merge_node_match<'b>(
                     out_slots: Vec::new(),
                 });
                 alias_map.insert(alias.clone(), slots.len() - 1);
-                Ok((slots.len() - 1).try_into().unwrap())
+                Ok(slots.len() - 1)
             }
         }
         None => {
@@ -360,7 +360,7 @@ fn merge_node_match<'b>(
                 in_slots: Vec::new(),
                 out_slots: Vec::new(),
             });
-            Ok((slots.len() - 1).try_into().unwrap())
+            Ok(slots.len() - 1)
         }
     }
 }
@@ -380,7 +380,7 @@ fn merge_relation_match<'b>(
                     in_slots: Vec::new(),
                     out_slots: Vec::new(),
                 });
-                alias_map.insert(alias.clone(), (slots.len() - 1));
+                alias_map.insert(alias.clone(), slots.len() - 1);
                 Ok(slots.len() - 1)
             }
         }

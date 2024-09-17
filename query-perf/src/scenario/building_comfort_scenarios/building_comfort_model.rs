@@ -188,7 +188,7 @@ impl Building {
         if let Location::Building(_) = location {
             Building {
                 effective_from,
-                source_id: source_id,
+                source_id,
                 location,
             }
         } else {
@@ -246,7 +246,7 @@ impl Floor {
         if let Location::Floor(_, _) = location {
             Floor {
                 effective_from,
-                source_id: source_id,
+                source_id,
                 location,
             }
         } else {
@@ -267,7 +267,7 @@ impl Floor {
     }
 
     fn name(&self) -> String {
-        format!("Floor {}", self.location.to_string())
+        format!("Floor {}", self.location)
     }
 
     fn to_domain_graph_node(&self) -> Node {
@@ -302,7 +302,7 @@ impl Room {
         // Validate that the provided Location is a Room Location or throw error
         if let Location::Room(_, _, _) = location {
             Room {
-                source_id: source_id,
+                source_id,
                 location,
                 effective_from: RwLock::new(effective_from),
                 temperature: RwLock::new(72.0),
@@ -336,7 +336,7 @@ impl Room {
     }
 
     fn name(&self) -> String {
-        format!("Room {}_", self.location.to_string())
+        format!("Room {}_", self.location)
     }
 
     fn element_reference(&self) -> ElementReference {

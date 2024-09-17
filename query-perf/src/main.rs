@@ -19,6 +19,7 @@ mod models;
 mod scenario;
 mod test_run;
 
+#[allow(clippy::print_stdout)]
 #[tokio::main]
 async fn main() {
     let args = TestRunArgs::parse();
@@ -46,8 +47,8 @@ async fn main() {
     for scenario in scenarios {
         let mut result: TestRunResult = TestRunResult::new(
             scenario.get_scenario_config().name.clone(),
-            test_run_config.element_index_type.clone(),
-            test_run_config.result_index_type.clone(),
+            test_run_config.element_index_type,
+            test_run_config.result_index_type,
         );
 
         let scenario_config = scenario.get_scenario_config();
@@ -57,7 +58,7 @@ async fn main() {
         println!(" - Scenario Config: \n{:?}\n", scenario_config);
         println!(" - Initializing Scenario...");
 
-        let query_id = format!("test-{}", Uuid::new_v4().to_string());
+        let query_id = format!("test-{}", Uuid::new_v4());
 
         let mut builder = QueryBuilder::new(&scenario_config.query);
 
