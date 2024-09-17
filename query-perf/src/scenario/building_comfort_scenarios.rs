@@ -176,6 +176,7 @@ impl RoomPropertySourceChangeGenerator {
     }
 }
 
+#[allow(clippy::unwrap_used)]
 impl SourceChangeGenerator for RoomPropertySourceChangeGenerator {
     fn generate_change(&mut self) -> Option<SourceChange> {
         if self.state.iterations_complete >= self.config.iterations {

@@ -29,11 +29,13 @@ impl RocksDbQueryConfig {
         RocksDbQueryConfig { url }
     }
 
+    #[allow(clippy::unwrap_used)]
     pub fn build_future_queue(&self, query_id: &str) -> RocksDbFutureQueue {
         RocksDbFutureQueue::new(query_id, &self.url).unwrap()
     }
 }
 
+#[allow(clippy::unwrap_used)]
 #[async_trait]
 impl QueryTestConfig for RocksDbQueryConfig {
     async fn config_query(&self, builder: QueryBuilder) -> QueryBuilder {

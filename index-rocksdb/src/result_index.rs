@@ -82,7 +82,7 @@ impl AccumulatorIndex for RocksDbResultIndex {
         let set_id = get_hash_key(owner, key);
 
         let task = task::spawn_blocking(move || {
-            let values_cf = db.cf_handle(VALUES_CF).unwrap();
+            let values_cf = db.cf_handle(VALUES_CF).expect("values cf not found");
             match db.get_cf(&values_cf, set_id.to_be_bytes()) {
                 Ok(Some(v)) => {
                     let value = match StoredValueAccumulatorContainer::decode(v.as_slice()) {
@@ -117,7 +117,7 @@ impl AccumulatorIndex for RocksDbResultIndex {
         let set_id = get_hash_key(&owner, &key);
 
         let task = task::spawn_blocking(move || {
-            let values_cf = db.cf_handle(VALUES_CF).unwrap();
+            let values_cf = db.cf_handle(VALUES_CF).expect("values cf not found");
             match value {
                 None => match db.delete_cf(&values_cf, set_id.to_be_bytes()) {
                     Ok(_) => Ok(()),
@@ -179,7 +179,7 @@ impl LazySortedSetStore for RocksDbResultIndex {
         let db = self.db.clone();
 
         let task = task::spawn_blocking(move || {
-            let set_cf = db.cf_handle(SETS_CF).unwrap();
+            let set_cf = db.cf_handle(SETS_CF).expect("sorted-sets cf not found");;
             let prefix = set_id.to_be_bytes();
 
             match value {
@@ -247,7 +247,7 @@ impl LazySortedSetStore for RocksDbResultIndex {
     ) -> Result<isize, IndexError> {
         let db = self.db.clone();
         let task = task::spawn_blocking(move || {
-            let set_cf = db.cf_handle(SETS_CF).unwrap();
+            let set_cf = db.cf_handle(SETS_CF).expect("sorted-sets cf not found");
             let key = encode_set_value_key(set_id, value);
             match db.get_cf(&set_cf, key) {
                 Ok(Some(v)) => decode_count(&v),
@@ -272,7 +272,7 @@ impl LazySortedSetStore for RocksDbResultIndex {
         let db = self.db.clone();
 
         let task = task::spawn_blocking(move || {
-            let set_cf = db.cf_handle(SETS_CF).unwrap();
+            let set_cf = db.cf_handle(SETS_CF).expect("sorted-sets cf not found");
             let key = encode_set_value_key(set_id, value);
             match db.merge_cf(&set_cf, key, encode_count(delta)) {
                 Ok(_) => Ok(()),
@@ -297,7 +297,7 @@ impl ResultSequenceCounter for RocksDbResultIndex {
         let db = self.db.clone();
         let source_change_id = source_change_id.to_string();
         let task = task::spawn_blocking(move || {
-            let metadata_cf = db.cf_handle(METADATA_CF).unwrap();
+            let metadata_cf = db.cf_handle(METADATA_CF).expect("metadata cf not found");
             let mut batch = rocksdb::WriteBatchWithTransaction::default();
             batch.put_cf(&metadata_cf, "sequence", sequence.to_be_bytes());
             batch.put_cf(
@@ -320,7 +320,7 @@ impl ResultSequenceCounter for RocksDbResultIndex {
     async fn get_sequence(&self) -> Result<ResultSequence, IndexError> {
         let db = self.db.clone();
         let task = task::spawn_blocking(move || {
-            let metadata_cf = db.cf_handle(METADATA_CF).unwrap();
+            let metadata_cf = db.cf_handle(METADATA_CF).expect("metadata cf not found");
             match db.get_cf(&metadata_cf, "sequence") {
                 Ok(Some(v)) => {
                     let seq_bytes: [u8; 8] = match v.try_into() {
@@ -399,7 +399,10 @@ fn decode_set_value_key(key: &[u8]) -> Result<OrderedFloat<f64>, IndexError> {
     if key.len() != 20 {
         return Err(IndexError::CorruptedData);
     }
-    let value_bytes: [u8; 12] = key[8..20].try_into().unwrap();
+    let value_bytes: [u8; 12] = match key[8..20].try_into() {
+        Ok(v) => v,
+        Err(_) => return Err(IndexError::CorruptedData),
+    };
     let val = decode_sortable_f64(&value_bytes);
 
     Ok(OrderedFloat(val))
@@ -407,7 +410,10 @@ fn decode_set_value_key(key: &[u8]) -> Result<OrderedFloat<f64>, IndexError> {
 
 fn encode_count(count: isize) -> Bytes {
     let mut buf = BytesMut::with_capacity(8);
-    (count as i64).encode(&mut buf).unwrap();
+    match (count as i64).encode(&mut buf) {
+        Ok(_) => (),
+        Err(_) => return Bytes::new(),
+    }
     buf.freeze()
 }
 

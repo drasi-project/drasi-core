@@ -91,7 +91,7 @@ impl Float {
 
 impl From<Float> for Number {
     fn from(val: Float) -> Self {
-        Number::from_f64(val.value).unwrap()
+        Number::from_f64(val.value).expect("a finite float")
     }
 }
 

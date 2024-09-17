@@ -580,20 +580,21 @@ impl ScalarFunction for Between {
             }
             (VariableValue::ZonedDateTime(start), VariableValue::Date(end)) => {
                 let start_datetime = start.datetime();
-                let end_datetime = match end
-                    .and_hms_opt(0, 0, 0)
-                    .unwrap()
-                    .and_local_timezone(*start_datetime.offset())
-                {
-                    LocalResult::Single(end_datetime) => end_datetime,
-                    _ => {
-                        return Err(FunctionError {
-                            function_name: expression.name.to_string(),
-                            error: FunctionEvaluationError::InvalidFormat {
-                                expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR
-                                    .to_string(),
-                            },
-                        })
+                let end_datetime = match end.and_hms_opt(0,0,0) {
+                    Some(end_datetime) => match end_datetime.and_local_timezone(*start_datetime.offset()) {
+                        LocalResult::Single(end_datetime) => end_datetime,
+                        _ => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::InvalidFormat {
+                                    expected: temporal_constants::INVALID_LOCAL_DATETIME_FORMAT_ERROR
+                                        .to_string(),
+                                },
+                            })
+                        }
+                    }
+                    None => {
+                        unreachable!()
                     }
                 };
                 let duration = end_datetime.signed_duration_since(start_datetime);

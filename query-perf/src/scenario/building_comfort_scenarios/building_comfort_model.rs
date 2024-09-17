@@ -27,6 +27,7 @@ pub enum Location {
     Room(usize, usize, usize),
 }
 
+#[allow(clippy::unwrap_used)]
 impl Location {
     // pub fn new_building(building_idx: usize) -> Location {
     //     Location::Building(building_idx)
@@ -297,6 +298,7 @@ struct Room {
     co2: RwLock<f32>,
 }
 
+#[allow(clippy::unwrap_used)]
 impl Room {
     fn new(effective_from: u64, source_id: String, location: Location) -> Room {
         // Validate that the provided Location is a Room Location or throw error
@@ -483,6 +485,7 @@ pub struct BuildingComfortModel {
     graph: RwLock<DomainModelGraph>,
 }
 
+#[allow(clippy::unwrap_used)]
 impl BuildingComfortModel {
     pub fn new(start_time_ms: u64) -> BuildingComfortModel {
         BuildingComfortModel {
@@ -687,6 +690,7 @@ pub struct BootstrapSourceChangeGenerator {
     graph_ids: GraphIds,
 }
 
+#[allow(clippy::unwrap_used)]
 impl BootstrapSourceChangeGenerator {
     pub fn new(model: Arc<BuildingComfortModel>) -> BootstrapSourceChangeGenerator {
         // Get all NodeIds and RelationIds from the DomainModelGraph calling get_graph_ids_by_filter()
@@ -706,6 +710,7 @@ impl BootstrapSourceChangeGenerator {
 // SourceChange::Insert. Once all the NodeIds have been removed from the node_ids Vec, the same process
 // is repeated for the relation_ids Vec. Once all the NodeIds and RelationIds have been removed from
 // their respective Vecs, None is returned to indicate that no more SourceChanges are available.
+#[allow(clippy::unwrap_used)]
 impl SourceChangeGenerator for BootstrapSourceChangeGenerator {
     fn generate_change(&mut self) -> Option<SourceChange> {
         // If there are any NodeIds left in the node_ids Vec, remove the first NodeId and return a

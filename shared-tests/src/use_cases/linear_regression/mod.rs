@@ -23,7 +23,7 @@ macro_rules! variablemap {
   }}
 }
 
-#[allow(clippy::print_stdout)]
+#[allow(clippy::print_stdout, clippy::unwrap_used)]
 pub async fn linear_gradient(config: &(impl QueryTestConfig + Send)) {
     let lg_query = {
         let mut builder = QueryBuilder::new(queries::gradient_query());

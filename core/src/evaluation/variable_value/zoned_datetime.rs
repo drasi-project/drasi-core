@@ -2,6 +2,9 @@ use chrono::{DateTime, FixedOffset, TimeZone};
 use core::fmt::{self, Display};
 use serde::{Deserialize, Serialize};
 use std::hash::Hash;
+use crate::evaluation::temporal_constants::{
+    self, UTC_FIXED_OFFSET,
+};
 
 #[derive(Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct ZonedDateTime {
@@ -15,7 +18,7 @@ impl ZonedDateTime {
     }
 
     pub fn from_epoch_millis(epoch_millis: u64) -> Self {
-        let offset = FixedOffset::east_opt(0).unwrap();
+        let offset = *UTC_FIXED_OFFSET;
         let datetime = offset.timestamp_millis_opt(epoch_millis as i64).unwrap();
         ZonedDateTime {
             datetime,

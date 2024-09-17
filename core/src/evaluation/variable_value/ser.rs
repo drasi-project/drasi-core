@@ -10,8 +10,14 @@ impl Serialize for VariableValue {
         match self {
             VariableValue::Null => serializer.serialize_unit(),
             VariableValue::Bool(v) => serializer.serialize_bool(*v),
-            VariableValue::Integer(v) => serializer.serialize_i64(v.as_i64().unwrap()),
-            VariableValue::Float(v) => serializer.serialize_f64(v.as_f64().unwrap()),
+            VariableValue::Integer(v) => serializer.serialize_i64(match v.as_i64() {
+                Some(v) => v,
+                None => return Err(serde::ser::Error::custom("Integer overflow")),
+            }),
+            VariableValue::Float(v) => serializer.serialize_f64(match v.as_f64() {
+                Some(v) => v,
+                None => return Err(serde::ser::Error::custom("Float overflow")),
+            }),
             VariableValue::String(s) => serializer.serialize_str(s),
             VariableValue::List(v) => v.serialize(serializer),
             VariableValue::Object(m) => {

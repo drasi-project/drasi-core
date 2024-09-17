@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 mod auto_future_queue_consumer;
 mod continuous_query;
 mod query_builder;

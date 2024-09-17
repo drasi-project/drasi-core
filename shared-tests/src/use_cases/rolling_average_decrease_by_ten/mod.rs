@@ -30,7 +30,7 @@ async fn bootstrap_query(query: &ContinuousQuery) {
     }
 }
 
-#[allow(clippy::print_stdout)]
+#[allow(clippy::print_stdout, clippy::unwrap_used)]
 pub async fn rolling_average_decrease_by_ten(config: &(impl QueryTestConfig + Send)) {
     let rolling_average_decrease_by_ten_query = {
         let mut builder = QueryBuilder::new(queries::rolling_average_decrease_by_ten_query())

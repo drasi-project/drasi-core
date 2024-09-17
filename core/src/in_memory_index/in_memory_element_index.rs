@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     hash::{Hash, Hasher},

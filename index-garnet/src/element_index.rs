@@ -321,6 +321,7 @@ impl GarnetElementIndex {
         Ok(())
     }
 
+    #[allow(clippy::unwrap_used)]
     #[async_recursion]
     async fn set_element_internal(
         &self,

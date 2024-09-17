@@ -136,6 +136,7 @@ impl SourceMiddleware for Map {
             #[allow(unused_assignments)]
             let mut del_element_binding = Option::<Element>::None;
 
+            #[allow(clippy::unwrap_used)]
             let element = match &source_change {
                 SourceChange::Insert { element } => element,
                 SourceChange::Update { element } => element,

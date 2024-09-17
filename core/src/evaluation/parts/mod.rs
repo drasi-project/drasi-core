@@ -603,7 +603,7 @@ impl QueryPartEvaluator {
     }
 
     /// Reconciles values crossing from one group to another
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::unwrap_used)]
     async fn reconile_crossing_agregate(
         &self,
         part: &QueryPart,

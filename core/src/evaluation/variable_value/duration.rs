@@ -17,6 +17,7 @@ pub struct Duration {
 
 impl ops::Add<Duration> for Duration {
     type Output = Duration;
+    #[allow(clippy::unwrap_used)]
     fn add(self, duration2: Duration) -> Duration {
         let new_duration = self.duration().checked_add(duration2.duration()).unwrap();
         let mut year = self.year() + duration2.year();
@@ -31,6 +32,7 @@ impl ops::Add<Duration> for Duration {
 
 impl ops::Sub<Duration> for Duration {
     type Output = Duration;
+    #[allow(clippy::unwrap_used)]
     fn sub(self, duration2: Duration) -> Duration {
         let new_duration = self.duration().checked_sub(duration2.duration()).unwrap();
         let mut year = self.year() - duration2.year();

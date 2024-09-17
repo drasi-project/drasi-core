@@ -109,6 +109,7 @@ impl FromRedisValue for StoredValueAccumulator {
     }
 }
 
+#[allow(clippy::unwrap_used)]
 impl FromRedisValue for StoredFutureElementRef {
     fn from_redis_value(v: &redis::Value) -> redis::RedisResult<Self> {
         match v {
@@ -134,6 +135,7 @@ impl ToRedisArgs for &StoredFutureElementRef {
     }
 }
 
+#[allow(clippy::unwrap_used)]
 impl FromRedisValue for StoredFutureElementRefWithContext {
     fn from_redis_value(v: &redis::Value) -> redis::RedisResult<Self> {
         match v {

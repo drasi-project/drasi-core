@@ -19,7 +19,7 @@ mod models;
 mod scenario;
 mod test_run;
 
-#[allow(clippy::print_stdout)]
+#[allow(clippy::print_stdout, clippy::unwrap_used)]
 #[tokio::main]
 async fn main() {
     let args = TestRunArgs::parse();

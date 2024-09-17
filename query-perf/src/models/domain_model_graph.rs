@@ -191,6 +191,7 @@ impl DomainModelGraph {
     }
 }
 
+#[allow(clippy::unwrap_used)]
 impl DomainModelGraph {
     pub fn add_node(&mut self, node: Node) -> Result<GraphChangeResult<Node>, GraphError> {
         let node_id = node.id.clone();

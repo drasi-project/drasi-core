@@ -8,7 +8,7 @@ use drasi_core::{
 };
 use serde_json::json;
 
-#[allow(clippy::print_stdout)]
+#[allow(clippy::print_stdout, clippy::unwrap_used)]
 #[tokio::main]
 async fn main() {
     let query_str = "

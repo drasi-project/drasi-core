@@ -24,7 +24,7 @@ macro_rules! variablemap {
   }}
 }
 
-#[allow(clippy::print_stdout)]
+#[allow(clippy::print_stdout, clippy::unwrap_used)]
 pub async fn overdue_invoice(config: &(impl QueryTestConfig + Send)) {
     let cq = {
         let mut builder = QueryBuilder::new(queries::list_overdue_query());
@@ -107,7 +107,7 @@ pub async fn overdue_invoice(config: &(impl QueryTestConfig + Send)) {
     }
 }
 
-#[allow(clippy::print_stdout)]
+#[allow(clippy::print_stdout, clippy::unwrap_used)]
 pub async fn overdue_count_persistent(config: &(impl QueryTestConfig + Send)) {
     let cq = {
         let mut builder = QueryBuilder::new(queries::count_overdue_greater_query());

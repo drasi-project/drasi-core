@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+#![allow(dead_code)]
 pub mod match_path;
 pub mod solution;
 

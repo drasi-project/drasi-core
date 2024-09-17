@@ -38,7 +38,7 @@ async fn main() {
     }
 }
 
-#[allow(clippy::print_stdout)]
+#[allow(clippy::print_stdout, clippy::unwrap_used)]
 async fn process_change(query: &ContinuousQuery, change: SourceChange) {
     let result = query.process_source_change(change).await.unwrap();
     for context in result {
@@ -59,10 +59,11 @@ async fn process_change(query: &ContinuousQuery, change: SourceChange) {
 
 fn sync_data(sys: &mut System) -> Vec<SourceChange> {
     sys.refresh_processes();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
+    let now = match std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH) {
+            Ok(n) => n.as_millis() as u64,
+            Err(_) => 0,
+        };
     let result = sys
         .processes()
         .iter()
