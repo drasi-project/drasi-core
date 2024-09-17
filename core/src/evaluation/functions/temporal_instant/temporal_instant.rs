@@ -859,8 +859,8 @@ async fn create_date_time_from_epoch(o: BTreeMap<String, VariableValue>) -> Opti
             Some(epoch_seconds) => epoch_seconds.as_i64().unwrap_or(0),
             None => 0,
         };
-        let datetime = match NaiveDateTime::from_timestamp_opt(epoch_seconds, nanoseconds as u32) {
-            Some(datetime) => datetime,
+        let datetime = match chrono::DateTime::from_timestamp(epoch_seconds, nanoseconds as u32) {
+            Some(datetime) => datetime.naive_local(),
             None => return None,
         };
         let zoned_datetime =

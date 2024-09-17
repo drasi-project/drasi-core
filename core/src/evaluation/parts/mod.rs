@@ -46,13 +46,7 @@ impl QueryPartEvaluator {
     ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
         // println!("Evaluating : {:#?}", context);
 
-        let is_return_aggreating = match &part.return_clause {
-            ProjectionClause::GroupBy {
-                grouping: _,
-                aggregates: _,
-            } => true,
-            _ => false,
-        };
+        let is_return_aggreating = matches!(&part.return_clause, ProjectionClause::GroupBy { grouping: _, aggregates: _ });
 
         match context {
             QueryPartEvaluationContext::Adding { after } => {
@@ -113,7 +107,7 @@ impl QueryPartEvaluator {
                 }
             }
             QueryPartEvaluationContext::Updating { before, after } => {
-                if &before == &after && !change_context.is_future_reprocess {
+                if before == after && !change_context.is_future_reprocess {
                     return Ok(vec![QueryPartEvaluationContext::Noop]);
                 };
 
@@ -609,6 +603,7 @@ impl QueryPartEvaluator {
     }
 
     /// Reconciles values crossing from one group to another
+    #[allow(clippy::too_many_arguments)]
     async fn reconile_crossing_agregate(
         &self,
         part: &QueryPart,

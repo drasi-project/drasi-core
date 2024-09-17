@@ -309,6 +309,7 @@ pub async fn not_reported(config: &(impl QueryTestConfig + Send)) {
     }
 }
 
+#[allow(clippy::print_stdout)]
 pub async fn percent_not_reported(config: &(impl QueryTestConfig + Send)) {
     let cq = {
         let mut builder = QueryBuilder::new(queries::percent_not_reported_query());

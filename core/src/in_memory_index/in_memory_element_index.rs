@@ -19,6 +19,7 @@ use crate::{
     path_solver::match_path::MatchPath,
 };
 
+#[allow(clippy::type_complexity)]
 pub struct InMemoryElementIndex {
     elements: Arc<RwLock<HashMap<ElementReference, Arc<Element>>>>,
 

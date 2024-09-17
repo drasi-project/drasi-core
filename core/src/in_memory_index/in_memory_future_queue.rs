@@ -103,21 +103,18 @@ impl FutureQueue for InMemoryFutureQueue {
         group_signature: u64,
     ) -> Result<(), IndexError> {
         let mut data = self.data.write().await;
-        match data.map.remove(&(position_in_query, group_signature)) {
-            Some(map) => {
-                for (due_time, (original_time, element_ref)) in map {
-                    data.queue.remove(&(
-                        position_in_query,
-                        FutureElementRef {
-                            element_ref: element_ref.clone(),
-                            original_time,
-                            due_time,
-                            group_signature,
-                        },
-                    ));
-                }
+        if let Some(map) = data.map.remove(&(position_in_query, group_signature)) {
+            for (due_time, (original_time, element_ref)) in map {
+                data.queue.remove(&(
+                    position_in_query,
+                    FutureElementRef {
+                        element_ref: element_ref.clone(),
+                        original_time,
+                        due_time,
+                        group_signature,
+                    },
+                ));
             }
-            None => {}
         };
         Ok(())
     }
@@ -128,14 +125,11 @@ impl FutureQueue for InMemoryFutureQueue {
             Some((key, due_time)) => {
                 let due_time = -due_time as u64;
                 let map_key = (key.0, key.1.group_signature);
-                match data.map.get_mut(&map_key) {
-                    Some(map) => {
-                        map.remove(&due_time);
-                        if map.is_empty() {
-                            data.map.remove(&map_key);
-                        }
+                if let Some(map) = data.map.get_mut(&map_key) {
+                    map.remove(&due_time);
+                    if map.is_empty() {
+                        data.map.remove(&map_key);
                     }
-                    None => {}
                 }
                 Ok(Some(key.1))
             }

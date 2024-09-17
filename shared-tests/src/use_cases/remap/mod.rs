@@ -22,6 +22,7 @@ macro_rules! variablemap {
   }}
 }
 
+#[allow(clippy::print_stdout)]
 pub async fn remap(config: &(impl QueryTestConfig + Send)) {
     let mut middleware_registry = MiddlewareTypeRegistry::new();
     middleware_registry.register(Arc::new(MapFactory::new()));

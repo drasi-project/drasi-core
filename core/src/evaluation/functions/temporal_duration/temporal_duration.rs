@@ -1003,79 +1003,77 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, FunctionEr
         };
 
         if let Some(cap) = re.captures(date_duration) {
-            for part in cap.iter().skip(1) {
-                if let Some(matched_value) = part {
-                    let matched_value = matched_value.as_str();
-                    if matched_value.contains('Y') {
-                        let substring = &matched_value[..(matched_value.len() - 1)];
-                        if let Ok(years) = substring.parse::<i64>() {
-                            duration_years = years;
-                        } else {
-                            return Err(FunctionError {
-                                function_name: "Duration".to_string(),
-                                error: FunctionEvaluationError::InvalidFormat {
-                                    expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR
-                                        .to_string(),
-                                },
-                            });
-                        }
+            for part in cap.iter().skip(1).flatten() {
+                let matched_value = part.as_str();
+                if matched_value.contains('Y') {
+                    let substring = &matched_value[..(matched_value.len() - 1)];
+                    if let Ok(years) = substring.parse::<i64>() {
+                        duration_years = years;
+                    } else {
+                        return Err(FunctionError {
+                            function_name: "Duration".to_string(),
+                            error: FunctionEvaluationError::InvalidFormat {
+                                expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR
+                                    .to_string(),
+                            },
+                        });
                     }
-                    if matched_value.contains('M') {
-                        let substring = &matched_value[..(matched_value.len() - 1)];
-                        if let Ok(months) = substring.parse::<i64>() {
-                            duration_months = months;
-                        } else {
-                            return Err(FunctionError {
-                                function_name: "Duration".to_string(),
-                                error: FunctionEvaluationError::InvalidFormat {
-                                    expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR
-                                        .to_string(),
-                                },
-                            });
-                        }
+                }
+                if matched_value.contains('M') {
+                    let substring = &matched_value[..(matched_value.len() - 1)];
+                    if let Ok(months) = substring.parse::<i64>() {
+                        duration_months = months;
+                    } else {
+                        return Err(FunctionError {
+                            function_name: "Duration".to_string(),
+                            error: FunctionEvaluationError::InvalidFormat {
+                                expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR
+                                    .to_string(),
+                            },
+                        });
                     }
-                    if matched_value.contains('W') {
-                        let substring = &matched_value[..(matched_value.len() - 1)];
-                        if let Ok(weeks) = substring.parse::<i64>() {
-                            duration_result += ChronoDuration::weeks(weeks);
-                        } else {
-                            return Err(FunctionError {
-                                function_name: "Duration".to_string(),
-                                error: FunctionEvaluationError::InvalidFormat {
-                                    expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR
-                                        .to_string(),
-                                },
-                            });
-                        }
+                }
+                if matched_value.contains('W') {
+                    let substring = &matched_value[..(matched_value.len() - 1)];
+                    if let Ok(weeks) = substring.parse::<i64>() {
+                        duration_result += ChronoDuration::weeks(weeks);
+                    } else {
+                        return Err(FunctionError {
+                            function_name: "Duration".to_string(),
+                            error: FunctionEvaluationError::InvalidFormat {
+                                expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR
+                                    .to_string(),
+                            },
+                        });
                     }
-                    if matched_value.contains('D') {
-                        let substring = &matched_value[..(matched_value.len() - 1)];
-                        if substring.contains('.') {
-                            if let Ok(days) = substring.parse::<f64>() {
-                                duration_result += ChronoDuration::nanoseconds(
-                                    (days * 86400000000000.0) as i64,
-                                );
-                            } else {
-                                return Err(FunctionError {
-                                    function_name: "Duration".to_string(),
-                                    error: FunctionEvaluationError::InvalidFormat {
-                                        expected:
-                                            temporal_constants::INVALID_DURATION_FORMAT_ERROR
-                                                .to_string(),
-                                    },
-                                });
-                            }
-                        } else if let Ok(days) = substring.parse::<i64>() {
-                            duration_result += ChronoDuration::days(days);
+                }
+                if matched_value.contains('D') {
+                    let substring = &matched_value[..(matched_value.len() - 1)];
+                    if substring.contains('.') {
+                        if let Ok(days) = substring.parse::<f64>() {
+                            duration_result += ChronoDuration::nanoseconds(
+                                (days * 86400000000000.0) as i64,
+                            );
                         } else {
                             return Err(FunctionError {
                                 function_name: "Duration".to_string(),
                                 error: FunctionEvaluationError::InvalidFormat {
-                                    expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR
-                                        .to_string(),
+                                    expected:
+                                        temporal_constants::INVALID_DURATION_FORMAT_ERROR
+                                            .to_string(),
                                 },
                             });
                         }
+                    } else if let Ok(days) = substring.parse::<i64>() {
+                        duration_result += ChronoDuration::days(days);
+                    } else {
+                        return Err(FunctionError {
+                            function_name: "Duration".to_string(),
+                            error: FunctionEvaluationError::InvalidFormat {
+                                expected: temporal_constants::INVALID_DURATION_FORMAT_ERROR
+                                    .to_string(),
+                            },
+                        });
                     }
                 }
             }

@@ -40,34 +40,22 @@ impl ClearByPattern for MultiplexedConnection {
                 redis::Value::Status(s) => {
                     cursor = s.clone();
                 }
-                redis::Value::Data(d) => match String::from_utf8(d.to_vec()) {
-                    Ok(s) => {
-                        cursor = s;
-                    }
-                    Err(_) => (),
+                redis::Value::Data(d) => if let Ok(s) = String::from_utf8(d.to_vec()) {
+                    cursor = s;
                 },
                 _ => (),
             }
 
-            match &result[1] {
-                redis::Value::Bulk(b) => {
-                    for k in b {
-                        match k {
-                            redis::Value::Data(d) => match String::from_utf8(d.to_vec()) {
-                                Ok(k) => {
-                                    match con2.del::<&str, ()>(remove_surrounding_quotes(&k)).await
-                                    {
-                                        Ok(_) => (),
-                                        Err(e) => return Err(IndexError::other(e)),
-                                    }
-                                }
-                                Err(_) => (),
-                            },
-                            _ => (),
+            if let redis::Value::Bulk(b) = &result[1] {
+                for k in b {
+                    if let redis::Value::Data(d) = k { if let Ok(k) = String::from_utf8(d.to_vec()) {
+                        match con2.del::<&str, ()>(remove_surrounding_quotes(&k)).await
+                        {
+                            Ok(_) => (),
+                            Err(e) => return Err(IndexError::other(e)),
                         }
-                    }
+                    } }
                 }
-                _ => (),
             }
 
             if cursor == "0" {

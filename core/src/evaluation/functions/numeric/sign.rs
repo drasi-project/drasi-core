@@ -34,12 +34,16 @@ impl ScalarFunction for Sign {
                         })
                     }
                 };
-                if f > 0 {
-                    Ok(VariableValue::Integer(Integer::from(1)))
-                } else if f < 0 {
-                    Ok(VariableValue::Integer(Integer::from(-1)))
-                } else {
-                    Ok(VariableValue::Integer(Integer::from(0)))
+                match f.partial_cmp(&0) {
+                    Some(std::cmp::Ordering::Greater) => Ok(VariableValue::Integer(Integer::from(1))),
+                    Some(std::cmp::Ordering::Less) => Ok(VariableValue::Integer(Integer::from(-1))),
+                    Some(std::cmp::Ordering::Equal) => Ok(VariableValue::Integer(Integer::from(0))),
+                    None => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
                 }
             }
             VariableValue::Float(n) => {

@@ -50,22 +50,15 @@ impl AggregatingFunction for Sum {
         }
 
         let accumulator = match accumulator {
-            Accumulator::Value(accumulator) => match accumulator {
-                super::ValueAccumulator::Sum { value } => value,
-                _ => {
-                    return Err(FunctionError {
-                        function_name: "Sum".to_string(),
-                        error: FunctionEvaluationError::CorruptData,
-                    })
-                }
-            },
+            Accumulator::Value(super::ValueAccumulator::Sum { value }) => value,
             _ => {
                 return Err(FunctionError {
                     function_name: "Sum".to_string(),
                     error: FunctionEvaluationError::CorruptData,
-                })
+                });
             }
         };
+        
 
         match &args[0] {
             VariableValue::Float(n) => {
@@ -145,20 +138,12 @@ impl AggregatingFunction for Sum {
             });
         }
         let accumulator = match accumulator {
-            Accumulator::Value(accumulator) => match accumulator {
-                super::ValueAccumulator::Sum { value } => value,
-                _ => {
-                    return Err(FunctionError {
-                        function_name: "Sum".to_string(),
-                        error: FunctionEvaluationError::CorruptData,
-                    })
-                }
-            },
+            Accumulator::Value(super::ValueAccumulator::Sum { value }) => value,
             _ => {
-                return Err(FunctionError {
-                    function_name: "Sum".to_string(),
-                    error: FunctionEvaluationError::CorruptData,
-                })
+            return Err(FunctionError {
+                function_name: "Sum".to_string(),
+                error: FunctionEvaluationError::CorruptData,
+            })
             }
         };
 
@@ -240,22 +225,15 @@ impl AggregatingFunction for Sum {
             });
         }
         let accumulator_value = match accumulator {
-            Accumulator::Value(accumulator) => match accumulator {
-                super::ValueAccumulator::Sum { value } => value,
-                _ => {
-                    return Err(FunctionError {
-                        function_name: "Sum".to_string(),
-                        error: FunctionEvaluationError::CorruptData,
-                    })
-                }
-            },
+            Accumulator::Value(super::ValueAccumulator::Sum { value }) => value,
             _ => {
                 return Err(FunctionError {
                     function_name: "Sum".to_string(),
                     error: FunctionEvaluationError::CorruptData,
-                })
+                });
             }
         };
+        
 
         match &args[0] {
             VariableValue::Float(_) => Ok(VariableValue::Float(

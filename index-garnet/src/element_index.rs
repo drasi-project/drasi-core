@@ -32,6 +32,7 @@ mod archive_index;
 /// ei:{query_id}:$in:{source_id}:{element_id}:{slot} -> [element_ref]   # Inverted index to inbound elements
 /// ei:{query_id}:$out:{source_id}:{element_id}:{slot} -> [element_ref]  # Inverted index to outbound elements
 /// ei:{query_id}:$partial:{join_label}:{field_value}:{node_label}:{property} -> [element_ref] # Partial join index to track source joins
+#[allow(clippy::type_complexity)]
 pub struct GarnetElementIndex {
     query_id: Arc<str>,
     key_formatter: Arc<KeyFormatter>,
@@ -93,17 +94,13 @@ impl GarnetElementIndex {
                                     let old_element =
                                         self.get_element_internal(&element_key).await?;
 
-                                    if let Some(old_element) = &old_element {
-                                        if let StoredElement::Node(old) = old_element {
-                                            if let Some(old_value) =
-                                                old.properties.get(&qjk.property)
-                                            {
+                                        if let Some(StoredElement::Node(old)) = &old_element {
+                                            if let Some(old_value) = old.properties.get(&qjk.property) {
                                                 if old_value == new_value {
                                                     continue;
                                                 }
                                             }
                                         }
-                                    }
 
                                     let pj_key = self.key_formatter.get_partial_join_key(
                                         &qj.id,
@@ -359,7 +356,7 @@ impl GarnetElementIndex {
             .hset(
                 &element_key,
                 "slots",
-                &new_slots.clone().into_bit_vec().to_bytes().to_redis_args(),
+                new_slots.clone().into_bit_vec().to_bytes().to_redis_args(),
             )
             .ignore();
 
@@ -466,11 +463,8 @@ impl GarnetElementIndex {
             }
         }
 
-        match self.get_element_internal(element_key.as_str()).await? {
-            Some(old_element) => {
-                self.delete_source_joins(pipeline, &old_element).await?;
-            }
-            None => (),
+        if let Some(old_element) = self.get_element_internal(element_key.as_str()).await? {
+            self.delete_source_joins(pipeline, &old_element).await?;
         }
 
         Ok(())
@@ -804,6 +798,7 @@ impl KeyFormatter {
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn extract_join_spec_by_label(
     match_path: &MatchPath,
     joins: &Vec<Arc<QueryJoin>>,

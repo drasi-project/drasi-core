@@ -647,12 +647,10 @@ fn update_source_joins(
                                 let old_element =
                                     get_element_internal(context.clone(), &element_key)?;
 
-                                if let Some(old_element) = &old_element {
-                                    if let StoredElement::Node(old) = old_element {
-                                        if let Some(old_value) = old.properties.get(&qjk.property) {
-                                            if old_value == new_value {
-                                                continue;
-                                            }
+                                if let Some(StoredElement::Node(old)) = &old_element {
+                                    if let Some(old_value) = old.properties.get(&qjk.property) {
+                                        if old_value == new_value {
+                                            continue;
                                         }
                                     }
                                 }
@@ -945,6 +943,7 @@ fn slots_to_bitset(slots: &Vec<usize>) -> BitSet {
 
 type JoinSpecByLabel = HashMap<String, Vec<(Arc<QueryJoin>, Vec<usize>)>>;
 
+#[allow(clippy::type_complexity)]
 fn extract_join_spec_by_label(
     match_path: &MatchPath,
     joins: &Vec<Arc<QueryJoin>>,

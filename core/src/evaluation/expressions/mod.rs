@@ -307,11 +307,9 @@ impl ExpressionEvaluator {
                     None => VariableValue::Null,
                 }
             }
-            ast::UnaryExpression::ExpressionProperty { exp, key } => match self
-                .evaluate_expression(context, exp)
-                .await?
-            {
-                v => match v {
+            ast::UnaryExpression::ExpressionProperty { exp, key } => {
+                let v = self.evaluate_expression(context, exp).await?;
+                match v {
                     //type of object
                     VariableValue::Object(o) => match o.get(&key.to_string()) {
                         Some(v) => v.clone(),
@@ -388,7 +386,7 @@ impl ExpressionEvaluator {
                         }
                     }
                     _ => VariableValue::Null,
-                },
+                }
             },
             ast::UnaryExpression::Parameter(p) => match context.get_variable(p.clone()) {
                 Some(v) => v.clone(),

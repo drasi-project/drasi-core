@@ -126,7 +126,7 @@ impl ScalarFunction for Round {
                                     error: FunctionEvaluationError::OverflowError,
                                 })
                             }
-                        } > std::f64::MAX / multiplier
+                        } > f64::MAX / multiplier
                         {
                             return Ok(VariableValue::Float(n.clone()));
                         }
@@ -461,7 +461,7 @@ impl ScalarFunction for Round {
                                             error: FunctionEvaluationError::OverflowError,
                                         })
                                     }
-                                } > std::f64::MAX / multiplier
+                                } > f64::MAX / multiplier
                                 {
                                     return Ok(VariableValue::Float(n.clone()));
                                 }
@@ -544,7 +544,7 @@ impl ScalarFunction for Round {
                                             error: FunctionEvaluationError::OverflowError,
                                         })
                                     }
-                                } > std::f64::MAX / multiplier
+                                } > f64::MAX / multiplier
                                 {
                                     return Ok(VariableValue::Float(n.clone()));
                                 }
@@ -557,7 +557,7 @@ impl ScalarFunction for Round {
                                         })
                                     }
                                 } * multiplier;
-                                if intermediate_value.fract() == 0.5 {
+                                if intermediate_value.fract() == 0.5 || intermediate_value.fract() == -0.5 {
                                     let rounded_value = (intermediate_value.trunc()) / multiplier;
                                     return Ok(VariableValue::Float(
                                         match Float::from_f64(rounded_value) {
@@ -570,20 +570,7 @@ impl ScalarFunction for Round {
                                             }
                                         },
                                     ));
-                                } else if intermediate_value.fract() == -0.5 {
-                                    let rounded_value = (intermediate_value.trunc()) / multiplier;
-                                    return Ok(VariableValue::Float(
-                                        match Float::from_f64(rounded_value) {
-                                            Some(f) => f,
-                                            None => {
-                                                return Err(FunctionError {
-                                                    function_name: expression.name.to_string(),
-                                                    error: FunctionEvaluationError::OverflowError,
-                                                })
-                                            }
-                                        },
-                                    ));
-                                }
+                                } 
                                 let rounded_value = (match n.as_f64() {
                                     Some(f) => f,
                                     None => {

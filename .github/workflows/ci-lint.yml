@@ -10,11 +10,27 @@ on:
 jobs:
   clippy_check:
     name: Cargo Clippy lint check
+    env:
+      # Set RUSTFLAGS for Clippy linting
+      RUSTFLAGS: |
+        -Dwarnings                        # Treat warnings as errors
+        -W clippy::print_stdout           # Warn on use of 'print' and 'println!'
+        -A unused                         # Allow unused code (false positive occurences in query-perf)
+        -A clippy::module_inception       # Allow module inception (module with same name as the file)
+        -A clippy::ptr_arg                # Allow passing references as function parameters
+        -A clippy::type_complexity        # Allow complex types without warning
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run Clippy
+      - name: Run Cargo Clippy
         run: cargo clippy --all-targets --all-features
 
 
   fmt_check:
+    name: Format check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Cargo fmt
+        run: |
+          rustup component add --toolchain nightly-x86_64-unknown-linux-gnu rustfmt
+          cargo fmt -- --check
