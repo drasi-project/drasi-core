@@ -17,7 +17,7 @@ pub fn middlewares() -> Vec<Arc<SourceMiddlewareConfig>> {
     let cfg: serde_json::Map<String, serde_json::Value> = json!({
         "Telemetry": {
             "insert": [{
-                "selector": "$[?(@.additionalProperties.Source == 'netstar.telemetry')]",
+                "selector": "$[?(@.additionalProperties.Source == 'telemetry')]",
                 "op": "Update",
                 "label": "Vehicle",
                 "id": "$.vehicleId",
