@@ -74,8 +74,12 @@ impl FutureQueue for RocksDbFutureQueue {
         let stored_element_ref: StoredElementReference = element_ref.into();
 
         let task = task::spawn_blocking(move || {
-            let index_cf = db.cf_handle(INDEX_CF).unwrap();
-            let queue_cf = db.cf_handle(QUEUE_CF).unwrap();
+            let index_cf = db
+                .cf_handle(INDEX_CF)
+                .expect("findex Column family not found");
+            let queue_cf = db
+                .cf_handle(QUEUE_CF)
+                .expect("fqueue Column family not found");
 
             let future_ref = StoredFutureElementRef {
                 element_ref: stored_element_ref,
@@ -158,8 +162,12 @@ impl FutureQueue for RocksDbFutureQueue {
         let db = self.db.clone();
 
         let task = task::spawn_blocking(move || {
-            let index_cf = db.cf_handle(INDEX_CF).unwrap();
-            let queue_cf = db.cf_handle(QUEUE_CF).unwrap();
+            let index_cf = db
+                .cf_handle(INDEX_CF)
+                .expect("findex column family not found");
+            let queue_cf = db
+                .cf_handle(QUEUE_CF)
+                .expect("fqueue column family not found");
 
             let position_in_query = position_in_query as u32;
 
@@ -185,8 +193,12 @@ impl FutureQueue for RocksDbFutureQueue {
         let db = self.db.clone();
 
         let task = task::spawn_blocking(move || {
-            let index_cf = db.cf_handle(INDEX_CF).unwrap();
-            let queue_cf = db.cf_handle(QUEUE_CF).unwrap();
+            let index_cf = db
+                .cf_handle(INDEX_CF)
+                .expect("findex column family not found");
+            let queue_cf = db
+                .cf_handle(QUEUE_CF)
+                .expect("fqueue column family not found");
 
             let read_opts = ReadOptions::default();
 
@@ -250,7 +262,9 @@ impl FutureQueue for RocksDbFutureQueue {
         let db = self.db.clone();
 
         let task = task::spawn_blocking(move || {
-            let queue_cf = db.cf_handle(QUEUE_CF).unwrap();
+            let queue_cf = db
+                .cf_handle(QUEUE_CF)
+                .expect("fqueue Column family not found");
 
             let read_opts = ReadOptions::default();
 

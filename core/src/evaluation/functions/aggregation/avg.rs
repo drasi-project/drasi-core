@@ -50,15 +50,7 @@ impl AggregatingFunction for Avg {
         }
 
         let (sum, count) = match accumulator {
-            Accumulator::Value(accumulator) => match accumulator {
-                ValueAccumulator::Avg { sum, count } => (sum, count),
-                _ => {
-                    return Err(FunctionError {
-                        function_name: "Avg".to_string(),
-                        error: FunctionEvaluationError::CorruptData,
-                    })
-                }
-            },
+            Accumulator::Value(ValueAccumulator::Avg { sum, count }) => (sum, count),
             _ => {
                 return Err(FunctionError {
                     function_name: "Avg".to_string(),
@@ -141,15 +133,7 @@ impl AggregatingFunction for Avg {
             });
         }
         let (sum, count) = match accumulator {
-            Accumulator::Value(accumulator) => match accumulator {
-                ValueAccumulator::Avg { sum, count } => (sum, count),
-                _ => {
-                    return Err(FunctionError {
-                        function_name: "Avg".to_string(),
-                        error: FunctionEvaluationError::CorruptData,
-                    })
-                }
-            },
+            Accumulator::Value(ValueAccumulator::Avg { sum, count }) => (sum, count),
             _ => {
                 return Err(FunctionError {
                     function_name: "Avg".to_string(),
@@ -251,15 +235,7 @@ impl AggregatingFunction for Avg {
             });
         }
         let (sum, count) = match accumulator {
-            Accumulator::Value(accumulator) => match accumulator {
-                ValueAccumulator::Avg { sum, count } => (sum, count),
-                _ => {
-                    return Err(FunctionError {
-                        function_name: "Avg".to_string(),
-                        error: FunctionEvaluationError::CorruptData,
-                    })
-                }
-            },
+            Accumulator::Value(ValueAccumulator::Avg { sum, count }) => (sum, count),
             _ => {
                 return Err(FunctionError {
                     function_name: "Avg".to_string(),

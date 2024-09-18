@@ -45,6 +45,7 @@ pub struct ContinuousQuery {
 }
 
 impl ContinuousQuery {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         query: Arc<Query>,
         match_path: Arc<MatchPath>,
@@ -166,31 +167,28 @@ impl ContinuousQuery {
                 result.anchor_element = Some(element);
             }
             SourceChange::Update { mut element } => {
-                match self
+                if let Some(prev_version) = self
                     .element_index
                     .get_element(element.get_reference())
                     .await?
                 {
-                    Some(prev_version) => {
-                        let prev_timestamp = prev_version.get_effective_from();
-                        let before_clock =
-                            Arc::new(InstantQueryClock::new(prev_timestamp, clock.get_realtime()));
-                        let solutions = self
-                            .resolve_solutions(
-                                base_variables,
-                                prev_version.clone(),
-                                before_clock.clone(),
-                                false,
-                            )
-                            .await?;
-                        for (signature, solution) in solutions {
-                            before_change_solutions.insert(signature, solution);
-                        }
-                        element.merge_missing_properties(prev_version.as_ref());
-                        result.before_clock = Some(before_clock);
-                        result.before_anchor_element = Some(prev_version);
+                    let prev_timestamp = prev_version.get_effective_from();
+                    let before_clock =
+                        Arc::new(InstantQueryClock::new(prev_timestamp, clock.get_realtime()));
+                    let solutions = self
+                        .resolve_solutions(
+                            base_variables,
+                            prev_version.clone(),
+                            before_clock.clone(),
+                            false,
+                        )
+                        .await?;
+                    for (signature, solution) in solutions {
+                        before_change_solutions.insert(signature, solution);
                     }
-                    None => {}
+                    element.merge_missing_properties(prev_version.as_ref());
+                    result.before_clock = Some(before_clock);
+                    result.before_anchor_element = Some(prev_version);
                 }
 
                 let element = Arc::new(element);
@@ -205,80 +203,69 @@ impl ContinuousQuery {
                 result.anchor_element = Some(element);
             }
             SourceChange::Delete { metadata } => {
-                match self.element_index.get_element(&metadata.reference).await? {
-                    Some(element) => {
-                        let prev_timestamp = element.get_effective_from();
-                        let before_clock =
-                            Arc::new(InstantQueryClock::new(prev_timestamp, clock.get_realtime()));
-                        let solutions = self
-                            .resolve_solutions(
-                                base_variables,
-                                element.clone(),
-                                before_clock.clone(),
-                                false,
-                            )
-                            .await?;
-                        for (signature, solution) in solutions {
-                            before_change_solutions.insert(signature, solution);
-                        }
-                        result.before_clock = Some(before_clock);
-                        result.before_anchor_element = Some(element);
-
-                        match self.element_index.delete_element(&metadata.reference).await {
-                            Ok(_) => {}
-                            Err(e) => return Err(EvaluationError::from(e)),
-                        }
+                if let Some(element) = self.element_index.get_element(&metadata.reference).await? {
+                    let prev_timestamp = element.get_effective_from();
+                    let before_clock =
+                        Arc::new(InstantQueryClock::new(prev_timestamp, clock.get_realtime()));
+                    let solutions = self
+                        .resolve_solutions(
+                            base_variables,
+                            element.clone(),
+                            before_clock.clone(),
+                            false,
+                        )
+                        .await?;
+                    for (signature, solution) in solutions {
+                        before_change_solutions.insert(signature, solution);
                     }
-                    None => {}
+                    result.before_clock = Some(before_clock);
+                    result.before_anchor_element = Some(element);
+
+                    match self.element_index.delete_element(&metadata.reference).await {
+                        Ok(_) => {}
+                        Err(e) => return Err(EvaluationError::from(e)),
+                    }
                 }
             }
             SourceChange::Future { future_ref } => {
                 result.is_future_reprocess = true;
-                match self
+                if let Some(element) = self
                     .element_index
                     .get_element(&future_ref.element_ref)
                     .await?
                 {
-                    Some(element) => {
-                        let prev_timestamp = element.get_effective_from();
-                        if prev_timestamp >= future_ref.due_time {
-                            // element already processed with due time expired, don't duplicate
-                            return Ok(result);
-                        }
-
-                        let before_clock =
-                            Arc::new(InstantQueryClock::new(prev_timestamp, prev_timestamp));
-
-                        let before_solutions = self
-                            .resolve_solutions(
-                                base_variables,
-                                element.clone(),
-                                before_clock.clone(),
-                                false,
-                            )
-                            .await?;
-                        for (signature, solution) in before_solutions {
-                            before_change_solutions.insert(signature, solution);
-                        }
-
-                        result.before_clock = Some(before_clock);
-                        result.before_anchor_element = Some(element.clone());
-
-                        let after_solutions = self
-                            .resolve_solutions(
-                                base_variables,
-                                element.clone(),
-                                clock.clone(),
-                                false,
-                            )
-                            .await?;
-                        for (signature, solution) in after_solutions {
-                            after_change_solutions.insert(signature, solution);
-                        }
-
-                        result.anchor_element = Some(element);
+                    let prev_timestamp = element.get_effective_from();
+                    if prev_timestamp >= future_ref.due_time {
+                        // element already processed with due time expired, don't duplicate
+                        return Ok(result);
                     }
-                    None => {}
+
+                    let before_clock =
+                        Arc::new(InstantQueryClock::new(prev_timestamp, prev_timestamp));
+
+                    let before_solutions = self
+                        .resolve_solutions(
+                            base_variables,
+                            element.clone(),
+                            before_clock.clone(),
+                            false,
+                        )
+                        .await?;
+                    for (signature, solution) in before_solutions {
+                        before_change_solutions.insert(signature, solution);
+                    }
+
+                    result.before_clock = Some(before_clock);
+                    result.before_anchor_element = Some(element.clone());
+
+                    let after_solutions = self
+                        .resolve_solutions(base_variables, element.clone(), clock.clone(), false)
+                        .await?;
+                    for (signature, solution) in after_solutions {
+                        after_change_solutions.insert(signature, solution);
+                    }
+
+                    result.anchor_element = Some(element);
                 }
             }
         }
@@ -414,8 +401,7 @@ impl ContinuousQuery {
         change_context: &ChangeContext,
     ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
         let mut result = Vec::new();
-        let mut contexts = Vec::new();
-        contexts.push((part_context, change_context.clone()));
+        let mut contexts = vec![(part_context, change_context.clone())];
 
         let mut part_num = 0;
 
@@ -605,60 +591,58 @@ impl CollapsedAggregationResults {
     }
 
     fn insert(&mut self, context: QueryPartEvaluationContext) {
-        match context {
-            QueryPartEvaluationContext::Aggregation {
-                before,
-                after,
-                grouping_keys,
-                default_before,
-                default_after,
-            } => {
-                let after_key = extract_grouping_value_hash(&grouping_keys, &after);
-                let before_key = match &before {
-                    Some(before) => extract_grouping_value_hash(&grouping_keys, before),
-                    None => after_key,
-                };
+        if let QueryPartEvaluationContext::Aggregation {
+            before,
+            after,
+            grouping_keys,
+            default_before,
+            default_after,
+        } = context
+        {
+            let after_key = extract_grouping_value_hash(&grouping_keys, &after);
+            let before_key = match &before {
+                Some(before) => extract_grouping_value_hash(&grouping_keys, before),
+                None => after_key,
+            };
 
-                match self.data.remove(&after_key) {
-                    Some((existing, before_key)) => match existing {
-                        QueryPartEvaluationContext::Aggregation {
-                            before: existing_before,
-                            ..
-                        } => {
-                            self.data.insert(
-                                after_key,
-                                (
-                                    QueryPartEvaluationContext::Aggregation {
-                                        before: existing_before,
-                                        default_before,
-                                        default_after,
-                                        after,
-                                        grouping_keys,
-                                    },
-                                    before_key,
-                                ),
-                            );
-                        }
-                        _ => {}
-                    },
-                    None => {
+            match self.data.remove(&after_key) {
+                Some((existing, before_key)) => {
+                    if let QueryPartEvaluationContext::Aggregation {
+                        before: existing_before,
+                        ..
+                    } = existing
+                    {
                         self.data.insert(
                             after_key,
                             (
                                 QueryPartEvaluationContext::Aggregation {
-                                    before,
-                                    after,
-                                    grouping_keys,
+                                    before: existing_before,
                                     default_before,
                                     default_after,
+                                    after,
+                                    grouping_keys,
                                 },
                                 before_key,
                             ),
                         );
                     }
                 }
+                None => {
+                    self.data.insert(
+                        after_key,
+                        (
+                            QueryPartEvaluationContext::Aggregation {
+                                before,
+                                after,
+                                grouping_keys,
+                                default_before,
+                                default_after,
+                            },
+                            before_key,
+                        ),
+                    );
+                }
             }
-            _ => {}
         }
     }
 

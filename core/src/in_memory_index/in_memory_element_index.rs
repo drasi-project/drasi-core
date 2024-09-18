@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     hash::{Hash, Hasher},
@@ -19,6 +20,7 @@ use crate::{
     path_solver::match_path::MatchPath,
 };
 
+#[allow(clippy::type_complexity)]
 pub struct InMemoryElementIndex {
     elements: Arc<RwLock<HashMap<ElementReference, Arc<Element>>>>,
 

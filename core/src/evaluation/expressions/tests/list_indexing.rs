@@ -2,9 +2,7 @@ use crate::evaluation::context::QueryVariables;
 use crate::evaluation::functions::FunctionRegistry;
 use crate::evaluation::variable_value::integer::Integer;
 use crate::evaluation::variable_value::VariableValue;
-use crate::evaluation::{
-    EvaluationError, FunctionError, FunctionEvaluationError, InstantQueryClock,
-};
+use crate::evaluation::{EvaluationError, InstantQueryClock};
 use crate::evaluation::{ExpressionEvaluationContext, ExpressionEvaluator};
 use crate::in_memory_index::in_memory_result_index::InMemoryResultIndex;
 use std::sync::Arc;

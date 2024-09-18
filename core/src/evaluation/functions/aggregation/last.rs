@@ -46,20 +46,12 @@ impl AggregatingFunction for Last {
         }
 
         let value = match accumulator {
-            Accumulator::Value(accumulator) => match accumulator {
-                super::ValueAccumulator::Value(value) => value,
-                _ => {
-                    return Err(FunctionError {
-                        function_name: "Last".to_string(),
-                        error: FunctionEvaluationError::CorruptData,
-                    })
-                }
-            },
+            Accumulator::Value(super::ValueAccumulator::Value(value)) => value,
             _ => {
                 return Err(FunctionError {
                     function_name: "Last".to_string(),
                     error: FunctionEvaluationError::CorruptData,
-                })
+                });
             }
         };
 
@@ -91,15 +83,7 @@ impl AggregatingFunction for Last {
             });
         }
         let value = match accumulator {
-            Accumulator::Value(accumulator) => match accumulator {
-                super::ValueAccumulator::Value(value) => value,
-                _ => {
-                    return Err(FunctionError {
-                        function_name: "Last".to_string(),
-                        error: FunctionEvaluationError::CorruptData,
-                    })
-                }
-            },
+            Accumulator::Value(super::ValueAccumulator::Value(value)) => value,
             _ => {
                 return Err(FunctionError {
                     function_name: "Last".to_string(),
@@ -119,15 +103,7 @@ impl AggregatingFunction for Last {
         accumulator: &Accumulator,
     ) -> Result<VariableValue, FunctionError> {
         let value = match accumulator {
-            Accumulator::Value(accumulator) => match accumulator {
-                super::ValueAccumulator::Value(value) => value,
-                _ => {
-                    return Err(FunctionError {
-                        function_name: "Last".to_string(),
-                        error: FunctionEvaluationError::CorruptData,
-                    })
-                }
-            },
+            Accumulator::Value(super::ValueAccumulator::Value(value)) => value,
             _ => {
                 return Err(FunctionError {
                     function_name: "Last".to_string(),

@@ -34,6 +34,7 @@ async fn test_drasi_max() {
     assert_eq!(result, 9.0);
 }
 
+#[allow(clippy::float_cmp)]
 #[tokio::test]
 async fn test_drasi_max_multiple_types() {
     let max = DrasiMax {};
@@ -45,7 +46,7 @@ async fn test_drasi_max_multiple_types() {
         VariableValue::Integer(0.into()),
         VariableValue::Null,
         VariableValue::Integer(1.into()),
-        VariableValue::Float((3.1415).into()),
+        VariableValue::Float((std::f64::consts::PI).into()),
         VariableValue::String("test".into()),
         VariableValue::Bool(true),
     ])];
@@ -54,7 +55,7 @@ async fn test_drasi_max_multiple_types() {
         .call(&context, &get_func_expr(), args.clone())
         .await
         .unwrap();
-    assert_eq!(result, 3.1415);
+    assert_eq!(result, std::f64::consts::PI);
 }
 
 #[tokio::test]

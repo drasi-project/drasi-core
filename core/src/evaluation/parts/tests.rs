@@ -24,8 +24,7 @@ async fn process_solution<'a>(
     context: QueryPartEvaluationContext,
 ) -> Vec<QueryPartEvaluationContext> {
     let mut result = Vec::new();
-    let mut contexts = Vec::new();
-    contexts.push(context);
+    let mut contexts = vec![context];
 
     let change_context = ChangeContext {
         before_clock: Arc::new(InstantQueryClock::new(0, 0)),

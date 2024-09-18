@@ -11,17 +11,15 @@ pub struct Float {
 
 impl PartialEq for Float {
     fn eq(&self, other: &Self) -> bool {
-        match (self.value, other.value) {
-            (a, b) => a == b,
-        }
+        let (a, b) = (self.value, other.value);
+        a == b
     }
 }
 
 impl PartialEq<f64> for Float {
     fn eq(&self, other: &f64) -> bool {
-        match (self.value, *other) {
-            (a, b) => a == b,
-        }
+        let (a, b) = (self.value, *other);
+        a == b
     }
 }
 
@@ -93,7 +91,7 @@ impl Float {
 
 impl From<Float> for Number {
     fn from(val: Float) -> Self {
-        Number::from_f64(val.value).unwrap()
+        Number::from_f64(val.value).expect("a finite float")
     }
 }
 
@@ -106,9 +104,8 @@ impl Debug for Float {
 impl Display for Float {
     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         {
-            match &self.value {
-                value => formatter.write_str(&value.to_string()),
-            }
+            let value = &self.value;
+            formatter.write_str(&value.to_string())
         }
     }
 }

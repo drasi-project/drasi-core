@@ -54,19 +54,11 @@ jobs:
         key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
           ${{ runner.os }}-cargo-build-
-    - name: Install latest nightly
-      uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1.0.7
-      with:
-          toolchain: nightly
-          override: true
-
 
     - name: Run tests
       env:
         REDIS_URL: redis://localhost:6379
       run: |
-        rustup component add --toolchain nightly-x86_64-unknown-linux-gnu rustfmt
-        cargo fmt -- --check
         cargo install junitify
         cargo test -- --format=json -Z unstable-options --report-time | junitify --ignore-parse-errors --out ./test-results
         ls

@@ -46,7 +46,7 @@ async fn test_to_integer_float() {
         .await;
     assert_eq!(result.unwrap(), VariableValue::Integer(1.into()));
 
-    let args = vec![VariableValue::Float((3.14).into())];
+    let args = vec![VariableValue::Float(std::f64::consts::PI.into())];
     let result = to_integer
         .call(&context, &get_func_expr(), args.clone())
         .await;

@@ -16,6 +16,7 @@ fn get_func_expr() -> ast::FunctionExpression {
     }
 }
 
+#[allow(clippy::approx_constant)]
 #[tokio::test]
 async fn test_drasi_stdevp() {
     let stdevp = DrasiStdevP {};
@@ -42,6 +43,7 @@ async fn test_drasi_stdevp() {
     );
 }
 
+#[allow(clippy::approx_constant)]
 #[tokio::test]
 async fn test_drasi_stdevp_with_null() {
     let stdevp = DrasiStdevP {};

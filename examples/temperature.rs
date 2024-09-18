@@ -10,6 +10,7 @@ use drasi_core::{
 use rand::Rng;
 use serde_json::json;
 
+#[allow(clippy::print_stdout, clippy::unwrap_used)]
 #[tokio::main]
 async fn main() {
     let query_str = "
@@ -74,6 +75,7 @@ async fn main() {
     }
 }
 
+#[allow(clippy::print_stdout, clippy::unwrap_used)]
 async fn process_change(query: &ContinuousQuery, change: SourceChange) {
     let result = query.process_source_change(change).await.unwrap();
     println!("Results affected: {:?}", result.len());
@@ -93,6 +95,7 @@ async fn process_change(query: &ContinuousQuery, change: SourceChange) {
     }
 }
 
+#[allow(clippy::print_stdout, clippy::unwrap_used)]
 fn get_initial_data() -> Vec<SourceChange> {
     vec![
         SourceChange::Insert {

@@ -3,13 +3,12 @@ mod process_monitor;
 use std::sync::Arc;
 
 use drasi_core::{
-    evaluation::context::QueryPartEvaluationContext,
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
-    query::{ContinuousQuery, QueryBuilder},
+    query::QueryBuilder,
 };
-use rand::Rng;
 use serde_json::json;
 
+#[allow(clippy::print_stdout, clippy::unwrap_used)]
 #[tokio::main]
 async fn main() {
     let query_str = "

@@ -31,6 +31,7 @@ async fn bootstrap_query(query: &ContinuousQuery) {
 }
 
 // Query identifies when a sensor value exceeds 32 three times in an hour.
+#[allow(clippy::print_stdout, clippy::unwrap_used)]
 pub async fn crosses_above_three_times_in_an_hour(config: &(impl QueryTestConfig + Send)) {
     let crosses_above_three_times_in_an_hour_query = {
         let mut builder = QueryBuilder::new(queries::crosses_above_three_times_in_an_hour_query())

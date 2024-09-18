@@ -3,7 +3,7 @@ use core::fmt::{self, Display};
 use std::hash::Hash;
 use std::ops;
 
-#[derive(Clone, Eq, Hash)]
+#[derive(Clone, Eq, Hash, PartialEq)]
 pub struct Duration {
     duration: ChronoDuration,
     year: i64,
@@ -17,6 +17,7 @@ pub struct Duration {
 
 impl ops::Add<Duration> for Duration {
     type Output = Duration;
+    #[allow(clippy::unwrap_used)]
     fn add(self, duration2: Duration) -> Duration {
         let new_duration = self.duration().checked_add(duration2.duration()).unwrap();
         let mut year = self.year() + duration2.year();
@@ -31,6 +32,7 @@ impl ops::Add<Duration> for Duration {
 
 impl ops::Sub<Duration> for Duration {
     type Output = Duration;
+    #[allow(clippy::unwrap_used)]
     fn sub(self, duration2: Duration) -> Duration {
         let new_duration = self.duration().checked_sub(duration2.duration()).unwrap();
         let mut year = self.year() - duration2.year();
@@ -40,21 +42,6 @@ impl ops::Sub<Duration> for Duration {
             month += 12;
         }
         Duration::new(new_duration, year, month)
-    }
-}
-
-impl PartialEq for Duration {
-    fn eq(&self, other: &Self) -> bool {
-        match (
-            self.duration,
-            other.duration,
-            self.year,
-            other.year,
-            self.month,
-            other.month,
-        ) {
-            (a, b, c, d, e, f) => a == b && c == d && e == f,
-        }
     }
 }
 

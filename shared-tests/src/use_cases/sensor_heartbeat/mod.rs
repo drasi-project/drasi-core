@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -309,6 +310,7 @@ pub async fn not_reported(config: &(impl QueryTestConfig + Send)) {
     }
 }
 
+#[allow(clippy::print_stdout, clippy::unwrap_used)]
 pub async fn percent_not_reported(config: &(impl QueryTestConfig + Send)) {
     let cq = {
         let mut builder = QueryBuilder::new(queries::percent_not_reported_query());

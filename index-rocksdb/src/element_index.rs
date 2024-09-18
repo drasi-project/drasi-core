@@ -183,7 +183,7 @@ impl ElementIndex for RocksDbElementIndex {
         let element_key = hash_element_ref(element_ref);
         let context = self.context.clone();
         let task = task::spawn_blocking(move || {
-            let slot_cf = context.db.cf_handle(SLOT_CF).unwrap();
+            let slot_cf = context.db.cf_handle(SLOT_CF).expect("Slot CF not found");
 
             let prev_slots = match context.db.get_cf(&slot_cf, element_key) {
                 Ok(Some(prev_slots)) => BitSet::from_bytes(&prev_slots),
@@ -211,6 +211,7 @@ impl ElementIndex for RocksDbElementIndex {
         }
     }
 
+    #[allow(clippy::unwrap_used)]
     #[tracing::instrument(skip_all, err)]
     async fn get_slot_elements_by_inbound(
         &self,
@@ -260,6 +261,7 @@ impl ElementIndex for RocksDbElementIndex {
         }))
     }
 
+    #[allow(clippy::unwrap_used)]
     #[tracing::instrument(skip_all, err)]
     async fn get_slot_elements_by_outbound(
         &self,
@@ -366,6 +368,7 @@ impl ElementIndex for RocksDbElementIndex {
         }
     }
 
+    #[allow(clippy::unwrap_used)]
     async fn set_joins(&self, match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) {
         let joins_by_label = extract_join_spec_by_label(match_path, joins);
         let mut join_spec_by_label = self.context.join_spec_by_label.write().unwrap();
@@ -395,7 +398,10 @@ fn get_element_internal(
     context: Arc<Context>,
     element_key: &ReferenceHash,
 ) -> Result<Option<StoredElement>, IndexError> {
-    let element_cf = context.db.cf_handle(ELEMENTS_CF).unwrap();
+    let element_cf = context
+        .db
+        .cf_handle(ELEMENTS_CF)
+        .expect("Element CF not found");
 
     let element = match context.db.get_cf(&element_cf, element_key) {
         Ok(Some(element)) => element,
@@ -416,10 +422,19 @@ fn delete_element_internal(
     txn: &Transaction<OptimisticTransactionDB>,
     element_key: &ReferenceHash,
 ) -> Result<(), IndexError> {
-    let element_cf = context.db.cf_handle(ELEMENTS_CF).unwrap();
-    let slot_cf = context.db.cf_handle(SLOT_CF).unwrap();
-    let inbound_cf = context.db.cf_handle(INBOUND_CF).unwrap();
-    let outbound_cf = context.db.cf_handle(OUTBOUND_CF).unwrap();
+    let element_cf = context
+        .db
+        .cf_handle(ELEMENTS_CF)
+        .expect("Element CF not found");
+    let slot_cf = context.db.cf_handle(SLOT_CF).expect("Slot CF not found");
+    let inbound_cf = context
+        .db
+        .cf_handle(INBOUND_CF)
+        .expect("Inbound CF not found");
+    let outbound_cf = context
+        .db
+        .cf_handle(OUTBOUND_CF)
+        .expect("Outbound CF not found");
 
     let prev_slots = match txn.get_cf(&slot_cf, element_key) {
         Ok(Some(prev_slots)) => Some(BitSet::from_bytes(&prev_slots)),
@@ -498,10 +513,19 @@ fn set_element_internal(
 ) -> Result<(), IndexError> {
     let eref = element.get_reference();
     let key_hash = hash_stored_element_ref(eref);
-    let element_cf = context.db.cf_handle(ELEMENTS_CF).unwrap();
-    let slot_cf = context.db.cf_handle(SLOT_CF).unwrap();
-    let inbound_cf = context.db.cf_handle(INBOUND_CF).unwrap();
-    let outbound_cf = context.db.cf_handle(OUTBOUND_CF).unwrap();
+    let element_cf = context
+        .db
+        .cf_handle(ELEMENTS_CF)
+        .expect("Element CF not found");
+    let slot_cf = context.db.cf_handle(SLOT_CF).expect("Slot CF not found");
+    let inbound_cf = context
+        .db
+        .cf_handle(INBOUND_CF)
+        .expect("Inbound CF not found");
+    let outbound_cf = context
+        .db
+        .cf_handle(OUTBOUND_CF)
+        .expect("Outbound CF not found");
 
     let prev_slots = match txn.get_cf(&slot_cf, key_hash) {
         Ok(Some(prev_slots)) => Some(BitSet::from_bytes(&prev_slots)),
@@ -524,7 +548,13 @@ fn set_element_internal(
         if let Err(e) = container.encode(&mut buf) {
             return Err(IndexError::other(e));
         }
-        (container.element.unwrap(), buf.freeze())
+        (
+            match container.element {
+                Some(e) => e,
+                None => return Err(IndexError::CorruptedData),
+            },
+            buf.freeze(),
+        )
     };
 
     match txn.put_cf(&element_cf, key_hash, &encoded_element) {
@@ -627,13 +657,19 @@ fn update_source_joins(
 ) -> Result<(), IndexError> {
     match new_element {
         StoredElement::Node(n) => {
-            let join_spec_by_label = context.join_spec_by_label.read().unwrap();
+            let join_spec_by_label = match context.join_spec_by_label.read() {
+                Ok(joins) => joins,
+                Err(e) => return Err(IndexError::CorruptedData),
+            };
             for (label, joins) in join_spec_by_label.iter() {
                 if !n.metadata.labels.contains(label) {
                     continue;
                 }
 
-                let partial_cf = context.db.cf_handle(PARTIAL_CF).unwrap();
+                let partial_cf = context
+                    .db
+                    .cf_handle(PARTIAL_CF)
+                    .expect("Partial CF not found");
 
                 for (qj, slots) in joins {
                     for qjk in &qj.keys {
@@ -647,12 +683,10 @@ fn update_source_joins(
                                 let old_element =
                                     get_element_internal(context.clone(), &element_key)?;
 
-                                if let Some(old_element) = &old_element {
-                                    if let StoredElement::Node(old) = old_element {
-                                        if let Some(old_value) = old.properties.get(&qjk.property) {
-                                            if old_value == new_value {
-                                                continue;
-                                            }
+                                if let Some(StoredElement::Node(old)) = &old_element {
+                                    if let Some(old_value) = old.properties.get(&qjk.property) {
+                                        if old_value == new_value {
+                                            continue;
                                         }
                                     }
                                 }
@@ -788,7 +822,10 @@ fn delete_source_joins(
 ) -> Result<(), IndexError> {
     match old_element {
         StoredElement::Node(n) => {
-            let join_spec_by_label = context.join_spec_by_label.read().unwrap();
+            let join_spec_by_label = match context.join_spec_by_label.read() {
+                Ok(joins) => joins,
+                Err(e) => return Err(IndexError::CorruptedData),
+            };
             for (label, joins) in join_spec_by_label.iter() {
                 if !n.metadata.labels.contains(label) {
                     continue;
@@ -831,7 +868,10 @@ fn delete_source_join(
     join_key: &QueryJoinKey,
     value: &StoredValue,
 ) -> Result<(), IndexError> {
-    let partial_cf = context.db.cf_handle(PARTIAL_CF).unwrap();
+    let partial_cf = context
+        .db
+        .cf_handle(PARTIAL_CF)
+        .expect("Partial CF not found");
 
     let pj_prefix =
         encode_partial_join_prefix(&query_join.id, value, &join_key.label, &join_key.property);
@@ -945,6 +985,7 @@ fn slots_to_bitset(slots: &Vec<usize>) -> BitSet {
 
 type JoinSpecByLabel = HashMap<String, Vec<(Arc<QueryJoin>, Vec<usize>)>>;
 
+#[allow(clippy::type_complexity)]
 fn extract_join_spec_by_label(
     match_path: &MatchPath,
     joins: &Vec<Arc<QueryJoin>>,

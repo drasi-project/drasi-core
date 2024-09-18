@@ -136,11 +136,13 @@ impl FunctionRegistry {
         result
     }
 
+    #[allow(clippy::unwrap_used)]
     pub fn register_function(&self, name: &str, function: Function) {
         let mut lock = self.functions.write().unwrap();
         lock.insert(name.to_string(), Arc::new(function));
     }
 
+    #[allow(clippy::unwrap_used)]
     pub fn get_function(&self, name: &str) -> Option<Arc<Function>> {
         let lock = self.functions.read().unwrap();
         lock.get(name).cloned()
@@ -148,6 +150,7 @@ impl FunctionRegistry {
 }
 
 impl CypherConfiguration for FunctionRegistry {
+    #[allow(clippy::unwrap_used)]
     fn get_aggregating_function_names(&self) -> std::collections::HashSet<String> {
         let lock = self.functions.read().unwrap();
         lock.iter()

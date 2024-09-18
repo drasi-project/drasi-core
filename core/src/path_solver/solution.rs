@@ -68,6 +68,7 @@ impl MatchPathSolution {
         self.solution_signature
     }
 
+    #[allow(clippy::explicit_counter_loop)]
     pub fn into_query_variables(
         &self,
         match_path: &MatchPath,

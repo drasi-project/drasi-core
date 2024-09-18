@@ -17,6 +17,7 @@ use zoned_time::ZonedTime;
 
 use crate::models::{Element, ElementMetadata, ElementReference};
 
+#[allow(clippy::derived_hash_with_manual_eq)]
 #[derive(Clone, Hash, Eq, Default)]
 pub enum VariableValue {
     #[default]
@@ -154,11 +155,7 @@ impl VariableValue {
     }
 
     pub fn is_number(&self) -> bool {
-        match *self {
-            VariableValue::Integer(_) => true,
-            VariableValue::Float(_) => true,
-            _ => false,
-        }
+        matches!(*self, VariableValue::Integer(_) | VariableValue::Float(_))
     }
 
     pub fn is_i64(&self) -> bool {
@@ -280,9 +277,18 @@ impl VariableValue {
     pub fn get_date_property(&self, property: String) -> Option<String> {
         if self.is_date() {
             match property.as_str() {
-                "year" => Some(self.as_date().unwrap().year().to_string()),
-                "month" => Some(self.as_date().unwrap().month().to_string()),
-                "day" => Some(self.as_date().unwrap().day().to_string()),
+                "year" => Some(match self.as_date() {
+                    Some(date) => date.year().to_string(),
+                    None => return None,
+                }),
+                "month" => Some(match self.as_date() {
+                    Some(date) => date.month().to_string(),
+                    None => return None,
+                }),
+                "day" => Some(match self.as_date() {
+                    Some(date) => date.day().to_string(),
+                    None => return None,
+                }),
                 _ => None,
             }
         } else {

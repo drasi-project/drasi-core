@@ -331,14 +331,8 @@ impl UnaryExpression {
         end_bound: Option<Expression>,
     ) -> Expression {
         Expression::UnaryExpression(Self::ListRange {
-            start_bound: match start_bound {
-                Some(expr) => Some(Box::new(expr)),
-                None => None,
-            },
-            end_bound: match end_bound {
-                Some(expr) => Some(Box::new(expr)),
-                None => None,
-            },
+            start_bound: start_bound.map(Box::new),
+            end_bound: end_bound.map(Box::new),
         })
     }
 }
@@ -516,15 +510,9 @@ impl CaseExpression {
         else_: Option<Expression>,
     ) -> Expression {
         Expression::CaseExpression(CaseExpression {
-            match_: match match_ {
-                Some(m) => Some(Box::new(m)),
-                None => None,
-            },
+            match_: match_.map(Box::new),
             when,
-            else_: match else_ {
-                Some(e) => Some(Box::new(e)),
-                None => None,
-            },
+            else_: else_.map(Box::new),
         })
     }
 }
@@ -569,7 +557,7 @@ impl ParentExpression for ObjectExpression {
     fn get_children(&self) -> Vec<&Expression> {
         let keys: Vec<_> = self.elements.values().clone().collect();
 
-        return keys;
+        keys
     }
 }
 

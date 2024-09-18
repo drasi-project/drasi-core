@@ -31,6 +31,7 @@ async fn bootstrap_query(query: &ContinuousQuery) {
     }
 }
 
+#[allow(clippy::print_stdout, clippy::unwrap_used)]
 pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
     let manager_incident_alert_query = {
         let mut builder = QueryBuilder::new(queries::manager_incident_alert_query());

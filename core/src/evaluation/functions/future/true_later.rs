@@ -20,6 +20,7 @@ impl TrueLater {
     }
 }
 
+#[allow(clippy::print_stdout, clippy::unwrap_used)]
 #[async_trait]
 impl ScalarFunction for TrueLater {
     async fn call(

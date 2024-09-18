@@ -1,5 +1,4 @@
 use chrono::{FixedOffset, Local, NaiveTime};
-use std::result;
 use std::str::FromStr;
 use std::sync::Arc;
 

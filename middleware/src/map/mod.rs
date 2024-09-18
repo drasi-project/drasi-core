@@ -76,10 +76,7 @@ impl JsonPathExpression {
 
     pub fn execute_one(&self, value: &Value) -> Option<Value> {
         let result = self.path.find_slice(value, JsonPathConfig::default());
-        match result.first() {
-            Some(v) => Some(v.deref().clone()),
-            None => None,
-        }
+        result.first().map(|v| v.deref().clone())
     }
 }
 
@@ -139,6 +136,7 @@ impl SourceMiddleware for Map {
             #[allow(unused_assignments)]
             let mut del_element_binding = Option::<Element>::None;
 
+            #[allow(clippy::unwrap_used)]
             let element = match &source_change {
                 SourceChange::Insert { element } => element,
                 SourceChange::Update { element } => element,
@@ -273,6 +271,12 @@ impl SourceMiddleware for Map {
 }
 
 pub struct MapFactory {}
+
+impl Default for MapFactory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl MapFactory {
     pub fn new() -> Self {

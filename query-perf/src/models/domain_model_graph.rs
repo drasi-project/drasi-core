@@ -18,6 +18,7 @@ pub enum GraphChangeResult<T> {
     Delete { element: T },
 }
 
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone)]
 pub enum GraphError {
     InvalidNodeId { id: NodeId },
@@ -48,8 +49,8 @@ pub struct GraphIds {
 impl GraphIds {
     pub fn new(node_ids: Vec<NodeId>, relation_ids: Vec<RelationId>) -> GraphIds {
         GraphIds {
-            node_ids: node_ids,
-            relation_ids: relation_ids,
+            node_ids,
+            relation_ids,
         }
     }
 }
@@ -77,11 +78,11 @@ impl Node {
         properties: BTreeMap<String, VariableValue>,
     ) -> Node {
         Node {
-            id: id,
-            effective_from: effective_from,
-            source_id: source_id,
-            labels: labels,
-            properties: properties,
+            id,
+            effective_from,
+            source_id,
+            labels,
+            properties,
             relation_ids: Vec::new(),
         }
     }
@@ -130,12 +131,12 @@ impl Relation {
         to_id: String,
     ) -> Relation {
         Relation {
-            id: id,
-            effective_from: effective_from,
-            source_id: source_id,
-            labels: labels,
-            from_id: from_id,
-            to_id: to_id,
+            id,
+            effective_from,
+            source_id,
+            labels,
+            from_id,
+            to_id,
         }
     }
 
@@ -190,6 +191,7 @@ impl DomainModelGraph {
     }
 }
 
+#[allow(clippy::unwrap_used)]
 impl DomainModelGraph {
     pub fn add_node(&mut self, node: Node) -> Result<GraphChangeResult<Node>, GraphError> {
         let node_id = node.id.clone();

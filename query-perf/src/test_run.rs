@@ -62,6 +62,7 @@ pub struct TestRunConfig {
 }
 
 impl TestRunConfig {
+    #[allow(clippy::print_stdout, clippy::unwrap_used)]
     pub fn new(args: TestRunArgs) -> TestRunConfig {
         let scenario = args.scenario;
 
@@ -112,6 +113,7 @@ pub struct TestRunResult {
     avg_run_events_per_sec: f64,
 }
 
+#[allow(clippy::unwrap_used)]
 impl TestRunResult {
     pub fn new(
         scenario_name: String,

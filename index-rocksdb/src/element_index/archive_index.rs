@@ -21,6 +21,7 @@ pub const ARCHIVE_CF: &str = "archive";
 
 #[async_trait]
 impl ElementArchiveIndex for RocksDbElementIndex {
+    #[allow(clippy::unwrap_used)]
     async fn get_element_as_at(
         &self,
         element_ref: &ElementReference,
@@ -32,7 +33,10 @@ impl ElementArchiveIndex for RocksDbElementIndex {
         key.extend_from_slice(&time.to_be_bytes());
 
         let task = task::spawn_blocking(move || {
-            let archive_cf = context.db.cf_handle(ARCHIVE_CF).unwrap();
+            let archive_cf = context
+                .db
+                .cf_handle(ARCHIVE_CF)
+                .expect("Archive CF not found");
             let mut iter = context
                 .db
                 .iterator_cf(
@@ -71,6 +75,7 @@ impl ElementArchiveIndex for RocksDbElementIndex {
         }
     }
 
+    #[allow(clippy::unwrap_used)]
     async fn get_element_versions(
         &self,
         element_ref: &ElementReference,
@@ -188,7 +193,7 @@ impl ElementArchiveIndex for RocksDbElementIndex {
             Ok(())
         });
 
-        task.await.unwrap()
+        task.await.expect("Failed to clear archive")
     }
 }
 
@@ -199,7 +204,10 @@ pub fn insert_archive(
     element: &Bytes,
     effective_from: u64,
 ) -> Result<(), IndexError> {
-    let archive_cf = context.db.cf_handle(ARCHIVE_CF).unwrap();
+    let archive_cf = context
+        .db
+        .cf_handle(ARCHIVE_CF)
+        .expect("Archive CF not found");
     let mut key = element_key.to_vec();
     key.extend_from_slice(&effective_from.to_be_bytes());
     match txn.put_cf(&archive_cf, key, element) {

@@ -26,6 +26,7 @@ struct GarnetQueryConfig {
     element_index: Mutex<Option<Arc<dyn ElementIndex>>>,
 }
 
+#[allow(clippy::unwrap_used)]
 impl GarnetQueryConfig {
     pub fn new(use_cache: bool) -> Self {
         let url = match env::var("REDIS_URL") {
@@ -51,6 +52,7 @@ impl GarnetQueryConfig {
     }
 }
 
+#[allow(clippy::unwrap_used)]
 #[async_trait]
 impl QueryTestConfig for GarnetQueryConfig {
     async fn config_query(&self, builder: QueryBuilder) -> QueryBuilder {

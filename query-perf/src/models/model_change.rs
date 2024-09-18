@@ -2,9 +2,9 @@ use drasi_core::models::{Element, SourceChange};
 
 #[derive(Debug)]
 pub enum ModelChangeType {
-    InsertNode,
-    UpdateNode,
-    DeleteNode,
+    Insert,
+    Update,
+    Delete,
 }
 
 #[derive(Debug)]
@@ -18,7 +18,7 @@ pub struct ModelChangeResult {
 impl ModelChangeResult {
     pub fn new_insert_node(node_after: Element) -> ModelChangeResult {
         ModelChangeResult {
-            change_type: ModelChangeType::InsertNode,
+            change_type: ModelChangeType::Insert,
             node_before: None,
             node_after: Some(node_after.clone()),
             node_source_change: Some(SourceChange::Insert {
@@ -29,7 +29,7 @@ impl ModelChangeResult {
 
     pub fn new_update_node(node_before: Element, node_after: Element) -> ModelChangeResult {
         ModelChangeResult {
-            change_type: ModelChangeType::UpdateNode,
+            change_type: ModelChangeType::Update,
             node_before: Some(node_before),
             node_after: Some(node_after.clone()),
             node_source_change: Some(SourceChange::Update {
@@ -40,7 +40,7 @@ impl ModelChangeResult {
 
     pub fn new_delete_node(node_before: Element) -> ModelChangeResult {
         ModelChangeResult {
-            change_type: ModelChangeType::DeleteNode,
+            change_type: ModelChangeType::Delete,
             node_before: Some(node_before.clone()),
             node_after: None,
             node_source_change: Some(SourceChange::Delete {

@@ -16,7 +16,7 @@ impl ScalarFunction for Timestamp {
         expression: &ast::FunctionExpression,
         args: Vec<VariableValue>,
     ) -> Result<VariableValue, FunctionError> {
-        if args.len() != 0 {
+        if !args.is_empty() {
             return Err(FunctionError {
                 function_name: expression.name.to_string(),
                 error: FunctionEvaluationError::InvalidArgumentCount,
