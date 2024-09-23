@@ -1,0 +1,22 @@
+[workspace]
+
+members = [
+  "core",
+  "query-ast",
+  "query-cypher",
+  "index-rocksdb",
+  "index-garnet",
+  "middleware",
+  
+  # Internal
+  "shared-tests",
+  "query-perf",
+  "examples",
+  ]
+
+[workspace.package]
+version = "0.2.0"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"

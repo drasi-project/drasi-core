@@ -1,0 +1,15 @@
+cargo run -- -s single_node_property_projection -e memory -r memory
+cargo run -- -s single_node_property_projection -e rocksdb -r rocksdb
+cargo run -- -s single_node_property_projection -e redis -r redis
+
+cargo run -- -s single_node_calculation_projection -e memory -r memory
+cargo run -- -s single_node_calculation_projection -e rocksdb -r rocksdb
+cargo run -- -s single_node_calculation_projection -e redis -r redis
+
+cargo run -- -s single_path_averaging_projection -e memory -r memory
+cargo run -- -s single_path_averaging_projection -e rocksdb -r rocksdb
+cargo run -- -s single_path_averaging_projection -e redis -r redis
+
+cargo run -- -s single_path_no_change_averaging_projection -e memory -r memory
+cargo run -- -s single_path_no_change_averaging_projection -e rocksdb -r rocksdb
+cargo run -- -s single_path_no_change_averaging_projection -e redis -r redis
