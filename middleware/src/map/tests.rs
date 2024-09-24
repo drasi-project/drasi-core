@@ -16,7 +16,7 @@ mod process {
         let config = json!({
             "Telemetry": {
                 "insert": [{
-                    "selector": "$[?(@.additionalProperties.Source == 'netstar.telemetry')]",
+                    "selector": "$[?(@.additionalProperties.Source == 'provider.telemetry')]",
                     "op": "Update",
                     "label": "Vehicle",
                     "id": "$.vehicleId",
@@ -60,7 +60,7 @@ mod process {
                             }
                         ],
                         "additionalProperties": {
-                            "Source": "netstar.telemetry"
+                            "Source": "provider.telemetry"
                         },
                         "vehicleId": "v1"
                     })),
@@ -96,7 +96,7 @@ mod process {
             "Telemetry": {
                 "insert": [
                 {
-                    "selector": "$[?(@.additionalProperties.Source == 'netstar.telemetry')]",
+                    "selector": "$[?(@.additionalProperties.Source == 'provider.telemetry')]",
                     "op": "Update",
                     "label": "Vehicle",
                     "id": "$.vehicleId",
@@ -106,7 +106,7 @@ mod process {
                     }
                 },
                 {
-                    "selector": "$[?(@.additionalProperties.Source == 'netstar.telemetry')]",
+                    "selector": "$[?(@.additionalProperties.Source == 'provider.telemetry')]",
                     "op": "Update",
                     "label": "Fleet",
                     "id": "$.fleetId",
@@ -150,7 +150,7 @@ mod process {
                             }
                         ],
                         "additionalProperties": {
-                            "Source": "netstar.telemetry"
+                            "Source": "provider.telemetry"
                         },
                         "vehicleId": "v1",
                         "fleetId": "f1"
@@ -203,7 +203,7 @@ mod factory {
         let config = json!({
             "Telemetry": {
                 "insert": [{
-                    "selector": "$[?(@.additionalProperties.Source == 'netstar.telemetry')]",
+                    "selector": "$[?(@.additionalProperties.Source == 'provider.telemetry')]",
                     "op": "Update",
                     "label": "Vehicle",
                     "id": "$.vehicleId",
@@ -230,7 +230,7 @@ mod factory {
         let config = json!({
             "Telemetry": {
                 "insert": [{
-                    "selector": "z$[?(@.additionalProperties.Source == 'netstar.telemetry')]",
+                    "selector": "z$[?(@.additionalProperties.Source == 'provider.telemetry')]",
                     "op": "Update",
                     "label": "Vehicle",
                     "id": "$.vehicleId",
