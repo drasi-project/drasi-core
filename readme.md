@@ -144,7 +144,7 @@ More examples can be found under the [examples](examples) folder.
 
 ## Storage implementations
 
-Drasi maintains internal indexes that are used to compute the effect of a data change on the query result. By default these indexes are in-memory, but a continuous query can be configured to use persistent storage.  Currently there are storage implementions for Redis, Garent and RocksDB.
+Drasi maintains internal indexes that are used to compute the effect of a data change on the query result. By default these indexes are in-memory, but a continuous query can be configured to use persistent storage.  Currently there are storage implementions for Redis, Garnet and RocksDB.
 
 
 ## Release Status
