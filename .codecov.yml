@@ -2,14 +2,19 @@ codecov:
   require_ci_to_pass: yes
 
 coverage:
-  precision: 2
+  precision: 2  # Precision of the coverage value
   round: down
-  range: "30...100"
+  range: "50...100"   # The value range where you want the value to be green 
   status:
     project:
       default:
         informational: true
-        target: auto
+        target: auto  # default; compares coverage to the previous base commit
         threshold: 0%
     patch:
       default: false
+
+comment:
+  layout: "diff, flags, files"
+  behavior: default
+  require_changes: false  # if true: only post the comment if coverage changes
