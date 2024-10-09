@@ -17,6 +17,8 @@ jobs:
   core_code_coverage:
     name: Generate Code Coverage for drasi-core
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
     services:
       redis:
         image: redis:7-alpine
