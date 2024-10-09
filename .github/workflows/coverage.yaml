@@ -1,8 +1,13 @@
 name: Generate Rust Code Coverage
 
 on:
-  pull_request_target:
-    types: [assigned, opened, synchronize, reopened]
+  pull_request:
+    branches:
+      - main
+  # pull_request_target:
+  #   branches:
+  #     - main
+  #   types: [assigned, opened, synchronize, reopened]
 
 env:
   CARGO_TERM_COLOR: always
@@ -73,12 +78,12 @@ jobs:
           indicators: true
           output: both
 
-      - name: Add Coverage PR Comment
-        uses: marocchino/sticky-pull-request-comment@v2
-        if: github.event_name == 'pull_request'
-        with:
-          recreate: true
-          path: code-coverage-results.md
+      # - name: Add Coverage PR Comment
+      #   uses: marocchino/sticky-pull-request-comment@v2
+      #   if: github.event_name == 'pull_request'
+      #   with:
+      #     recreate: true
+      #     path: code-coverage-results.md
 
       - name: Write to Job Summary
         run: cat code-coverage-results.md >> $GITHUB_STEP_SUMMARY
