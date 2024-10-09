@@ -59,7 +59,7 @@ jobs:
           REDIS_URL: redis://localhost:6379
         run: |
           cargo tarpaulin --out Xml
-          mv tarpaulin-report.xml drasi-core-tarpaulin-report.xml
+          mv cobertura.xml drasi-core-tarpaulin-report.xml
           echo "Code coverage report generated"
 
       - name: Code Coverage Report
