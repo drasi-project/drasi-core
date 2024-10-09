@@ -14,16 +14,13 @@ permissions:
 
   
 jobs:
-  coverage_with_code_cov: 
+  core_code_coverage:
+    name: Generate Code Coverage for drasi-core
     runs-on: ubuntu-latest
-    services:
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
     steps:
       - name: Checkout repository
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+
       - name: Cache Cargo registry
         uses: actions/cache@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9 # v4.0.2
         with:
@@ -47,20 +44,30 @@ jobs:
           key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-build-
-      - name: Install Rust
-        run: rustup update stable
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@981088406945bfd239b6fcdeb9a73f24b463e426 # cargo-llvm-cov
-      - name: Generate code coverage
-        env:
-          REDIS_URL: redis://localhost:6379
+      - name: Install Rust and Cargo tarpaulin
         run: |
-          cd core
-          cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@ab904c41d6ece82784817410c45d8b8c02684457 # v3.1.6
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }} 
-          files: core/lcov.info
-          fail_ci_if_error: true
+          rustup update stable
+          cargo install cargo-tarpaulin
       
+      - name: Generate Code Coverage
+        run: |
+          cargo tarpaulin --out Xml
+          mv tarpaulin-report.xml drasi-core-tarpaulin-report.xml
+          echo "Code coverage report generated"
+
+      - name: Code Coverage Report
+        uses: irongut/CodeCoverageSummary@v1.3.0
+        with:
+          filename: drasi-core-tarpaulin-report.xml
+          badge: true
+          fail_below_min: true
+          format: markdown
+          indicators: true
+          output: both
+
+      - name: Add Coverage PR Comment
+        uses: marocchino/sticky-pull-request-comment@v2
+        if: github.event_name == 'pull_request'
+        with:
+          recreate: true
+          path: code-coverage-results.md
