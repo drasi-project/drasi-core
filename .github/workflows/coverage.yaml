@@ -27,6 +27,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+        with:
+          fetch-depth: 0
       - name: Get SHA ancestor to origin/main
         run: |
           echo "SHA_ANCESTOR=$(git merge-base origin/main HEAD)" >> $GITHUB_ENV
