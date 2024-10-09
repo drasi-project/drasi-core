@@ -17,6 +17,11 @@ jobs:
   core_code_coverage:
     name: Generate Code Coverage for drasi-core
     runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
     steps:
       - name: Checkout repository
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
@@ -50,6 +55,8 @@ jobs:
           cargo install cargo-tarpaulin
       
       - name: Generate Code Coverage
+        env:
+          REDIS_URL: redis://localhost:6379
         run: |
           cargo tarpaulin --out Xml
           mv tarpaulin-report.xml drasi-core-tarpaulin-report.xml
