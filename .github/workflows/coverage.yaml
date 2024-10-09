@@ -27,6 +27,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+      - name: Get SHA ancestor to origin/main
+        run: |
+          echo "SHA_ANCESTOR=$(git merge-base origin/main HEAD)" >> $GITHUB_ENV
       - name: Cache Cargo registry
         uses: actions/cache@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9 # v4.0.2
         with:
@@ -64,6 +67,7 @@ jobs:
         uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }} 
+          commit_parent: ${{ env.SHA_ANCESTOR }}
           files: core/lcov.info
           fail_ci_if_error: true
           verbose: true
