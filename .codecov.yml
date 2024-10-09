@@ -1,5 +1,6 @@
 codecov:
-  require_ci_to_pass: yes
+  require_ci_to_pass: true
+  allow_pseudo_compare: false 
 
 coverage:
   precision: 2  # Precision of the coverage value
