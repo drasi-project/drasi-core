@@ -2,7 +2,7 @@ name: Generate Rust Code Coverage
 
 on:
   workflow_dispatch:
-  pull_request:
+  pull_request_target:
     branches:
       - "main"
 
@@ -19,6 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
+      contents: read
     services:
       redis:
         image: redis:7-alpine
@@ -80,6 +81,8 @@ jobs:
         with:
           recreate: true
           path: code-coverage-results.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Write to Job Summary
         run: cat code-coverage-results.md >> $GITHUB_STEP_SUMMARY
