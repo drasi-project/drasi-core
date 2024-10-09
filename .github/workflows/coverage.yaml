@@ -1,10 +1,8 @@
 name: Generate Rust Code Coverage
 
 on:
-  workflow_dispatch:
   pull_request_target:
-    branches:
-      - "main"
+    types: [assigned, opened, synchronize, reopened]
 
 env:
   CARGO_TERM_COLOR: always
