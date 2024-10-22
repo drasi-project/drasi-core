@@ -1846,17 +1846,14 @@ impl ExpressionEvaluator {
                     }
 
                     if let Some(map_expression) = &expression.map_expression {
-                        variables.insert(
-                            expression.item_identifier.to_string().into(),
-                            item.clone(),
-                        );
+                        variables
+                            .insert(expression.item_identifier.to_string().into(), item.clone());
                         let local_context =
                             ExpressionEvaluationContext::new(&variables, context.get_clock());
                         result = self
                             .evaluate_expression(&local_context, map_expression)
                             .await?;
-                        variables
-                            .insert(accumulator_variable.to_string().into(), result.clone());
+                        variables.insert(accumulator_variable.to_string().into(), result.clone());
                     }
                 }
                 Ok(result)
