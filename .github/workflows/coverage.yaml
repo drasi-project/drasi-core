@@ -1,10 +1,23 @@
+# Copyright 2024 The Drasi Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 name: Generate Rust Code Coverage
 
 on:
-  workflow_dispatch:
   pull_request:
     branches:
-      - "main"
+      - main
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,8 +27,11 @@ permissions:
 
   
 jobs:
-  coverage_with_code_cov: 
+  core_code_coverage:
+    name: Generate Code Coverage for drasi-core
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     services:
       redis:
         image: redis:7-alpine
@@ -24,6 +40,7 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+
       - name: Cache Cargo registry
         uses: actions/cache@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9 # v4.0.2
         with:
@@ -47,20 +64,28 @@ jobs:
           key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-build-
-      - name: Install Rust
-        run: rustup update stable
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@981088406945bfd239b6fcdeb9a73f24b463e426 # cargo-llvm-cov
-      - name: Generate code coverage
+      - name: Install Rust and Cargo tarpaulin
+        run: |
+          rustup update stable
+          cargo install cargo-tarpaulin
+      
+      - name: Generate Code Coverage
         env:
           REDIS_URL: redis://localhost:6379
         run: |
-          cd core
-          cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@ab904c41d6ece82784817410c45d8b8c02684457 # v3.1.6
+          cargo tarpaulin --out Xml
+          mv cobertura.xml drasi-core-tarpaulin-report.xml
+          echo "Code coverage report generated"
+
+      - name: Code Coverage Report
+        uses: irongut/CodeCoverageSummary@v1.3.0
         with:
-          token: ${{ secrets.CODECOV_TOKEN }} 
-          files: core/lcov.info
-          fail_ci_if_error: true
-      
+          filename: drasi-core-tarpaulin-report.xml
+          badge: true
+          fail_below_min: true
+          format: markdown
+          indicators: true
+          output: both
+
+      - name: Write to Job Summary
+        run: cat code-coverage-results.md >> $GITHUB_STEP_SUMMARY
