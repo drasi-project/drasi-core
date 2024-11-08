@@ -1805,22 +1805,19 @@ impl ExpressionEvaluator {
                         }
                     }
 
-                    match &expression.map_expression {
-                        Some(map_expression) => {
-                            variables.insert(
-                                expression.item_identifier.to_string().into(),
-                                item.clone(),
-                            );
-                            let local_context =
-                                ExpressionEvaluationContext::new(&variables, context.get_clock());
-                            let item_result = self
-                                .evaluate_expression(&local_context, map_expression)
-                                .await?;
-                            result.push(item_result);
-                        }
-                        None => {
-                            result.push(item);
-                        }
+                    if let Some(map_expression) = &expression.map_expression {
+                        variables.insert(
+                            expression.item_identifier.to_string().into(),
+                            item.clone(),
+                        );
+                        let local_context =
+                            ExpressionEvaluationContext::new(&variables, context.get_clock());
+                        let item_result = self
+                            .evaluate_expression(&local_context, map_expression)
+                            .await?;
+                        result.push(item_result);
+                    } else {
+                        result.push(item);
                     }
                 }
                 Ok(VariableValue::List(result))
