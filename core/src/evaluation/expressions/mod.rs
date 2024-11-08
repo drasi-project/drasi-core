@@ -1806,10 +1806,8 @@ impl ExpressionEvaluator {
                     }
 
                     if let Some(map_expression) = &expression.map_expression {
-                        variables.insert(
-                            expression.item_identifier.to_string().into(),
-                            item.clone(),
-                        );
+                        variables
+                            .insert(expression.item_identifier.to_string().into(), item.clone());
                         let local_context =
                             ExpressionEvaluationContext::new(&variables, context.get_clock());
                         let item_result = self
