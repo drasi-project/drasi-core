@@ -6,10 +6,10 @@ This allows us to establish a baseline understanding of raw component performanc
 The tool is structured around the concept of a Performance Test Scenario, which represents the combination of a specific Continuous Query against a data model. The same Performance Test Scenario with the same expected outcomes can then be run against different component configurations simply by specifying the desired component configuration using command line parameters.
 
 # Execution
-You can run the The Component Performance Test Tool from a compiled binary:
+You can run the The Component Performance Test Tool using a shell script:
 
 ```
-./query-perf <ARGS>
+./run_perf_tests.sh
 ```
 
 ... or using the Cargo tool from the project directory:
