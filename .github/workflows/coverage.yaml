@@ -85,8 +85,6 @@ jobs:
         with:
           files: drasi-core-tarpaulin-report.xml
           name: codecov-drasi-core
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
       # - name: Code Coverage Report
       #   uses: irongut/CodeCoverageSummary@v1.3.0
       #   with:
