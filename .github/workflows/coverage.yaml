@@ -85,6 +85,7 @@ jobs:
         with:
           files: drasi-core-tarpaulin-report.xml
           name: codecov-drasi-core
+          verbose: true
       # - name: Code Coverage Report
       #   uses: irongut/CodeCoverageSummary@v1.3.0
       #   with:
