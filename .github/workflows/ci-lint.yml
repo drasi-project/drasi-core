@@ -34,7 +34,7 @@ jobs:
       - name: Install specific Rust version
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: stable-1.82.0 # Pin to a specific Rust version
+          toolchain: 1.82.0 # Pin to a specific Rust version
           override: true
 
       - name: Install Clippy
