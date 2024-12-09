@@ -43,7 +43,6 @@ spec:
             property: sensor_id
   query: > … Cypher Query …
  */
-
 pub fn exceeds_one_standard_deviation_metadata() -> Vec<QueryJoin> {
     vec![
         QueryJoin {
