@@ -132,7 +132,7 @@ impl<'de> Deserialize<'de> for Float {
     {
         struct NumberVisitor;
 
-        impl<'de> Visitor<'de> for NumberVisitor {
+        impl Visitor<'_> for NumberVisitor {
             type Value = Float;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {

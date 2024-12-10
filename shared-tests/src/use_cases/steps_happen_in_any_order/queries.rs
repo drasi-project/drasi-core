@@ -43,7 +43,6 @@ spec:
             property: step_id
   query: > … Cypher Query …
 */
-
 pub fn steps_happen_in_any_order_metadata() -> Vec<QueryJoin> {
     vec![
         QueryJoin {

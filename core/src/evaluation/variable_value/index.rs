@@ -102,7 +102,7 @@ impl Index for String {
     }
 }
 
-impl<'a, T> Index for &'a T
+impl<T> Index for &T
 where
     T: ?Sized + Index,
 {
@@ -123,12 +123,12 @@ mod private {
     impl Sealed for usize {}
     impl Sealed for str {}
     impl Sealed for String {}
-    impl<'a, T> Sealed for &'a T where T: ?Sized + Sealed {}
+    impl<T> Sealed for &T where T: ?Sized + Sealed {}
 }
 
 struct Type<'a>(&'a VariableValue);
 
-impl<'a> Display for Type<'a> {
+impl Display for Type<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self.0 {
             VariableValue::Null => f.write_str("null"),
