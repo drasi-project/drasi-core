@@ -27,4 +27,3 @@ pub fn document_query() -> &'static str {
 
     "
 }
-

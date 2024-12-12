@@ -61,7 +61,7 @@ pub async fn document(config: &(impl QueryTestConfig + Send)) {
                             "app": "nginx",
                             "env": "prod"
                         },
-                        "annotations": {                            
+                        "annotations": {
                             "dapr.io/enabled": "true",
                             "dapr.io/app-id": "my-app"
                         }
@@ -152,5 +152,4 @@ pub async fn document(config: &(impl QueryTestConfig + Send)) {
             )
         }));
     }
-
 }

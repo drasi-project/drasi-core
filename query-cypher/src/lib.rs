@@ -242,7 +242,7 @@ peg::parser! {
                 pos: position!() func:function_name() _* "(" __* params:(expression() ** (__* "," __*))? __* ")" {
                     let params = params.unwrap_or_else(Vec::new);
                     FunctionExpression::function(func, params, pos )
-                }                
+                }
                 "$" name:ident() { UnaryExpression::parameter(name) }
                 start:expression()? ".." end:expression()? { UnaryExpression::list_range(start, end) }
                 l:literal() { UnaryExpression::literal(l) }

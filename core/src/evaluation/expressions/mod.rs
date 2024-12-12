@@ -111,7 +111,7 @@ impl ExpressionEvaluator {
         let alias = match expression {
             ast::Expression::UnaryExpression(expression) => match expression {
                 ast::UnaryExpression::Property { name: _, key } => key,
-                ast::UnaryExpression::ExpressionProperty { key, exp: _  } => key,
+                ast::UnaryExpression::ExpressionProperty { key, exp: _ } => key,
                 ast::UnaryExpression::Parameter(p) => p,
                 ast::UnaryExpression::Alias { source: _, alias } => alias,
                 ast::UnaryExpression::Identifier(id) => id,
@@ -325,7 +325,6 @@ impl ExpressionEvaluator {
             ast::UnaryExpression::ExpressionProperty { exp, key } => {
                 let v = self.evaluate_expression(context, exp).await?;
                 match v {
-
                     VariableValue::Element(e) => e.get_property(key).into(),
 
                     //type of object

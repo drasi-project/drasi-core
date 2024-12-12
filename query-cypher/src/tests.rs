@@ -67,10 +67,16 @@ fn return_clause_aggregating() {
     assert_eq!(
         query.parts[0].return_clause,
         ProjectionClause::GroupBy {
-            grouping: vec![UnaryExpression::expression_property(UnaryExpression::ident("a"), "name".into())],
+            grouping: vec![UnaryExpression::expression_property(
+                UnaryExpression::ident("a"),
+                "name".into()
+            )],
             aggregates: vec![FunctionExpression::function(
                 "sum".into(),
-                vec![UnaryExpression::expression_property(UnaryExpression::ident("a"), "Field2".into())],
+                vec![UnaryExpression::expression_property(
+                    UnaryExpression::ident("a"),
+                    "Field2".into()
+                )],
                 45
             )]
         }
@@ -89,7 +95,10 @@ fn namespaced_function() {
         query.parts[0].return_clause,
         ProjectionClause::Item(vec![FunctionExpression::function(
             "namespace.function".into(),
-            vec![UnaryExpression::expression_property(UnaryExpression::ident("a"), "Field2".into())],
+            vec![UnaryExpression::expression_property(
+                UnaryExpression::ident("a"),
+                "Field2".into()
+            )],
             37
         ),])
     );
@@ -140,7 +149,8 @@ fn match_clause() {
                     )],
                 }],
                 where_clauses: vec![],
-                return_clause: ProjectionClause::Item(vec![UnaryExpression::expression_property(UnaryExpression::ident("t"),
+                return_clause: ProjectionClause::Item(vec![UnaryExpression::expression_property(
+                    UnaryExpression::ident("t"),
                     "name".into()
                 )]),
             }]
@@ -180,7 +190,8 @@ fn match_clause() {
                     )],
                 }],
                 where_clauses: vec![],
-                return_clause: ProjectionClause::Item(vec![UnaryExpression::expression_property(UnaryExpression::ident("t"),
+                return_clause: ProjectionClause::Item(vec![UnaryExpression::expression_property(
+                    UnaryExpression::ident("t"),
                     "name".into()
                 )]),
             }]
@@ -199,7 +210,8 @@ fn match_clause() {
                     )],
                 }],
                 where_clauses: vec![],
-                return_clause: ProjectionClause::Item(vec![UnaryExpression::expression_property(UnaryExpression::ident("a"),
+                return_clause: ProjectionClause::Item(vec![UnaryExpression::expression_property(
+                    UnaryExpression::ident("a"),
                     "test".into()
                 )]),
             }]
@@ -226,7 +238,10 @@ fn match_clause() {
                             Annotation::new("b".into()),
                             vec!["Person".into()],
                             vec![BinaryExpression::gt(
-                                UnaryExpression::expression_property(UnaryExpression::ident("b"), "Age".into()),
+                                UnaryExpression::expression_property(
+                                    UnaryExpression::ident("b"),
+                                    "Age".into()
+                                ),
                                 UnaryExpression::literal(Literal::Integer(10))
                             )]
                         )
@@ -234,8 +249,14 @@ fn match_clause() {
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
-                    UnaryExpression::expression_property(UnaryExpression::ident("e"), "since".into()),
-                    UnaryExpression::expression_property(UnaryExpression::ident("b"), "name".into()),
+                    UnaryExpression::expression_property(
+                        UnaryExpression::ident("e"),
+                        "since".into()
+                    ),
+                    UnaryExpression::expression_property(
+                        UnaryExpression::ident("b"),
+                        "name".into()
+                    ),
                 ]),
             }]
         })
@@ -468,7 +489,10 @@ fn test_list_construction() {
                     UnaryExpression::literal(Literal::Integer(5)),
                     UnaryExpression::literal(Literal::Integer(7)),
                     UnaryExpression::literal(Literal::Integer(9)),
-                    UnaryExpression::expression_property(UnaryExpression::ident("foo"), "bah".into())
+                    UnaryExpression::expression_property(
+                        UnaryExpression::ident("foo"),
+                        "bah".into()
+                    )
                 ]),
                 "list".into()
             )
@@ -505,7 +529,10 @@ fn test_list_construction_with_comments_in_between_parts() {
                     UnaryExpression::literal(Literal::Integer(5)),
                     UnaryExpression::literal(Literal::Integer(7)),
                     UnaryExpression::literal(Literal::Integer(9)),
-                    UnaryExpression::expression_property(UnaryExpression::ident("foo"), "bah".into())
+                    UnaryExpression::expression_property(
+                        UnaryExpression::ident("foo"),
+                        "bah".into()
+                    )
                 ]),
                 "list".into()
             )
@@ -539,7 +566,10 @@ fn test_list_construction_with_comments() {
                     UnaryExpression::literal(Literal::Integer(5)),
                     UnaryExpression::literal(Literal::Integer(7)),
                     UnaryExpression::literal(Literal::Integer(9)),
-                    UnaryExpression::expression_property(UnaryExpression::ident("foo"), "bah".into())
+                    UnaryExpression::expression_property(
+                        UnaryExpression::ident("foo"),
+                        "bah".into()
+                    )
                 ]),
                 "list".into()
             )
@@ -630,7 +660,10 @@ fn test_reflex_query_with_comment() {
             ),
             UnaryExpression::alias(
                 BinaryExpression::subtract(
-                    UnaryExpression::expression_property(UnaryExpression::ident("val"), "timestamp".into()),
+                    UnaryExpression::expression_property(
+                        UnaryExpression::ident("val"),
+                        "timestamp".into()
+                    ),
                     BinaryExpression::multiply(
                         UnaryExpression::literal(Literal::Integer(15)),
                         UnaryExpression::literal(Literal::Integer(60))
@@ -639,7 +672,10 @@ fn test_reflex_query_with_comment() {
                 "timeRangeStart".into()
             ),
             UnaryExpression::alias(
-                UnaryExpression::expression_property(UnaryExpression::ident("val"), "timestamp".into()),
+                UnaryExpression::expression_property(
+                    UnaryExpression::ident("val"),
+                    "timestamp".into()
+                ),
                 "timeRangeEnd".into()
             )
         ])
@@ -684,6 +720,9 @@ fn where_follows_with_no_alias() {
 
     assert_eq!(
         query.parts[1].return_clause,
-        ProjectionClause::Item(vec![UnaryExpression::expression_property(UnaryExpression::ident("a"), "Field1".into())])
+        ProjectionClause::Item(vec![UnaryExpression::expression_property(
+            UnaryExpression::ident("a"),
+            "Field1".into()
+        )])
     );
 }
