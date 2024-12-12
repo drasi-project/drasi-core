@@ -1483,17 +1483,20 @@ impl ExpressionEvaluator {
             }
             ast::BinaryExpression::Index(e1, e2) => {
                 let index_exp = self.evaluate_expression(context, e2).await?;
-                let variable_value_list = self.evaluate_expression(context, e1).await?;
-                let list = match variable_value_list.as_array() {
-                    Some(list) => list,
-                    None => {
-                        return Err(EvaluationError::InvalidType {
-                            expected: "List".to_string(),
-                        })
-                    }
-                };
+                let parent = self.evaluate_expression(context, e1).await?;
+                
                 match index_exp {
                     VariableValue::ListRange(list_range) => {
+                        
+                        let list = match parent.as_array() {
+                            Some(list) => list,
+                            None => {
+                                return Err(EvaluationError::InvalidType {
+                                    expected: "List".to_string(),
+                                })
+                            }
+                        };
+                        
                         let start_bound = match list_range.start {
                             RangeBound::Index(index) => {
                                 if index < 0 {
@@ -1522,6 +1525,16 @@ impl ExpressionEvaluator {
                         return Ok(VariableValue::List(result));
                     }
                     VariableValue::Integer(index) => {
+
+                        let list = match parent.as_array() {
+                            Some(list) => list,
+                            None => {
+                                return Err(EvaluationError::InvalidType {
+                                    expected: "List".to_string(),
+                                })
+                            }
+                        };
+
                         let index_i64 = match index.as_i64() {
                             Some(index) => index,
                             None => {
@@ -1549,6 +1562,23 @@ impl ExpressionEvaluator {
                         let element = list[index].clone();
 
                         return Ok(element);
+                    }
+                    VariableValue::String(key) => {
+                        match parent {
+                            VariableValue::Object(object) => {
+                                let val = object.get(&key).cloned().unwrap_or(VariableValue::Null);
+                                return Ok(val);
+                            }
+                            VariableValue::Element(element) => {
+                                let val = element.get_property(&key).into();
+                                return Ok(val);
+                            }
+                            _ => {
+                                return Err(EvaluationError::InvalidType {
+                                    expected: "Object".to_string(),
+                                })
+                            }
+                        }                        
                     }
                     _ => {
                         return Err(EvaluationError::InvalidType {

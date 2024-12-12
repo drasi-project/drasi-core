@@ -144,6 +144,7 @@ pub async fn document(config: &(impl QueryTestConfig + Send)) {
                 "namespace" => VariableValue::from(json!("default")),
                 "app" => VariableValue::from(json!("nginx")),
                 "app_id" => VariableValue::from(json!("my-app")),
+                "app_id2" => VariableValue::from(json!("my-app")),
                 "container_0_image" => VariableValue::from(json!("nginx:latest")),
                 "total_restart_count" => VariableValue::from(json!(5)),
                 "sidecar_container_id" => VariableValue::from(json!("docker://0987654321"))

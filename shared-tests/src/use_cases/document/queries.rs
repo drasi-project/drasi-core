@@ -21,6 +21,7 @@ pub fn document_query() -> &'static str {
     p.metadata.namespace as namespace,
     p.metadata.labels.app as app,
     p.metadata.annotations.`dapr.io/app-id` as app_id,
+    p.metadata.annotations['dapr.io/app-id'] as app_id2,
     p.spec.containers[0].image as container_0_image,
     reduce(acc=0, x in p.status.containerStatuses | acc + x.restartCount) as total_restart_count,
     head(container IN p.status.containerStatuses WHERE container.name = 'sidecar').containerID as sidecar_container_id
