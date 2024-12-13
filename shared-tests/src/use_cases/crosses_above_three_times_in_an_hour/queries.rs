@@ -43,7 +43,6 @@ spec:
             property: sensor_id
   query: > … Cypher Query …
 */
-
 pub fn crosses_above_three_times_in_an_hour_metadata() -> Vec<QueryJoin> {
     vec![
         QueryJoin {

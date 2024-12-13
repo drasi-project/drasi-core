@@ -43,7 +43,6 @@ spec:
             property: sensor_id
   query: > … Cypher Query …
  */
-
 pub fn rolling_average_decrease_by_ten_metadata() -> Vec<QueryJoin> {
     vec![
         QueryJoin {

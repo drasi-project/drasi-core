@@ -54,7 +54,7 @@ impl<'a> SrcChangeStreamIter<'a> {
     }
 }
 
-impl<'a> Iterator for SrcChangeStreamIter<'a> {
+impl Iterator for SrcChangeStreamIter<'_> {
     type Item = SourceChange;
 
     fn next(&mut self) -> Option<Self::Item> {

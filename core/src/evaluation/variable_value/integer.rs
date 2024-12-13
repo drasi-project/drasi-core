@@ -206,7 +206,7 @@ impl<'de> Deserialize<'de> for Integer {
     {
         struct NumberVisitor;
 
-        impl<'de> Visitor<'de> for NumberVisitor {
+        impl Visitor<'_> for NumberVisitor {
             type Value = Integer;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
