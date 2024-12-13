@@ -43,7 +43,6 @@ spec:
             property: cust_id
   query: > … Cypher Query …
 */
-
 pub fn greater_than_a_threshold_metadata() -> Vec<QueryJoin> {
     vec![
         QueryJoin {

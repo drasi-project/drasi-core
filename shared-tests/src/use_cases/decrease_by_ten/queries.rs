@@ -43,7 +43,6 @@ spec:
             property: id
   query: > … Cypher Query …
 */
-
 pub fn decrease_by_ten_metadata() -> Vec<QueryJoin> {
     vec![
         QueryJoin {

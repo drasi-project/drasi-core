@@ -43,7 +43,6 @@ spec:
             property: sensor_id
   query: > … Cypher Query …
 */
-
 pub fn crosses_above_and_stays_above_metadata() -> Vec<QueryJoin> {
     vec![
         QueryJoin {

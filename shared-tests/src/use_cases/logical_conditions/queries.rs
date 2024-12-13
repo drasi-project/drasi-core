@@ -43,7 +43,6 @@ spec:
             property: sensor_id
   query: > … Cypher Query …
 */
-
 pub fn logical_conditions_metadata() -> Vec<QueryJoin> {
     vec![
         QueryJoin {
