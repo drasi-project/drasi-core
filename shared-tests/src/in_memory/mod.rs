@@ -334,3 +334,14 @@ mod index {
         index::future_queue::push_overwrite(&fqi).await;
     }
 }
+
+mod document {
+    use super::InMemoryQueryConfig;
+    use crate::use_cases::*;
+
+    #[tokio::test]
+    async fn document() {
+        let test_config = InMemoryQueryConfig::new();
+        document::document(&test_config).await;
+    }
+}
