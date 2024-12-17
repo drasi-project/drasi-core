@@ -1,7 +1,13 @@
 [package]
 name = "drasi-index-rocksdb"
-version.workspace = true
+version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
+description = "Drasi Core RocksDb Index"
+repository = "https://github.com/drasi-project/drasi-core"
+keywords = ["drasi"]
+categories = ["database"]
+readme = "../readme.md"    
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
