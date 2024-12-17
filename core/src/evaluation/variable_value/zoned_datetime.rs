@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::evaluation::temporal_constants::{self, UTC_FIXED_OFFSET};
+use crate::evaluation::temporal_constants::UTC_FIXED_OFFSET;
 use chrono::{DateTime, FixedOffset, TimeZone};
 use core::fmt::{self, Display};
 use serde::{Deserialize, Serialize};
