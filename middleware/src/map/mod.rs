@@ -21,7 +21,10 @@ use std::{
 
 use async_trait::async_trait;
 use drasi_core::{
-    interface::{ElementIndex, MiddlewareError, MiddlewareSetupError, SourceMiddleware, SourceMiddlewareFactory},
+    interface::{
+        ElementIndex, MiddlewareError, MiddlewareSetupError, SourceMiddleware,
+        SourceMiddlewareFactory,
+    },
     models::{Element, ElementPropertyMap, ElementReference, SourceChange, SourceMiddlewareConfig},
 };
 use jsonpath_rust::{path::config::JsonPathConfig, JsonPathInst};

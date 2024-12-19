@@ -36,13 +36,15 @@ pub fn middlewares() -> Vec<Arc<SourceMiddlewareConfig>> {
             "label": "Container",
             "key": "$.containerID",
             "relation": "OWNS"
-        }]  
+        }]
     })
     .as_object()
     .unwrap()
     .clone();
 
-    vec![Arc::new(SourceMiddlewareConfig::new("unwind", "unwind", cfg))]
+    vec![Arc::new(SourceMiddlewareConfig::new(
+        "unwind", "unwind", cfg,
+    ))]
 }
 
 pub fn source_pipeline() -> Vec<String> {

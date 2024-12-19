@@ -82,7 +82,7 @@ pub async fn unwind(config: &(impl QueryTestConfig + Send)) {
                                 "name": "redis"
                             }
                         ]
-                    }                        
+                    }
                 })),
             },
         };
@@ -142,7 +142,7 @@ pub async fn unwind(config: &(impl QueryTestConfig + Send)) {
                                 "name": "dapr"
                             }
                         ]
-                    }                        
+                    }
                 })),
             },
         };
@@ -159,7 +159,7 @@ pub async fn unwind(config: &(impl QueryTestConfig + Send)) {
                 "containerID" => VariableValue::from(json!("c3")),
                 "name" => VariableValue::from(json!("dapr"))
             )
-        }));        
+        }));
     }
 
     //remove container / update container
@@ -191,7 +191,7 @@ pub async fn unwind(config: &(impl QueryTestConfig + Send)) {
                                 "name": "dapr"
                             }
                         ]
-                    }                        
+                    }
                 })),
             },
         };
@@ -202,13 +202,13 @@ pub async fn unwind(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         println!("Node Result - Update p1: {:?}", result);
         assert_eq!(result.len(), 2);
-        
+
         assert!(result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!(
                 "pod" => VariableValue::from(json!("pod-1")),
                 "containerID" => VariableValue::from(json!("c2")),
                 "name" => VariableValue::from(json!("redis"))
-            )            
+            )
         }));
 
         assert!(result.contains(&QueryPartEvaluationContext::Updating {
@@ -241,13 +241,13 @@ pub async fn unwind(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         println!("Node Result - Delete p1: {:?}", result);
         assert_eq!(result.len(), 2);
-        
+
         assert!(result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!(
                 "pod" => VariableValue::from(json!("pod-1")),
                 "containerID" => VariableValue::from(json!("c1")),
                 "name" => VariableValue::from(json!("nginx2"))
-            )            
+            )
         }));
 
         assert!(result.contains(&QueryPartEvaluationContext::Removing {
@@ -255,7 +255,7 @@ pub async fn unwind(config: &(impl QueryTestConfig + Send)) {
                 "pod" => VariableValue::from(json!("pod-1")),
                 "containerID" => VariableValue::from(json!("c3")),
                 "name" => VariableValue::from(json!("dapr"))
-            )            
+            )
         }));
     }
 }

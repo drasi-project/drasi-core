@@ -464,7 +464,11 @@ impl ContinuousQuery {
 
         let mut new_source_changes = Vec::new();
         for source_change in source_changes {
-            new_source_changes.append(&mut pipeline.process(source_change, self.element_index.clone()).await?);
+            new_source_changes.append(
+                &mut pipeline
+                    .process(source_change, self.element_index.clone())
+                    .await?,
+            );
         }
 
         source_changes = new_source_changes;

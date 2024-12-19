@@ -15,7 +15,10 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    interface::{ElementIndex, MiddlewareError, MiddlewareSetupError, SourceMiddleware, SourceMiddlewareFactory},
+    interface::{
+        ElementIndex, MiddlewareError, MiddlewareSetupError, SourceMiddleware,
+        SourceMiddlewareFactory,
+    },
     models::{SourceChange, SourceMiddlewareConfig},
 };
 
@@ -109,7 +112,11 @@ impl SourceMiddlewarePipeline {
         for middleware in &self.pipeline {
             let mut new_source_changes = Vec::new();
             for source_change in source_changes {
-                new_source_changes.append(&mut middleware.process(source_change, element_index.as_ref()).await?);
+                new_source_changes.append(
+                    &mut middleware
+                        .process(source_change, element_index.as_ref())
+                        .await?,
+                );
             }
 
             source_changes = new_source_changes;

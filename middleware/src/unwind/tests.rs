@@ -16,10 +16,12 @@ mod process {
     use std::sync::Arc;
 
     use drasi_core::{
-        in_memory_index::in_memory_element_index::InMemoryElementIndex, interface::{ElementIndex, SourceMiddlewareFactory}, models::{
+        in_memory_index::in_memory_element_index::InMemoryElementIndex,
+        interface::{ElementIndex, SourceMiddlewareFactory},
+        models::{
             Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
             SourceMiddlewareConfig,
-        }
+        },
     };
     use serde_json::json;
 
@@ -34,7 +36,7 @@ mod process {
                 "label": "Container",
                 "key": "$.containerID",
                 "relation": "OWNS"
-            }]            
+            }]
         });
 
         let element_index = Arc::new(InMemoryElementIndex::new());
@@ -71,21 +73,24 @@ mod process {
                             "name": "redis"
                         }
                     ]
-                }                        
+                }
             })),
         };
 
         let result = subject
-            .process(SourceChange::Insert {
-                element: element1.clone(),
-            }, element_index.as_ref())
+            .process(
+                SourceChange::Insert {
+                    element: element1.clone(),
+                },
+                element_index.as_ref(),
+            )
             .await;
 
         assert!(result.is_ok());
         let result = result.unwrap();
 
         assert_eq!(result.len(), 5);
-        assert!(result.contains(&SourceChange::Insert{
+        assert!(result.contains(&SourceChange::Insert {
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "p1"),
@@ -112,15 +117,18 @@ mod process {
                                 "name": "redis"
                             }
                         ]
-                    }                        
+                    }
                 }))
             }
         }));
 
-        assert!(result.contains(&SourceChange::Insert{
+        assert!(result.contains(&SourceChange::Insert {
             element: Element::Node {
                 metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "$unwind-$.status.containerStatuses[*]-p1-c1"),
+                    reference: ElementReference::new(
+                        "test",
+                        "$unwind-$.status.containerStatuses[*]-p1-c1"
+                    ),
                     labels: vec!["Container".into()].into(),
                     effective_from: 0
                 },
@@ -131,23 +139,32 @@ mod process {
             }
         }));
 
-        assert!(result.contains(&SourceChange::Insert{
+        assert!(result.contains(&SourceChange::Insert {
             element: Element::Relation {
                 metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "$unwind-$.status.containerStatuses[*]-p1-c1$rel"),
+                    reference: ElementReference::new(
+                        "test",
+                        "$unwind-$.status.containerStatuses[*]-p1-c1$rel"
+                    ),
                     labels: vec!["OWNS".into()].into(),
                     effective_from: 0
                 },
                 properties: ElementPropertyMap::new(),
-                out_node: ElementReference::new("test", "$unwind-$.status.containerStatuses[*]-p1-c1"),
+                out_node: ElementReference::new(
+                    "test",
+                    "$unwind-$.status.containerStatuses[*]-p1-c1"
+                ),
                 in_node: ElementReference::new("test", "p1"),
             }
         }));
 
-        assert!(result.contains(&SourceChange::Insert{
+        assert!(result.contains(&SourceChange::Insert {
             element: Element::Node {
                 metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "$unwind-$.status.containerStatuses[*]-p1-c2"),
+                    reference: ElementReference::new(
+                        "test",
+                        "$unwind-$.status.containerStatuses[*]-p1-c2"
+                    ),
                     labels: vec!["Container".into()].into(),
                     effective_from: 0
                 },
@@ -158,15 +175,21 @@ mod process {
             }
         }));
 
-        assert!(result.contains(&SourceChange::Insert{
+        assert!(result.contains(&SourceChange::Insert {
             element: Element::Relation {
                 metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "$unwind-$.status.containerStatuses[*]-p1-c2$rel"),
+                    reference: ElementReference::new(
+                        "test",
+                        "$unwind-$.status.containerStatuses[*]-p1-c2$rel"
+                    ),
                     labels: vec!["OWNS".into()].into(),
                     effective_from: 0
                 },
                 properties: ElementPropertyMap::new(),
-                out_node: ElementReference::new("test", "$unwind-$.status.containerStatuses[*]-p1-c2"),
+                out_node: ElementReference::new(
+                    "test",
+                    "$unwind-$.status.containerStatuses[*]-p1-c2"
+                ),
                 in_node: ElementReference::new("test", "p1"),
             }
         }));
@@ -174,56 +197,64 @@ mod process {
         element_index.set_element(&element1, &vec![]).await.unwrap();
 
         let result = subject
-            .process(SourceChange::Update {
-                element: Element::Node {
-                    metadata: ElementMetadata {
-                        reference: ElementReference::new("test", "p1"),
-                        labels: vec!["Pod".into()].into(),
-                        effective_from: 0,
-                    },
-                    properties: ElementPropertyMap::from(json!({
-                        "metadata": {
-                            "name": "pod-1",
-                            "namespace": "default",
-                            "labels": {
-                                "app": "nginx",
-                                "env": "prod"
-                            }
+            .process(
+                SourceChange::Update {
+                    element: Element::Node {
+                        metadata: ElementMetadata {
+                            reference: ElementReference::new("test", "p1"),
+                            labels: vec!["Pod".into()].into(),
+                            effective_from: 0,
                         },
-                        "status": {
-                            "containerStatuses": [
-                                {
-                                    "containerID": "c2",
-                                    "name": "redis"
+                        properties: ElementPropertyMap::from(json!({
+                            "metadata": {
+                                "name": "pod-1",
+                                "namespace": "default",
+                                "labels": {
+                                    "app": "nginx",
+                                    "env": "prod"
                                 }
-                            ]
-                        }                        
-                    })),
+                            },
+                            "status": {
+                                "containerStatuses": [
+                                    {
+                                        "containerID": "c2",
+                                        "name": "redis"
+                                    }
+                                ]
+                            }
+                        })),
+                    },
                 },
-            }, element_index.as_ref())
+                element_index.as_ref(),
+            )
             .await;
 
         assert!(result.is_ok());
         let result = result.unwrap();
 
         println!("Result: {:#?}", result);
-        
-        assert!(result.contains(&SourceChange::Delete{
+
+        assert!(result.contains(&SourceChange::Delete {
             metadata: ElementMetadata {
-                reference: ElementReference::new("test", "$unwind-$.status.containerStatuses[*]-p1-c1"),
+                reference: ElementReference::new(
+                    "test",
+                    "$unwind-$.status.containerStatuses[*]-p1-c1"
+                ),
                 labels: vec!["Container".into()].into(),
                 effective_from: 0
             },
         }));
 
-        assert!(result.contains(&SourceChange::Delete{
+        assert!(result.contains(&SourceChange::Delete {
             metadata: ElementMetadata {
-                reference: ElementReference::new("test", "$unwind-$.status.containerStatuses[*]-p1-c1$rel"),
+                reference: ElementReference::new(
+                    "test",
+                    "$unwind-$.status.containerStatuses[*]-p1-c1$rel"
+                ),
                 labels: vec!["OWNS".into()].into(),
                 effective_from: 0
             },
         }));
-
     }
 
     #[tokio::test]
@@ -234,7 +265,7 @@ mod process {
                 "selector": "$.status.containerStatuses[*]",
                 "label": "Container",
                 "key": "$.containerID"
-            }]            
+            }]
         });
 
         let element_index = Arc::new(InMemoryElementIndex::new());
@@ -247,44 +278,47 @@ mod process {
         let subject = factory.create(&mw_config).unwrap();
 
         let result = subject
-            .process(SourceChange::Insert {
-                element: Element::Node {
-                    metadata: ElementMetadata {
-                        reference: ElementReference::new("test", "p1"),
-                        labels: vec!["Pod".into()].into(),
-                        effective_from: 0,
-                    },
-                    properties: ElementPropertyMap::from(json!({
-                        "metadata": {
-                            "name": "pod-1",
-                            "namespace": "default",
-                            "labels": {
-                                "app": "nginx",
-                                "env": "prod"
-                            }
+            .process(
+                SourceChange::Insert {
+                    element: Element::Node {
+                        metadata: ElementMetadata {
+                            reference: ElementReference::new("test", "p1"),
+                            labels: vec!["Pod".into()].into(),
+                            effective_from: 0,
                         },
-                        "status": {
-                            "containerStatuses": [
-                                {
-                                    "containerID": "c1",
-                                    "name": "nginx"
-                                },
-                                {
-                                    "containerID": "c2",
-                                    "name": "redis"
+                        properties: ElementPropertyMap::from(json!({
+                            "metadata": {
+                                "name": "pod-1",
+                                "namespace": "default",
+                                "labels": {
+                                    "app": "nginx",
+                                    "env": "prod"
                                 }
-                            ]
-                        }                        
-                    })),
+                            },
+                            "status": {
+                                "containerStatuses": [
+                                    {
+                                        "containerID": "c1",
+                                        "name": "nginx"
+                                    },
+                                    {
+                                        "containerID": "c2",
+                                        "name": "redis"
+                                    }
+                                ]
+                            }
+                        })),
+                    },
                 },
-            }, element_index.as_ref())
+                element_index.as_ref(),
+            )
             .await;
 
         assert!(result.is_ok());
         let result = result.unwrap();
 
         assert_eq!(result.len(), 3);
-        assert!(result.contains(&SourceChange::Insert{
+        assert!(result.contains(&SourceChange::Insert {
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "p1"),
@@ -311,15 +345,18 @@ mod process {
                                 "name": "redis"
                             }
                         ]
-                    }                        
+                    }
                 }))
             }
         }));
 
-        assert!(result.contains(&SourceChange::Insert{
+        assert!(result.contains(&SourceChange::Insert {
             element: Element::Node {
                 metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "$unwind-$.status.containerStatuses[*]-p1-c1"),
+                    reference: ElementReference::new(
+                        "test",
+                        "$unwind-$.status.containerStatuses[*]-p1-c1"
+                    ),
                     labels: vec!["Container".into()].into(),
                     effective_from: 0
                 },
@@ -330,10 +367,13 @@ mod process {
             }
         }));
 
-        assert!(result.contains(&SourceChange::Insert{
+        assert!(result.contains(&SourceChange::Insert {
             element: Element::Node {
                 metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "$unwind-$.status.containerStatuses[*]-p1-c2"),
+                    reference: ElementReference::new(
+                        "test",
+                        "$unwind-$.status.containerStatuses[*]-p1-c2"
+                    ),
                     labels: vec!["Container".into()].into(),
                     effective_from: 0
                 },
@@ -353,7 +393,7 @@ mod process {
                 "selector": "$.status.containerStatuses[*]",
                 "label": "Container",
                 "relation": "OWNS"
-            }]            
+            }]
         });
 
         let element_index = Arc::new(InMemoryElementIndex::new());
@@ -366,44 +406,47 @@ mod process {
         let subject = factory.create(&mw_config).unwrap();
 
         let result = subject
-            .process(SourceChange::Insert {
-                element: Element::Node {
-                    metadata: ElementMetadata {
-                        reference: ElementReference::new("test", "p1"),
-                        labels: vec!["Pod".into()].into(),
-                        effective_from: 0,
-                    },
-                    properties: ElementPropertyMap::from(json!({
-                        "metadata": {
-                            "name": "pod-1",
-                            "namespace": "default",
-                            "labels": {
-                                "app": "nginx",
-                                "env": "prod"
-                            }
+            .process(
+                SourceChange::Insert {
+                    element: Element::Node {
+                        metadata: ElementMetadata {
+                            reference: ElementReference::new("test", "p1"),
+                            labels: vec!["Pod".into()].into(),
+                            effective_from: 0,
                         },
-                        "status": {
-                            "containerStatuses": [
-                                {
-                                    "containerID": "c1",
-                                    "name": "nginx"
-                                },
-                                {
-                                    "containerID": "c2",
-                                    "name": "redis"
+                        properties: ElementPropertyMap::from(json!({
+                            "metadata": {
+                                "name": "pod-1",
+                                "namespace": "default",
+                                "labels": {
+                                    "app": "nginx",
+                                    "env": "prod"
                                 }
-                            ]
-                        }                        
-                    })),
+                            },
+                            "status": {
+                                "containerStatuses": [
+                                    {
+                                        "containerID": "c1",
+                                        "name": "nginx"
+                                    },
+                                    {
+                                        "containerID": "c2",
+                                        "name": "redis"
+                                    }
+                                ]
+                            }
+                        })),
+                    },
                 },
-            }, element_index.as_ref())
+                element_index.as_ref(),
+            )
             .await;
 
         assert!(result.is_ok());
         let result = result.unwrap();
 
         assert_eq!(result.len(), 5);
-        assert!(result.contains(&SourceChange::Insert{
+        assert!(result.contains(&SourceChange::Insert {
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "p1"),
@@ -430,15 +473,18 @@ mod process {
                                 "name": "redis"
                             }
                         ]
-                    }                        
+                    }
                 }))
             }
         }));
 
-        assert!(result.contains(&SourceChange::Insert{
+        assert!(result.contains(&SourceChange::Insert {
             element: Element::Node {
                 metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "$unwind-$.status.containerStatuses[*]-p1-0"),
+                    reference: ElementReference::new(
+                        "test",
+                        "$unwind-$.status.containerStatuses[*]-p1-0"
+                    ),
                     labels: vec!["Container".into()].into(),
                     effective_from: 0
                 },
@@ -449,23 +495,32 @@ mod process {
             }
         }));
 
-        assert!(result.contains(&SourceChange::Insert{
+        assert!(result.contains(&SourceChange::Insert {
             element: Element::Relation {
                 metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "$unwind-$.status.containerStatuses[*]-p1-0$rel"),
+                    reference: ElementReference::new(
+                        "test",
+                        "$unwind-$.status.containerStatuses[*]-p1-0$rel"
+                    ),
                     labels: vec!["OWNS".into()].into(),
                     effective_from: 0
                 },
                 properties: ElementPropertyMap::new(),
-                out_node: ElementReference::new("test", "$unwind-$.status.containerStatuses[*]-p1-0"),
+                out_node: ElementReference::new(
+                    "test",
+                    "$unwind-$.status.containerStatuses[*]-p1-0"
+                ),
                 in_node: ElementReference::new("test", "p1"),
             }
         }));
 
-        assert!(result.contains(&SourceChange::Insert{
+        assert!(result.contains(&SourceChange::Insert {
             element: Element::Node {
                 metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "$unwind-$.status.containerStatuses[*]-p1-1"),
+                    reference: ElementReference::new(
+                        "test",
+                        "$unwind-$.status.containerStatuses[*]-p1-1"
+                    ),
                     labels: vec!["Container".into()].into(),
                     effective_from: 0
                 },
@@ -476,21 +531,25 @@ mod process {
             }
         }));
 
-        assert!(result.contains(&SourceChange::Insert{
+        assert!(result.contains(&SourceChange::Insert {
             element: Element::Relation {
                 metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "$unwind-$.status.containerStatuses[*]-p1-1$rel"),
+                    reference: ElementReference::new(
+                        "test",
+                        "$unwind-$.status.containerStatuses[*]-p1-1$rel"
+                    ),
                     labels: vec!["OWNS".into()].into(),
                     effective_from: 0
                 },
                 properties: ElementPropertyMap::new(),
-                out_node: ElementReference::new("test", "$unwind-$.status.containerStatuses[*]-p1-1"),
+                out_node: ElementReference::new(
+                    "test",
+                    "$unwind-$.status.containerStatuses[*]-p1-1"
+                ),
                 in_node: ElementReference::new("test", "p1"),
             }
-        }));        
+        }));
     }
-
-
 }
 
 mod factory {
@@ -508,7 +567,7 @@ mod factory {
                 "label": "Container",
                 "key": "$.containerID",
                 "relation": "OWNS"
-            }]            
+            }]
         });
 
         let mw_config = SourceMiddlewareConfig {
@@ -529,7 +588,7 @@ mod factory {
                 "label": "Container",
                 "key": "$.containerID",
                 "relation": "OWNS"
-            }]            
+            }]
         });
 
         let mw_config = SourceMiddlewareConfig {
