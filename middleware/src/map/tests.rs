@@ -81,7 +81,7 @@ mod process {
                         "vehicleId": "v1"
                     })),
                 },
-            }, element_index.clone())
+            }, element_index.as_ref())
             .await;
 
         assert!(result.is_ok());
@@ -173,7 +173,7 @@ mod process {
                         "fleetId": "f1"
                     })),
                 },
-            }, element_index.clone())
+            }, element_index.as_ref())
             .await;
 
         assert!(result.is_ok());

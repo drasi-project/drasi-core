@@ -123,7 +123,7 @@ impl SourceMiddleware for Map {
     async fn process(
         &self,
         source_change: SourceChange,
-        _element_index: Arc<dyn ElementIndex>,
+        _element_index: &dyn ElementIndex,
     ) -> Result<Vec<SourceChange>, MiddlewareError> {
         let metadata = match &source_change {
             SourceChange::Insert { element } => element.get_metadata(),

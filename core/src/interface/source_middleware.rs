@@ -52,7 +52,7 @@ pub trait SourceMiddleware: Send + Sync {
     async fn process(
         &self,
         source_change: SourceChange,
-        element_index: Arc<dyn ElementIndex>,
+        element_index: &dyn ElementIndex,
     ) -> Result<Vec<SourceChange>, MiddlewareError>;
 }
 

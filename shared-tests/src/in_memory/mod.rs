@@ -345,3 +345,14 @@ mod document {
         document::document(&test_config).await;
     }
 }
+
+mod unwind {
+    use super::InMemoryQueryConfig;
+    use crate::use_cases::*;
+
+    #[tokio::test]
+    async fn unwind() {
+        let test_config = InMemoryQueryConfig::new();
+        unwind::unwind(&test_config).await;
+    }
+}

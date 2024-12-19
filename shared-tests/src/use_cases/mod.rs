@@ -25,6 +25,7 @@ pub mod linear_regression;
 pub mod min_value;
 pub mod overdue_invoice;
 pub mod remap;
+pub mod unwind;
 pub mod sensor_heartbeat;
 
 pub mod crosses_above_a_threshold;

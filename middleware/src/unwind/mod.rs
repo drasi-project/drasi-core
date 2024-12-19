@@ -90,7 +90,7 @@ impl SourceMiddleware for Unwind {
     async fn process(
         &self,
         source_change: SourceChange,
-        element_index: Arc<dyn ElementIndex>,
+        element_index: &dyn ElementIndex,
     ) -> Result<Vec<SourceChange>, MiddlewareError> {
         
         let metadata = match &source_change {
@@ -108,21 +108,21 @@ impl SourceMiddleware for Unwind {
                 Some(mapping) => mapping,
                 None => continue,
             };
-            
-            log::info!("Processing mappings for label: {}", label);
-
-            #[allow(unused_assignments)]
-            let mut del_element = None;
-
-            #[allow(clippy::unwrap_used)]
-            let element = match &source_change {
-                SourceChange::Insert { element } => element,
-                SourceChange::Update { element } => element,
+           
+            let (new_element, old_element) = match &source_change {
+                SourceChange::Insert { element } => (Some(element), None),
+                SourceChange::Update { element } => {
+                    match element_index.get_element(&metadata.reference).await {
+                        Ok(old) => (Some(element), old),
+                        Err(e) => {
+                            return Err(MiddlewareError::IndexError(e));
+                        }
+                    }                    
+                },
                 SourceChange::Delete { metadata } => {
                     match element_index.get_element(&metadata.reference).await {
                         Ok(Some(element)) => {
-                            del_element = Some(element);
-                            del_element.as_ref().unwrap()
+                            (None, Some(element))
                         },
                         Ok(None) => continue,
                         Err(e) => {
@@ -133,96 +133,161 @@ impl SourceMiddleware for Unwind {
                 _ => continue,
             };
 
-            let source_obj: Value = element.into();
+            let new_element_obj: Option<Value> = new_element.map(|x| x.into());
+            let old_element_obj: Option<Value> = old_element.map(|x| x.as_ref().into());
 
             for mapping in mappings {
 
-                let selected = mapping.selector.execute(&source_obj);
+                let mut change_map = HashMap::new();
 
-                for (index, obj) in selected.iter().enumerate() {
-                    
-                    let mut new_metadata = metadata.clone();
+                if let Some(new_obj) = &new_element_obj {
 
-                    let id_suffix = match &mapping.key {
-                        Some(key) => match key.execute_one(&obj) {
-                            Some(id) => match id.as_str() {
-                                Some(id) => id.to_string(),
+                    let selected = mapping.selector.execute(new_obj);
+
+                    for (index, obj) in selected.iter().enumerate() {
+                        
+                        let mut new_metadata = metadata.clone();
+    
+                        let item_id = match &mapping.key {
+                            Some(key) => match key.execute_one(&obj) {
+                                Some(id) => match id.as_str() {
+                                    Some(id) => id.to_string(),
+                                    None => index.to_string(),
+                                },
                                 None => index.to_string(),
                             },
                             None => index.to_string(),
-                        },
-                        None => index.to_string(),
-                    };
-
-                    new_metadata.reference.element_id = Arc::from(format!("$unwind-{}-{}", metadata.reference.element_id, id_suffix));
-
-                    new_metadata.labels = Arc::from(vec![Arc::from(mapping.label.clone())]);
-
-                    let properties = match obj.as_object() {
-                        Some(obj) => obj.into(),
-                        None => ElementPropertyMap::new(),
-                    };
-
-                    let relation = match &mapping.relation {
-                        Some(rel_label) => Some(Element::Relation {
-                                metadata: ElementMetadata {
-                                    reference: ElementReference::new(&new_metadata.reference.source_id, &format!("{}$rel", new_metadata.reference.element_id)),
-                                    labels: Arc::new([Arc::from(rel_label.as_str())]),
-                                    effective_from: new_metadata.effective_from,
-                                },
-                                properties: ElementPropertyMap::new(),
-                                out_node: metadata.reference.clone(),
-                                in_node: new_metadata.reference.clone(),
-                            }),
-                        None => None,
-                    };
-
-                    match &source_change {
-                        SourceChange::Insert { .. } => {
-                            results.push(SourceChange::Insert {
-                                element: Element::Node {
-                                    metadata: new_metadata,
-                                    properties,
-                                },
-                            });
-                            if let Some(rel) = relation {
-                                results.push(SourceChange::Insert {
-                                    element: rel,
+                        };
+                        
+                        let mut item_source_changes = Vec::new();
+    
+                        new_metadata.reference.element_id = Arc::from(format_item_id(&mapping.selector.expression, &metadata.reference.element_id, &item_id));
+                        new_metadata.labels = Arc::from(vec![Arc::from(mapping.label.clone())]);
+    
+                        let properties = match obj.as_object() {
+                            Some(obj) => obj.into(),
+                            None => ElementPropertyMap::new(),
+                        };
+                        
+                        let relation = match &mapping.relation {
+                            Some(rel_label) => Some(Element::Relation {
+                                    metadata: ElementMetadata {
+                                        reference: ElementReference::new(&new_metadata.reference.source_id, &format_relation_id(&new_metadata.reference.element_id)),
+                                        labels: Arc::new([Arc::from(rel_label.as_str())]),
+                                        effective_from: new_metadata.effective_from,
+                                    },
+                                    properties: ElementPropertyMap::new(),
+                                    out_node: new_metadata.reference.clone(),
+                                    in_node: metadata.reference.clone(),
+                                }),
+                            None => None,
+                        };
+    
+                        match &source_change {
+                            SourceChange::Insert { .. } => {
+                                item_source_changes.push(SourceChange::Insert {
+                                    element: Element::Node {
+                                        metadata: new_metadata,
+                                        properties,
+                                    },
                                 });
+                                if let Some(rel) = relation {
+                                    item_source_changes.push(SourceChange::Insert {
+                                        element: rel,
+                                    });
+                                }
                             }
-                        }
-                        SourceChange::Update { .. } => {
-                            results.push(SourceChange::Update {
-                                element: Element::Node {
-                                    metadata: new_metadata,
-                                    properties,
-                                },
-                            });
-                            if let Some(rel) = relation {
-                                results.push(SourceChange::Update {
-                                    element: rel,
+                            SourceChange::Update { .. } => {
+                                item_source_changes.push(SourceChange::Update {
+                                    element: Element::Node {
+                                        metadata: new_metadata,
+                                        properties,
+                                    },
                                 });
+                                if let Some(rel) = relation {
+                                    item_source_changes.push(SourceChange::Update {
+                                        element: rel,
+                                    });
+                                }
                             }
-                        }
-                        SourceChange::Delete { .. } => {
-                            results.push(SourceChange::Delete { metadata: new_metadata });
-                            if let Some(rel) = relation {
-                                results.push(SourceChange::Delete { 
-                                    metadata: rel.get_metadata().clone()
-                                });
+                            SourceChange::Delete { .. } => {
+                                item_source_changes.push(SourceChange::Delete { metadata: new_metadata });
+                                if let Some(rel) = relation {
+                                    item_source_changes.push(SourceChange::Delete { 
+                                        metadata: rel.get_metadata().clone()
+                                    });
+                                }
                             }
+                            _ => {}
                         }
-                        _ => {}
+    
+                        change_map.insert(item_id.clone(), item_source_changes);
                     }
-
                 }
-            
+
+                if let Some(old_obj) = &old_element_obj {
+
+                    let selected = mapping.selector.execute(old_obj);
+
+                    for (index, obj) in selected.iter().enumerate() {    
+                        let item_id = match &mapping.key {
+                            Some(key) => match key.execute_one(&obj) {
+                                Some(id) => match id.as_str() {
+                                    Some(id) => id.to_string(),
+                                    None => index.to_string(),
+                                },
+                                None => index.to_string(),
+                            },
+                            None => index.to_string(),
+                        };
+
+                        if change_map.contains_key(&item_id) {
+                            continue;
+                        }
+
+                        let mut item_source_changes = Vec::new();
+
+                        let child_id = format_item_id(&mapping.selector.expression, &metadata.reference.element_id, &item_id);
+
+                        item_source_changes.push(SourceChange::Delete { 
+                            metadata: ElementMetadata {
+                                reference: ElementReference::new(&metadata.reference.source_id, &child_id),
+                                labels: Arc::new([Arc::from(mapping.label.clone())]),
+                                effective_from: metadata.effective_from,
+                            }
+                        });
+
+                        if let Some(rel_label) = &mapping.relation {
+                            item_source_changes.push(SourceChange::Delete { 
+                                metadata: ElementMetadata {
+                                    reference: ElementReference::new(&metadata.reference.source_id, &format_relation_id(&child_id)),
+                                    labels: Arc::new([Arc::from(rel_label.as_str())]),
+                                    effective_from: metadata.effective_from,
+                                }
+                            });
+                        }
+                        
+                        change_map.insert(item_id.clone(), item_source_changes);
+                    }
+                }
+
+                for (_, changes) in change_map {
+                    results.extend(changes);
+                }            
             }
         }
 
         results.push(source_change);
         Ok(results)
     }
+}
+
+fn format_item_id(expression: &str, parent_id: &str, item_id: &str) -> String {
+    format!("$unwind-{}-{}-{}", expression, parent_id, item_id)
+}
+
+fn format_relation_id(child_id: &str) -> String {
+    format!("{}$rel", child_id)
 }
 
 pub struct UnwindFactory {}
