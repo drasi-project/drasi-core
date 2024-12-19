@@ -33,9 +33,9 @@ pub enum MiddlewareError {
     IndexError(IndexError),
 }
 
-impl Into<MiddlewareError> for IndexError {
-    fn into(self) -> MiddlewareError {
-        MiddlewareError::IndexError(self)
+impl From<IndexError> for MiddlewareError {
+    fn from(val: IndexError) -> Self {
+        MiddlewareError::IndexError(val)
     }
 }
 

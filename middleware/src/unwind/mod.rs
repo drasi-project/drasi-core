@@ -143,7 +143,7 @@ impl SourceMiddleware for Unwind {
                         let mut new_metadata = metadata.clone();
 
                         let item_id = match &mapping.key {
-                            Some(key) => match key.execute_one(&obj) {
+                            Some(key) => match key.execute_one(obj) {
                                 Some(id) => match id.as_str() {
                                     Some(id) => id.to_string(),
                                     None => index.to_string(),
@@ -229,7 +229,7 @@ impl SourceMiddleware for Unwind {
 
                     for (index, obj) in selected.iter().enumerate() {
                         let item_id = match &mapping.key {
-                            Some(key) => match key.execute_one(&obj) {
+                            Some(key) => match key.execute_one(obj) {
                                 Some(id) => match id.as_str() {
                                     Some(id) => id.to_string(),
                                     None => index.to_string(),
