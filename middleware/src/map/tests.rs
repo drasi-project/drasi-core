@@ -13,12 +13,13 @@
 // limitations under the License.
 
 mod process {
+    use std::sync::Arc;
+
     use drasi_core::{
-        interface::SourceMiddlewareFactory,
-        models::{
+        in_memory_index::in_memory_element_index::InMemoryElementIndex, interface::SourceMiddlewareFactory, models::{
             Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
             SourceMiddlewareConfig,
-        },
+        }
     };
     use serde_json::json;
 
@@ -42,6 +43,7 @@ mod process {
             }
         });
 
+        let element_index = Arc::new(InMemoryElementIndex::new());
         let mw_config = SourceMiddlewareConfig {
             name: "test".into(),
             kind: "map".into(),
@@ -79,7 +81,7 @@ mod process {
                         "vehicleId": "v1"
                     })),
                 },
-            })
+            }, element_index.clone())
             .await;
 
         assert!(result.is_ok());
@@ -132,6 +134,7 @@ mod process {
             }
         });
 
+        let element_index = Arc::new(InMemoryElementIndex::new());
         let mw_config = SourceMiddlewareConfig {
             name: "test".into(),
             kind: "map".into(),
@@ -170,7 +173,7 @@ mod process {
                         "fleetId": "f1"
                     })),
                 },
-            })
+            }, element_index.clone())
             .await;
 
         assert!(result.is_ok());

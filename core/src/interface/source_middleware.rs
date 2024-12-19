@@ -19,6 +19,8 @@ use thiserror::Error;
 
 use crate::models::{SourceChange, SourceMiddlewareConfig};
 
+use super::{ElementIndex, IndexError};
+
 #[derive(Error, Debug)]
 pub enum MiddlewareError {
     #[error("Error processing source change: {0}")]
@@ -26,6 +28,15 @@ pub enum MiddlewareError {
 
     #[error("Unknown middleware {0}")]
     UnknownKind(String),
+
+    #[error("Error processing source change: {0}")]
+    IndexError(IndexError),
+}
+
+impl Into<MiddlewareError> for IndexError {
+    fn into(self) -> MiddlewareError {
+        MiddlewareError::IndexError(self)
+    }
 }
 
 #[derive(Error, Debug)]
@@ -41,6 +52,7 @@ pub trait SourceMiddleware: Send + Sync {
     async fn process(
         &self,
         source_change: SourceChange,
+        element_index: Arc<dyn ElementIndex>,
     ) -> Result<Vec<SourceChange>, MiddlewareError>;
 }
 

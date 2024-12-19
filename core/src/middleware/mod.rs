@@ -15,7 +15,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    interface::{MiddlewareError, MiddlewareSetupError, SourceMiddleware, SourceMiddlewareFactory},
+    interface::{ElementIndex, MiddlewareError, MiddlewareSetupError, SourceMiddleware, SourceMiddlewareFactory},
     models::{SourceChange, SourceMiddlewareConfig},
 };
 
@@ -102,13 +102,14 @@ impl SourceMiddlewarePipeline {
     pub async fn process(
         &self,
         source_change: SourceChange,
+        element_index: Arc<dyn ElementIndex>,
     ) -> Result<Vec<SourceChange>, MiddlewareError> {
         let mut source_changes = vec![source_change];
 
         for middleware in &self.pipeline {
             let mut new_source_changes = Vec::new();
             for source_change in source_changes {
-                new_source_changes.append(&mut middleware.process(source_change).await?);
+                new_source_changes.append(&mut middleware.process(source_change, element_index.clone()).await?);
             }
 
             source_changes = new_source_changes;
