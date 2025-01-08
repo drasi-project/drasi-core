@@ -86,15 +86,3 @@ jobs:
           files: drasi-core-tarpaulin-report.xml
           name: codecov-drasi-core
           verbose: true
-      # - name: Code Coverage Report
-      #   uses: irongut/CodeCoverageSummary@v1.3.0
-      #   with:
-      #     filename: drasi-core-tarpaulin-report.xml
-      #     badge: true
-      #     fail_below_min: true
-      #     format: markdown
-      #     indicators: true
-      #     output: both
-
-      # - name: Write to Job Summary
-      #   run: cat code-coverage-results.md >> $GITHUB_STEP_SUMMARY
