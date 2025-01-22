@@ -85,4 +85,3 @@ jobs:
         with:
           files: drasi-core-tarpaulin-report.xml
           name: codecov-drasi-core
-          verbose: true
