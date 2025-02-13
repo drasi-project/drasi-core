@@ -13,7 +13,10 @@
 // limitations under the License.
 
 mod process {
+    use std::sync::Arc;
+
     use drasi_core::{
+        in_memory_index::in_memory_element_index::InMemoryElementIndex,
         interface::SourceMiddlewareFactory,
         models::{
             Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
@@ -42,6 +45,7 @@ mod process {
             }
         });
 
+        let element_index = Arc::new(InMemoryElementIndex::new());
         let mw_config = SourceMiddlewareConfig {
             name: "test".into(),
             kind: "map".into(),
@@ -51,35 +55,38 @@ mod process {
         let subject = factory.create(&mw_config).unwrap();
 
         let result = subject
-            .process(SourceChange::Insert {
-                element: Element::Node {
-                    metadata: ElementMetadata {
-                        reference: ElementReference::new("test", "t1"),
-                        labels: vec!["Telemetry".into()].into(),
-                        effective_from: 0,
-                    },
-                    properties: ElementPropertyMap::from(json!({
-                        "signals": [
-                            {
-                                "name": "Vehicle.CurrentLocation.Heading",
-                                "value": "96"
-                            },
-                            {
-                                "name": "Vehicle.Speed",
-                                "value": "119"
-                            },
-                            {
-                                "name": "Vehicle.TraveledDistance",
-                                "value": "4563"
-                            }
-                        ],
-                        "additionalProperties": {
-                            "Source": "provider.telemetry"
+            .process(
+                SourceChange::Insert {
+                    element: Element::Node {
+                        metadata: ElementMetadata {
+                            reference: ElementReference::new("test", "t1"),
+                            labels: vec!["Telemetry".into()].into(),
+                            effective_from: 0,
                         },
-                        "vehicleId": "v1"
-                    })),
+                        properties: ElementPropertyMap::from(json!({
+                            "signals": [
+                                {
+                                    "name": "Vehicle.CurrentLocation.Heading",
+                                    "value": "96"
+                                },
+                                {
+                                    "name": "Vehicle.Speed",
+                                    "value": "119"
+                                },
+                                {
+                                    "name": "Vehicle.TraveledDistance",
+                                    "value": "4563"
+                                }
+                            ],
+                            "additionalProperties": {
+                                "Source": "provider.telemetry"
+                            },
+                            "vehicleId": "v1"
+                        })),
+                    },
                 },
-            })
+                element_index.as_ref(),
+            )
             .await;
 
         assert!(result.is_ok());
@@ -132,6 +139,7 @@ mod process {
             }
         });
 
+        let element_index = Arc::new(InMemoryElementIndex::new());
         let mw_config = SourceMiddlewareConfig {
             name: "test".into(),
             kind: "map".into(),
@@ -141,36 +149,39 @@ mod process {
         let subject = factory.create(&mw_config).unwrap();
 
         let result = subject
-            .process(SourceChange::Insert {
-                element: Element::Node {
-                    metadata: ElementMetadata {
-                        reference: ElementReference::new("test", "t1"),
-                        labels: vec!["Telemetry".into()].into(),
-                        effective_from: 0,
-                    },
-                    properties: ElementPropertyMap::from(json!({
-                        "signals": [
-                            {
-                                "name": "Vehicle.CurrentLocation.Heading",
-                                "value": "96"
-                            },
-                            {
-                                "name": "Vehicle.Speed",
-                                "value": "119"
-                            },
-                            {
-                                "name": "Vehicle.TraveledDistance",
-                                "value": "4563"
-                            }
-                        ],
-                        "additionalProperties": {
-                            "Source": "provider.telemetry"
+            .process(
+                SourceChange::Insert {
+                    element: Element::Node {
+                        metadata: ElementMetadata {
+                            reference: ElementReference::new("test", "t1"),
+                            labels: vec!["Telemetry".into()].into(),
+                            effective_from: 0,
                         },
-                        "vehicleId": "v1",
-                        "fleetId": "f1"
-                    })),
+                        properties: ElementPropertyMap::from(json!({
+                            "signals": [
+                                {
+                                    "name": "Vehicle.CurrentLocation.Heading",
+                                    "value": "96"
+                                },
+                                {
+                                    "name": "Vehicle.Speed",
+                                    "value": "119"
+                                },
+                                {
+                                    "name": "Vehicle.TraveledDistance",
+                                    "value": "4563"
+                                }
+                            ],
+                            "additionalProperties": {
+                                "Source": "provider.telemetry"
+                            },
+                            "vehicleId": "v1",
+                            "fleetId": "f1"
+                        })),
+                    },
                 },
-            })
+                element_index.as_ref(),
+            )
             .await;
 
         assert!(result.is_ok());
