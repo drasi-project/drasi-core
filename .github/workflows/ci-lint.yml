@@ -31,6 +31,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install specific Rust version
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: 1.83.0 # Pin to a specific Rust version
+          override: true
+
+      - name: Install Clippy
+        run: rustup component add clippy rustfmt
       - name: Run Cargo Clippy
         run: cargo clippy --all-targets --all-features
 
