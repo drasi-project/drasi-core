@@ -1,7 +1,13 @@
 [package]
 name = "drasi-middleware"
+version = "0.1.0"
 edition = "2021"
-version.workspace = true
+license = "Apache-2.0"
+description = "Drasi Core Middleware"
+repository = "https://github.com/drasi-project/drasi-core"
+keywords = ["drasi"]
+categories = ["database"]
+readme = "../readme.md"    
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
