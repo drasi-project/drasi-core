@@ -21,7 +21,10 @@ use std::{
 
 use async_trait::async_trait;
 use drasi_core::{
-    interface::{MiddlewareError, MiddlewareSetupError, SourceMiddleware, SourceMiddlewareFactory},
+    interface::{
+        ElementIndex, MiddlewareError, MiddlewareSetupError, SourceMiddleware,
+        SourceMiddlewareFactory,
+    },
     models::{Element, ElementPropertyMap, ElementReference, SourceChange, SourceMiddlewareConfig},
 };
 use jsonpath_rust::{path::config::JsonPathConfig, JsonPathInst};
@@ -123,6 +126,7 @@ impl SourceMiddleware for Map {
     async fn process(
         &self,
         source_change: SourceChange,
+        _element_index: &dyn ElementIndex,
     ) -> Result<Vec<SourceChange>, MiddlewareError> {
         let metadata = match &source_change {
             SourceChange::Insert { element } => element.get_metadata(),

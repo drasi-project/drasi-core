@@ -228,6 +228,8 @@ peg::parser! {
                 a:(@) __* "%" __* b:@ { BinaryExpression::modulo(a, b) }
                 a:(@) __* "^" __* b:@ { BinaryExpression::exponent(a, b) }
                 --
+                parent:@ "." key:ident() { UnaryExpression::expression_property(parent, key) }
+                --
                 list:expression() "[" index:expression() "]" { BinaryExpression::index(list, index)}
                 e:(@) __+ kw_is() _+ kw_null() { UnaryExpression::is_null(e) }
                 e:(@) __+ kw_is() _+ kw_not() _+ kw_null() { UnaryExpression::is_not_null(e) }
@@ -241,7 +243,6 @@ peg::parser! {
                     let params = params.unwrap_or_else(Vec::new);
                     FunctionExpression::function(func, params, pos )
                 }
-                p:property() { UnaryExpression::property(p.0, p.1) }
                 "$" name:ident() { UnaryExpression::parameter(name) }
                 start:expression()? ".." end:expression()? { UnaryExpression::list_range(start, end) }
                 l:literal() { UnaryExpression::literal(l) }
@@ -283,6 +284,7 @@ peg::parser! {
         // e.g. 'hello_world', 'Rust', 'HAS_PROPERTY'
         rule ident() -> Arc<str>
             = quiet!{ident:$(alpha()alpha_num()*) { Arc::from(ident) }}
+            / "`" ident:$([^ '`' | '\n' | '\r']*) "`" { Arc::from(ident) }
             / expected!("an identifier")
 
         // e.g. 'sign', 'duration_between'
@@ -343,6 +345,10 @@ peg::parser! {
         rule property() -> (Arc<str>, Arc<str>)
             = name:ident() "." key:ident() { (name, key) }
             / "$" name:ident() "." key:ident() { (name, key) }
+
+            #[cache_left_rec]
+        rule nested_property() -> Expression
+            = parent:expression() "." key:ident() { UnaryExpression::expression_property(parent, key) }
 
         // e.g. 'MATCH (a)', 'MATCH (a) -> (b) <- (c)', ...
         rule match_clause() -> Vec<MatchClause>

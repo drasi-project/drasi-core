@@ -51,7 +51,6 @@ spec:
             property: id
   query: > … Cypher Query …
 */
-
 pub fn crosses_above_a_threshold_metadata() -> Vec<QueryJoin> {
     vec![
         QueryJoin {
