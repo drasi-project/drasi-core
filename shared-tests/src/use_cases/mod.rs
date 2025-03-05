@@ -26,11 +26,13 @@ pub mod min_value;
 pub mod overdue_invoice;
 pub mod remap;
 pub mod sensor_heartbeat;
+pub mod unwind;
 
 pub mod crosses_above_a_threshold;
 pub mod crosses_above_and_stays_above;
 pub mod crosses_above_three_times_in_an_hour;
 pub mod decrease_by_ten;
+pub mod document;
 pub mod exceeds_one_standard_deviation;
 pub mod greater_than_a_threshold;
 pub mod logical_conditions;
