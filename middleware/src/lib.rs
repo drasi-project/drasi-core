@@ -14,3 +14,4 @@
 
 pub mod map;
 pub mod unwind;
+pub mod decoder;
