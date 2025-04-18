@@ -27,6 +27,7 @@ impl CypherConfiguration for TestCypherConfig {
         set.insert("min".into());
         set.insert("max".into());
         set.insert("avg".into());
+        set.insert("collect".into());
         set.insert("drasi.linearGradient".into());
         set.insert("drasi.last".into());
         set
@@ -78,6 +79,36 @@ fn return_clause_aggregating() {
                     "Field2".into()
                 )],
                 45
+            )]
+        }
+    );
+}
+
+#[test]
+fn return_clause_collect_aggregating() {
+    let query = cypher::query(
+        "MATCH (a:Person) RETURN a.city, collect(a.name) AS names",
+        &TEST_CONFIG,
+    )
+    .unwrap();
+
+    assert_eq!(
+        query.parts[0].return_clause,
+        ProjectionClause::GroupBy {
+            grouping: vec![UnaryExpression::expression_property(
+                UnaryExpression::ident("a"),
+                "city".into()
+            )],
+            aggregates: vec![UnaryExpression::alias(
+                FunctionExpression::function(
+                    "collect".into(),
+                    vec![UnaryExpression::expression_property(
+                        UnaryExpression::ident("a"),
+                        "name".into()
+                    )],
+                    32
+                ),
+                "names".into()
             )]
         }
     );
