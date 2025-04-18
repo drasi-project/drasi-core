@@ -13,9 +13,9 @@
 // limitations under the License.
 
 //! # Decoder Middleware Tests
-//! 
+//!
 //! This module contains comprehensive tests for the decoder middleware, verifying:
-//! 
+//!
 //! - Support for multiple encoding types (base64, base64url, hex, url, json_escape)
 //! - Error handling behavior with the `on_error` option
 //! - Property handling including missing properties and wrong types
@@ -26,10 +26,10 @@ use std::sync::Arc;
 
 use drasi_core::{
     in_memory_index::in_memory_element_index::InMemoryElementIndex,
-    interface::{SourceMiddlewareFactory, MiddlewareError},
+    interface::{MiddlewareError, SourceMiddlewareFactory},
     models::{
-        Element, ElementMetadata, ElementReference, SourceChange,
-        SourceMiddlewareConfig, ElementValue,
+        Element, ElementMetadata, ElementReference, ElementValue, SourceChange,
+        SourceMiddlewareConfig,
     },
 };
 use serde_json::json;
@@ -66,16 +66,23 @@ mod process {
                 },
                 properties: json!({
                     "encoded_value": "SGVsbG8gV29ybGQh"  // Base64 encoded "Hello World!"
-                }).into(),
+                })
+                .into(),
             },
         };
 
-        let result = subject.process(source_change, element_index.as_ref()).await.unwrap();
+        let result = subject
+            .process(source_change, element_index.as_ref())
+            .await
+            .unwrap();
         let change = &result[0];
 
         if let SourceChange::Insert { element } = change {
             let decoded_value = element.get_properties().get("encoded_value").unwrap();
-            assert_eq!(decoded_value, &ElementValue::String("Hello World!".into()));
+            assert_eq!(
+                decoded_value,
+                &ElementValue::String("Hello World!".to_string().into())
+            );
         } else {
             panic!("Expected an Insert change");
         }
@@ -108,16 +115,23 @@ mod process {
                 },
                 properties: json!({
                     "encoded_value": "Invalid Base64 String"
-                }).into(),
+                })
+                .into(),
             },
         };
 
-        let result = subject.process(source_change, element_index.as_ref()).await.unwrap();
+        let result = subject
+            .process(source_change, element_index.as_ref())
+            .await
+            .unwrap();
         let change = &result[0];
 
         if let SourceChange::Insert { element } = change {
             let decoded_value = element.get_properties().get("encoded_value").unwrap();
-            assert_eq!(decoded_value, &ElementValue::String("Invalid Base64 String".to_string().into()));
+            assert_eq!(
+                decoded_value,
+                &ElementValue::String("Invalid Base64 String".to_string().into())
+            );
         } else {
             panic!("Expected an Insert change");
         }
@@ -150,16 +164,23 @@ mod process {
                 },
                 properties: json!({
                     "encoded_value": "SGVsbG8gV29ybGQh"  // Base64 URL-safe encoded "Hello World!"
-                }).into(),
+                })
+                .into(),
             },
         };
 
-        let result = subject.process(source_change, element_index.as_ref()).await.unwrap();
+        let result = subject
+            .process(source_change, element_index.as_ref())
+            .await
+            .unwrap();
         let change = &result[0];
 
         if let SourceChange::Insert { element } = change {
             let decoded_value = element.get_properties().get("encoded_value").unwrap();
-            assert_eq!(decoded_value, &ElementValue::String("Hello World!".into()));
+            assert_eq!(
+                decoded_value,
+                &ElementValue::String("Hello World!".to_string().into())
+            );
         } else {
             panic!("Expected an Insert change");
         }
@@ -192,16 +213,23 @@ mod process {
                 },
                 properties: json!({
                     "encoded_value": "48656c6c6f20576f726c6421"  // Hex encoded "Hello World!"
-                }).into(),
+                })
+                .into(),
             },
         };
 
-        let result = subject.process(source_change, element_index.as_ref()).await.unwrap();
+        let result = subject
+            .process(source_change, element_index.as_ref())
+            .await
+            .unwrap();
         let change = &result[0];
 
         if let SourceChange::Insert { element } = change {
             let decoded_value = element.get_properties().get("encoded_value").unwrap();
-            assert_eq!(decoded_value, &ElementValue::String("Hello World!".into()));
+            assert_eq!(
+                decoded_value,
+                &ElementValue::String("Hello World!".to_string().into())
+            );
         } else {
             panic!("Expected an Insert change");
         }
@@ -235,7 +263,8 @@ mod process {
                 },
                 properties: json!({
                     "encoded_value": "Not a valid hex string ZZ"  // Invalid hex
-                }).into(),
+                })
+                .into(),
             },
         };
 
@@ -247,7 +276,7 @@ mod process {
                 assert!(msg.contains("[test]"));
                 assert!(msg.contains("hex encoding"));
             }
-            _ => panic!("Expected SourceChangeError")
+            _ => panic!("Expected SourceChangeError"),
         }
     }
 
@@ -278,16 +307,23 @@ mod process {
                 },
                 properties: json!({
                     "encoded_value": "Hello%20World%21"  // URL encoded "Hello World!"
-                }).into(),
+                })
+                .into(),
             },
         };
 
-        let result = subject.process(source_change, element_index.as_ref()).await.unwrap();
+        let result = subject
+            .process(source_change, element_index.as_ref())
+            .await
+            .unwrap();
         let change = &result[0];
 
         if let SourceChange::Insert { element } = change {
             let decoded_value = element.get_properties().get("encoded_value").unwrap();
-            assert_eq!(decoded_value, &ElementValue::String("Hello World!".into()));
+            assert_eq!(
+                decoded_value,
+                &ElementValue::String("Hello World!".to_string().into())
+            );
         } else {
             panic!("Expected an Insert change");
         }
@@ -320,16 +356,23 @@ mod process {
                 },
                 properties: json!({
                     "encoded_value": "Hello\\u0020World\\u0021"  // JSON escaped "Hello World!"
-                }).into(),
+                })
+                .into(),
             },
         };
 
-        let result = subject.process(source_change, element_index.as_ref()).await.unwrap();
+        let result = subject
+            .process(source_change, element_index.as_ref())
+            .await
+            .unwrap();
         let change = &result[0];
 
         if let SourceChange::Insert { element } = change {
             let decoded_value = element.get_properties().get("encoded_value").unwrap();
-            assert_eq!(decoded_value, &ElementValue::String("Hello World!".into()));
+            assert_eq!(
+                decoded_value,
+                &ElementValue::String("Hello World!".to_string().into())
+            );
         } else {
             panic!("Expected an Insert change");
         }
@@ -363,7 +406,8 @@ mod process {
                 },
                 properties: json!({
                     "encoded_value": "Invalid escape \\u00zz sequence"  // Invalid JSON escape
-                }).into(),
+                })
+                .into(),
             },
         };
 
@@ -375,7 +419,7 @@ mod process {
                 assert!(msg.contains("[test]"));
                 assert!(msg.contains("JSON escape"));
             }
-            _ => panic!("Expected SourceChangeError")
+            _ => panic!("Expected SourceChangeError"),
         }
     }
 
@@ -407,7 +451,8 @@ mod process {
                 },
                 properties: json!({
                     "encoded_value": "Invalid Base64 String"
-                }).into(),
+                })
+                .into(),
             },
         };
 
@@ -419,7 +464,7 @@ mod process {
                 assert!(msg.contains("[test]"));
                 assert!(msg.contains("Failed to decode property"));
             }
-            _ => panic!("Expected SourceChangeError")
+            _ => panic!("Expected SourceChangeError"),
         }
     }
 
@@ -451,16 +496,23 @@ mod process {
                 },
                 properties: json!({
                     "some_other_value": "Some Value"
-                }).into(),
+                })
+                .into(),
             },
         };
 
-        let result = subject.process(source_change, element_index.as_ref()).await.unwrap();
+        let result = subject
+            .process(source_change, element_index.as_ref())
+            .await
+            .unwrap();
         let change = &result[0];
 
         if let SourceChange::Insert { element } = change {
             let value = element.get_properties().get("some_other_value").unwrap();
-            assert_eq!(value, &ElementValue::String("Some Value".to_string().into()));
+            assert_eq!(
+                value,
+                &ElementValue::String("Some Value".to_string().into())
+            );
         } else {
             panic!("Expected an Insert change");
         }
@@ -494,7 +546,8 @@ mod process {
                 },
                 properties: json!({
                     "some_other_value": "Some Value"
-                }).into(),
+                })
+                .into(),
             },
         };
 
@@ -506,14 +559,14 @@ mod process {
                 assert!(msg.contains("[test]"));
                 assert!(msg.contains("Property missing_value not found"));
             }
-            _ => panic!("Expected SourceChangeError")
+            _ => panic!("Expected SourceChangeError"),
         }
     }
 
     /// Tests for failure when the target property is of the wrong type (a number for example)
     #[tokio::test]
     async fn test_decoder_wrong_type() {
-       let factory = DecoderFactory::new();
+        let factory = DecoderFactory::new();
         let config = json!({
             "encoding_type": "base64",
             "target_property": "wrong_type"
@@ -537,11 +590,15 @@ mod process {
                 },
                 properties: json!({
                     "wrong_type": 123
-                }).into(),
+                })
+                .into(),
             },
         };
 
-        let result = subject.process(source_change, element_index.as_ref()).await.unwrap();
+        let result = subject
+            .process(source_change, element_index.as_ref())
+            .await
+            .unwrap();
         let change = &result[0];
 
         if let SourceChange::Insert { element } = change {
@@ -581,16 +638,23 @@ mod process {
                 },
                 properties: json!({
                     "encoded_value": "\"SGVsbG8gV29ybGQh\""  // Base64 encoded "Hello World!" with quotes
-                }).into(),
+                })
+                .into(),
             },
         };
 
-        let result = subject.process(source_change, element_index.as_ref()).await.unwrap();
+        let result = subject
+            .process(source_change, element_index.as_ref())
+            .await
+            .unwrap();
         let change = &result[0];
 
         if let SourceChange::Insert { element } = change {
             let decoded_value = element.get_properties().get("encoded_value").unwrap();
-            assert_eq!(decoded_value, &ElementValue::String("Hello World!".into()));
+            assert_eq!(
+                decoded_value,
+                &ElementValue::String("Hello World!".to_string().into())
+            );
         } else {
             panic!("Expected an Insert change");
         }
@@ -625,16 +689,23 @@ mod process {
                 },
                 properties: json!({
                     "encoded_value": "eyJuYW1lIjoiQWxpY2UiLCJhZ2UiOjMwLCJhY3RpdmUiOnRydWV9"
-                }).into(),
+                })
+                .into(),
             },
         };
 
-        let result = subject.process(source_change, element_index.as_ref()).await.unwrap();
+        let result = subject
+            .process(source_change, element_index.as_ref())
+            .await
+            .unwrap();
         let change = &result[0];
 
         if let SourceChange::Insert { element } = change {
             let decoded_value = element.get_properties().get("encoded_value").unwrap();
-            assert_eq!(decoded_value, &ElementValue::String(r#"{"name":"Alice","age":30,"active":true}"#.into()));
+            assert_eq!(
+                decoded_value,
+                &ElementValue::String(r#"{"name":"Alice","age":30,"active":true}"#.into())
+            );
         } else {
             panic!("Expected an Insert change");
         }
@@ -671,25 +742,29 @@ mod process {
                 },
                 properties: json!({
                     "encoded_value": "eyJuYW1lIjoiQWxpY2UiLCJhZ2UiOjMwLCJhY3RpdmUiOnRydWV9"
-                }).into(),
+                })
+                .into(),
             },
         };
 
-        let result = subject.process(source_change, element_index.as_ref()).await.unwrap();
+        let result = subject
+            .process(source_change, element_index.as_ref())
+            .await
+            .unwrap();
         let change = &result[0];
 
         if let SourceChange::Insert { element } = change {
             // Original property should remain
             assert!(element.get_properties().get("encoded_value").is_some());
-            
+
             // Check flattened properties with prefix
             let name = element.get_properties().get("user_name").unwrap();
             let age = element.get_properties().get("user_age").unwrap();
             let active = element.get_properties().get("user_active").unwrap();
-            
-            assert_eq!(name, &ElementValue::String("Alice".into()));
+
+            assert_eq!(name, &ElementValue::String("Alice".to_string().into()));
             assert_eq!(age, &ElementValue::Integer(30));
-            assert_eq!(active, &ElementValue::String("true".into()));
+            assert_eq!(active, &ElementValue::String("true".to_string().into()));
         } else {
             panic!("Expected an Insert change");
         }
@@ -724,17 +799,24 @@ mod process {
                 },
                 properties: json!({
                     "encoded_value": "bm90IGEgdmFsaWQganNvbg=="
-                }).into(),
+                })
+                .into(),
             },
         };
 
-        let result = subject.process(source_change, element_index.as_ref()).await.unwrap();
+        let result = subject
+            .process(source_change, element_index.as_ref())
+            .await
+            .unwrap();
         let change = &result[0];
 
         if let SourceChange::Insert { element } = change {
             let decoded_value = element.get_properties().get("encoded_value").unwrap();
             // Even though JSON parsing failed, it should still decode the base64
-            assert_eq!(decoded_value, &ElementValue::String("not a valid json".into()));
+            assert_eq!(
+                decoded_value,
+                &ElementValue::String("not a valid json".to_string().into())
+            );
         } else {
             panic!("Expected an Insert change");
         }
@@ -770,7 +852,8 @@ mod process {
                 },
                 properties: json!({
                     "encoded_value": "bm90IGEgdmFsaWQganNvbg=="
-                }).into(),
+                })
+                .into(),
             },
         };
 
@@ -782,7 +865,7 @@ mod process {
                 assert!(msg.contains("[test]"));
                 assert!(msg.contains("Failed to parse JSON"));
             }
-            _ => panic!("Expected SourceChangeError")
+            _ => panic!("Expected SourceChangeError"),
         }
     }
 }
@@ -869,7 +952,7 @@ mod factory {
     #[tokio::test]
     pub async fn test_all_encoding_types() {
         let subject = DecoderFactory::new();
-        
+
         // Test all valid encoding types
         let encoding_types = vec![
             ("base64", EncodingType::Base64),
@@ -878,21 +961,25 @@ mod factory {
             ("url", EncodingType::Url),
             ("json_escape", EncodingType::JsonEscape),
         ];
-        
+
         for (type_str, _) in encoding_types {
             let config = json!({
                 "encoding_type": type_str,
                 "target_property": "encoded_value"
             });
-            
+
             let mw_config = SourceMiddlewareConfig {
                 name: format!("test_{}", type_str).into(),
                 kind: "decoder".into(),
                 config: config.as_object().unwrap().clone(),
             };
-            
+
             let result = subject.create(&mw_config);
-            assert!(result.is_ok(), "Failed to create decoder with encoding_type: {}", type_str);
+            assert!(
+                result.is_ok(),
+                "Failed to create decoder with encoding_type: {}",
+                type_str
+            );
         }
     }
 
@@ -914,7 +1001,7 @@ mod factory {
         // It should return an error for invalid encoding type
         let result = subject.create(&mw_config);
         assert!(result.is_err());
-        
+
         // The error message from serde might not contain "encoding_type" directly
         // Let's just check that it's an InvalidConfiguration error
         match result {
@@ -945,7 +1032,7 @@ mod factory {
         // It should return an error since flatten requires parse_json
         let result = subject.create(&mw_config);
         assert!(result.is_err());
-        
+
         // Let's also check the error message
         match result {
             Err(MiddlewareSetupError::InvalidConfiguration(msg)) => {

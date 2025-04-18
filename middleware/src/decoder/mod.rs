@@ -17,32 +17,23 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use drasi_core::{
     interface::{
-        ElementIndex,
-        MiddlewareError,
-        MiddlewareSetupError,
-        SourceMiddleware,
-        SourceMiddlewareFactory
+        ElementIndex, MiddlewareError, MiddlewareSetupError, SourceMiddleware,
+        SourceMiddlewareFactory,
     },
-    models::{Element, SourceChange, SourceMiddlewareConfig, ElementValue},
+    models::{Element, ElementValue, SourceChange, SourceMiddlewareConfig},
 };
 use serde::Deserialize;
 use serde_json::Value;
-use base64::Engine as _;
 
 #[cfg(test)]
 mod tests;
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ErrorHandling {
+    #[default]
     Skip,
     Fail,
-}
-
-impl Default for ErrorHandling {
-    fn default() -> Self {
-        ErrorHandling::Skip
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -90,18 +81,14 @@ impl SourceMiddleware for Decoder {
         _element_index: &dyn ElementIndex,
     ) -> Result<Vec<SourceChange>, MiddlewareError> {
         match source_change {
-            SourceChange::Insert { mut element } => {
-                match self.decode_property(&mut element) {
-                    Ok(_) => Ok(vec![SourceChange::Insert { element }]),
-                    Err(e) => Err(e),
-                }
-            }
-            SourceChange::Update { mut element } => {
-                match self.decode_property(&mut element) {
-                    Ok(_) => Ok(vec![SourceChange::Update { element }]),
-                    Err(e) => Err(e),
-                }
-            }
+            SourceChange::Insert { mut element } => match self.decode_property(&mut element) {
+                Ok(_) => Ok(vec![SourceChange::Insert { element }]),
+                Err(e) => Err(e),
+            },
+            SourceChange::Update { mut element } => match self.decode_property(&mut element) {
+                Ok(_) => Ok(vec![SourceChange::Update { element }]),
+                Err(e) => Err(e),
+            },
             SourceChange::Delete { metadata } => Ok(vec![SourceChange::Delete { metadata }]),
             SourceChange::Future { .. } => Ok(vec![source_change]),
         }
@@ -111,25 +98,31 @@ impl SourceMiddleware for Decoder {
 impl Decoder {
     fn decode_property(&self, element: &mut Element) -> Result<(), MiddlewareError> {
         let property = &self.target_property;
-        
+
         // Check if the property exists
         if element.get_properties().get(property).is_none() {
-            let msg = format!("[{}] Property {} not found in element. Decoder will skip this change.", self.name, property);
+            let msg = format!(
+                "[{}] Property {} not found in element. Decoder will skip this change.",
+                self.name, property
+            );
             log::warn!("{}", msg);
             if self.on_error == ErrorHandling::Fail {
                 return Err(MiddlewareError::SourceChangeError(msg));
             }
             return Ok(());
         }
-        
+
         // Get the property value
         let value = element.get_property(property);
-        
+
         // Only process string values
         let encoded = match value {
             ElementValue::String(s) => s,
             _ => {
-                let msg = format!("[{}] Property {} is not a string value. Decoder will skip this change.", self.name, property);
+                let msg = format!(
+                    "[{}] Property {} is not a string value. Decoder will skip this change.",
+                    self.name, property
+                );
                 log::warn!("{}", msg);
                 if self.on_error == ErrorHandling::Fail {
                     return Err(MiddlewareError::SourceChangeError(msg));
@@ -137,10 +130,15 @@ impl Decoder {
                 return Ok(());
             }
         };
-        
+
         // Step 1: Strip quotes if requested
-        let encoded = if self.strip_quotes { encoded.trim_matches('"') } else { &encoded }.to_string();
-        
+        let encoded = if self.strip_quotes {
+            encoded.trim_matches('"')
+        } else {
+            encoded
+        }
+        .to_string();
+
         // Step 2: Decode the string based on encoding type
         let decoded_result = match self.encoding_type {
             EncodingType::Base64 => self.decode_base64(&encoded),
@@ -156,7 +154,11 @@ impl Decoder {
                 if self.parse_json {
                     self.handle_json_processing(element, property, &decoded_string)?;
                 } else {
-                    self.update_property(element, property, ElementValue::String(decoded_string.into()));
+                    self.update_property(
+                        element,
+                        property,
+                        ElementValue::String(decoded_string.into()),
+                    );
                 }
                 Ok(())
             }
@@ -181,44 +183,38 @@ impl Decoder {
 
     fn decode_base64(&self, encoded: &str) -> Result<String, String> {
         match base64::engine::general_purpose::STANDARD.decode(encoded.as_bytes()) {
-            Ok(decoded_bytes) => {
-                match String::from_utf8(decoded_bytes) {
-                    Ok(decoded_string) => Ok(decoded_string),
-                    Err(_) => Err("Failed to decode to UTF-8 string".to_string())
-                }
-            }
-            Err(_) => Err("Invalid base64 encoding".to_string())
+            Ok(decoded_bytes) => match String::from_utf8(decoded_bytes) {
+                Ok(decoded_string) => Ok(decoded_string),
+                Err(_) => Err("Failed to decode to UTF-8 string".to_string()),
+            },
+            Err(_) => Err("Invalid base64 encoding".to_string()),
         }
     }
 
     fn decode_base64url(&self, encoded: &str) -> Result<String, String> {
         match base64::engine::general_purpose::URL_SAFE.decode(encoded.as_bytes()) {
-            Ok(decoded_bytes) => {
-                match String::from_utf8(decoded_bytes) {
-                    Ok(decoded_string) => Ok(decoded_string),
-                    Err(_) => Err("Failed to decode to UTF-8 string".to_string())
-                }
-            }
-            Err(_) => Err("Invalid base64url encoding".to_string())
+            Ok(decoded_bytes) => match String::from_utf8(decoded_bytes) {
+                Ok(decoded_string) => Ok(decoded_string),
+                Err(_) => Err("Failed to decode to UTF-8 string".to_string()),
+            },
+            Err(_) => Err("Invalid base64url encoding".to_string()),
         }
     }
 
     fn decode_hex(&self, encoded: &str) -> Result<String, String> {
         match hex::decode(encoded) {
-            Ok(decoded_bytes) => {
-                match String::from_utf8(decoded_bytes) {
-                    Ok(decoded_string) => Ok(decoded_string),
-                    Err(_) => Err("Failed to decode to UTF-8 string".to_string())
-                }
-            }
-            Err(_) => Err("Invalid hex encoding".to_string())
+            Ok(decoded_bytes) => match String::from_utf8(decoded_bytes) {
+                Ok(decoded_string) => Ok(decoded_string),
+                Err(_) => Err("Failed to decode to UTF-8 string".to_string()),
+            },
+            Err(_) => Err("Invalid hex encoding".to_string()),
         }
     }
 
     fn decode_url(&self, encoded: &str) -> Result<String, String> {
         match urlencoding::decode(encoded) {
             Ok(decoded_string) => Ok(decoded_string.into_owned()),
-            Err(_) => Err("Invalid URL encoding".to_string())
+            Err(_) => Err("Invalid URL encoding".to_string()),
         }
     }
 
@@ -227,11 +223,16 @@ impl Decoder {
         let json_value = format!("\"{}\"", encoded);
         match serde_json::from_str::<String>(&json_value) {
             Ok(decoded_string) => Ok(decoded_string),
-            Err(e) => Err(format!("Invalid JSON escape sequence: {}", e))
+            Err(e) => Err(format!("Invalid JSON escape sequence: {}", e)),
         }
     }
-    
-    fn handle_json_processing(&self, element: &mut Element, property: &str, json_str: &str) -> Result<(), MiddlewareError> {
+
+    fn handle_json_processing(
+        &self,
+        element: &mut Element,
+        property: &str,
+        json_str: &str,
+    ) -> Result<(), MiddlewareError> {
         match serde_json::from_str::<serde_json::Value>(json_str) {
             Ok(json_value) => {
                 if self.flatten {
@@ -242,7 +243,10 @@ impl Decoder {
                 Ok(())
             }
             Err(e) => {
-                let msg = format!("[{}] Failed to parse JSON for property {}. Parsing will be skipped. Error: {}", self.name, property, e);
+                let msg = format!(
+                    "[{}] Failed to parse JSON for property {}. Parsing will be skipped. Error: {}",
+                    self.name, property, e
+                );
                 log::warn!("{}", msg);
                 if self.on_error == ErrorHandling::Fail {
                     return Err(MiddlewareError::SourceChangeError(msg));
@@ -252,7 +256,7 @@ impl Decoder {
             }
         }
     }
-    
+
     fn flatten_json(&self, element: &mut Element, json: &serde_json::Value) {
         if let serde_json::Value::Object(map) = json {
             for (key, value) in map {
@@ -261,7 +265,7 @@ impl Decoder {
                 } else {
                     key.clone()
                 };
-                
+
                 // Convert the JSON value to an ElementValue
                 let element_value = match value {
                     serde_json::Value::String(s) => ElementValue::String(s.clone().into()),
@@ -273,17 +277,17 @@ impl Decoder {
                         } else {
                             continue;
                         }
-                    },
+                    }
                     serde_json::Value::Bool(b) => ElementValue::String(b.to_string().into()),
                     serde_json::Value::Null => ElementValue::Null,
                     _ => continue, // Skip nested objects and arrays for flattening
                 };
-                
+
                 self.update_property(element, &property_name, element_value);
             }
         }
     }
-    
+
     fn update_property(&self, element: &mut Element, property: &str, value: ElementValue) {
         match element {
             Element::Node { properties, .. } => {
@@ -319,13 +323,14 @@ impl SourceMiddlewareFactory for DecoderFactory {
         &self,
         config: &SourceMiddlewareConfig,
     ) -> Result<Arc<dyn SourceMiddleware>, MiddlewareSetupError> {
-        let decoder_config: DecoderConfig = match serde_json::from_value(Value::Object(config.config.clone())) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                let msg = format!("Invalid decoder configuration: {}", e);
-                return Err(MiddlewareSetupError::InvalidConfiguration(msg));
-            }
-        };
+        let decoder_config: DecoderConfig =
+            match serde_json::from_value(Value::Object(config.config.clone())) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    let msg = format!("Invalid decoder configuration: {}", e);
+                    return Err(MiddlewareSetupError::InvalidConfiguration(msg));
+                }
+            };
 
         if decoder_config.target_property.is_empty() {
             return Err(MiddlewareSetupError::InvalidConfiguration(
@@ -348,7 +353,7 @@ impl SourceMiddlewareFactory for DecoderFactory {
         let flatten = decoder_config.flatten;
         let output_prefix = decoder_config.output_prefix.clone();
         let on_error = decoder_config.on_error;
-        
+
         log::info!(
             "[{}] Creating Decoder middleware with encoding_type: {:?}, target_property: {}, strip_quotes: {}, parse_json: {}, flatten: {}, output_prefix: {:?}, on_error: {:?}",
             name,
@@ -361,15 +366,15 @@ impl SourceMiddlewareFactory for DecoderFactory {
             on_error
         );
 
-        Ok(Arc::new(Decoder { 
-            name, 
+        Ok(Arc::new(Decoder {
+            name,
             encoding_type,
-            target_property, 
-            strip_quotes, 
-            parse_json, 
-            flatten, 
+            target_property,
+            strip_quotes,
+            parse_json,
+            flatten,
             output_prefix,
-            on_error
+            on_error,
         }))
     }
 }
