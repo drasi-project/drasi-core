@@ -274,7 +274,7 @@ mod process {
             props.get("encoded_value"),
             Some(&ElementValue::String("Invalid Base64 ---".into()))
         );
-        // Use map_iter().count() instead of len()
+        
         assert_eq!(props.map_iter(|_, _| ()).count(), 1);
     }
 
@@ -325,7 +325,7 @@ mod process {
             .unwrap();
         assert_eq!(result.len(), 1); // Should pass through unchanged
         let props = get_props_from_change(&result[0]);
-        // Use map_iter().count() instead of len()
+        
         assert_eq!(props.map_iter(|_, _| ()).count(), 1);
         assert_eq!(
             props.get("other_prop"),
@@ -436,7 +436,7 @@ mod process {
             props.get("encoded_value"),
             Some(&ElementValue::String("Hello World!".into()))
         );
-        // Use map_iter().count() instead of len()
+        
         assert_eq!(props.map_iter(|_, _| ()).count(), 1);
     }
 
@@ -467,7 +467,7 @@ mod process {
             props.get("encoded_value"),
             Some(&ElementValue::String("\"Secret Message\"".into()))
         );
-        // Use map_iter().count() instead of len()
+        
         assert_eq!(props.map_iter(|_, _| ()).count(), 1);
     }
 }

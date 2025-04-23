@@ -154,7 +154,7 @@ impl Decoder {
                     return if self.config.on_error == ErrorHandling::Fail {
                         Err(MiddlewareError::SourceChangeError(msg))
                     } else {
-                        Ok(()) // Skip processing this element
+                        Ok(())
                     };
                 }
 
@@ -227,7 +227,7 @@ impl Decoder {
                 if self.config.on_error == ErrorHandling::Fail {
                     Err(MiddlewareError::SourceChangeError(msg))
                 } else {
-                    Ok(()) // Skip processing this element
+                    Ok(())
                 }
             }
             None => {
@@ -240,7 +240,7 @@ impl Decoder {
                 if self.config.on_error == ErrorHandling::Fail {
                     Err(MiddlewareError::SourceChangeError(msg))
                 } else {
-                    Ok(()) // Skip processing this element
+                    Ok(())
                 }
             }
         }
