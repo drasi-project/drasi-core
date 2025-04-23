@@ -272,7 +272,6 @@ Key features:
 The Decoder middleware decodes encoded strings.
 
 Key features:
+- Supports decoding from various formats - base64, hex, etc.
 - Supports stripping quotes from encoded strings
-- Optional JSON parsing of decoded content
-- Can flatten JSON objects into individual properties
 - Configurable output property prefix
