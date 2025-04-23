@@ -21,11 +21,13 @@ The `parse_json` middleware processes `SourceChange` events (specifically `Inser
 
 The middleware is configured using a JSON object with the following fields:
 
-| Field             | Type                          | Required | Default | Description                                                                                                                               |
-| :---------------- | :---------------------------- | :------- | :------ | :---------------------------------------------------------------------------------------------------------------------------------------- |
-| `target_property` | String                        | Yes      |         | The name of the element property containing the JSON string to be parsed.                                                                 |
-| `output_property` | String                        | No       | `null`  | Optional. The name of the property where the parsed `ElementValue` should be stored. If omitted or `null`, `target_property` will be overwritten. |
-| `on_error`        | String (`"skip"` or `"fail"`) | No       | `"fail"`| Defines behavior when an error occurs (missing target, wrong type, parsing/conversion failure): `"skip"` logs a warning and skips the element; `"fail"` stops processing and returns an error. |
+| Field               | Type                          | Required | Default      | Description                                                                                                                               |
+| :------------------ | :---------------------------- | :------- | :----------- | :---------------------------------------------------------------------------------------------------------------------------------------- |
+| `target_property`   | String                        | Yes      |              | The name of the element property containing the JSON string to be parsed.                                                                 |
+| `output_property`   | String                        | No       | `null`       | Optional. The name of the property where the parsed `ElementValue` should be stored. If omitted or `null`, `target_property` will be overwritten. |
+| `on_error`          | String (`"skip"` or `"fail"`) | No       | `"fail"`     | Defines behavior when an error occurs (missing target, wrong type, parsing/conversion failure): `"skip"` logs a warning and passes the change through unchanged; `"fail"` stops processing and returns an error. |
+| `max_json_size`     | Integer (bytes)               | No       | `1_048_576`  | Maximum size (in bytes) of the JSON string that will be parsed. Use to guard against unexpectedly large payloads.                                                               |
+| `max_nesting_depth` | Integer                       | No       | `20`         | Maximum allowed nesting depth for objects/arrays within the JSON document. Prevents excessively nested or malicious payloads.                                                   |
 
 ## Example Configuration
 

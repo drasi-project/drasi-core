@@ -4,9 +4,7 @@ use drasi_core::{
     in_memory_index::in_memory_element_index::InMemoryElementIndex,
     interface::{MiddlewareSetupError, SourceMiddlewareFactory},
     models::{
-        Element, ElementMetadata, ElementPropertyMap, ElementReference,
-        ElementValue,
-        SourceChange,
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
         SourceMiddlewareConfig,
     },
 };
@@ -93,8 +91,12 @@ fn get_props_from_change(change: &SourceChange) -> &ElementPropertyMap {
 
 // Helper to assert that a property has an expected value
 fn assert_property(props: &ElementPropertyMap, property: &str, expected: &ElementValue) {
-    assert_eq!(props.get(property), Some(expected), 
-               "Property '{}' doesn't match expected value", property);
+    assert_eq!(
+        props.get(property),
+        Some(expected),
+        "Property '{}' doesn't match expected value",
+        property
+    );
 }
 
 // --- Test Modules ---
@@ -108,7 +110,9 @@ mod process {
         let config = create_mw_config(json!({
             "target_property": "data_json",
         }));
-        let middleware = factory.create(&config).expect("Failed to create middleware");
+        let middleware = factory
+            .create(&config)
+            .expect("Failed to create middleware");
         let index = InMemoryElementIndex::new();
 
         let input_change = create_node_insert_change(json!({
@@ -123,7 +127,7 @@ mod process {
 
         let props = get_props_from_change(&output_changes[0]);
         assert_eq!(props.get("id"), Some(&ElementValue::Integer(1_i64)));
-        
+
         let mut expected_map = ElementPropertyMap::new();
         expected_map.insert("key", ElementValue::String(Arc::from("value")));
         expected_map.insert("num", ElementValue::Integer(123_i64));
@@ -139,7 +143,9 @@ mod process {
             "target_property": "raw_list",
             "output_property": "parsed_list"
         }));
-        let middleware = factory.create(&config).expect("Failed to create middleware");
+        let middleware = factory
+            .create(&config)
+            .expect("Failed to create middleware");
         let index = InMemoryElementIndex::new();
 
         let input_change = create_node_insert_change(json!({
@@ -154,8 +160,12 @@ mod process {
 
         let props = get_props_from_change(&output_changes[0]);
         assert_property(props, "name", &ElementValue::String(Arc::from("test")));
-        assert_property(props, "raw_list", &ElementValue::String(Arc::from(r#"[1, "two", true, null]"#)));
-        
+        assert_property(
+            props,
+            "raw_list",
+            &ElementValue::String(Arc::from(r#"[1, "two", true, null]"#)),
+        );
+
         let expected_list = ElementValue::List(vec![
             ElementValue::Integer(1_i64),
             ElementValue::String(Arc::from("two")),
@@ -172,7 +182,9 @@ mod process {
             "target_property": "json_str",
             "output_property": "parsed_data"
         }));
-        let middleware = factory.create(&config).expect("Failed to create middleware");
+        let middleware = factory
+            .create(&config)
+            .expect("Failed to create middleware");
         let index = InMemoryElementIndex::new();
 
         let input_change = create_node_insert_change(json!({
@@ -186,8 +198,12 @@ mod process {
         assert_eq!(output_changes.len(), 1);
 
         let props = get_props_from_change(&output_changes[0]);
-        assert_property(props, "json_str", &ElementValue::String(Arc::from(r#"{"new": true}"#)));
-        
+        assert_property(
+            props,
+            "json_str",
+            &ElementValue::String(Arc::from(r#"{"new": true}"#)),
+        );
+
         let mut expected_map = ElementPropertyMap::new();
         expected_map.insert("new", ElementValue::Bool(true));
         let expected_obj = ElementValue::Object(expected_map);
@@ -201,7 +217,9 @@ mod process {
         let config = create_mw_config(json!({
             "target_property": "data",
         }));
-        let middleware = factory.create(&config).expect("Failed to create middleware");
+        let middleware = factory
+            .create(&config)
+            .expect("Failed to create middleware");
         let index = InMemoryElementIndex::new();
 
         let input_change = create_node_update_change(json!({
@@ -251,7 +269,7 @@ mod process {
         assert_property(
             get_props_from_change(&result_num[0]),
             "value",
-            &ElementValue::Float(OrderedFloat(123.45))
+            &ElementValue::Float(OrderedFloat(123.45)),
         );
 
         // Test string
@@ -260,7 +278,7 @@ mod process {
         assert_property(
             get_props_from_change(&result_str[0]),
             "value",
-            &ElementValue::String(Arc::from("hello"))
+            &ElementValue::String(Arc::from("hello")),
         );
 
         // Test null
@@ -269,7 +287,7 @@ mod process {
         assert_property(
             get_props_from_change(&result_null[0]),
             "value",
-            &ElementValue::Null
+            &ElementValue::Null,
         );
     }
 
@@ -286,7 +304,7 @@ mod process {
         assert_property(
             get_props_from_change(&result_true[0]),
             "is_active",
-            &ElementValue::Bool(true)
+            &ElementValue::Bool(true),
         );
 
         // Test false
@@ -295,7 +313,7 @@ mod process {
         assert_property(
             get_props_from_change(&result_false[0]),
             "is_active",
-            &ElementValue::Bool(false)
+            &ElementValue::Bool(false),
         );
     }
 
@@ -319,7 +337,7 @@ mod process {
         assert_property(
             get_props_from_change(&result[0]),
             "nested_data",
-            &expected_obj
+            &expected_obj,
         );
     }
 
@@ -345,11 +363,7 @@ mod process {
             ElementValue::Object(nested_map),
             ElementValue::List(vec![ElementValue::Integer(10_i64)]),
         ]);
-        assert_property(
-            get_props_from_change(&result[0]),
-            "mixed",
-            &expected_list
-        );
+        assert_property(get_props_from_change(&result[0]), "mixed", &expected_list);
     }
 
     #[tokio::test]
@@ -365,7 +379,7 @@ mod process {
         assert_property(
             get_props_from_change(&result_obj[0]),
             "empty_data",
-            &ElementValue::Object(ElementPropertyMap::new())
+            &ElementValue::Object(ElementPropertyMap::new()),
         );
 
         // Empty array
@@ -374,7 +388,7 @@ mod process {
         assert_property(
             get_props_from_change(&result_arr[0]),
             "empty_data",
-            &ElementValue::List(vec![])
+            &ElementValue::List(vec![]),
         );
     }
 
@@ -389,14 +403,13 @@ mod process {
 
         let result = middleware.process(input_change, &index).await.unwrap();
         let mut expected_map = ElementPropertyMap::new();
-        expected_map.insert("text", ElementValue::String(Arc::from("你好世界 \" \\ \n end")));
+        expected_map.insert(
+            "text",
+            ElementValue::String(Arc::from("你好世界 \" \\ \n end")),
+        );
         let expected_obj = ElementValue::Object(expected_map);
 
-        assert_property(
-            get_props_from_change(&result[0]),
-            "special",
-            &expected_obj
-        );
+        assert_property(get_props_from_change(&result[0]), "special", &expected_obj);
     }
 
     // --- Error Handling Tests (Skip Mode) ---
@@ -448,7 +461,8 @@ mod process {
         }));
         let middleware = factory.create(&config).unwrap();
         let index = InMemoryElementIndex::new();
-        let input_change = create_node_insert_change(json!({ "invalid_json": r#"{"key": "value""# }));
+        let input_change =
+            create_node_insert_change(json!({ "invalid_json": r#"{"key": "value""# }));
         let original_change_clone = input_change.clone();
 
         let result = middleware.process(input_change, &index).await;
@@ -468,7 +482,9 @@ mod process {
         }));
         let middleware = factory.create(&config).unwrap();
         let index = InMemoryElementIndex::new();
-        let input_change = create_node_insert_change(json!({ "large_json": r#"{"a": "this is definitely more than 10 bytes"}"# }));
+        let input_change = create_node_insert_change(
+            json!({ "large_json": r#"{"a": "this is definitely more than 10 bytes"}"# }),
+        );
         let original_change_clone = input_change.clone();
 
         let result = middleware.process(input_change, &index).await;
@@ -541,12 +557,13 @@ mod process {
     async fn test_fail_on_parse_error() {
         let factory = ParseJsonFactory::default();
         let config = create_mw_config(json!({
-            "target_property": "invalid_json", 
+            "target_property": "invalid_json",
             "on_error": "fail"
         }));
         let middleware = factory.create(&config).unwrap();
         let index = InMemoryElementIndex::new();
-        let input_change = create_node_insert_change(json!({ "invalid_json": r#"{"key": "value""# }));
+        let input_change =
+            create_node_insert_change(json!({ "invalid_json": r#"{"key": "value""# }));
 
         let result = middleware.process(input_change, &index).await;
         assert!(result.is_err());
@@ -607,7 +624,8 @@ mod process {
         }));
         let middleware = factory.create(&config).unwrap();
         let index = InMemoryElementIndex::new();
-        let input_change = create_node_insert_change(json!({ "bad_json": "{\"key\": \"value\0\"}" }));
+        let input_change =
+            create_node_insert_change(json!({ "bad_json": "{\"key\": \"value\0\"}" }));
 
         let result = middleware.process(input_change, &index).await;
         assert!(result.is_err());
@@ -647,10 +665,8 @@ mod factory {
     #[test]
     fn fail_missing_target_property() {
         let factory = ParseJsonFactory::default();
-        let config_map = serde_json::Map::from_iter(vec![(
-            "output_property".to_string(),
-            json!("output"),
-        )]);
+        let config_map =
+            serde_json::Map::from_iter(vec![("output_property".to_string(), json!("output"))]);
         let config = SourceMiddlewareConfig {
             name: Arc::from("test_parse_json"),
             kind: "parse_json".into(),
@@ -658,7 +674,9 @@ mod factory {
         };
         let result = factory.create(&config);
         assert!(result.is_err());
-        assert!(matches!(result.err().unwrap(), MiddlewareSetupError::InvalidConfiguration(msg) if msg.contains("missing field `target_property`")));
+        assert!(
+            matches!(result.err().unwrap(), MiddlewareSetupError::InvalidConfiguration(msg) if msg.contains("missing field `target_property`"))
+        );
     }
 
     #[test]
@@ -669,7 +687,9 @@ mod factory {
         }));
         let result = factory.create(&config);
         assert!(result.is_err());
-        assert!(matches!(result.err().unwrap(), MiddlewareSetupError::InvalidConfiguration(msg) if msg.contains("Missing or empty 'target_property' field")) );
+        assert!(
+            matches!(result.err().unwrap(), MiddlewareSetupError::InvalidConfiguration(msg) if msg.contains("Missing or empty 'target_property' field"))
+        );
     }
 
     #[test]
@@ -681,7 +701,9 @@ mod factory {
         }));
         let result = factory.create(&config);
         assert!(result.is_err());
-        assert!(matches!(result.err().unwrap(), MiddlewareSetupError::InvalidConfiguration(msg) if msg.contains("'output_property' cannot be empty if provided")));
+        assert!(
+            matches!(result.err().unwrap(), MiddlewareSetupError::InvalidConfiguration(msg) if msg.contains("'output_property' cannot be empty if provided"))
+        );
     }
 
     #[test]
@@ -704,7 +726,7 @@ mod factory {
     fn fail_invalid_on_error_value() {
         let factory = ParseJsonFactory::default();
         let config = create_mw_config(json!({
-            "target_property": "data", 
+            "target_property": "data",
             "on_error": "ignore"
         }));
         let result = factory.create(&config);
@@ -724,7 +746,9 @@ mod factory {
         }));
         let result = factory.create(&config);
         assert!(result.is_err());
-        assert!(matches!(result.err().unwrap(), MiddlewareSetupError::InvalidConfiguration(msg) if msg.contains("unknown field `unknown_field`")));
+        assert!(
+            matches!(result.err().unwrap(), MiddlewareSetupError::InvalidConfiguration(msg) if msg.contains("unknown field `unknown_field`"))
+        );
     }
 
     #[test]
@@ -746,6 +770,8 @@ mod factory {
         }));
         let result = factory.create(&config);
         assert!(result.is_err());
-        assert!(matches!(result.err().unwrap(), MiddlewareSetupError::InvalidConfiguration(msg) if msg.contains("'max_json_size' must be greater than 0")));
+        assert!(
+            matches!(result.err().unwrap(), MiddlewareSetupError::InvalidConfiguration(msg) if msg.contains("'max_json_size' must be greater than 0"))
+        );
     }
 }

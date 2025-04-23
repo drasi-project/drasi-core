@@ -121,10 +121,10 @@ impl ParseJson {
     fn handle_error(
         &self,
         error_type: ParseJsonErrorType,
-        message: String
+        message: String,
     ) -> Result<(), MiddlewareError> {
         log::warn!("[{}] {}", self.name, message);
-        
+
         if self.config.on_error == ErrorHandling::Fail {
             Err(MiddlewareError::SourceChangeError(format!(
                 "[{}] [Error: {:?}] {}",
@@ -159,12 +159,18 @@ impl ParseJson {
     }
 
     /// Check for invalid control characters in a JSON string
-    fn check_for_invalid_characters(&self, json_string: &str) -> Result<(), (ParseJsonErrorType, String)> {
+    fn check_for_invalid_characters(
+        &self,
+        json_string: &str,
+    ) -> Result<(), (ParseJsonErrorType, String)> {
         // Check for control characters that might indicate malicious input
-        if json_string.chars().any(|c| c.is_control() && c != '\n' && c != '\r' && c != '\t') {
+        if json_string
+            .chars()
+            .any(|c| c.is_control() && c != '\n' && c != '\r' && c != '\t')
+        {
             return Err((
                 ParseJsonErrorType::InvalidInput,
-                format!("JSON string contains invalid control characters")
+                format!("JSON string contains invalid control characters"),
             ));
         }
         Ok(())
@@ -189,7 +195,7 @@ impl ParseJson {
                     format!(
                         "Target property '{}' is not a String (Type: {}). Cannot parse JSON.",
                         target_prop_name, type_name
-                    )
+                    ),
                 );
             }
             None => {
@@ -198,7 +204,7 @@ impl ParseJson {
                     format!(
                         "Target property '{}' not found in element. Cannot parse JSON.",
                         target_prop_name
-                    )
+                    ),
                 );
             }
         };
@@ -209,8 +215,10 @@ impl ParseJson {
                 ParseJsonErrorType::SizeExceeded,
                 format!(
                     "JSON string in property '{}' exceeds maximum allowed size ({} > {} bytes)",
-                    target_prop_name, json_string.len(), self.config.max_json_size
-                )
+                    target_prop_name,
+                    json_string.len(),
+                    self.config.max_json_size
+                ),
             );
         }
 
@@ -230,7 +238,7 @@ impl ParseJson {
                         format!(
                             "JSON nesting depth ({}) exceeds maximum allowed depth ({})",
                             depth, self.config.max_nesting_depth
-                        )
+                        ),
                     );
                 }
 
@@ -242,7 +250,7 @@ impl ParseJson {
                             Element::Node { properties, .. }
                             | Element::Relation { properties, .. } => {
                                 // Check for potential overwrite collision if output_property is specified
-                                if output_prop_name != target_prop_name 
+                                if output_prop_name != target_prop_name
                                     && properties.get(output_prop_name).is_some()
                                 {
                                     log::warn!(
@@ -252,25 +260,20 @@ impl ParseJson {
                                     );
                                 }
                                 // Insert or overwrite the property.
-                                properties.insert(
-                                    output_prop_name,
-                                    element_value,
-                                );
+                                properties.insert(output_prop_name, element_value);
                             }
                         }
                         Ok(())
                     }
                 }
             }
-            Err(e) => {
-                self.handle_error(
-                    ParseJsonErrorType::ParseError,
-                    format!(
-                        "Failed to parse JSON string in property '{}': {}",
-                        target_prop_name, e
-                    )
-                )
-            }
+            Err(e) => self.handle_error(
+                ParseJsonErrorType::ParseError,
+                format!(
+                    "Failed to parse JSON string in property '{}': {}",
+                    target_prop_name, e
+                ),
+            ),
         }
     }
 }
@@ -317,7 +320,7 @@ impl SourceMiddlewareFactory for ParseJsonFactory {
                 config.name
             )));
         }
-        
+
         if let Some(output_prop) = &parse_json_config.output_property {
             if output_prop.is_empty() {
                 return Err(MiddlewareSetupError::InvalidConfiguration(format!(
@@ -326,7 +329,7 @@ impl SourceMiddlewareFactory for ParseJsonFactory {
                 )));
             }
         }
-        
+
         // Validate max_json_size
         if parse_json_config.max_json_size == 0 {
             return Err(MiddlewareSetupError::InvalidConfiguration(format!(
@@ -334,7 +337,7 @@ impl SourceMiddlewareFactory for ParseJsonFactory {
                 config.name
             )));
         }
-        
+
         // Warn about potentially risky configurations
         if parse_json_config.max_json_size > 10 * 1024 * 1024 {
             log::warn!(
