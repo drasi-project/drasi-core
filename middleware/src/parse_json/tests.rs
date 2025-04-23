@@ -348,12 +348,12 @@ mod process {
         let middleware = factory.create(&config).unwrap();
         let index = InMemoryElementIndex::new();
         let input_change = create_node_insert_change(json!({
-            "mixed": r#"[1, "hello", null, true, {"nested": 3.14}, [10]]"#
+            "mixed": r#"[1, "hello", null, true, {"nested": 3.561}, [10]]"#
         }));
 
         let result = middleware.process(input_change, &index).await.unwrap();
         let mut nested_map = ElementPropertyMap::new();
-        nested_map.insert("nested", ElementValue::Float(OrderedFloat(3.14)));
+        nested_map.insert("nested", ElementValue::Float(OrderedFloat(3.561)));
 
         let expected_list = ElementValue::List(vec![
             ElementValue::Integer(1_i64),
