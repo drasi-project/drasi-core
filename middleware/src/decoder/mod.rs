@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
+use crate::common::ErrorHandling;
 use async_trait::async_trait;
 use base64::Engine;
 use drasi_core::{
@@ -25,19 +24,13 @@ use drasi_core::{
 };
 use serde::Deserialize;
 use serde_json::Value;
+use std::sync::Arc;
 
 #[cfg(test)]
 mod tests;
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum ErrorHandling {
-    #[default]
-    Skip,
-    Fail,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+/// Specifies the encoding type of the target property's string value.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EncodingType {
     Base64,
@@ -47,31 +40,45 @@ pub enum EncodingType {
     JsonEscape,
 }
 
-pub struct Decoder {
-    name: String,
-    encoding_type: EncodingType,
-    target_property: String,
-    strip_quotes: bool,
-    parse_json: bool,
-    flatten: bool,
-    output_prefix: Option<String>,
-    on_error: ErrorHandling,
-}
+/// Mapping of encoding types to their string representations for error messages
+const ENCODING_TYPE_NAMES: &[(&str, EncodingType)] = &[
+    ("base64", EncodingType::Base64),
+    ("base64url", EncodingType::Base64url),
+    ("hex", EncodingType::Hex),
+    ("url", EncodingType::Url),
+    ("json_escape", EncodingType::JsonEscape),
+];
 
+/// Configuration for the Decoder middleware.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DecoderConfig {
+    /// The encoding type to decode from.
     pub encoding_type: EncodingType,
+    /// The property containing the encoded string.
     pub target_property: String,
+    /// Optional property name to store the decoded string.
+    /// If None, `target_property` is overwritten.
+    pub output_property: Option<String>,
+    /// If true, surrounding double quotes (`"`) are removed from the target string before decoding.
     #[serde(default)]
     pub strip_quotes: bool,
-    #[serde(default)]
-    pub parse_json: bool,
-    #[serde(default)]
-    pub flatten: bool,
-    #[serde(default)]
-    pub output_prefix: Option<String>,
+    /// How to handle errors during decoding or if the target property is missing/invalid.
     #[serde(default)]
     pub on_error: ErrorHandling,
+    /// Maximum allowed size for encoded strings to prevent excessive memory usage.
+    #[serde(default = "default_max_size")]
+    pub max_size_bytes: usize,
+}
+
+fn default_max_size() -> usize {
+    1024 * 1024 // 1MB default
+}
+
+/// Middleware that decodes a string property using a specified encoding.
+pub struct Decoder {
+    name: String,
+    config: DecoderConfig,
 }
 
 #[async_trait]
@@ -90,217 +97,196 @@ impl SourceMiddleware for Decoder {
                 Ok(_) => Ok(vec![SourceChange::Update { element }]),
                 Err(e) => Err(e),
             },
-            SourceChange::Delete { metadata } => Ok(vec![SourceChange::Delete { metadata }]),
-            SourceChange::Future { .. } => Ok(vec![source_change]),
+            // Pass through other change types
+            SourceChange::Delete { .. } | SourceChange::Future { .. } => Ok(vec![source_change]),
         }
     }
 }
 
 impl Decoder {
+    /// Helper method to get the type name of an ElementValue
+    fn get_element_value_type_name(value: &ElementValue) -> &'static str {
+        match value {
+            ElementValue::Null => "Null",
+            ElementValue::Bool(_) => "Bool",
+            ElementValue::Float(_) => "Float",
+            ElementValue::Integer(_) => "Integer",
+            ElementValue::String(_) => "String",
+            ElementValue::List(_) => "List",
+            ElementValue::Object(_) => "Object",
+        }
+    }
+
+    /// Helper method to get the encoding type name for error messages
+    fn get_encoding_type_name(&self) -> &'static str {
+        for (name, encoding_type) in ENCODING_TYPE_NAMES {
+            if *encoding_type == self.config.encoding_type {
+                return name;
+            }
+        }
+        "unknown"
+    }
+
+    /// Decodes the target property within the given element.
     fn decode_property(&self, element: &mut Element) -> Result<(), MiddlewareError> {
-        let property = &self.target_property;
+        let target_prop_name = &self.config.target_property;
+        let output_prop_name = self
+            .config
+            .output_property
+            .as_deref()
+            .unwrap_or(target_prop_name);
 
-        // Check if the property exists
-        if element.get_properties().get(property).is_none() {
-            let msg = format!(
-                "[{}] Property {} not found in element. Decoder will skip this change.",
-                self.name, property
-            );
-            log::warn!("{}", msg);
-            if self.on_error == ErrorHandling::Fail {
-                return Err(MiddlewareError::SourceChangeError(msg));
-            }
-            return Ok(());
-        }
-
-        // Get the property value
-        let value = element.get_property(property);
-
-        // Only process string values
-        let encoded = match value {
-            ElementValue::String(s) => s,
-            _ => {
-                let msg = format!(
-                    "[{}] Property {} is not a string value. Decoder will skip this change.",
-                    self.name, property
-                );
-                log::warn!("{}", msg);
-                if self.on_error == ErrorHandling::Fail {
-                    return Err(MiddlewareError::SourceChangeError(msg));
-                }
-                return Ok(());
-            }
-        };
-
-        // Step 1: Strip quotes if requested
-        let encoded = if self.strip_quotes {
-            encoded.trim_matches('"')
-        } else {
-            encoded
-        }
-        .to_string();
-
-        // Step 2: Decode the string based on encoding type
-        let decoded_result = match self.encoding_type {
-            EncodingType::Base64 => self.decode_base64(&encoded),
-            EncodingType::Base64url => self.decode_base64url(&encoded),
-            EncodingType::Hex => self.decode_hex(&encoded),
-            EncodingType::Url => self.decode_url(&encoded),
-            EncodingType::JsonEscape => self.decode_json_escape(&encoded),
-        };
-
-        match decoded_result {
-            Ok(decoded_string) => {
-                // Step 3: Parse JSON if requested
-                if self.parse_json {
-                    self.handle_json_processing(element, property, &decoded_string)?;
-                } else {
-                    self.update_property(
-                        element,
-                        property,
-                        ElementValue::String(decoded_string.into()),
+        // Get the property value without cloning
+        match element.get_properties().get(target_prop_name) {
+            Some(ElementValue::String(s)) => {
+                let encoded_str = s.to_string();
+                
+                // Check size limit
+                if encoded_str.len() > self.config.max_size_bytes {
+                    let msg = format!(
+                        "[{}] Encoded string in property '{}' exceeds size limit ({} > {})",
+                        self.name, target_prop_name, encoded_str.len(), self.config.max_size_bytes
                     );
+                    log::warn!("{}", msg);
+                    return if self.config.on_error == ErrorHandling::Fail {
+                        Err(MiddlewareError::SourceChangeError(msg))
+                    } else {
+                        Ok(()) // Skip processing this element
+                    };
                 }
-                Ok(())
-            }
-            Err(e) => {
-                let encoding_name = match self.encoding_type {
-                    EncodingType::Base64 => "base64",
-                    EncodingType::Base64url => "base64url",
-                    EncodingType::Hex => "hex",
-                    EncodingType::Url => "url",
-                    EncodingType::JsonEscape => "json_escape",
-                };
-                let msg = format!("[{}] Failed to decode property {} using {} encoding: {}. Decoder will skip this change.", 
-                    self.name, property, encoding_name, e);
-                log::warn!("{}", msg);
-                if self.on_error == ErrorHandling::Fail {
-                    return Err(MiddlewareError::SourceChangeError(msg));
-                }
-                Ok(())
-            }
-        }
-    }
 
-    fn decode_base64(&self, encoded: &str) -> Result<String, String> {
-        match base64::engine::general_purpose::STANDARD.decode(encoded.as_bytes()) {
-            Ok(decoded_bytes) => match String::from_utf8(decoded_bytes) {
-                Ok(decoded_string) => Ok(decoded_string),
-                Err(_) => Err("Failed to decode to UTF-8 string".to_string()),
-            },
-            Err(_) => Err("Invalid base64 encoding".to_string()),
-        }
-    }
-
-    fn decode_base64url(&self, encoded: &str) -> Result<String, String> {
-        match base64::engine::general_purpose::URL_SAFE.decode(encoded.as_bytes()) {
-            Ok(decoded_bytes) => match String::from_utf8(decoded_bytes) {
-                Ok(decoded_string) => Ok(decoded_string),
-                Err(_) => Err("Failed to decode to UTF-8 string".to_string()),
-            },
-            Err(_) => Err("Invalid base64url encoding".to_string()),
-        }
-    }
-
-    fn decode_hex(&self, encoded: &str) -> Result<String, String> {
-        match hex::decode(encoded) {
-            Ok(decoded_bytes) => match String::from_utf8(decoded_bytes) {
-                Ok(decoded_string) => Ok(decoded_string),
-                Err(_) => Err("Failed to decode to UTF-8 string".to_string()),
-            },
-            Err(_) => Err("Invalid hex encoding".to_string()),
-        }
-    }
-
-    fn decode_url(&self, encoded: &str) -> Result<String, String> {
-        match urlencoding::decode(encoded) {
-            Ok(decoded_string) => Ok(decoded_string.into_owned()),
-            Err(_) => Err("Invalid URL encoding".to_string()),
-        }
-    }
-
-    fn decode_json_escape(&self, encoded: &str) -> Result<String, String> {
-        // For JSON-escaped strings, we need to parse as a JSON string
-        let json_value = format!("\"{}\"", encoded);
-        match serde_json::from_str::<String>(&json_value) {
-            Ok(decoded_string) => Ok(decoded_string),
-            Err(e) => Err(format!("Invalid JSON escape sequence: {}", e)),
-        }
-    }
-
-    fn handle_json_processing(
-        &self,
-        element: &mut Element,
-        property: &str,
-        json_str: &str,
-    ) -> Result<(), MiddlewareError> {
-        match serde_json::from_str::<serde_json::Value>(json_str) {
-            Ok(json_value) => {
-                if self.flatten {
-                    self.flatten_json(element, &json_value);
+                // Step 1: Strip quotes if requested
+                let processed_str = if self.config.strip_quotes {
+                    encoded_str.trim_matches('"')
                 } else {
-                    self.update_property(element, property, ElementValue::String(json_str.into()));
+                    &encoded_str
                 }
-                Ok(())
-            }
-            Err(e) => {
-                let msg = format!(
-                    "[{}] Failed to parse JSON for property {}. Parsing will be skipped. Error: {}",
-                    self.name, property, e
-                );
-                log::warn!("{}", msg);
-                if self.on_error == ErrorHandling::Fail {
-                    return Err(MiddlewareError::SourceChangeError(msg));
-                }
-                self.update_property(element, property, ElementValue::String(json_str.into()));
-                Ok(())
-            }
-        }
-    }
+                .to_string();
 
-    fn flatten_json(&self, element: &mut Element, json: &serde_json::Value) {
-        if let serde_json::Value::Object(map) = json {
-            for (key, value) in map {
-                let property_name = if let Some(prefix) = &self.output_prefix {
-                    format!("{}{}", prefix, key)
-                } else {
-                    key.clone()
+                // Step 2: Decode the string based on encoding type
+                let decoded_result = match self.config.encoding_type {
+                    EncodingType::Base64 => self.decode_base64(&processed_str),
+                    EncodingType::Base64url => self.decode_base64url(&processed_str),
+                    EncodingType::Hex => self.decode_hex(&processed_str),
+                    EncodingType::Url => self.decode_url(&processed_str),
+                    EncodingType::JsonEscape => self.decode_json_escape(&processed_str),
                 };
 
-                // Convert the JSON value to an ElementValue
-                let element_value = match value {
-                    serde_json::Value::String(s) => ElementValue::String(s.clone().into()),
-                    serde_json::Value::Number(n) => {
-                        if let Some(i) = n.as_i64() {
-                            ElementValue::Integer(i)
-                        } else if let Some(f) = n.as_f64() {
-                            ElementValue::Float(ordered_float::OrderedFloat(f))
+                match decoded_result {
+                    Ok(decoded_string) => {
+                        // Get mutable access to properties to check for collision and insert
+                        match element {
+                            Element::Node { properties, .. } | Element::Relation { properties, .. } => {
+                                // Check for potential overwrite collision
+                                if output_prop_name != target_prop_name
+                                    && properties.get(output_prop_name).is_some()
+                                {
+                                    log::warn!(
+                                        "[{}] Output property '{}' specified in config already exists and will be overwritten.",
+                                        self.name,
+                                        output_prop_name
+                                    );
+                                }
+                                
+                                // Update the element with the decoded string
+                                properties.insert(output_prop_name, ElementValue::String(decoded_string.into()));
+                            }
+                        }
+                        Ok(())
+                    }
+                    Err(e) => {
+                        let encoding_name = self.get_encoding_type_name();
+                        let msg = format!(
+                            "[{}] Failed to decode property '{}' using {} encoding: {}",
+                            self.name, target_prop_name, encoding_name, e
+                        );
+                        log::warn!("{}", msg);
+                        if self.config.on_error == ErrorHandling::Fail {
+                            Err(MiddlewareError::SourceChangeError(msg))
                         } else {
-                            continue;
+                            Ok(())
                         }
                     }
-                    serde_json::Value::Bool(b) => ElementValue::String(b.to_string().into()),
-                    serde_json::Value::Null => ElementValue::Null,
-                    _ => continue, // Skip nested objects and arrays for flattening
+                }
+            },
+            Some(value) => {
+                // Handle non-string property types
+                let type_name = Self::get_element_value_type_name(value);
+                let msg = format!(
+                    "[{}] Target property '{}' is not a string value (Type: {}).",
+                    self.name, target_prop_name, type_name
+                );
+                log::warn!("{}", msg);
+                return if self.config.on_error == ErrorHandling::Fail {
+                    Err(MiddlewareError::SourceChangeError(msg))
+                } else {
+                    Ok(()) // Skip processing this element
                 };
-
-                self.update_property(element, &property_name, element_value);
+            },
+            None => {
+                // Handle missing property
+                let msg = format!(
+                    "[{}] Target property '{}' not found in element.",
+                    self.name, target_prop_name
+                );
+                log::warn!("{}", msg);
+                return if self.config.on_error == ErrorHandling::Fail {
+                    Err(MiddlewareError::SourceChangeError(msg))
+                } else {
+                    Ok(()) // Skip processing this element
+                };
             }
         }
     }
 
-    fn update_property(&self, element: &mut Element, property: &str, value: ElementValue) {
-        match element {
-            Element::Node { properties, .. } => {
-                properties.insert(property, value);
-            }
-            Element::Relation { properties, .. } => {
-                properties.insert(property, value);
-            }
-        }
+    /// Decodes a base64 encoded string.
+    pub fn decode_base64(&self, encoded: &str) -> Result<String, String> {
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded.as_bytes())
+            .map_err(|e| format!("Invalid base64 encoding: {}", e))
+            .and_then(|bytes| {
+                String::from_utf8(bytes)
+                    .map_err(|e| format!("Decoded bytes are not valid UTF-8: {}", e))
+            })
+    }
+
+    /// Decodes a base64url encoded string.
+    pub fn decode_base64url(&self, encoded: &str) -> Result<String, String> {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(encoded.as_bytes())
+            .map_err(|e| format!("Invalid base64url encoding: {}", e))
+            .and_then(|bytes| {
+                String::from_utf8(bytes)
+                    .map_err(|e| format!("Decoded bytes are not valid UTF-8: {}", e))
+            })
+    }
+
+    /// Decodes a hex encoded string.
+    pub fn decode_hex(&self, encoded: &str) -> Result<String, String> {
+        hex::decode(encoded)
+            .map_err(|e| format!("Invalid hex encoding: {}", e))
+            .and_then(|bytes| {
+                String::from_utf8(bytes)
+                    .map_err(|e| format!("Decoded bytes are not valid UTF-8: {}", e))
+            })
+    }
+
+    /// Decodes a URL encoded string.
+    pub fn decode_url(&self, encoded: &str) -> Result<String, String> {
+        urlencoding::decode(encoded)
+            .map(|cow| cow.into_owned())
+            .map_err(|e| format!("Invalid URL encoding: {}", e))
+    }
+
+    /// Decodes a JSON escaped string.
+    pub fn decode_json_escape(&self, encoded: &str) -> Result<String, String> {
+        let json_value_str = format!("\"{}\"", encoded);
+        serde_json::from_str::<String>(&json_value_str)
+            .map_err(|e| format!("Invalid JSON escape sequence: {}", e))
     }
 }
 
+/// Factory for creating Decoder middleware instances.
 pub struct DecoderFactory {}
 
 impl DecoderFactory {
@@ -328,54 +314,47 @@ impl SourceMiddlewareFactory for DecoderFactory {
             match serde_json::from_value(Value::Object(config.config.clone())) {
                 Ok(cfg) => cfg,
                 Err(e) => {
-                    let msg = format!("Invalid decoder configuration: {}", e);
-                    return Err(MiddlewareSetupError::InvalidConfiguration(msg));
+                    return Err(MiddlewareSetupError::InvalidConfiguration(format!(
+                        "[{}] Invalid decoder configuration: {}",
+                        config.name, e
+                    )));
                 }
             };
 
+        // Basic validation
         if decoder_config.target_property.is_empty() {
-            return Err(MiddlewareSetupError::InvalidConfiguration(
-                "Missing 'target_property' field in decoder configuration".to_string(),
-            ));
+            return Err(MiddlewareSetupError::InvalidConfiguration(format!(
+                "[{}] Missing or empty 'target_property' field in decoder configuration",
+                config.name
+            )));
         }
 
-        // Add validation to ensure flatten requires parse_json
-        if decoder_config.flatten && !decoder_config.parse_json {
-            return Err(MiddlewareSetupError::InvalidConfiguration(
-                "The 'flatten' option requires 'parse_json' to be enabled".to_string(),
-            ));
+        if let Some(output_prop) = &decoder_config.output_property {
+            if output_prop.is_empty() {
+                return Err(MiddlewareSetupError::InvalidConfiguration(format!(
+                    "[{}] 'output_property' cannot be empty if provided",
+                    config.name
+                )));
+            }
         }
 
-        let name = config.name.to_string();
-        let encoding_type = decoder_config.encoding_type;
-        let target_property = decoder_config.target_property.clone();
-        let strip_quotes = decoder_config.strip_quotes;
-        let parse_json = decoder_config.parse_json;
-        let flatten = decoder_config.flatten;
-        let output_prefix = decoder_config.output_prefix.clone();
-        let on_error = decoder_config.on_error;
+        // Validate max_size_bytes is reasonable
+        if decoder_config.max_size_bytes == 0 {
+            return Err(MiddlewareSetupError::InvalidConfiguration(format!(
+                "[{}] 'max_size_bytes' must be greater than zero",
+                config.name
+            )));
+        }
 
         log::info!(
-            "[{}] Creating Decoder middleware with encoding_type: {:?}, target_property: {}, strip_quotes: {}, parse_json: {}, flatten: {}, output_prefix: {:?}, on_error: {:?}",
-            name,
-            encoding_type,
-            target_property,
-            strip_quotes,
-            parse_json,
-            flatten,
-            output_prefix,
-            on_error
+            "[{}] Creating Decoder middleware with config: {:?}",
+            config.name,
+            decoder_config
         );
 
         Ok(Arc::new(Decoder {
-            name,
-            encoding_type,
-            target_property,
-            strip_quotes,
-            parse_json,
-            flatten,
-            output_prefix,
-            on_error,
+            name: config.name.to_string(),
+            config: decoder_config,
         }))
     }
 }

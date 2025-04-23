@@ -13,131 +13,123 @@
 // limitations under the License.
 
 //! # Decoder Middleware Tests
-//!
-//! This module contains comprehensive tests for the decoder middleware, verifying:
-//!
-//! - Support for multiple encoding types (base64, base64url, hex, url, json_escape)
-//! - Error handling behavior with the `on_error` option
-//! - Property handling including missing properties and wrong types
-//! - JSON parsing and flattening capabilities
-//! - Configuration validation
 
 use std::sync::Arc;
 
 use drasi_core::{
     in_memory_index::in_memory_element_index::InMemoryElementIndex,
-    interface::{MiddlewareError, SourceMiddlewareFactory},
+    interface::{MiddlewareError, MiddlewareSetupError, SourceMiddlewareFactory},
     models::{
-        Element, ElementMetadata, ElementReference, ElementValue, SourceChange,
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
         SourceMiddlewareConfig,
     },
 };
-use serde_json::json;
-
+use serde_json::{json, Value};
 use crate::decoder::DecoderFactory;
+
+// --- Test Helpers ---
+
+fn create_mw_config(config_json: Value) -> SourceMiddlewareConfig {
+    SourceMiddlewareConfig {
+        name: "test_decoder".into(),
+        kind: "decoder".into(),
+        config: config_json.as_object().expect("Config JSON must be an object").clone(),
+    }
+}
+
+fn create_node_insert_change(props: Value) -> SourceChange {
+    SourceChange::Insert {
+        element: Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new("test_source", "node1"),
+                labels: vec!["TestNode".into()].into(),
+                effective_from: 0,
+            },
+            properties: props.into(),
+        },
+    }
+}
+
+fn get_props_from_change(change: &SourceChange) -> &ElementPropertyMap {
+    match change {
+        SourceChange::Insert { element } | SourceChange::Update { element } => {
+            element.get_properties()
+        }
+        _ => panic!("Expected Insert or Update change to get properties"),
+    }
+}
+
+// --- Test Modules ---
 
 mod process {
     use super::*;
 
-    /// Tests for successful base64 decoding
     #[tokio::test]
-    async fn test_base64_decode_success() {
+    async fn test_base64_decode_success_overwrite() {
         let factory = DecoderFactory::new();
         let config = json!({
             "encoding_type": "base64",
             "target_property": "encoded_value"
         });
-
-        let element_index = Arc::new(InMemoryElementIndex::new());
-        let mw_config = SourceMiddlewareConfig {
-            name: "test".into(),
-            kind: "decoder".into(),
-            config: config.as_object().unwrap().clone(),
-        };
-
+        let mw_config = create_mw_config(config);
         let subject = factory.create(&mw_config).unwrap();
+        let element_index = Arc::new(InMemoryElementIndex::new());
 
-        let source_change = SourceChange::Insert {
-            element: Element::Node {
-                metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "node1"),
-                    labels: vec!["TestNode".into()].into(),
-                    effective_from: 0,
-                },
-                properties: json!({
-                    "encoded_value": "SGVsbG8gV29ybGQh"  // Base64 encoded "Hello World!"
-                })
-                .into(),
-            },
-        };
+        let source_change = create_node_insert_change(json!({
+            "encoded_value": "SGVsbG8gV29ybGQh" // "Hello World!"
+        }));
 
         let result = subject
             .process(source_change, element_index.as_ref())
             .await
             .unwrap();
-        let change = &result[0];
+        assert_eq!(result.len(), 1);
+        let props = get_props_from_change(&result[0]);
+        assert_eq!(
+            props.get("encoded_value"),
+            Some(&ElementValue::String("Hello World!".into()))
+        );
 
-        if let SourceChange::Insert { element } = change {
-            let decoded_value = element.get_properties().get("encoded_value").unwrap();
-            assert_eq!(
-                decoded_value,
-                &ElementValue::String("Hello World!".to_string().into())
-            );
-        } else {
-            panic!("Expected an Insert change");
-        }
+        assert_eq!(props.map_iter(|_, _| ()).count(), 1);
     }
 
-    /// Tests for base64 decoding failure
     #[tokio::test]
-    async fn test_base64_decode_failure() {
+    async fn test_base64_decode_success_output_prop() {
         let factory = DecoderFactory::new();
         let config = json!({
             "encoding_type": "base64",
-            "target_property": "encoded_value"
+            "target_property": "encoded_value",
+            "output_property": "decoded_value"
         });
-
-        let element_index = Arc::new(InMemoryElementIndex::new());
-        let mw_config = SourceMiddlewareConfig {
-            name: "test".into(),
-            kind: "decoder".into(),
-            config: config.as_object().unwrap().clone(),
-        };
-
+        let mw_config = create_mw_config(config);
         let subject = factory.create(&mw_config).unwrap();
+        let element_index = Arc::new(InMemoryElementIndex::new());
 
-        let source_change = SourceChange::Insert {
-            element: Element::Node {
-                metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "node1"),
-                    labels: vec!["TestNode".into()].into(),
-                    effective_from: 0,
-                },
-                properties: json!({
-                    "encoded_value": "Invalid Base64 String"
-                })
-                .into(),
-            },
-        };
+        let source_change = create_node_insert_change(json!({
+            "encoded_value": "SGVsbG8gV29ybGQh", // "Hello World!"
+            "other_prop": 123
+        }));
 
         let result = subject
             .process(source_change, element_index.as_ref())
             .await
             .unwrap();
-        let change = &result[0];
-
-        if let SourceChange::Insert { element } = change {
-            let decoded_value = element.get_properties().get("encoded_value").unwrap();
-            assert_eq!(
-                decoded_value,
-                &ElementValue::String("Invalid Base64 String".to_string().into())
-            );
-        } else {
-            panic!("Expected an Insert change");
-        }
+        assert_eq!(result.len(), 1);
+        let props = get_props_from_change(&result[0]);
+        assert_eq!(
+            props.get("encoded_value"),
+            Some(&ElementValue::String("SGVsbG8gV29ybGQh".into()))
+        );
+        assert_eq!(
+            props.get("decoded_value"),
+            Some(&ElementValue::String("Hello World!".into()))
+        );
+        assert_eq!(props.get("other_prop"), Some(&ElementValue::Integer(123)));
+        
+        assert_eq!(props.map_iter(|_, _| ()).count(), 3);
     }
 
-    /// Tests for base64url decoding success
+
     #[tokio::test]
     async fn test_base64url_decode_success() {
         let factory = DecoderFactory::new();
@@ -145,48 +137,27 @@ mod process {
             "encoding_type": "base64url",
             "target_property": "encoded_value"
         });
-
-        let element_index = Arc::new(InMemoryElementIndex::new());
-        let mw_config = SourceMiddlewareConfig {
-            name: "test".into(),
-            kind: "decoder".into(),
-            config: config.as_object().unwrap().clone(),
-        };
-
+        let mw_config = create_mw_config(config);
         let subject = factory.create(&mw_config).unwrap();
+        let element_index = Arc::new(InMemoryElementIndex::new());
 
-        let source_change = SourceChange::Insert {
-            element: Element::Node {
-                metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "node1"),
-                    labels: vec!["TestNode".into()].into(),
-                    effective_from: 0,
-                },
-                properties: json!({
-                    "encoded_value": "SGVsbG8gV29ybGQh"  // Base64 URL-safe encoded "Hello World!"
-                })
-                .into(),
-            },
-        };
+        let source_change = create_node_insert_change(json!({
+            "encoded_value": "SGVsbG8gV29ybGQ_" // "Hello World?" (Base64URL for "Hello World?")
+        }));
 
         let result = subject
             .process(source_change, element_index.as_ref())
             .await
             .unwrap();
-        let change = &result[0];
+        let props = get_props_from_change(&result[0]);
+        assert_eq!(
+            props.get("encoded_value"),
+            Some(&ElementValue::String("Hello World?".into()))
+        );
 
-        if let SourceChange::Insert { element } = change {
-            let decoded_value = element.get_properties().get("encoded_value").unwrap();
-            assert_eq!(
-                decoded_value,
-                &ElementValue::String("Hello World!".to_string().into())
-            );
-        } else {
-            panic!("Expected an Insert change");
-        }
+        assert_eq!(props.map_iter(|_, _| ()).count(), 1);
     }
 
-    /// Tests for hex decoding success
     #[tokio::test]
     async fn test_hex_decode_success() {
         let factory = DecoderFactory::new();
@@ -194,93 +165,27 @@ mod process {
             "encoding_type": "hex",
             "target_property": "encoded_value"
         });
-
-        let element_index = Arc::new(InMemoryElementIndex::new());
-        let mw_config = SourceMiddlewareConfig {
-            name: "test".into(),
-            kind: "decoder".into(),
-            config: config.as_object().unwrap().clone(),
-        };
-
+        let mw_config = create_mw_config(config);
         let subject = factory.create(&mw_config).unwrap();
+        let element_index = Arc::new(InMemoryElementIndex::new());
 
-        let source_change = SourceChange::Insert {
-            element: Element::Node {
-                metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "node1"),
-                    labels: vec!["TestNode".into()].into(),
-                    effective_from: 0,
-                },
-                properties: json!({
-                    "encoded_value": "48656c6c6f20576f726c6421"  // Hex encoded "Hello World!"
-                })
-                .into(),
-            },
-        };
+        let source_change = create_node_insert_change(json!({
+            "encoded_value": "48656c6c6f20576f726c6421" // "Hello World!"
+        }));
 
         let result = subject
             .process(source_change, element_index.as_ref())
             .await
             .unwrap();
-        let change = &result[0];
+        let props = get_props_from_change(&result[0]);
+        assert_eq!(
+            props.get("encoded_value"),
+            Some(&ElementValue::String("Hello World!".into()))
+        );
 
-        if let SourceChange::Insert { element } = change {
-            let decoded_value = element.get_properties().get("encoded_value").unwrap();
-            assert_eq!(
-                decoded_value,
-                &ElementValue::String("Hello World!".to_string().into())
-            );
-        } else {
-            panic!("Expected an Insert change");
-        }
+        assert_eq!(props.map_iter(|_, _| ()).count(), 1);
     }
 
-    /// Tests for hex decoding failure
-    #[tokio::test]
-    async fn test_hex_decode_failure() {
-        let factory = DecoderFactory::new();
-        let config = json!({
-            "encoding_type": "hex",
-            "target_property": "encoded_value",
-            "on_error": "fail"
-        });
-
-        let element_index = Arc::new(InMemoryElementIndex::new());
-        let mw_config = SourceMiddlewareConfig {
-            name: "test".into(),
-            kind: "decoder".into(),
-            config: config.as_object().unwrap().clone(),
-        };
-
-        let subject = factory.create(&mw_config).unwrap();
-
-        let source_change = SourceChange::Insert {
-            element: Element::Node {
-                metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "node1"),
-                    labels: vec!["TestNode".into()].into(),
-                    effective_from: 0,
-                },
-                properties: json!({
-                    "encoded_value": "Not a valid hex string ZZ"  // Invalid hex
-                })
-                .into(),
-            },
-        };
-
-        // This should fail with an error
-        let result = subject.process(source_change, element_index.as_ref()).await;
-        assert!(result.is_err());
-        match result {
-            Err(MiddlewareError::SourceChangeError(msg)) => {
-                assert!(msg.contains("[test]"));
-                assert!(msg.contains("hex encoding"));
-            }
-            _ => panic!("Expected SourceChangeError"),
-        }
-    }
-
-    /// Tests for URL decoding success
     #[tokio::test]
     async fn test_url_decode_success() {
         let factory = DecoderFactory::new();
@@ -288,48 +193,27 @@ mod process {
             "encoding_type": "url",
             "target_property": "encoded_value"
         });
-
-        let element_index = Arc::new(InMemoryElementIndex::new());
-        let mw_config = SourceMiddlewareConfig {
-            name: "test".into(),
-            kind: "decoder".into(),
-            config: config.as_object().unwrap().clone(),
-        };
-
+        let mw_config = create_mw_config(config);
         let subject = factory.create(&mw_config).unwrap();
+        let element_index = Arc::new(InMemoryElementIndex::new());
 
-        let source_change = SourceChange::Insert {
-            element: Element::Node {
-                metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "node1"),
-                    labels: vec!["TestNode".into()].into(),
-                    effective_from: 0,
-                },
-                properties: json!({
-                    "encoded_value": "Hello%20World%21"  // URL encoded "Hello World!"
-                })
-                .into(),
-            },
-        };
+        let source_change = create_node_insert_change(json!({
+            "encoded_value": "Hello%20World%21" // "Hello World!"
+        }));
 
         let result = subject
             .process(source_change, element_index.as_ref())
             .await
             .unwrap();
-        let change = &result[0];
+        let props = get_props_from_change(&result[0]);
+        assert_eq!(
+            props.get("encoded_value"),
+            Some(&ElementValue::String("Hello World!".into()))
+        );
 
-        if let SourceChange::Insert { element } = change {
-            let decoded_value = element.get_properties().get("encoded_value").unwrap();
-            assert_eq!(
-                decoded_value,
-                &ElementValue::String("Hello World!".to_string().into())
-            );
-        } else {
-            panic!("Expected an Insert change");
-        }
+        assert_eq!(props.map_iter(|_, _| ()).count(), 1);
     }
 
-    /// Tests for json_escape decoding success
     #[tokio::test]
     async fn test_json_escape_decode_success() {
         let factory = DecoderFactory::new();
@@ -337,707 +221,433 @@ mod process {
             "encoding_type": "json_escape",
             "target_property": "encoded_value"
         });
-
-        let element_index = Arc::new(InMemoryElementIndex::new());
-        let mw_config = SourceMiddlewareConfig {
-            name: "test".into(),
-            kind: "decoder".into(),
-            config: config.as_object().unwrap().clone(),
-        };
-
+        let mw_config = create_mw_config(config);
         let subject = factory.create(&mw_config).unwrap();
+        let element_index = Arc::new(InMemoryElementIndex::new());
 
-        let source_change = SourceChange::Insert {
-            element: Element::Node {
-                metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "node1"),
-                    labels: vec!["TestNode".into()].into(),
-                    effective_from: 0,
-                },
-                properties: json!({
-                    "encoded_value": "Hello\\u0020World\\u0021"  // JSON escaped "Hello World!"
-                })
-                .into(),
-            },
-        };
+        let source_change = create_node_insert_change(json!({
+            "encoded_value": r#"{\"key\": \"value with \\\"quotes\\\" and \\\\escapes\"}"#
+        }));
 
         let result = subject
             .process(source_change, element_index.as_ref())
             .await
             .unwrap();
-        let change = &result[0];
+        let props = get_props_from_change(&result[0]);
+        assert_eq!(
+            props.get("encoded_value"),
+            // The expected result after JSON un-escaping
+            Some(&ElementValue::String(r#"{"key": "value with \"quotes\" and \\escapes"}"#.into()))
+        );
 
-        if let SourceChange::Insert { element } = change {
-            let decoded_value = element.get_properties().get("encoded_value").unwrap();
-            assert_eq!(
-                decoded_value,
-                &ElementValue::String("Hello World!".to_string().into())
-            );
-        } else {
-            panic!("Expected an Insert change");
-        }
+        assert_eq!(props.map_iter(|_, _| ()).count(), 1);
     }
 
-    /// Tests for json_escape decoding failure
     #[tokio::test]
-    async fn test_json_escape_decode_failure() {
+    async fn test_decode_failure_skip() {
         let factory = DecoderFactory::new();
         let config = json!({
-            "encoding_type": "json_escape",
+            "encoding_type": "base64",
             "target_property": "encoded_value",
-            "on_error": "fail"
+            "on_error": "skip" // Explicit skip
         });
-
-        let element_index = Arc::new(InMemoryElementIndex::new());
-        let mw_config = SourceMiddlewareConfig {
-            name: "test".into(),
-            kind: "decoder".into(),
-            config: config.as_object().unwrap().clone(),
-        };
-
+        let mw_config = create_mw_config(config);
         let subject = factory.create(&mw_config).unwrap();
+        let element_index = Arc::new(InMemoryElementIndex::new());
 
-        let source_change = SourceChange::Insert {
-            element: Element::Node {
-                metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "node1"),
-                    labels: vec!["TestNode".into()].into(),
-                    effective_from: 0,
-                },
-                properties: json!({
-                    "encoded_value": "Invalid escape \\u00zz sequence"  // Invalid JSON escape
-                })
-                .into(),
-            },
-        };
+        let source_change = create_node_insert_change(json!({
+            "encoded_value": "Invalid Base64 ---"
+        }));
 
-        // This should fail with an error
+        let result = subject
+            .process(source_change.clone(), element_index.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        let props = get_props_from_change(&result[0]);
+        // Value should remain unchanged
+        assert_eq!(
+            props.get("encoded_value"),
+            Some(&ElementValue::String("Invalid Base64 ---".into()))
+        );
+        // Use map_iter().count() instead of len()
+        assert_eq!(props.map_iter(|_, _| ()).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_decode_failure_fail_default() {
+        // Default on_error is Fail
+        let factory = DecoderFactory::new();
+        let config = json!({
+            "encoding_type": "base64",
+            "target_property": "encoded_value"
+        });
+        let mw_config = create_mw_config(config);
+        let subject = factory.create(&mw_config).unwrap();
+        let element_index = Arc::new(InMemoryElementIndex::new());
+
+        let source_change = create_node_insert_change(json!({
+            "encoded_value": "Invalid Base64 ---"
+        }));
+
         let result = subject.process(source_change, element_index.as_ref()).await;
         assert!(result.is_err());
         match result {
             Err(MiddlewareError::SourceChangeError(msg)) => {
-                assert!(msg.contains("[test]"));
-                assert!(msg.contains("JSON escape"));
+                assert!(msg.contains("Failed to decode property 'encoded_value'"));
+                assert!(msg.contains("base64")); // Check encoding type in message
             }
             _ => panic!("Expected SourceChangeError"),
         }
     }
 
-    // Tests for decoding failure when on_error is set to fail
     #[tokio::test]
-    async fn test_decoder_with_on_error_fail() {
+    async fn test_missing_target_property_skip() {
         let factory = DecoderFactory::new();
         let config = json!({
             "encoding_type": "base64",
-            "target_property": "encoded_value",
-            "on_error": "fail"
-        });
-
-        let element_index = Arc::new(InMemoryElementIndex::new());
-        let mw_config = SourceMiddlewareConfig {
-            name: "test".into(),
-            kind: "decoder".into(),
-            config: config.as_object().unwrap().clone(),
-        };
-
-        let subject = factory.create(&mw_config).unwrap();
-
-        let source_change = SourceChange::Insert {
-            element: Element::Node {
-                metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "node1"),
-                    labels: vec!["TestNode".into()].into(),
-                    effective_from: 0,
-                },
-                properties: json!({
-                    "encoded_value": "Invalid Base64 String"
-                })
-                .into(),
-            },
-        };
-
-        // This should fail with an error
-        let result = subject.process(source_change, element_index.as_ref()).await;
-        assert!(result.is_err());
-        match result {
-            Err(MiddlewareError::SourceChangeError(msg)) => {
-                assert!(msg.contains("[test]"));
-                assert!(msg.contains("Failed to decode property"));
-            }
-            _ => panic!("Expected SourceChangeError"),
-        }
-    }
-
-    /// Tests for failure when the target property is missing and on_error is set to skip
-    #[tokio::test]
-    async fn test_decoder_missing_property() {
-        let factory = DecoderFactory::new();
-        let config = json!({
-            "encoding_type": "base64",
-            "target_property": "missing_value",
+            "target_property": "missing_prop",
             "on_error": "skip"
         });
-
-        let element_index = Arc::new(InMemoryElementIndex::new());
-        let mw_config = SourceMiddlewareConfig {
-            name: "test".into(),
-            kind: "decoder".into(),
-            config: config.as_object().unwrap().clone(),
-        };
-
+        let mw_config = create_mw_config(config);
         let subject = factory.create(&mw_config).unwrap();
+        let element_index = Arc::new(InMemoryElementIndex::new());
 
-        let source_change = SourceChange::Insert {
-            element: Element::Node {
-                metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "node1"),
-                    labels: vec!["TestNode".into()].into(),
-                    effective_from: 0,
-                },
-                properties: json!({
-                    "some_other_value": "Some Value"
-                })
-                .into(),
-            },
-        };
+        let source_change = create_node_insert_change(json!({ "other_prop": "value" }));
 
         let result = subject
-            .process(source_change, element_index.as_ref())
+            .process(source_change.clone(), element_index.as_ref())
             .await
             .unwrap();
-        let change = &result[0];
-
-        if let SourceChange::Insert { element } = change {
-            let value = element.get_properties().get("some_other_value").unwrap();
-            assert_eq!(
-                value,
-                &ElementValue::String("Some Value".to_string().into())
-            );
-        } else {
-            panic!("Expected an Insert change");
-        }
+        assert_eq!(result.len(), 1); // Should pass through unchanged
+        let props = get_props_from_change(&result[0]);
+        // Use map_iter().count() instead of len()
+        assert_eq!(props.map_iter(|_, _| ()).count(), 1);
+        assert_eq!(props.get("other_prop"), Some(&ElementValue::String("value".into())));
+        assert!(props.get("missing_prop").is_none()); // Ensure missing prop wasn't added
     }
 
-    /// Tests for failure when the target property is missing and on_error is set to fail
     #[tokio::test]
-    async fn test_decoder_missing_property_with_on_error_fail() {
+    async fn test_missing_target_property_fail_default() {
         let factory = DecoderFactory::new();
         let config = json!({
             "encoding_type": "base64",
-            "target_property": "missing_value",
-            "on_error": "fail"
+            "target_property": "missing_prop"
+            // on_error defaults to fail
         });
-
-        let element_index = Arc::new(InMemoryElementIndex::new());
-        let mw_config = SourceMiddlewareConfig {
-            name: "test".into(),
-            kind: "decoder".into(),
-            config: config.as_object().unwrap().clone(),
-        };
-
+        let mw_config = create_mw_config(config);
         let subject = factory.create(&mw_config).unwrap();
+        let element_index = Arc::new(InMemoryElementIndex::new());
 
-        let source_change = SourceChange::Insert {
-            element: Element::Node {
-                metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "node1"),
-                    labels: vec!["TestNode".into()].into(),
-                    effective_from: 0,
-                },
-                properties: json!({
-                    "some_other_value": "Some Value"
-                })
-                .into(),
-            },
-        };
+        let source_change = create_node_insert_change(json!({ "other_prop": "value" }));
 
-        // This should fail with an error since the property is missing
         let result = subject.process(source_change, element_index.as_ref()).await;
         assert!(result.is_err());
         match result {
             Err(MiddlewareError::SourceChangeError(msg)) => {
-                assert!(msg.contains("[test]"));
-                assert!(msg.contains("Property missing_value not found"));
+                assert!(msg.contains("Target property 'missing_prop' not found"));
             }
             _ => panic!("Expected SourceChangeError"),
         }
     }
 
-    /// Tests for failure when the target property is of the wrong type (a number for example)
     #[tokio::test]
-    async fn test_decoder_wrong_type() {
+    async fn test_wrong_target_property_type_skip() {
         let factory = DecoderFactory::new();
         let config = json!({
             "encoding_type": "base64",
-            "target_property": "wrong_type"
+            "target_property": "wrong_type_prop",
+            "on_error": "skip"
         });
-
-        let element_index = Arc::new(InMemoryElementIndex::new());
-        let mw_config = SourceMiddlewareConfig {
-            name: "test".into(),
-            kind: "decoder".into(),
-            config: config.as_object().unwrap().clone(),
-        };
-
+        let mw_config = create_mw_config(config);
         let subject = factory.create(&mw_config).unwrap();
+        let element_index = Arc::new(InMemoryElementIndex::new());
 
-        let source_change = SourceChange::Insert {
-            element: Element::Node {
-                metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "node1"),
-                    labels: vec!["TestNode".into()].into(),
-                    effective_from: 0,
-                },
-                properties: json!({
-                    "wrong_type": 123
-                })
-                .into(),
-            },
-        };
+        let source_change = create_node_insert_change(json!({ "wrong_type_prop": 12345 }));
 
         let result = subject
-            .process(source_change, element_index.as_ref())
+            .process(source_change.clone(), element_index.as_ref())
             .await
             .unwrap();
-        let change = &result[0];
+        assert_eq!(result.len(), 1); // Should pass through unchanged
+        let props = get_props_from_change(&result[0]);
+        
+        assert_eq!(props.map_iter(|_, _| ()).count(), 1);
+        assert_eq!(props.get("wrong_type_prop"), Some(&ElementValue::Integer(12345)));
+    }
 
-        if let SourceChange::Insert { element } = change {
-            let value = element.get_properties().get("wrong_type").unwrap();
-            //  Using Integer variant
-            assert_eq!(value, &ElementValue::Integer(123));
-        } else {
-            panic!("Expected an Insert change");
+    #[tokio::test]
+    async fn test_wrong_target_property_type_fail_default() {
+        let factory = DecoderFactory::new();
+        let config = json!({
+            "encoding_type": "base64",
+            "target_property": "wrong_type_prop"
+            // on_error defaults to fail
+        });
+        let mw_config = create_mw_config(config);
+        let subject = factory.create(&mw_config).unwrap();
+        let element_index = Arc::new(InMemoryElementIndex::new());
+
+        let source_change = create_node_insert_change(json!({ "wrong_type_prop": true }));
+
+        let result = subject.process(source_change, element_index.as_ref()).await;
+        assert!(result.is_err());
+        match result {
+            Err(MiddlewareError::SourceChangeError(msg)) => {
+                assert!(msg.contains("Target property 'wrong_type_prop' is not a string value"));
+                assert!(msg.contains("(Type: Bool)")); // Check type name in message
+            }
+            _ => panic!("Expected SourceChangeError"),
         }
     }
 
-    /// Tests for stripping quotes from the decoded value when the option is set
     #[tokio::test]
-    async fn test_decoder_with_quotes() {
+    async fn test_strip_quotes_enabled() {
         let factory = DecoderFactory::new();
         let config = json!({
             "encoding_type": "base64",
             "target_property": "encoded_value",
             "strip_quotes": true
         });
-
-        let element_index = Arc::new(InMemoryElementIndex::new());
-        let mw_config = SourceMiddlewareConfig {
-            name: "test".into(),
-            kind: "decoder".into(),
-            config: config.as_object().unwrap().clone(),
-        };
-
+        let mw_config = create_mw_config(config);
         let subject = factory.create(&mw_config).unwrap();
+        let element_index = Arc::new(InMemoryElementIndex::new());
 
-        let source_change = SourceChange::Insert {
-            element: Element::Node {
-                metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "node1"),
-                    labels: vec!["TestNode".into()].into(),
-                    effective_from: 0,
-                },
-                properties: json!({
-                    "encoded_value": "\"SGVsbG8gV29ybGQh\""  // Base64 encoded "Hello World!" with quotes
-                })
-                .into(),
-            },
-        };
+        let source_change = create_node_insert_change(json!({
+            "encoded_value": "\"SGVsbG8gV29ybGQh\"" // Base64("Hello World!") with quotes
+        }));
 
         let result = subject
             .process(source_change, element_index.as_ref())
             .await
             .unwrap();
-        let change = &result[0];
-
-        if let SourceChange::Insert { element } = change {
-            let decoded_value = element.get_properties().get("encoded_value").unwrap();
-            assert_eq!(
-                decoded_value,
-                &ElementValue::String("Hello World!".to_string().into())
-            );
-        } else {
-            panic!("Expected an Insert change");
-        }
+        let props = get_props_from_change(&result[0]);
+        assert_eq!(
+            props.get("encoded_value"),
+            Some(&ElementValue::String("Hello World!".into()))
+        );
+        // Use map_iter().count() instead of len()
+        assert_eq!(props.map_iter(|_, _| ()).count(), 1);
     }
 
-    /// Tests for json parsing of the decoded value when the option is set
     #[tokio::test]
-    async fn test_decoder_with_json_parsing() {
+    async fn test_strip_quotes_disabled_default() {
         let factory = DecoderFactory::new();
         let config = json!({
             "encoding_type": "base64",
-            "target_property": "encoded_value",
-            "parse_json": true
+            "target_property": "encoded_value"
+            // strip_quotes defaults to false
         });
-
-        let element_index = Arc::new(InMemoryElementIndex::new());
-        let mw_config = SourceMiddlewareConfig {
-            name: "test".into(),
-            kind: "decoder".into(),
-            config: config.as_object().unwrap().clone(),
-        };
-
+        let mw_config = create_mw_config(config);
         let subject = factory.create(&mw_config).unwrap();
+        let element_index = Arc::new(InMemoryElementIndex::new());
 
-        // Base64 for {"name":"Alice","age":30,"active":true}
-        let source_change = SourceChange::Insert {
-            element: Element::Node {
-                metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "node1"),
-                    labels: vec!["TestNode".into()].into(),
-                    effective_from: 0,
-                },
-                properties: json!({
-                    "encoded_value": "eyJuYW1lIjoiQWxpY2UiLCJhZ2UiOjMwLCJhY3RpdmUiOnRydWV9"
-                })
-                .into(),
-            },
-        };
+        // Base64 encoding of the string "\"Secret Message\"" (including the quotes)
+        let source_change = create_node_insert_change(json!({
+            "encoded_value": "IlNlY3JldCBNZXNzYWdlIg=="
+        }));
 
         let result = subject
             .process(source_change, element_index.as_ref())
             .await
             .unwrap();
-        let change = &result[0];
-
-        if let SourceChange::Insert { element } = change {
-            let decoded_value = element.get_properties().get("encoded_value").unwrap();
-            assert_eq!(
-                decoded_value,
-                &ElementValue::String(r#"{"name":"Alice","age":30,"active":true}"#.into())
-            );
-        } else {
-            panic!("Expected an Insert change");
-        }
-    }
-
-    /// Tests for the json parsing and flattening of the decoded value when the options are set
-    #[tokio::test]
-    async fn test_decoder_with_json_parsing_and_flattening() {
-        let factory = DecoderFactory::new();
-        let config = json!({
-            "encoding_type": "base64",
-            "target_property": "encoded_value",
-            "parse_json": true,
-            "flatten": true,
-            "output_prefix": "user_"
-        });
-
-        let element_index = Arc::new(InMemoryElementIndex::new());
-        let mw_config = SourceMiddlewareConfig {
-            name: "test".into(),
-            kind: "decoder".into(),
-            config: config.as_object().unwrap().clone(),
-        };
-
-        let subject = factory.create(&mw_config).unwrap();
-
-        // Base64 for {"name":"Alice","age":30,"active":true}
-        let source_change = SourceChange::Insert {
-            element: Element::Node {
-                metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "node1"),
-                    labels: vec!["TestNode".into()].into(),
-                    effective_from: 0,
-                },
-                properties: json!({
-                    "encoded_value": "eyJuYW1lIjoiQWxpY2UiLCJhZ2UiOjMwLCJhY3RpdmUiOnRydWV9"
-                })
-                .into(),
-            },
-        };
-
-        let result = subject
-            .process(source_change, element_index.as_ref())
-            .await
-            .unwrap();
-        let change = &result[0];
-
-        if let SourceChange::Insert { element } = change {
-            // Original property should remain
-            assert!(element.get_properties().get("encoded_value").is_some());
-
-            // Check flattened properties with prefix
-            let name = element.get_properties().get("user_name").unwrap();
-            let age = element.get_properties().get("user_age").unwrap();
-            let active = element.get_properties().get("user_active").unwrap();
-
-            assert_eq!(name, &ElementValue::String("Alice".to_string().into()));
-            assert_eq!(age, &ElementValue::Integer(30));
-            assert_eq!(active, &ElementValue::String("true".to_string().into()));
-        } else {
-            panic!("Expected an Insert change");
-        }
-    }
-
-    /// Tests for json parsing failure when the option is set
-    #[tokio::test]
-    async fn test_decoder_with_invalid_json() {
-        let factory = DecoderFactory::new();
-        let config = json!({
-            "encoding_type": "base64",
-            "target_property": "encoded_value",
-            "parse_json": true
-        });
-
-        let element_index = Arc::new(InMemoryElementIndex::new());
-        let mw_config = SourceMiddlewareConfig {
-            name: "test".into(),
-            kind: "decoder".into(),
-            config: config.as_object().unwrap().clone(),
-        };
-
-        let subject = factory.create(&mw_config).unwrap();
-
-        // Base64 for "not a valid json"
-        let source_change = SourceChange::Insert {
-            element: Element::Node {
-                metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "node1"),
-                    labels: vec!["TestNode".into()].into(),
-                    effective_from: 0,
-                },
-                properties: json!({
-                    "encoded_value": "bm90IGEgdmFsaWQganNvbg=="
-                })
-                .into(),
-            },
-        };
-
-        let result = subject
-            .process(source_change, element_index.as_ref())
-            .await
-            .unwrap();
-        let change = &result[0];
-
-        if let SourceChange::Insert { element } = change {
-            let decoded_value = element.get_properties().get("encoded_value").unwrap();
-            // Even though JSON parsing failed, it should still decode the base64
-            assert_eq!(
-                decoded_value,
-                &ElementValue::String("not a valid json".to_string().into())
-            );
-        } else {
-            panic!("Expected an Insert change");
-        }
-    }
-
-    /// Tests for json parsing failure when the option is set and on_error is set to fail
-    #[tokio::test]
-    async fn test_decoder_with_invalid_json_on_error_fail() {
-        let factory = DecoderFactory::new();
-        let config = json!({
-            "encoding_type": "base64",
-            "target_property": "encoded_value",
-            "parse_json": true,
-            "on_error": "fail"
-        });
-
-        let element_index = Arc::new(InMemoryElementIndex::new());
-        let mw_config = SourceMiddlewareConfig {
-            name: "test".into(),
-            kind: "decoder".into(),
-            config: config.as_object().unwrap().clone(),
-        };
-
-        let subject = factory.create(&mw_config).unwrap();
-
-        // Base64 for "not a valid json"
-        let source_change = SourceChange::Insert {
-            element: Element::Node {
-                metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "node1"),
-                    labels: vec!["TestNode".into()].into(),
-                    effective_from: 0,
-                },
-                properties: json!({
-                    "encoded_value": "bm90IGEgdmFsaWQganNvbg=="
-                })
-                .into(),
-            },
-        };
-
-        // This should fail with an error since JSON parsing fails and on_error is set to fail
-        let result = subject.process(source_change, element_index.as_ref()).await;
-        assert!(result.is_err());
-        match result {
-            Err(MiddlewareError::SourceChangeError(msg)) => {
-                assert!(msg.contains("[test]"));
-                assert!(msg.contains("Failed to parse JSON"));
-            }
-            _ => panic!("Expected SourceChangeError"),
-        }
+        let props = get_props_from_change(&result[0]);
+        // Expect the decoded string to still contain the quotes
+        assert_eq!(
+            props.get("encoded_value"),
+            Some(&ElementValue::String("\"Secret Message\"".into()))
+        );
+        // Use map_iter().count() instead of len()
+        assert_eq!(props.map_iter(|_, _| ()).count(), 1);
     }
 }
 
 mod factory {
-    use drasi_core::interface::MiddlewareSetupError;
-    use drasi_core::interface::SourceMiddlewareFactory;
-    use drasi_core::models::SourceMiddlewareConfig;
-    use serde_json::json;
+    use super::*;
 
-    use crate::decoder::{DecoderFactory, EncodingType};
-
-    /// Tests for the DecoderFactory's ability to create a decoder middleware
-    #[tokio::test]
-    pub async fn construct_decoder_middleware() {
+    #[test]
+    fn construct_decoder_middleware_minimal() {
         let subject = DecoderFactory::new();
         let config = json!({
             "encoding_type": "base64",
-            "target_property": "encoded_value"
+            "target_property": "data"
         });
-
-        let mw_config = SourceMiddlewareConfig {
-            name: "test".into(),
-            kind: "decoder".into(),
-            config: config.as_object().unwrap().clone(),
-        };
-
+        let mw_config = create_mw_config(config);
         assert!(subject.create(&mw_config).is_ok());
     }
 
-    /// Tests for error handling when the target property is missing in the decoder config
-    #[tokio::test]
-    pub async fn missing_target_property() {
+    #[test]
+    fn construct_decoder_middleware_full() {
         let subject = DecoderFactory::new();
         let config = json!({
-            "encoding_type": "base64"
-            // Missing "target_property"
+            "encoding_type": "hex",
+            "target_property": "input",
+            "output_property": "output",
+            "strip_quotes": true,
+            "on_error": "skip" // Explicitly testing skip here
         });
+        let mw_config = create_mw_config(config);
+        let result = subject.create(&mw_config);
+        assert!(result.is_ok());
+    }
 
-        let mw_config = SourceMiddlewareConfig {
-            name: "test".into(),
-            kind: "decoder".into(),
-            config: config.as_object().unwrap().clone(),
-        };
-
-        // It should not panic, but return an error
+    #[test]
+    fn fail_missing_target_property() {
+        let subject = DecoderFactory::new();
+        let config = json!({ "encoding_type": "base64" }); // Missing target_property
+        let mw_config = create_mw_config(config);
         let result = subject.create(&mw_config);
         assert!(result.is_err());
         match result {
             Err(MiddlewareSetupError::InvalidConfiguration(msg)) => {
-                assert!(msg.contains("target_property"));
+                // Check serde's error message for missing field
+                assert!(msg.contains("missing field `target_property`"));
             }
             _ => panic!("Expected InvalidConfiguration error"),
         }
     }
 
-    /// Tests for error handling when the encoding type is missing in the decoder config
-    #[tokio::test]
-    pub async fn missing_encoding_type() {
+    #[test]
+    fn fail_empty_target_property() {
         let subject = DecoderFactory::new();
-        let config = json!({
-            "target_property": "encoded_value"
-            // Missing "encoding_type"
-        });
-
-        let mw_config = SourceMiddlewareConfig {
-            name: "test".into(),
-            kind: "decoder".into(),
-            config: config.as_object().unwrap().clone(),
-        };
-
-        // It should not panic, but return an error
+        let config = json!({ "encoding_type": "base64", "target_property": "" });
+        let mw_config = create_mw_config(config);
         let result = subject.create(&mw_config);
         assert!(result.is_err());
         match result {
             Err(MiddlewareSetupError::InvalidConfiguration(msg)) => {
-                assert!(msg.contains("encoding_type"));
+                // Check our custom validation message
+                assert!(msg.contains("Missing or empty 'target_property'"));
             }
             _ => panic!("Expected InvalidConfiguration error"),
         }
     }
 
-    /// Tests whether decoder can be created with all encoding types
-    #[tokio::test]
-    pub async fn test_all_encoding_types() {
+    #[test]
+    fn fail_missing_encoding_type() {
         let subject = DecoderFactory::new();
+        let config = json!({ "target_property": "data" }); // Missing encoding_type
+        let mw_config = create_mw_config(config);
+        let result = subject.create(&mw_config);
+        assert!(result.is_err());
+        match result {
+            Err(MiddlewareSetupError::InvalidConfiguration(msg)) => {
+                assert!(msg.contains("missing field `encoding_type`"));
+            }
+            _ => panic!("Expected InvalidConfiguration error"),
+        }
+    }
 
-        // Test all valid encoding types
-        let encoding_types = vec![
-            ("base64", EncodingType::Base64),
-            ("base64url", EncodingType::Base64url),
-            ("hex", EncodingType::Hex),
-            ("url", EncodingType::Url),
-            ("json_escape", EncodingType::JsonEscape),
-        ];
+    #[test]
+    fn fail_invalid_encoding_type() {
+        let subject = DecoderFactory::new();
+        let config = json!({ "encoding_type": "invalid", "target_property": "data" });
+        let mw_config = create_mw_config(config);
+        let result = subject.create(&mw_config);
+        assert!(result.is_err());
+        match result {
+            Err(MiddlewareSetupError::InvalidConfiguration(msg)) => {
+                // Check serde's error message for unknown variant
+                assert!(msg.contains("unknown variant `invalid`"));
+            }
+            _ => panic!("Expected InvalidConfiguration error"),
+        }
+    }
 
-        for (type_str, _) in encoding_types {
+    #[test]
+    fn fail_empty_output_property() {
+        let subject = DecoderFactory::new();
+        let config = json!({
+            "encoding_type": "base64",
+            "target_property": "input",
+            "output_property": "" // Empty output property
+        });
+        let mw_config = create_mw_config(config);
+        let result = subject.create(&mw_config);
+        assert!(result.is_err());
+        match result {
+            Err(MiddlewareSetupError::InvalidConfiguration(msg)) => {
+                // Check our custom validation message
+                assert!(msg.contains("'output_property' cannot be empty"));
+            }
+            _ => panic!("Expected InvalidConfiguration error"),
+        }
+    }
+
+    #[test]
+    fn test_all_valid_encoding_types() {
+        let subject = DecoderFactory::new();
+        let types = ["base64", "base64url", "hex", "url", "json_escape"];
+        for enc_type in types {
             let config = json!({
-                "encoding_type": type_str,
-                "target_property": "encoded_value"
+                "encoding_type": enc_type,
+                "target_property": "data"
             });
-
-            let mw_config = SourceMiddlewareConfig {
-                name: format!("test_{}", type_str).into(),
-                kind: "decoder".into(),
-                config: config.as_object().unwrap().clone(),
-            };
-
-            let result = subject.create(&mw_config);
+            let mw_config = create_mw_config(config);
             assert!(
-                result.is_ok(),
-                "Failed to create decoder with encoding_type: {}",
-                type_str
+                subject.create(&mw_config).is_ok(),
+                "Failed for encoding_type: {}",
+                enc_type
             );
         }
     }
 
-    /// Tests for error handling when an invalid encoding type is provided
-    #[tokio::test]
-    pub async fn test_invalid_encoding_type() {
+    #[test]
+    fn test_all_valid_on_error_values() {
+        let subject = DecoderFactory::new();
+        let values = ["skip", "fail"];
+        for val in values {
+            let config = json!({
+                "encoding_type": "base64",
+                "target_property": "data",
+                "on_error": val
+            });
+            let mw_config = create_mw_config(config);
+            assert!(
+                subject.create(&mw_config).is_ok(),
+                "Failed for on_error: {}",
+                val
+            );
+        }
+        // Test default (fail) by omitting the field
+        let config_default = json!({ "encoding_type": "base64", "target_property": "data" });
+        let mw_config_default = create_mw_config(config_default);
+        assert!(subject.create(&mw_config_default).is_ok(), "Failed for default on_error");
+    }
+
+    #[test]
+    fn fail_invalid_on_error_value() {
         let subject = DecoderFactory::new();
         let config = json!({
-            "encoding_type": "invalid_encoding", // Invalid encoding type
-            "target_property": "encoded_value"
+            "encoding_type": "base64",
+            "target_property": "data",
+            "on_error": "invalid_value" // Invalid enum variant
         });
-
-        let mw_config = SourceMiddlewareConfig {
-            name: "test".into(),
-            kind: "decoder".into(),
-            config: config.as_object().unwrap().clone(),
-        };
-
-        // It should return an error for invalid encoding type
+        let mw_config = create_mw_config(config);
         let result = subject.create(&mw_config);
         assert!(result.is_err());
-
-        // The error message from serde might not contain "encoding_type" directly
-        // Let's just check that it's an InvalidConfiguration error
         match result {
-            Err(MiddlewareSetupError::InvalidConfiguration(_)) => {
-                // This is the expected error type
+            Err(MiddlewareSetupError::InvalidConfiguration(msg)) => {
+                assert!(msg.contains("unknown variant `invalid_value`"));
             }
             _ => panic!("Expected InvalidConfiguration error"),
         }
     }
 
-    /// Tests for error handling when the flatten option is set without parse_json
-    #[tokio::test]
-    pub async fn test_invalid_flatten_config() {
+    #[test]
+    fn fail_unknown_config_field() {
         let subject = DecoderFactory::new();
         let config = json!({
             "encoding_type": "base64",
-            "target_property": "encoded_value",
-            "flatten": true,  // This requires parse_json:true
-            "parse_json": false
+            "target_property": "data",
+            "unknown_field": 123 // Added deny_unknown_fields to config struct
         });
-
-        let mw_config = SourceMiddlewareConfig {
-            name: "test".into(),
-            kind: "decoder".into(),
-            config: config.as_object().unwrap().clone(),
-        };
-
-        // It should return an error since flatten requires parse_json
+        let mw_config = create_mw_config(config);
         let result = subject.create(&mw_config);
         assert!(result.is_err());
-
-        // Let's also check the error message
         match result {
             Err(MiddlewareSetupError::InvalidConfiguration(msg)) => {
-                assert!(msg.contains("flatten"));
-                assert!(msg.contains("parse_json"));
+                assert!(msg.contains("unknown field `unknown_field`"));
             }
             _ => panic!("Expected InvalidConfiguration error"),
         }
