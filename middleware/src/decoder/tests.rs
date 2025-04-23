@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use crate::decoder::DecoderFactory;
 use drasi_core::{
     in_memory_index::in_memory_element_index::InMemoryElementIndex,
     interface::{MiddlewareError, MiddlewareSetupError, SourceMiddlewareFactory},
@@ -25,7 +26,6 @@ use drasi_core::{
     },
 };
 use serde_json::{json, Value};
-use crate::decoder::DecoderFactory;
 
 // --- Test Helpers ---
 
@@ -33,7 +33,10 @@ fn create_mw_config(config_json: Value) -> SourceMiddlewareConfig {
     SourceMiddlewareConfig {
         name: "test_decoder".into(),
         kind: "decoder".into(),
-        config: config_json.as_object().expect("Config JSON must be an object").clone(),
+        config: config_json
+            .as_object()
+            .expect("Config JSON must be an object")
+            .clone(),
     }
 }
 
@@ -125,10 +128,9 @@ mod process {
             Some(&ElementValue::String("Hello World!".into()))
         );
         assert_eq!(props.get("other_prop"), Some(&ElementValue::Integer(123)));
-        
+
         assert_eq!(props.map_iter(|_, _| ()).count(), 3);
     }
-
 
     #[tokio::test]
     async fn test_base64url_decode_success() {
@@ -237,7 +239,9 @@ mod process {
         assert_eq!(
             props.get("encoded_value"),
             // The expected result after JSON un-escaping
-            Some(&ElementValue::String(r#"{"key": "value with \"quotes\" and \\escapes"}"#.into()))
+            Some(&ElementValue::String(
+                r#"{"key": "value with \"quotes\" and \\escapes"}"#.into()
+            ))
         );
 
         assert_eq!(props.map_iter(|_, _| ()).count(), 1);
@@ -323,7 +327,10 @@ mod process {
         let props = get_props_from_change(&result[0]);
         // Use map_iter().count() instead of len()
         assert_eq!(props.map_iter(|_, _| ()).count(), 1);
-        assert_eq!(props.get("other_prop"), Some(&ElementValue::String("value".into())));
+        assert_eq!(
+            props.get("other_prop"),
+            Some(&ElementValue::String("value".into()))
+        );
         assert!(props.get("missing_prop").is_none()); // Ensure missing prop wasn't added
     }
 
@@ -371,9 +378,12 @@ mod process {
             .unwrap();
         assert_eq!(result.len(), 1); // Should pass through unchanged
         let props = get_props_from_change(&result[0]);
-        
+
         assert_eq!(props.map_iter(|_, _| ()).count(), 1);
-        assert_eq!(props.get("wrong_type_prop"), Some(&ElementValue::Integer(12345)));
+        assert_eq!(
+            props.get("wrong_type_prop"),
+            Some(&ElementValue::Integer(12345))
+        );
     }
 
     #[tokio::test]
@@ -612,7 +622,10 @@ mod factory {
         // Test default (fail) by omitting the field
         let config_default = json!({ "encoding_type": "base64", "target_property": "data" });
         let mw_config_default = create_mw_config(config_default);
-        assert!(subject.create(&mw_config_default).is_ok(), "Failed for default on_error");
+        assert!(
+            subject.create(&mw_config_default).is_ok(),
+            "Failed for default on_error"
+        );
     }
 
     #[test]

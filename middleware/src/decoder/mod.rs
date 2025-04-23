@@ -140,12 +140,15 @@ impl Decoder {
         match element.get_properties().get(target_prop_name) {
             Some(ElementValue::String(s)) => {
                 let encoded_str = s.to_string();
-                
+
                 // Check size limit
                 if encoded_str.len() > self.config.max_size_bytes {
                     let msg = format!(
                         "[{}] Encoded string in property '{}' exceeds size limit ({} > {})",
-                        self.name, target_prop_name, encoded_str.len(), self.config.max_size_bytes
+                        self.name,
+                        target_prop_name,
+                        encoded_str.len(),
+                        self.config.max_size_bytes
                     );
                     log::warn!("{}", msg);
                     return if self.config.on_error == ErrorHandling::Fail {
@@ -176,7 +179,8 @@ impl Decoder {
                     Ok(decoded_string) => {
                         // Get mutable access to properties to check for collision and insert
                         match element {
-                            Element::Node { properties, .. } | Element::Relation { properties, .. } => {
+                            Element::Node { properties, .. }
+                            | Element::Relation { properties, .. } => {
                                 // Check for potential overwrite collision
                                 if output_prop_name != target_prop_name
                                     && properties.get(output_prop_name).is_some()
@@ -187,9 +191,12 @@ impl Decoder {
                                         output_prop_name
                                     );
                                 }
-                                
+
                                 // Update the element with the decoded string
-                                properties.insert(output_prop_name, ElementValue::String(decoded_string.into()));
+                                properties.insert(
+                                    output_prop_name,
+                                    ElementValue::String(decoded_string.into()),
+                                );
                             }
                         }
                         Ok(())
@@ -208,7 +215,7 @@ impl Decoder {
                         }
                     }
                 }
-            },
+            }
             Some(value) => {
                 // Handle non-string property types
                 let type_name = Self::get_element_value_type_name(value);
@@ -217,12 +224,12 @@ impl Decoder {
                     self.name, target_prop_name, type_name
                 );
                 log::warn!("{}", msg);
-                return if self.config.on_error == ErrorHandling::Fail {
+                if self.config.on_error == ErrorHandling::Fail {
                     Err(MiddlewareError::SourceChangeError(msg))
                 } else {
                     Ok(()) // Skip processing this element
-                };
-            },
+                }
+            }
             None => {
                 // Handle missing property
                 let msg = format!(
@@ -230,11 +237,11 @@ impl Decoder {
                     self.name, target_prop_name
                 );
                 log::warn!("{}", msg);
-                return if self.config.on_error == ErrorHandling::Fail {
+                if self.config.on_error == ErrorHandling::Fail {
                     Err(MiddlewareError::SourceChangeError(msg))
                 } else {
                     Ok(()) // Skip processing this element
-                };
+                }
             }
         }
     }
