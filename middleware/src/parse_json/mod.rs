@@ -170,7 +170,7 @@ impl ParseJson {
         {
             return Err((
                 ParseJsonErrorType::InvalidInput,
-                format!("JSON string contains invalid control characters"),
+                "JSON string contains invalid control characters".to_string(),
             ));
         }
         Ok(())
@@ -243,29 +243,25 @@ impl ParseJson {
                 }
 
                 // Convert serde_json::Value to ElementValue
-                match ElementValue::from(&parsed_value) {
-                    element_value => {
-                        // Update the element's properties
-                        match element {
-                            Element::Node { properties, .. }
-                            | Element::Relation { properties, .. } => {
-                                // Check for potential overwrite collision if output_property is specified
-                                if output_prop_name != target_prop_name
-                                    && properties.get(output_prop_name).is_some()
-                                {
-                                    log::warn!(
-                                        "[{}] Output property '{}' specified in config already exists and will be overwritten.",
-                                        self.name,
-                                        output_prop_name
-                                    );
-                                }
-                                // Insert or overwrite the property.
-                                properties.insert(output_prop_name, element_value);
-                            }
+                let element_value = ElementValue::from(&parsed_value);
+                // Update the element's properties
+                match element {
+                    Element::Node { properties, .. } | Element::Relation { properties, .. } => {
+                        // Check for potential overwrite collision if output_property is specified
+                        if output_prop_name != target_prop_name
+                            && properties.get(output_prop_name).is_some()
+                        {
+                            log::warn!(
+                                "[{}] Output property '{}' specified in config already exists and will be overwritten.",
+                                self.name,
+                                output_prop_name
+                            );
                         }
-                        Ok(())
+                        // Insert or overwrite the property.
+                        properties.insert(output_prop_name, element_value);
                     }
                 }
+                Ok(())
             }
             Err(e) => self.handle_error(
                 ParseJsonErrorType::ParseError,

@@ -9,7 +9,7 @@ use drasi_core::{
     },
 };
 use ordered_float::OrderedFloat;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 use crate::parse_json::ParseJsonFactory;
 
