@@ -19,10 +19,10 @@ use std::sync::Arc;
 use crate::decoder::DecoderFactory;
 use drasi_core::{
     in_memory_index::in_memory_element_index::InMemoryElementIndex,
-    interface::{MiddlewareError, MiddlewareSetupError, SourceMiddlewareFactory, FutureElementRef},
+    interface::{FutureElementRef, MiddlewareError, MiddlewareSetupError, SourceMiddlewareFactory},
     models::{
-        Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
-        SourceMiddlewareConfig, ElementTimestamp,
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementTimestamp,
+        ElementValue, SourceChange, SourceMiddlewareConfig,
     },
 };
 use serde_json::{json, Value};
@@ -809,7 +809,8 @@ mod process {
         let element_index = Arc::new(InMemoryElementIndex::new());
 
         // Use a sequence that decodes to invalid UTF-8 (%80)
-        let source_change = create_node_insert_change(json!({ "encoded_value": "invalid%80sequence" }));
+        let source_change =
+            create_node_insert_change(json!({ "encoded_value": "invalid%80sequence" }));
 
         let result = subject.process(source_change, element_index.as_ref()).await;
         assert!(result.is_err());
@@ -836,7 +837,8 @@ mod process {
         let element_index = Arc::new(InMemoryElementIndex::new());
 
         // Invalid unicode escape sequence
-        let source_change = create_node_insert_change(json!({ "encoded_value": r"Invalid \uDEFG sequence" }));
+        let source_change =
+            create_node_insert_change(json!({ "encoded_value": r"Invalid \uDEFG sequence" }));
 
         let result = subject.process(source_change, element_index.as_ref()).await;
         assert!(result.is_err());
