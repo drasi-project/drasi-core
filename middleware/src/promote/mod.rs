@@ -23,7 +23,7 @@ use drasi_core::{
 };
 use jsonpath_rust::{path::config::JsonPathConfig, JsonPathInst};
 use log::debug;
-use serde::{Deserialize, Deserializer, de};
+use serde::{de, Deserialize, Deserializer};
 use serde_json::Value;
 use std::{str::FromStr, sync::Arc};
 
@@ -58,7 +58,8 @@ pub struct JsonPathExpression {
 impl JsonPathExpression {
     /// Execute the JSONPath expression and return all matching values
     fn execute(&self, value: &Value) -> Vec<Value> {
-        self.path.find_slice(value, JsonPathConfig::default())
+        self.path
+            .find_slice(value, JsonPathConfig::default())
             .into_iter()
             .map(|v| (*v).clone())
             .collect()
@@ -135,12 +136,19 @@ impl PromoteMiddleware {
     }
 
     /// Extract value using JSONPath and handle according to error strategy
-    fn extract_value(&self, json_obj: &Value, path: &JsonPathExpression) -> Result<Option<Value>, MiddlewareError> {
+    fn extract_value(
+        &self,
+        json_obj: &Value,
+        path: &JsonPathExpression,
+    ) -> Result<Option<Value>, MiddlewareError> {
         // Check for null or empty results
         let results = path.execute(json_obj);
-        
+
         if results.is_empty() {
-            let msg = format!("[{}] JSONPath '{}' selected no values", self.name, path.expression);
+            let msg = format!(
+                "[{}] JSONPath '{}' selected no values",
+                self.name, path.expression
+            );
             match self.on_error {
                 ErrorHandling::Skip => {
                     debug!("{}", msg);
@@ -148,11 +156,14 @@ impl PromoteMiddleware {
                 }
                 ErrorHandling::Fail => Err(MiddlewareError::SourceChangeError(msg)),
             }
-        } 
-        else if results.len() > 1 {
+        } else if results.len() > 1 {
             // Multiple results
-            let msg = format!("[{}] JSONPath '{}' selected multiple values ({})", 
-                self.name, path.expression, results.len());
+            let msg = format!(
+                "[{}] JSONPath '{}' selected multiple values ({})",
+                self.name,
+                path.expression,
+                results.len()
+            );
             match self.on_error {
                 ErrorHandling::Skip => {
                     debug!("{}", msg);
@@ -160,8 +171,7 @@ impl PromoteMiddleware {
                 }
                 ErrorHandling::Fail => Err(MiddlewareError::SourceChangeError(msg)),
             }
-        } 
-        else {
+        } else {
             // Single result
             Ok(Some(results[0].clone()))
         }
@@ -194,10 +204,16 @@ impl PromoteMiddleware {
                 if *existing != ElementValue::Null {
                     match self.on_conflict {
                         ConflictStrategy::Overwrite => {
-                            debug!("[{}] Overwriting existing property '{}'", self.name, mapping.target_name);
+                            debug!(
+                                "[{}] Overwriting existing property '{}'",
+                                self.name, mapping.target_name
+                            );
                         }
                         ConflictStrategy::Skip => {
-                            debug!("[{}] Skipping promotion to '{}' due to existing property", self.name, mapping.target_name);
+                            debug!(
+                                "[{}] Skipping promotion to '{}' due to existing property",
+                                self.name, mapping.target_name
+                            );
                             continue;
                         }
                         ConflictStrategy::Fail => {
@@ -265,37 +281,39 @@ impl SourceMiddlewareFactory for PromoteMiddlewareFactory {
         config: &SourceMiddlewareConfig,
     ) -> Result<Arc<dyn SourceMiddleware>, MiddlewareSetupError> {
         // Parse configuration
-        let promote_config: PromoteMiddlewareConfig = match serde_json::from_value(
-            serde_json::Value::Object(config.config.clone())
-        ) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                // Check if the error message is the one we set for empty paths
-                if e.to_string().contains("Empty JSONPath") {
-                     return Err(MiddlewareSetupError::InvalidConfiguration(
-                        format!("[{}] {}", config.name, e) // Use the custom message
-                     ));
+        let promote_config: PromoteMiddlewareConfig =
+            match serde_json::from_value(serde_json::Value::Object(config.config.clone())) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    // Check if the error message is the one we set for empty paths
+                    if e.to_string().contains("Empty JSONPath") {
+                        return Err(MiddlewareSetupError::InvalidConfiguration(
+                            format!("[{}] {}", config.name, e), // Use the custom message
+                        ));
+                    }
+                    // Otherwise, wrap the generic serde error
+                    return Err(MiddlewareSetupError::InvalidConfiguration(format!(
+                        "[{}] Invalid configuration: {}",
+                        config.name, e
+                    )));
                 }
-                // Otherwise, wrap the generic serde error
-                return Err(MiddlewareSetupError::InvalidConfiguration(
-                    format!("[{}] Invalid configuration: {}", config.name, e)
-                ));
-            }
-        };
+            };
 
         // Validate configuration
         if promote_config.mappings.is_empty() {
-            return Err(MiddlewareSetupError::InvalidConfiguration(
-                format!("[{}] At least one mapping must be specified", config.name)
-            ));
+            return Err(MiddlewareSetupError::InvalidConfiguration(format!(
+                "[{}] At least one mapping must be specified",
+                config.name
+            )));
         }
 
         // Validate each mapping - only check target_name now
         for (i, mapping) in promote_config.mappings.iter().enumerate() {
             if mapping.target_name.is_empty() {
-                return Err(MiddlewareSetupError::InvalidConfiguration(
-                    format!("[{}] Empty target_name in mapping at index {}", config.name, i)
-                ));
+                return Err(MiddlewareSetupError::InvalidConfiguration(format!(
+                    "[{}] Empty target_name in mapping at index {}",
+                    config.name, i
+                )));
             }
         }
 
@@ -308,7 +326,7 @@ impl SourceMiddlewareFactory for PromoteMiddlewareFactory {
         // Create middleware instance
         Ok(Arc::new(PromoteMiddleware::new(
             config.name.to_string(),
-            promote_config
+            promote_config,
         )))
     }
 }

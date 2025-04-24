@@ -150,13 +150,15 @@ mod process {
 
         assert_eq!(result.len(), 1);
         let props = get_props_from_change(&result[0]);
-        
+
         // Original data should be preserved
         assert_eq!(
             props.get("user"),
-            Some(&ElementValue::from(&json!({"id": "user123", "name": "John Doe"})))
+            Some(&ElementValue::from(
+                &json!({"id": "user123", "name": "John Doe"})
+            ))
         );
-        
+
         // Id should be promoted to top level
         assert_eq!(
             props.get("id"),
@@ -191,10 +193,10 @@ mod process {
             .process(source_change, element_index.as_ref())
             .await
             .unwrap();
-        
+
         assert_eq!(result.len(), 1);
         let props = get_props_from_change(&result[0]);
-        
+
         // Should promote to the specified name
         assert_eq!(
             props.get("device_id"),
@@ -241,10 +243,10 @@ mod process {
             .process(source_change, element_index.as_ref())
             .await
             .unwrap();
-        
+
         assert_eq!(result.len(), 1);
         let props = get_props_from_change(&result[0]);
-        
+
         // Check all promoted properties
         assert_eq!(
             props.get("id"),
@@ -258,7 +260,7 @@ mod process {
             props.get("created_at"),
             Some(&ElementValue::String("2023-01-01T00:00:00Z".into()))
         );
-        
+
         // Original structure should remain
         assert!(props.get("user").is_some());
         assert!(props.get("metadata").is_some());
@@ -288,10 +290,10 @@ mod process {
             .process(source_change, element_index.as_ref())
             .await
             .unwrap();
-        
+
         assert_eq!(result.len(), 1);
         let props = get_props_from_change(&result[0]);
-        
+
         assert_eq!(
             props.get("primary_tag"),
             Some(&ElementValue::String("important".into()))
@@ -324,10 +326,10 @@ mod process {
             .process(source_change, element_index.as_ref())
             .await
             .unwrap();
-        
+
         assert_eq!(result.len(), 1);
         let props = get_props_from_change(&result[0]);
-        
+
         assert_eq!(
             props.get("user_id"),
             Some(&ElementValue::String("user789".into()))
@@ -362,23 +364,23 @@ mod process {
             .process(source_change.clone(), element_index.as_ref())
             .await
             .unwrap();
-        
+
         assert_eq!(result.len(), 1);
-        
+
         // Original data should be unchanged - no new properties
         let original_props = match &source_change {
             SourceChange::Insert { element } => element.get_properties(),
             _ => panic!("Expected Insert change"),
         };
-        
+
         let result_props = get_props_from_change(&result[0]);
-        
+
         // The result should have the same number of keys as the original
         assert_eq!(
             count_properties(original_props),
             count_properties(result_props)
         );
-        
+
         // The extracted_value property should not exist
         assert!(result_props.get("extracted_value").is_none());
     }
@@ -406,10 +408,8 @@ mod process {
             }
         }));
 
-        let result = subject
-            .process(source_change, element_index.as_ref())
-            .await;
-        
+        let result = subject.process(source_change, element_index.as_ref()).await;
+
         // Should fail because on_error is fail
         assert!(result.is_err());
         match result {
@@ -447,10 +447,8 @@ mod process {
             }
         }));
 
-        let result = subject
-            .process(source_change, element_index.as_ref())
-            .await;
-        
+        let result = subject.process(source_change, element_index.as_ref()).await;
+
         // Should fail because JSONPath selects multiple values
         assert!(result.is_err());
         match result {
@@ -490,10 +488,10 @@ mod process {
             .process(source_change, element_index.as_ref())
             .await
             .unwrap();
-        
+
         assert_eq!(result.len(), 1);
         let props = get_props_from_change(&result[0]);
-        
+
         // Name should be overwritten with the nested value
         assert_eq!(
             props.get("name"),
@@ -529,10 +527,10 @@ mod process {
             .process(source_change, element_index.as_ref())
             .await
             .unwrap();
-        
+
         assert_eq!(result.len(), 1);
         let props = get_props_from_change(&result[0]);
-        
+
         // Name should still have the original value
         assert_eq!(
             props.get("name"),
@@ -564,10 +562,8 @@ mod process {
             "name": "Original Name" // Existing property will cause failure
         }));
 
-        let result = subject
-            .process(source_change, element_index.as_ref())
-            .await;
-        
+        let result = subject.process(source_change, element_index.as_ref()).await;
+
         // Should fail because of conflict
         assert!(result.is_err());
         match result {
@@ -631,10 +627,10 @@ mod process {
             .process(source_change, element_index.as_ref())
             .await
             .unwrap();
-        
+
         assert_eq!(result.len(), 1);
         let props = get_props_from_change(&result[0]);
-        
+
         // Check all promoted values have the correct type
         assert_eq!(
             props.get("promoted_string"),
@@ -644,10 +640,7 @@ mod process {
             props.get("promoted_number"),
             Some(&ElementValue::Integer(12345))
         );
-        assert_eq!(
-            props.get("promoted_bool"),
-            Some(&ElementValue::Bool(true))
-        );
+        assert_eq!(props.get("promoted_bool"), Some(&ElementValue::Bool(true)));
         assert_eq!(
             props.get("promoted_object"),
             Some(&ElementValue::from(&json!({"key": "value"})))
@@ -656,10 +649,7 @@ mod process {
             props.get("promoted_array"),
             Some(&ElementValue::from(&json!([1, 2, 3])))
         );
-        assert_eq!(
-            props.get("promoted_null"),
-            Some(&ElementValue::Null)
-        );
+        assert_eq!(props.get("promoted_null"), Some(&ElementValue::Null));
     }
 
     #[tokio::test]
@@ -689,7 +679,7 @@ mod process {
             .process(source_change, element_index.as_ref())
             .await
             .unwrap();
-        
+
         assert_eq!(result.len(), 1);
         match &result[0] {
             SourceChange::Insert {
@@ -731,7 +721,7 @@ mod process {
             .process(source_change, element_index.as_ref())
             .await
             .unwrap();
-        
+
         assert_eq!(result.len(), 1);
         match &result[0] {
             SourceChange::Update { element } => {
@@ -767,7 +757,7 @@ mod process {
             .process(source_change.clone(), element_index.as_ref())
             .await
             .unwrap();
-        
+
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], source_change); // Should pass through unchanged
     }
@@ -794,7 +784,7 @@ mod process {
             .process(source_change.clone(), element_index.as_ref())
             .await
             .unwrap();
-        
+
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], source_change); // Should pass through unchanged
     }
@@ -822,20 +812,23 @@ mod process {
         }));
 
         // Should not fail because on_error is skip
-        let result = subject.process(source_change.clone(), element_index.as_ref()).await.unwrap();
-        
+        let result = subject
+            .process(source_change.clone(), element_index.as_ref())
+            .await
+            .unwrap();
+
         assert_eq!(result.len(), 1);
         let props = get_props_from_change(&result[0]);
-        
+
         // The multiple-match path should be skipped
         assert!(props.get("extracted_value").is_none());
-        
+
         // The valid single-match path should still be processed
         assert_eq!(
             props.get("identifier").unwrap(),
             &ElementValue::String("test-123".into())
         );
-        
+
         // Original properties should remain
         assert!(props.get("id").is_some());
         assert!(props.get("values").is_some());
@@ -961,7 +954,11 @@ mod factory {
         match result {
             Err(MiddlewareSetupError::InvalidConfiguration(msg)) => {
                 // Check for a message indicating a parse failure
-                assert!(msg.contains("Failed to parse rule"), "Error message was: {}", msg);
+                assert!(
+                    msg.contains("Failed to parse rule"),
+                    "Error message was: {}",
+                    msg
+                );
             }
             _ => panic!("Expected InvalidConfiguration error for invalid JSONPath syntax"),
         }
@@ -1141,7 +1138,7 @@ mod factory {
     fn test_all_conflict_strategy_values() {
         let subject = PromoteMiddlewareFactory::new();
         let strategies = ["overwrite", "skip", "fail"];
-        
+
         for strategy in strategies {
             let config = json!({
                 "mappings": [
@@ -1165,7 +1162,7 @@ mod factory {
     fn test_all_error_handling_values() {
         let subject = PromoteMiddlewareFactory::new();
         let values = ["skip", "fail"];
-        
+
         for value in values {
             let config = json!({
                 "mappings": [
