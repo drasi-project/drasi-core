@@ -12,5 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod common;
+pub mod decoder;
 pub mod map;
 pub mod unwind;
