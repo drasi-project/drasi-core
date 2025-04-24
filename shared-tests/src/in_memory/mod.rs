@@ -122,6 +122,17 @@ mod remap {
     }
 }
 
+mod collect_movies {
+    use super::InMemoryQueryConfig;
+    use crate::use_cases::*;
+
+    #[tokio::test]
+    pub async fn collect_movies() {
+        let test_config = InMemoryQueryConfig::new();
+        collect_movies::collect_movies(&test_config).await;
+    }
+}
+
 mod overdue_invoice {
     use super::InMemoryQueryConfig;
     use crate::use_cases::*;
