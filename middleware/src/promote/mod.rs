@@ -31,21 +31,16 @@ use std::{str::FromStr, sync::Arc};
 mod tests;
 
 /// Defines how to handle cases where the target property already exists
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Default, Debug, Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum ConflictStrategy {
     /// Overwrite the existing property
+    #[default]
     Overwrite,
     /// Skip this mapping and keep the existing property
     Skip,
     /// Fail with an error
     Fail,
-}
-
-impl Default for ConflictStrategy {
-    fn default() -> Self {
-        ConflictStrategy::Overwrite
-    }
 }
 
 /// JSONPath expression wrapper for selecting values to promote
