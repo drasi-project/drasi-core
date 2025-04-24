@@ -16,4 +16,5 @@ pub mod common;
 pub mod decoder;
 pub mod map;
 pub mod parse_json;
+pub mod promote;
 pub mod unwind;
