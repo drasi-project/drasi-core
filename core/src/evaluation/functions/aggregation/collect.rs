@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{collections::HashMap, fmt::Debug, sync::Arc};
 use std::collections::hash_map::Entry;
+use std::{collections::HashMap, fmt::Debug, sync::Arc};
 
 use async_trait::async_trait;
 use drasi_query_ast::ast;
@@ -40,7 +40,6 @@ fn build_list_from_counts(counts: &HashMap<VariableValue, usize>) -> Vec<Variabl
     // Order is not guaranteed by HashMap iteration, which matches Cypher's collect behavior.
     result_list
 }
-
 
 #[async_trait]
 impl AggregatingFunction for Collect {
@@ -79,15 +78,15 @@ impl AggregatingFunction for Collect {
                 return Err(FunctionError {
                     function_name: "collect".to_string(),
                     error: FunctionEvaluationError::CorruptData, // Or InvalidAccumulatorType
-                })
+                });
             }
         };
 
         // Ignore null values
         if let VariableValue::Null = &args[0] {
-             // Return the current state without modification
-             let result_list = build_list_from_counts(counts);
-             return Ok(VariableValue::List(result_list));
+            // Return the current state without modification
+            let result_list = build_list_from_counts(counts);
+            return Ok(VariableValue::List(result_list));
         }
 
         *counts.entry(args[0].clone()).or_insert(0) += 1;
@@ -116,11 +115,11 @@ impl AggregatingFunction for Collect {
                 return Err(FunctionError {
                     function_name: "collect".to_string(),
                     error: FunctionEvaluationError::CorruptData, // Or InvalidAccumulatorType
-                })
+                });
             }
         };
 
-        // Ignore null values 
+        // Ignore null values
         if let VariableValue::Null = &args[0] {
             // Return the current state without modification
             let result_list = build_list_from_counts(counts);
@@ -131,7 +130,7 @@ impl AggregatingFunction for Collect {
             Entry::Occupied(mut entry) => {
                 let current_count = entry.get_mut();
                 if *current_count > 0 {
-                     *current_count -= 1;
+                    *current_count -= 1;
                 }
                 // Remove the entry if the count becomes zero
                 if *current_count == 0 {
@@ -154,13 +153,13 @@ impl AggregatingFunction for Collect {
         _args: Vec<VariableValue>, // Args usually not needed for snapshot
         accumulator: &Accumulator,
     ) -> Result<VariableValue, FunctionError> {
-         let counts = match accumulator {
+        let counts = match accumulator {
             Accumulator::Value(ValueAccumulator::CollectCounts { counts }) => counts,
             _ => {
                 return Err(FunctionError {
                     function_name: "collect".to_string(),
                     error: FunctionEvaluationError::CorruptData, // Or InvalidAccumulatorType
-                })
+                });
             }
         };
 

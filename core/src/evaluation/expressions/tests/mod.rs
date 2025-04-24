@@ -22,12 +22,12 @@ use crate::{
 use super::*;
 
 mod arithmetic;
+mod collect;
 mod comparison;
 mod cypher_scalar;
 mod date;
 mod datetime;
 mod duration;
-mod collect;
 mod list_construction;
 mod list_functions;
 mod list_indexing;

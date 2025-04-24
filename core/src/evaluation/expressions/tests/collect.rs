@@ -51,13 +51,9 @@ fn result_to_set(value: VariableValue) -> HashSet<VariableValue> {
 fn dummy_func_expr() -> ast::FunctionExpression {
     ast::FunctionExpression {
         name: "collect".to_string().into(),
-        args: vec![
-            ast::Expression::UnaryExpression(
-                UnaryExpression::Literal(
-                    Literal::Text("dummy".to_string().into())
-                )
-            )
-        ],
+        args: vec![ast::Expression::UnaryExpression(UnaryExpression::Literal(
+            Literal::Text("dummy".to_string().into()),
+        ))],
         position_in_query: Default::default(),
     }
 }
@@ -67,7 +63,6 @@ fn dummy_grouping_keys() -> Vec<VariableValue> {
     Vec::new()
 }
 
-
 #[tokio::test]
 async fn test_collect_basic() {
     let collect_fn = Collect {};
@@ -76,25 +71,47 @@ async fn test_collect_basic() {
     let grouping_keys = dummy_grouping_keys();
     let dummy_index = Arc::new(InMemoryResultIndex::new());
 
-    let mut accumulator = collect_fn.initialize_accumulator(&context, &func_expr, &grouping_keys, dummy_index);
+    let mut accumulator =
+        collect_fn.initialize_accumulator(&context, &func_expr, &grouping_keys, dummy_index);
 
     let val1 = VariableValue::Integer(Integer::from(10));
     let val2 = VariableValue::String("hello".to_string());
     let val3 = VariableValue::Bool(true);
 
     // Apply values and unwrap
-    let res1 = collect_fn.apply(&context, vec![val1.clone()], &mut accumulator).await.expect("Apply 1 failed");
-    let res2 = collect_fn.apply(&context, vec![val2.clone()], &mut accumulator).await.expect("Apply 2 failed");
-    let res3 = collect_fn.apply(&context, vec![val3.clone()], &mut accumulator).await.expect("Apply 3 failed");
+    let res1 = collect_fn
+        .apply(&context, vec![val1.clone()], &mut accumulator)
+        .await
+        .expect("Apply 1 failed");
+    let res2 = collect_fn
+        .apply(&context, vec![val2.clone()], &mut accumulator)
+        .await
+        .expect("Apply 2 failed");
+    let res3 = collect_fn
+        .apply(&context, vec![val3.clone()], &mut accumulator)
+        .await
+        .expect("Apply 3 failed");
 
     // Check intermediate results (order doesn't matter)
     assert_eq!(result_to_set(res1), HashSet::from_iter(vec![val1.clone()]));
-    assert_eq!(result_to_set(res2), HashSet::from_iter(vec![val1.clone(), val2.clone()]));
-    assert_eq!(result_to_set(res3), HashSet::from_iter(vec![val1.clone(), val2.clone(), val3.clone()]));
+    assert_eq!(
+        result_to_set(res2),
+        HashSet::from_iter(vec![val1.clone(), val2.clone()])
+    );
+    assert_eq!(
+        result_to_set(res3),
+        HashSet::from_iter(vec![val1.clone(), val2.clone(), val3.clone()])
+    );
 
     // Check final snapshot and unwrap
-    let final_result = collect_fn.snapshot(&context, vec![], &accumulator).await.expect("Snapshot failed");
-    assert_eq!(result_to_set(final_result), HashSet::from_iter(vec![val1, val2, val3]));
+    let final_result = collect_fn
+        .snapshot(&context, vec![], &accumulator)
+        .await
+        .expect("Snapshot failed");
+    assert_eq!(
+        result_to_set(final_result),
+        HashSet::from_iter(vec![val1, val2, val3])
+    );
 }
 
 #[tokio::test]
@@ -105,16 +122,29 @@ async fn test_collect_with_duplicates() {
     let grouping_keys = dummy_grouping_keys();
     let dummy_index = Arc::new(InMemoryResultIndex::new());
 
-    let mut accumulator = collect_fn.initialize_accumulator(&context, &func_expr, &grouping_keys, dummy_index);
+    let mut accumulator =
+        collect_fn.initialize_accumulator(&context, &func_expr, &grouping_keys, dummy_index);
 
     let val1 = VariableValue::Integer(Integer::from(5));
     let val2 = VariableValue::String("test".to_string());
 
-    collect_fn.apply(&context, vec![val1.clone()], &mut accumulator).await.expect("Apply 1 failed");
-    collect_fn.apply(&context, vec![val2.clone()], &mut accumulator).await.expect("Apply 2 failed");
-    collect_fn.apply(&context, vec![val1.clone()], &mut accumulator).await.expect("Apply 3 failed"); // Duplicate
+    collect_fn
+        .apply(&context, vec![val1.clone()], &mut accumulator)
+        .await
+        .expect("Apply 1 failed");
+    collect_fn
+        .apply(&context, vec![val2.clone()], &mut accumulator)
+        .await
+        .expect("Apply 2 failed");
+    collect_fn
+        .apply(&context, vec![val1.clone()], &mut accumulator)
+        .await
+        .expect("Apply 3 failed"); // Duplicate
 
-    let final_result = collect_fn.snapshot(&context, vec![], &accumulator).await.expect("Snapshot failed");
+    let final_result = collect_fn
+        .snapshot(&context, vec![], &accumulator)
+        .await
+        .expect("Snapshot failed");
 
     // Check final list (order doesn't matter, but count does)
     match final_result {
@@ -127,7 +157,7 @@ async fn test_collect_with_duplicates() {
     }
 }
 
- #[tokio::test]
+#[tokio::test]
 async fn test_collect_with_nulls() {
     let collect_fn = Collect {};
     let context = create_test_context();
@@ -135,19 +165,38 @@ async fn test_collect_with_nulls() {
     let grouping_keys = dummy_grouping_keys();
     let dummy_index = Arc::new(InMemoryResultIndex::new());
 
-    let mut accumulator = collect_fn.initialize_accumulator(&context, &func_expr, &grouping_keys, dummy_index);
+    let mut accumulator =
+        collect_fn.initialize_accumulator(&context, &func_expr, &grouping_keys, dummy_index);
 
     let val1 = VariableValue::Integer(Integer::from(1));
     let val_null = VariableValue::Null;
     let val2 = VariableValue::String("world".to_string());
 
-    collect_fn.apply(&context, vec![val1.clone()], &mut accumulator).await.expect("Apply 1 failed");
-    collect_fn.apply(&context, vec![val_null.clone()], &mut accumulator).await.expect("Apply null 1 failed"); // Null should be ignored
-    collect_fn.apply(&context, vec![val2.clone()], &mut accumulator).await.expect("Apply 2 failed");
-    collect_fn.apply(&context, vec![val_null.clone()], &mut accumulator).await.expect("Apply null 2 failed"); // Null should be ignored
+    collect_fn
+        .apply(&context, vec![val1.clone()], &mut accumulator)
+        .await
+        .expect("Apply 1 failed");
+    collect_fn
+        .apply(&context, vec![val_null.clone()], &mut accumulator)
+        .await
+        .expect("Apply null 1 failed"); // Null should be ignored
+    collect_fn
+        .apply(&context, vec![val2.clone()], &mut accumulator)
+        .await
+        .expect("Apply 2 failed");
+    collect_fn
+        .apply(&context, vec![val_null.clone()], &mut accumulator)
+        .await
+        .expect("Apply null 2 failed"); // Null should be ignored
 
-    let final_result = collect_fn.snapshot(&context, vec![], &accumulator).await.expect("Snapshot failed");
-    assert_eq!(result_to_set(final_result), HashSet::from_iter(vec![val1, val2]));
+    let final_result = collect_fn
+        .snapshot(&context, vec![], &accumulator)
+        .await
+        .expect("Snapshot failed");
+    assert_eq!(
+        result_to_set(final_result),
+        HashSet::from_iter(vec![val1, val2])
+    );
 }
 
 #[tokio::test]
@@ -158,13 +207,17 @@ async fn test_collect_empty() {
     let grouping_keys = dummy_grouping_keys();
     let dummy_index = Arc::new(InMemoryResultIndex::new());
 
-    let accumulator = collect_fn.initialize_accumulator(&context, &func_expr, &grouping_keys, dummy_index);
+    let accumulator =
+        collect_fn.initialize_accumulator(&context, &func_expr, &grouping_keys, dummy_index);
 
-    let final_result = collect_fn.snapshot(&context, vec![], &accumulator).await.expect("Snapshot failed");
+    let final_result = collect_fn
+        .snapshot(&context, vec![], &accumulator)
+        .await
+        .expect("Snapshot failed");
     assert_eq!(result_to_set(final_result), HashSet::new());
 }
 
- #[tokio::test]
+#[tokio::test]
 async fn test_collect_only_nulls() {
     let collect_fn = Collect {};
     let context = create_test_context();
@@ -172,12 +225,22 @@ async fn test_collect_only_nulls() {
     let grouping_keys = dummy_grouping_keys();
     let dummy_index = Arc::new(InMemoryResultIndex::new());
 
-    let mut accumulator = collect_fn.initialize_accumulator(&context, &func_expr, &grouping_keys, dummy_index);
+    let mut accumulator =
+        collect_fn.initialize_accumulator(&context, &func_expr, &grouping_keys, dummy_index);
 
-    collect_fn.apply(&context, vec![VariableValue::Null], &mut accumulator).await.expect("Apply null 1 failed");
-    collect_fn.apply(&context, vec![VariableValue::Null], &mut accumulator).await.expect("Apply null 2 failed");
+    collect_fn
+        .apply(&context, vec![VariableValue::Null], &mut accumulator)
+        .await
+        .expect("Apply null 1 failed");
+    collect_fn
+        .apply(&context, vec![VariableValue::Null], &mut accumulator)
+        .await
+        .expect("Apply null 2 failed");
 
-    let final_result = collect_fn.snapshot(&context, vec![], &accumulator).await.expect("Snapshot failed");
+    let final_result = collect_fn
+        .snapshot(&context, vec![], &accumulator)
+        .await
+        .expect("Snapshot failed");
     assert_eq!(result_to_set(final_result), HashSet::new());
 }
 
@@ -189,22 +252,35 @@ async fn test_collect_apply_revert() {
     let grouping_keys = dummy_grouping_keys();
     let dummy_index = Arc::new(InMemoryResultIndex::new());
 
-    let mut accumulator = collect_fn.initialize_accumulator(&context, &func_expr, &grouping_keys, dummy_index);
+    let mut accumulator =
+        collect_fn.initialize_accumulator(&context, &func_expr, &grouping_keys, dummy_index);
 
     let val1 = VariableValue::Integer(Integer::from(1));
     let val2 = VariableValue::String("a".to_string());
     let val3 = VariableValue::Integer(Integer::from(1)); // Duplicate of val1
 
     // Apply
-    collect_fn.apply(&context, vec![val1.clone()], &mut accumulator).await.expect("Apply 1 failed");
-    collect_fn.apply(&context, vec![val2.clone()], &mut accumulator).await.expect("Apply 2 failed");
-    collect_fn.apply(&context, vec![val3.clone()], &mut accumulator).await.expect("Apply 3 failed"); // Apply duplicate
+    collect_fn
+        .apply(&context, vec![val1.clone()], &mut accumulator)
+        .await
+        .expect("Apply 1 failed");
+    collect_fn
+        .apply(&context, vec![val2.clone()], &mut accumulator)
+        .await
+        .expect("Apply 2 failed");
+    collect_fn
+        .apply(&context, vec![val3.clone()], &mut accumulator)
+        .await
+        .expect("Apply 3 failed"); // Apply duplicate
 
     // Snapshot after apply
-    let after_apply = collect_fn.snapshot(&context, vec![], &accumulator).await.expect("Snapshot after apply failed");
+    let after_apply = collect_fn
+        .snapshot(&context, vec![], &accumulator)
+        .await
+        .expect("Snapshot after apply failed");
     let expected_after_apply_set = HashSet::from_iter(vec![val1.clone(), val2.clone()]);
     // Need to handle potential list order differences if not using result_to_set
-     match after_apply {
+    match after_apply {
         VariableValue::List(list) => {
             let list_set: HashSet<_> = list.into_iter().collect();
             assert_eq!(list_set, expected_after_apply_set);
@@ -212,62 +288,73 @@ async fn test_collect_apply_revert() {
         _ => panic!("Expected List after apply snapshot"),
     }
 
-
     // Check internal counts before revert
-     match &accumulator {
+    match &accumulator {
         Accumulator::Value(ValueAccumulator::CollectCounts { counts }) => {
-             assert_eq!(counts.get(&val1), Some(&2));
-             assert_eq!(counts.get(&val2), Some(&1));
+            assert_eq!(counts.get(&val1), Some(&2));
+            assert_eq!(counts.get(&val2), Some(&1));
         }
         _ => panic!("Incorrect accumulator type"),
     }
 
     // Revert one instance of val1
-    let revert1_res = collect_fn.revert(&context, vec![val1.clone()], &mut accumulator).await.expect("Revert 1 failed");
+    let revert1_res = collect_fn
+        .revert(&context, vec![val1.clone()], &mut accumulator)
+        .await
+        .expect("Revert 1 failed");
     let expected_revert1_set = HashSet::from_iter(vec![val1.clone(), val2.clone()]); // Still contains val1 and val2
     assert_eq!(result_to_set(revert1_res), expected_revert1_set);
 
-     // Check internal counts after first revert
-     match &accumulator {
+    // Check internal counts after first revert
+    match &accumulator {
         Accumulator::Value(ValueAccumulator::CollectCounts { counts }) => {
-             assert_eq!(counts.get(&val1), Some(&1)); // Count decreased
-             assert_eq!(counts.get(&val2), Some(&1));
+            assert_eq!(counts.get(&val1), Some(&1)); // Count decreased
+            assert_eq!(counts.get(&val2), Some(&1));
         }
         _ => panic!("Incorrect accumulator type"),
     }
 
     // Revert val2
-    let revert2_res = collect_fn.revert(&context, vec![val2.clone()], &mut accumulator).await.expect("Revert 2 failed");
+    let revert2_res = collect_fn
+        .revert(&context, vec![val2.clone()], &mut accumulator)
+        .await
+        .expect("Revert 2 failed");
     let expected_revert2_set = HashSet::from_iter(vec![val1.clone()]); // Only val1 left
     assert_eq!(result_to_set(revert2_res), expected_revert2_set);
 
     // Check internal counts after second revert
-     match &accumulator {
+    match &accumulator {
         Accumulator::Value(ValueAccumulator::CollectCounts { counts }) => {
-             assert_eq!(counts.get(&val1), Some(&1));
-             assert_eq!(counts.get(&val2), None); // val2 removed
+            assert_eq!(counts.get(&val1), Some(&1));
+            assert_eq!(counts.get(&val2), None); // val2 removed
         }
         _ => panic!("Incorrect accumulator type"),
     }
 
     // Revert final instance of val1
-    let revert3_res = collect_fn.revert(&context, vec![val1.clone()], &mut accumulator).await.expect("Revert 3 failed");
+    let revert3_res = collect_fn
+        .revert(&context, vec![val1.clone()], &mut accumulator)
+        .await
+        .expect("Revert 3 failed");
     assert_eq!(result_to_set(revert3_res), HashSet::new()); // Empty now
 
-     // Check internal counts after final revert
-     match &accumulator {
+    // Check internal counts after final revert
+    match &accumulator {
         Accumulator::Value(ValueAccumulator::CollectCounts { counts }) => {
-             assert!(counts.is_empty());
+            assert!(counts.is_empty());
         }
         _ => panic!("Incorrect accumulator type"),
     }
 
     // Final snapshot check
-    let final_result = collect_fn.snapshot(&context, vec![], &accumulator).await.expect("Final snapshot failed");
+    let final_result = collect_fn
+        .snapshot(&context, vec![], &accumulator)
+        .await
+        .expect("Final snapshot failed");
     assert_eq!(result_to_set(final_result), HashSet::new());
 }
 
- #[tokio::test]
+#[tokio::test]
 async fn test_collect_revert_non_existent() {
     let collect_fn = Collect {};
     let context = create_test_context();
@@ -275,22 +362,38 @@ async fn test_collect_revert_non_existent() {
     let grouping_keys = dummy_grouping_keys();
     let dummy_index = Arc::new(InMemoryResultIndex::new());
 
-    let mut accumulator = collect_fn.initialize_accumulator(&context, &func_expr, &grouping_keys, dummy_index);
+    let mut accumulator =
+        collect_fn.initialize_accumulator(&context, &func_expr, &grouping_keys, dummy_index);
 
     let val1 = VariableValue::Integer(Integer::from(1));
     let val_non_existent = VariableValue::String("nope".to_string());
 
     // Apply val1
-    collect_fn.apply(&context, vec![val1.clone()], &mut accumulator).await.expect("Apply failed");
+    collect_fn
+        .apply(&context, vec![val1.clone()], &mut accumulator)
+        .await
+        .expect("Apply failed");
 
     // Revert a value that wasn't added
-    let revert_res = collect_fn.revert(&context, vec![val_non_existent], &mut accumulator).await.expect("Revert non-existent failed");
+    let revert_res = collect_fn
+        .revert(&context, vec![val_non_existent], &mut accumulator)
+        .await
+        .expect("Revert non-existent failed");
     // Should not error, and the state should remain unchanged
-    assert_eq!(result_to_set(revert_res), HashSet::from_iter(vec![val1.clone()]));
+    assert_eq!(
+        result_to_set(revert_res),
+        HashSet::from_iter(vec![val1.clone()])
+    );
 
     // Final snapshot check
-    let final_result = collect_fn.snapshot(&context, vec![], &accumulator).await.expect("Snapshot failed");
-    assert_eq!(result_to_set(final_result), HashSet::from_iter(vec![val1.clone()]));
+    let final_result = collect_fn
+        .snapshot(&context, vec![], &accumulator)
+        .await
+        .expect("Snapshot failed");
+    assert_eq!(
+        result_to_set(final_result),
+        HashSet::from_iter(vec![val1.clone()])
+    );
 }
 
 #[tokio::test]
@@ -301,20 +404,39 @@ async fn test_collect_revert_null() {
     let grouping_keys = dummy_grouping_keys();
     let dummy_index = Arc::new(InMemoryResultIndex::new());
 
-    let mut accumulator = collect_fn.initialize_accumulator(&context, &func_expr, &grouping_keys, dummy_index);
+    let mut accumulator =
+        collect_fn.initialize_accumulator(&context, &func_expr, &grouping_keys, dummy_index);
 
     let val1 = VariableValue::Integer(Integer::from(1));
     let val_null = VariableValue::Null;
 
     // Apply val1 and a null (which is ignored)
-    collect_fn.apply(&context, vec![val1.clone()], &mut accumulator).await.expect("Apply 1 failed");
-    collect_fn.apply(&context, vec![val_null.clone()], &mut accumulator).await.expect("Apply null failed");
+    collect_fn
+        .apply(&context, vec![val1.clone()], &mut accumulator)
+        .await
+        .expect("Apply 1 failed");
+    collect_fn
+        .apply(&context, vec![val_null.clone()], &mut accumulator)
+        .await
+        .expect("Apply null failed");
 
     // Revert the null (should also be ignored and not change state)
-    let revert_res = collect_fn.revert(&context, vec![val_null.clone()], &mut accumulator).await.expect("Revert null failed");
-    assert_eq!(result_to_set(revert_res), HashSet::from_iter(vec![val1.clone()]));
+    let revert_res = collect_fn
+        .revert(&context, vec![val_null.clone()], &mut accumulator)
+        .await
+        .expect("Revert null failed");
+    assert_eq!(
+        result_to_set(revert_res),
+        HashSet::from_iter(vec![val1.clone()])
+    );
 
     // Final snapshot check
-    let final_result = collect_fn.snapshot(&context, vec![], &accumulator).await.expect("Snapshot failed");
-    assert_eq!(result_to_set(final_result), HashSet::from_iter(vec![val1.clone()]));
+    let final_result = collect_fn
+        .snapshot(&context, vec![], &accumulator)
+        .await
+        .expect("Snapshot failed");
+    assert_eq!(
+        result_to_set(final_result),
+        HashSet::from_iter(vec![val1.clone()])
+    );
 }

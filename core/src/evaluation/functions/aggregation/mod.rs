@@ -33,7 +33,7 @@ pub use max::Max;
 pub use min::Min;
 pub use sum::Sum;
 
-use crate::evaluation::variable_value::VariableValue; 
+use crate::evaluation::variable_value::VariableValue;
 use crate::models::ElementValue;
 
 use self::lazy_sorted_set::LazySortedSet;
