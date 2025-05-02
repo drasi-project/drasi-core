@@ -20,10 +20,14 @@ use drasi_query_ast::ast::Query;
 
 pub mod building_comfort;
 pub mod curbside_pickup;
+pub mod dapr_state_store;
+pub mod decoder;
 pub mod incident_alert;
 pub mod linear_regression;
 pub mod min_value;
 pub mod overdue_invoice;
+pub mod parse_json;
+pub mod promote;
 pub mod remap;
 pub mod sensor_heartbeat;
 pub mod unwind;
