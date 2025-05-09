@@ -39,16 +39,29 @@ impl MatchPath {
         let mut path_index = 0;
         let mut optional_paths = HashSet::new();
 
-        for mc in &query_part.match_clauses {            
+        for mc in &query_part.match_clauses {
             if mc.optional {
                 optional_paths.insert(path_index);
             }
-            let slot_num = merge_node_match(&mc.start, &mut slots, &mut alias_map, path_index, mc.optional)?;
+            let slot_num = merge_node_match(
+                &mc.start,
+                &mut slots,
+                &mut alias_map,
+                path_index,
+                mc.optional,
+            )?;
             let mut prev_slot_num = slot_num;
 
             for p in &mc.path {
-                let rel_slot_num = merge_relation_match(&p.0, &mut slots, &mut alias_map, path_index, mc.optional)?;
-                let node_slot_num = merge_node_match(&p.1, &mut slots, &mut alias_map, path_index, mc.optional)?;
+                let rel_slot_num = merge_relation_match(
+                    &p.0,
+                    &mut slots,
+                    &mut alias_map,
+                    path_index,
+                    mc.optional,
+                )?;
+                let node_slot_num =
+                    merge_node_match(&p.1, &mut slots, &mut alias_map, path_index, mc.optional)?;
 
                 match p.0.direction {
                     ast::Direction::Right => {
@@ -83,19 +96,24 @@ impl MatchPath {
             path_index += 1;
         }
 
-        Ok(MatchPath { slots, optional_paths })
+        Ok(MatchPath {
+            slots,
+            optional_paths,
+        })
     }
 
-    pub fn get_optional_slots_on_common_paths(&self, anchor_slot_num: usize, empty_slots: HashSet<usize>) -> HashSet<usize> {
+    pub fn get_optional_slots_on_common_paths(
+        &self,
+        anchor_slot_num: usize,
+        empty_slots: HashSet<usize>,
+    ) -> HashSet<usize> {
         let mut optional_slots = HashSet::new();
         for path in &self.slots[anchor_slot_num].paths {
-
             let mut has_empty_slots = false;
             let mut path_slots = HashSet::new();
 
             for (slot_num, slot) in self.slots.iter().enumerate() {
                 if slot.optional && slot.paths.contains(path) {
-                    
                     if empty_slots.contains(&slot_num) {
                         has_empty_slots = true;
                         break;
@@ -112,7 +130,7 @@ impl MatchPath {
                 optional_slots.extend(path_slots);
             }
         }
-            
+
         optional_slots
     }
 }

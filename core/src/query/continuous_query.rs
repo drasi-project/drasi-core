@@ -128,7 +128,12 @@ impl ContinuousQuery {
                     .await?;
                 change_results.into_iter().for_each(|ctx| {
                     match &ctx {
-                        QueryPartEvaluationContext::Aggregation { before, after, default_before, .. } => {
+                        QueryPartEvaluationContext::Aggregation {
+                            before,
+                            after,
+                            default_before,
+                            ..
+                        } => {
                             if let Some(before) = before {
                                 if before == after && !default_before {
                                     return;
@@ -170,13 +175,17 @@ impl ContinuousQuery {
         match change {
             SourceChange::Insert { element } => {
                 let element = Arc::new(element);
-                let affinity_slots = self.get_slots_with_affinity(base_variables, element.clone(), clock.clone()).await?;
+                let affinity_slots = self
+                    .get_slots_with_affinity(base_variables, element.clone(), clock.clone())
+                    .await?;
                 let solutions = self
                     .resolve_solutions(element.clone(), affinity_slots, true)
                     .await?;
 
                 for (signature, solution) in solutions {
-                    if let Some(blank_optional_solution) = solution.get_empty_optional_solution(&self.match_path) {
+                    if let Some(blank_optional_solution) =
+                        solution.get_empty_optional_solution(&self.match_path)
+                    {
                         before_change_solutions.insert(signature, blank_optional_solution);
                     }
                     after_change_solutions.insert(signature, solution);
@@ -193,13 +202,15 @@ impl ContinuousQuery {
                     let prev_timestamp = prev_version.get_effective_from();
                     let before_clock =
                         Arc::new(InstantQueryClock::new(prev_timestamp, clock.get_realtime()));
-                    let affinity_slots = self.get_slots_with_affinity(base_variables, prev_version.clone(), before_clock.clone()).await?;
-                    let solutions = self
-                        .resolve_solutions(                            
+                    let affinity_slots = self
+                        .get_slots_with_affinity(
+                            base_variables,
                             prev_version.clone(),
-                            affinity_slots,
-                            false,
+                            before_clock.clone(),
                         )
+                        .await?;
+                    let solutions = self
+                        .resolve_solutions(prev_version.clone(), affinity_slots, false)
                         .await?;
                     for (signature, solution) in solutions {
                         before_change_solutions.insert(signature, solution);
@@ -210,7 +221,9 @@ impl ContinuousQuery {
                 }
 
                 let element = Arc::new(element);
-                let affinity_slots = self.get_slots_with_affinity(base_variables, element.clone(), clock.clone()).await?;
+                let affinity_slots = self
+                    .get_slots_with_affinity(base_variables, element.clone(), clock.clone())
+                    .await?;
                 let solutions = self
                     .resolve_solutions(element.clone(), affinity_slots, true)
                     .await?;
@@ -226,16 +239,20 @@ impl ContinuousQuery {
                     let prev_timestamp = element.get_effective_from();
                     let before_clock =
                         Arc::new(InstantQueryClock::new(prev_timestamp, clock.get_realtime()));
-                    let affinity_slots = self.get_slots_with_affinity(base_variables, element.clone(), before_clock.clone()).await?;
-                    let solutions = self
-                        .resolve_solutions(
+                    let affinity_slots = self
+                        .get_slots_with_affinity(
+                            base_variables,
                             element.clone(),
-                            affinity_slots,
-                            false,
+                            before_clock.clone(),
                         )
                         .await?;
+                    let solutions = self
+                        .resolve_solutions(element.clone(), affinity_slots, false)
+                        .await?;
                     for (signature, solution) in solutions {
-                        if let Some(blank_optional_solution) = solution.get_empty_optional_solution(&self.match_path) {
+                        if let Some(blank_optional_solution) =
+                            solution.get_empty_optional_solution(&self.match_path)
+                        {
                             after_change_solutions.insert(signature, blank_optional_solution);
                         }
 
@@ -266,14 +283,16 @@ impl ContinuousQuery {
                     let before_clock =
                         Arc::new(InstantQueryClock::new(prev_timestamp, prev_timestamp));
 
-                    let affinity_slots = self.get_slots_with_affinity(base_variables, element.clone(), before_clock.clone()).await?;
+                    let affinity_slots = self
+                        .get_slots_with_affinity(
+                            base_variables,
+                            element.clone(),
+                            before_clock.clone(),
+                        )
+                        .await?;
 
                     let before_solutions = self
-                        .resolve_solutions(
-                            element.clone(),
-                            affinity_slots,
-                            false,
-                        )
+                        .resolve_solutions(element.clone(), affinity_slots, false)
                         .await?;
                     for (signature, solution) in before_solutions {
                         before_change_solutions.insert(signature, solution);
@@ -282,7 +301,9 @@ impl ContinuousQuery {
                     result.before_clock = Some(before_clock);
                     result.before_anchor_element = Some(element.clone());
 
-                    let affinity_slots = self.get_slots_with_affinity(base_variables, element.clone(), clock.clone()).await?;
+                    let affinity_slots = self
+                        .get_slots_with_affinity(base_variables, element.clone(), clock.clone())
+                        .await?;
 
                     let after_solutions = self
                         .resolve_solutions(element.clone(), affinity_slots, false)
@@ -353,13 +374,11 @@ impl ContinuousQuery {
         Ok(result)
     }
 
-
     async fn get_slots_with_affinity(
         &self,
         variables: &QueryVariables,
         anchor_element: Arc<Element>,
         clock: Arc<dyn QueryClock>,
-        
     ) -> Result<Vec<usize>, EvaluationError> {
         let context = MatchSolveContext::new(variables, clock);
 

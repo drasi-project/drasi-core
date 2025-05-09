@@ -17,7 +17,8 @@ pub mod match_path;
 pub mod solution;
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet}, sync::Arc
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::Arc,
 };
 
 use async_stream::stream;
@@ -196,7 +197,7 @@ async fn try_complete_solution(
         let slot = &path.slots[slot_num];
         let mut alt_by_slot = HashMap::new();
 
-        for out_slot in &slot.out_slots {            
+        for out_slot in &slot.out_slots {
             if solution.is_slot_solved(*out_slot) {
                 continue;
             }
@@ -219,7 +220,7 @@ async fn try_complete_solution(
                         return;
                     }
                 };
-                
+
                 while let Some(adjacent_element) = adjacent_stream.next().await {
                     found_adjacent = true;
                     match adjacent_element {
@@ -229,10 +230,9 @@ async fn try_complete_solution(
                             return;
                         }
                     }
-                }                
+                }
             }
 
-            
             if path.slots[*out_slot].optional && !found_adjacent {
                 adjacent_elements.push(None);
             }
@@ -260,7 +260,7 @@ async fn try_complete_solution(
                         cmd_tx.send(SolutionStreamCommand::Error(e.into())).unwrap();
                         return;
                     }
-                };                
+                };
 
                 while let Some(adjacent_element) = adjacent_stream.next().await {
                     found_adjacent = true;
@@ -388,7 +388,7 @@ fn merge_node_match<'b>(
                     in_slots: Vec::new(),
                     out_slots: Vec::new(),
                     optional,
-                    paths: HashSet::from([path_index])
+                    paths: HashSet::from([path_index]),
                 });
                 alias_map.insert(alias.clone(), slots.len() - 1);
                 Ok(slots.len() - 1)
@@ -400,7 +400,7 @@ fn merge_node_match<'b>(
                 in_slots: Vec::new(),
                 out_slots: Vec::new(),
                 optional,
-                paths: HashSet::from([path_index])
+                paths: HashSet::from([path_index]),
             });
             Ok(slots.len() - 1)
         }
@@ -426,7 +426,7 @@ fn merge_relation_match<'b>(
                     in_slots: Vec::new(),
                     out_slots: Vec::new(),
                     optional,
-                    paths: HashSet::from([path_index])
+                    paths: HashSet::from([path_index]),
                 });
                 alias_map.insert(alias.clone(), slots.len() - 1);
                 Ok(slots.len() - 1)
@@ -438,7 +438,7 @@ fn merge_relation_match<'b>(
                 in_slots: Vec::new(),
                 out_slots: Vec::new(),
                 optional,
-                paths: HashSet::from([path_index])
+                paths: HashSet::from([path_index]),
             });
             Ok(slots.len() - 1)
         }

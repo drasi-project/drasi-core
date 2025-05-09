@@ -68,7 +68,7 @@ impl MatchPathSolution {
                         let elem_ref = value.get_reference();
                         elem_ref.source_id.hash(&mut hasher);
                         elem_ref.element_id.hash(&mut hasher);
-                    },
+                    }
                     None => 0.hash(&mut hasher),
                 }
             }
@@ -91,7 +91,6 @@ impl MatchPathSolution {
         self.solution_signature
     }
 
-
     pub fn get_empty_optional_solution(&self, match_path: &MatchPath) -> Option<MatchPathSolution> {
         if !match_path.slots[self.anchor_slot].optional {
             return None;
@@ -101,13 +100,16 @@ impl MatchPathSolution {
             return None;
         }
 
-        let empty_slots = self.solved_slots.iter()
+        let empty_slots = self
+            .solved_slots
+            .iter()
             .filter(|(_, value)| value.is_none())
             .map(|(slot_num, _)| *slot_num)
             .collect::<HashSet<_>>();
 
-        let opt_slots = match_path.get_optional_slots_on_common_paths(self.anchor_slot, empty_slots);
-        
+        let opt_slots =
+            match_path.get_optional_slots_on_common_paths(self.anchor_slot, empty_slots);
+
         let mut result = self.clone();
         for slot_num in &opt_slots {
             result.solved_slots.remove(slot_num);
