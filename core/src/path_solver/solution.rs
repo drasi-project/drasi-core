@@ -15,6 +15,7 @@
 use hashers::jenkins::spooky_hash::SpookyHasher;
 
 use crate::evaluation::context::QueryVariables;
+use crate::evaluation::variable_value::VariableValue;
 
 use std::hash::{Hash, Hasher};
 
@@ -32,15 +33,16 @@ pub(crate) type SolutionSignature = u64;
 
 #[derive(Clone, Debug)]
 pub struct MatchPathSolution {
-    pub(crate) solved_slots: BTreeMap<usize, Arc<Element>>,
+    pub(crate) solved_slots: BTreeMap<usize, Option<Arc<Element>>>,
     pub(crate) total_slots: usize,
     pub(crate) queued_slots: Vec<bool>,
-    pub(crate) slot_cursors: VecDeque<(usize, Arc<Element>)>,
+    pub(crate) slot_cursors: VecDeque<(usize, Option<Arc<Element>>)>,
     pub(crate) solution_signature: Option<SolutionSignature>,
+    pub(crate) anchor_slot: usize,
 }
 
 impl MatchPathSolution {
-    pub fn new(total_slots: usize) -> Self {
+    pub fn new(total_slots: usize, anchor_slot: usize) -> Self {
         let mut queued_slots = Vec::new();
         queued_slots.resize(total_slots, false);
 
@@ -50,24 +52,36 @@ impl MatchPathSolution {
             queued_slots,
             slot_cursors: VecDeque::new(),
             solution_signature: None,
+            anchor_slot,
         }
     }
 
-    pub fn mark_slot_solved(&mut self, slot_num: usize, value: Arc<Element>) {
+    pub fn mark_slot_solved(&mut self, slot_num: usize, value: Option<Arc<Element>>) {
+        println!("Marking slot {} as solved with value {:?}", slot_num, value);
         self.solved_slots.insert(slot_num, value);
+        
+        println!("Solved slots: {:?}", self.solved_slots.len());
+        println!("Total slots: {:?}", self.total_slots);
+
         if self.solved_slots.len() == self.total_slots {
             let mut hasher = SpookyHasher::default();
             for (slot_num, value) in &self.solved_slots {
                 slot_num.hash(&mut hasher);
-                let elem_ref = value.get_reference();
-                elem_ref.source_id.hash(&mut hasher);
-                elem_ref.element_id.hash(&mut hasher);
+                match value {
+                    Some(value) => {
+                        let elem_ref = value.get_reference();
+                        elem_ref.source_id.hash(&mut hasher);
+                        elem_ref.element_id.hash(&mut hasher);
+                    },
+                    None => 0.hash(&mut hasher),
+                }
             }
             self.solution_signature = Some(hasher.finish());
         }
     }
 
-    pub fn enqueue_slot(&mut self, slot_num: usize, value: Arc<Element>) {
+    pub fn enqueue_slot(&mut self, slot_num: usize, value: Option<Arc<Element>>) {
+        println!("Enqueueing slot {} with value {:?}", slot_num, value);
         if !self.queued_slots[slot_num] {
             self.slot_cursors.push_back((slot_num, value));
             self.queued_slots[slot_num] = true;
@@ -96,7 +110,10 @@ impl MatchPathSolution {
                     if let Some(annotation) = &slot.spec.annotation {
                         result.insert(
                             annotation.to_string().into_boxed_str(),
-                            element.to_expression_variable(),
+                            match element {
+                                Some(element) => element.to_expression_variable(),
+                                None => VariableValue::Null,
+                            },
                         );
                     }
                 }

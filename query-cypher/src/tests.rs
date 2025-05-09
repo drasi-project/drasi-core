@@ -147,6 +147,7 @@ fn match_clause() {
                             "Warehouse".into()
                         )
                     )],
+                    optional: false,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![UnaryExpression::expression_property(
@@ -188,6 +189,7 @@ fn match_clause() {
                             "Warehouse".into()
                         )
                     )],
+                    optional: false,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![UnaryExpression::expression_property(
@@ -208,6 +210,7 @@ fn match_clause() {
                         RelationMatch::right(Annotation::empty(), vec![], vec![], None),
                         NodeMatch::new(Annotation::empty(), vec!["LABEL_ONLY".into()], vec![]),
                     )],
+                    optional: false,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![UnaryExpression::expression_property(
@@ -246,6 +249,7 @@ fn match_clause() {
                             )]
                         )
                     )],
+                    optional: false,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -276,6 +280,7 @@ fn multiple_match_clauses() {
                         RelationMatch::right(Annotation::empty(), vec!["AT".into()], vec![], None),
                         NodeMatch::with_annotation(Annotation::new("wh".into()), "Warehouse".into())
                     )],
+                    optional: false,
                   },
                   MatchClause {
                     start: NodeMatch::with_annotation(Annotation::new("i".into()), "Item".into()),
@@ -283,6 +288,7 @@ fn multiple_match_clauses() {
                         RelationMatch::right(Annotation::empty(), vec!["CONTAINS".into()], vec![], None),
                         NodeMatch::with_annotation(Annotation::new("c".into()), "Component".into())
                     )],
+                    optional: false,
                   }
                 ],
                 where_clauses: vec![],
@@ -305,6 +311,7 @@ fn where_clauses() {
                       RelationMatch::right(Annotation::new("e".into()), vec!["KNOWS".into()], vec![], None),
                         NodeMatch::with_annotation(Annotation::new("b".into()), "Person".into())
                     )],
+                    optional: false,
                   }
                 ],
                 where_clauses: vec![BinaryExpression::or(BinaryExpression::and(
@@ -335,6 +342,7 @@ fn with_clauses_non_aggregating() {
                         RelationMatch::right(Annotation::empty(), vec!["AT".into()], vec![], None),
                         NodeMatch::with_annotation(Annotation::new("wh".into()), "Warehouse".into())
                     )],
+                    optional: false,
                 }],
                 where_clauses: vec![BinaryExpression::eq(
                   UnaryExpression::expression_property(UnaryExpression::ident("t"), "category".into()),
@@ -643,6 +651,7 @@ fn test_reflex_query_with_comment() {
                     }
                 )
             ],
+            optional: false,
         }
     );
 

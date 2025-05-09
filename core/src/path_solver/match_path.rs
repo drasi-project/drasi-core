@@ -36,12 +36,12 @@ impl MatchPath {
         let mut alias_map = HashMap::new();
 
         for mc in &query_part.match_clauses {
-            let slot_num = merge_node_match(&mc.start, &mut slots, &mut alias_map)?;
+            let slot_num = merge_node_match(&mc.start, &mut slots, &mut alias_map, mc.optional)?;
             let mut prev_slot_num = slot_num;
 
             for p in &mc.path {
-                let rel_slot_num = merge_relation_match(&p.0, &mut slots, &mut alias_map)?;
-                let node_slot_num = merge_node_match(&p.1, &mut slots, &mut alias_map)?;
+                let rel_slot_num = merge_relation_match(&p.0, &mut slots, &mut alias_map, mc.optional)?;
+                let node_slot_num = merge_node_match(&p.1, &mut slots, &mut alias_map, mc.optional)?;
 
                 match p.0.direction {
                     ast::Direction::Right => {
@@ -75,6 +75,8 @@ impl MatchPath {
             }
         }
 
+        println!("MatchPath slots: {:#?}", slots);
+
         Ok(MatchPath { slots })
     }
 }
@@ -84,6 +86,7 @@ pub struct MatchPathSlot {
     pub spec: SlotElementSpec,
     pub in_slots: Vec<usize>,
     pub out_slots: Vec<usize>,
+    pub optional: bool,
 }
 
 #[derive(Debug)]

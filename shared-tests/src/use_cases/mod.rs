@@ -27,6 +27,7 @@ pub mod overdue_invoice;
 pub mod remap;
 pub mod sensor_heartbeat;
 pub mod unwind;
+pub mod optional_match;
 
 pub mod crosses_above_a_threshold;
 pub mod crosses_above_and_stays_above;

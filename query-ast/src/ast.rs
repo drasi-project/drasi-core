@@ -32,6 +32,7 @@ pub struct QueryPart {
 pub struct MatchClause {
     pub start: NodeMatch,
     pub path: Vec<(RelationMatch, NodeMatch)>,
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

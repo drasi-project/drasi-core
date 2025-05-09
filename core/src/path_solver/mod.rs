@@ -17,8 +17,7 @@ pub mod match_path;
 pub mod solution;
 
 use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
+    collections::{BTreeMap, HashMap}, option, sync::Arc
 };
 
 use async_stream::stream;
@@ -74,8 +73,8 @@ impl MatchPathSolver {
         anchor_slot: usize,
     ) -> Result<HashMap<u64, solution::MatchPathSolution>, EvaluationError> {
         let total_slots = path.slots.len();
-        let mut start_solution = MatchPathSolution::new(total_slots);
-        start_solution.enqueue_slot(anchor_slot, anchor_element);
+        let mut start_solution = MatchPathSolution::new(total_slots, anchor_slot);
+        start_solution.enqueue_slot(anchor_slot, Some(anchor_element));
 
         let sol_stream =
             create_solution_stream(start_solution, path.clone(), self.element_index.clone()).await;
@@ -188,6 +187,7 @@ async fn try_complete_solution(
         solution.mark_slot_solved(slot_num, element.clone());
 
         if let Some(hash) = solution.get_solution_signature() {
+            println!("Found a solution with hash: {}", hash);
             cmd_tx
                 .send(SolutionStreamCommand::Complete((hash, solution)))
                 .unwrap();
@@ -197,34 +197,46 @@ async fn try_complete_solution(
         let slot = &path.slots[slot_num];
         let mut alt_by_slot = HashMap::new();
 
-        for out_slot in &slot.out_slots {
+        for out_slot in &slot.out_slots {            
             if solution.is_slot_solved(*out_slot) {
                 continue;
             }
-            let mut adjacent_stream = match get_adjacent_elements(
-                element_index.clone(),
-                element.clone(),
-                *out_slot,
-                SolveDirection::Outward,
-            )
-            .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    cmd_tx.send(SolutionStreamCommand::Error(e.into())).unwrap();
-                    return;
-                }
-            };
+
+            println!("Slot {} (out) is not solved, looking for adjacent elements", *out_slot);
+
             let adjacent_elements = alt_by_slot.entry(*out_slot).or_insert_with(Vec::new);
 
-            while let Some(adjacent_element) = adjacent_stream.next().await {
-                match adjacent_element {
-                    Ok(adjacent_element) => adjacent_elements.push(adjacent_element),
+            if let Some(element) = &element {
+                let mut adjacent_stream = match get_adjacent_elements(
+                    element_index.clone(),
+                    element.clone(),
+                    *out_slot,
+                    SolveDirection::Outward,
+                )
+                .await
+                {
+                    Ok(s) => s,
                     Err(e) => {
                         cmd_tx.send(SolutionStreamCommand::Error(e.into())).unwrap();
                         return;
                     }
-                }
+                };
+                
+                while let Some(adjacent_element) = adjacent_stream.next().await {
+                    match adjacent_element {
+                        Ok(adjacent_element) => adjacent_elements.push(Some(adjacent_element)),
+                        Err(e) => {
+                            cmd_tx.send(SolutionStreamCommand::Error(e.into())).unwrap();
+                            return;
+                        }
+                    }
+                }                
+            }
+
+            
+            if path.slots[*out_slot].optional && !path.slots[solution.anchor_slot].optional && adjacent_elements.is_empty() {
+                println!("Slot {} is optional, adding None", *out_slot);
+                adjacent_elements.push(None);
             }
         }
 
@@ -233,30 +245,40 @@ async fn try_complete_solution(
                 continue;
             }
 
-            let mut adjacent_stream = match get_adjacent_elements(
-                element_index.clone(),
-                element.clone(),
-                *in_slot,
-                SolveDirection::Inward,
-            )
-            .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    cmd_tx.send(SolutionStreamCommand::Error(e.into())).unwrap();
-                    return;
-                }
-            };
+            println!("Slot {} (in) is not solved, looking for adjacent elements", *in_slot);
+
             let adjacent_elements = alt_by_slot.entry(*in_slot).or_insert_with(Vec::new);
 
-            while let Some(adjacent_element) = adjacent_stream.next().await {
-                match adjacent_element {
-                    Ok(adjacent_element) => adjacent_elements.push(adjacent_element),
+            if let Some(element) = &element {
+                let mut adjacent_stream = match get_adjacent_elements(
+                    element_index.clone(),
+                    element.clone(),
+                    *in_slot,
+                    SolveDirection::Inward,
+                )
+                .await
+                {
+                    Ok(s) => s,
                     Err(e) => {
                         cmd_tx.send(SolutionStreamCommand::Error(e.into())).unwrap();
                         return;
                     }
+                };                
+
+                while let Some(adjacent_element) = adjacent_stream.next().await {
+                    match adjacent_element {
+                        Ok(adjacent_element) => adjacent_elements.push(Some(adjacent_element)),
+                        Err(e) => {
+                            cmd_tx.send(SolutionStreamCommand::Error(e.into())).unwrap();
+                            return;
+                        }
+                    }
                 }
+            }
+
+            if path.slots[*in_slot].optional && !path.slots[solution.anchor_slot].optional && adjacent_elements.is_empty() {
+                println!("Slot {} is optional, adding None", *in_slot);
+                adjacent_elements.push(None);
             }
         }
 
@@ -354,16 +376,19 @@ fn merge_node_match<'b>(
     mtch: &NodeMatch,
     slots: &'b mut Vec<match_path::MatchPathSlot>,
     alias_map: &'b mut HashMap<Arc<str>, usize>,
+    optional: bool,
 ) -> Result<usize, EvaluationError> {
     match &mtch.annotation.name {
         Some(alias) => {
             if let Some(slot_num) = alias_map.get(alias) {
+                slots[*slot_num].optional = optional && slots[*slot_num].optional;
                 Ok(*slot_num)
             } else {
                 slots.push(match_path::MatchPathSlot {
                     spec: match_path::SlotElementSpec::from_node_match(mtch),
                     in_slots: Vec::new(),
                     out_slots: Vec::new(),
+                    optional,
                 });
                 alias_map.insert(alias.clone(), slots.len() - 1);
                 Ok(slots.len() - 1)
@@ -374,6 +399,7 @@ fn merge_node_match<'b>(
                 spec: match_path::SlotElementSpec::from_node_match(mtch),
                 in_slots: Vec::new(),
                 out_slots: Vec::new(),
+                optional,
             });
             Ok(slots.len() - 1)
         }
@@ -384,16 +410,19 @@ fn merge_relation_match<'b>(
     mtch: &RelationMatch,
     slots: &'b mut Vec<match_path::MatchPathSlot>,
     alias_map: &'b mut HashMap<Arc<str>, usize>,
+    optional: bool,
 ) -> Result<usize, EvaluationError> {
     match &mtch.annotation.name {
         Some(alias) => {
             if let Some(slot_num) = alias_map.get(alias) {
+                slots[*slot_num].optional = optional && slots[*slot_num].optional;
                 Ok(*slot_num)
             } else {
                 slots.push(match_path::MatchPathSlot {
                     spec: match_path::SlotElementSpec::from_relation_match(mtch),
                     in_slots: Vec::new(),
                     out_slots: Vec::new(),
+                    optional,
                 });
                 alias_map.insert(alias.clone(), slots.len() - 1);
                 Ok(slots.len() - 1)
@@ -404,6 +433,7 @@ fn merge_relation_match<'b>(
                 spec: match_path::SlotElementSpec::from_relation_match(mtch),
                 in_slots: Vec::new(),
                 out_slots: Vec::new(),
+                optional,
             });
             Ok(slots.len() - 1)
         }
