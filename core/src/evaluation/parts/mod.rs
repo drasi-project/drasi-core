@@ -58,7 +58,7 @@ impl QueryPartEvaluator {
         part: &QueryPart,
         change_context: &ChangeContext,
     ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
-        println!("Evaluating : {:#?}", context);
+        // println!("Evaluating : {:#?}", context);
 
         let is_return_aggreating = matches!(
             &part.return_clause,

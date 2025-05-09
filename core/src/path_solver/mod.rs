@@ -17,7 +17,7 @@ pub mod match_path;
 pub mod solution;
 
 use std::{
-    collections::{BTreeMap, HashMap}, option, sync::Arc
+    collections::{BTreeMap, HashMap, HashSet}, sync::Arc
 };
 
 use async_stream::stream;
@@ -187,7 +187,6 @@ async fn try_complete_solution(
         solution.mark_slot_solved(slot_num, element.clone());
 
         if let Some(hash) = solution.get_solution_signature() {
-            println!("Found a solution with hash: {}", hash);
             cmd_tx
                 .send(SolutionStreamCommand::Complete((hash, solution)))
                 .unwrap();
@@ -202,9 +201,8 @@ async fn try_complete_solution(
                 continue;
             }
 
-            println!("Slot {} (out) is not solved, looking for adjacent elements", *out_slot);
-
             let adjacent_elements = alt_by_slot.entry(*out_slot).or_insert_with(Vec::new);
+            let mut found_adjacent = false;
 
             if let Some(element) = &element {
                 let mut adjacent_stream = match get_adjacent_elements(
@@ -223,6 +221,7 @@ async fn try_complete_solution(
                 };
                 
                 while let Some(adjacent_element) = adjacent_stream.next().await {
+                    found_adjacent = true;
                     match adjacent_element {
                         Ok(adjacent_element) => adjacent_elements.push(Some(adjacent_element)),
                         Err(e) => {
@@ -234,8 +233,7 @@ async fn try_complete_solution(
             }
 
             
-            if path.slots[*out_slot].optional && !path.slots[solution.anchor_slot].optional && adjacent_elements.is_empty() {
-                println!("Slot {} is optional, adding None", *out_slot);
+            if path.slots[*out_slot].optional && !found_adjacent {
                 adjacent_elements.push(None);
             }
         }
@@ -245,9 +243,8 @@ async fn try_complete_solution(
                 continue;
             }
 
-            println!("Slot {} (in) is not solved, looking for adjacent elements", *in_slot);
-
             let adjacent_elements = alt_by_slot.entry(*in_slot).or_insert_with(Vec::new);
+            let mut found_adjacent = false;
 
             if let Some(element) = &element {
                 let mut adjacent_stream = match get_adjacent_elements(
@@ -266,6 +263,7 @@ async fn try_complete_solution(
                 };                
 
                 while let Some(adjacent_element) = adjacent_stream.next().await {
+                    found_adjacent = true;
                     match adjacent_element {
                         Ok(adjacent_element) => adjacent_elements.push(Some(adjacent_element)),
                         Err(e) => {
@@ -276,8 +274,7 @@ async fn try_complete_solution(
                 }
             }
 
-            if path.slots[*in_slot].optional && !path.slots[solution.anchor_slot].optional && adjacent_elements.is_empty() {
-                println!("Slot {} is optional, adding None", *in_slot);
+            if path.slots[*in_slot].optional && !found_adjacent {
                 adjacent_elements.push(None);
             }
         }
@@ -376,12 +373,14 @@ fn merge_node_match<'b>(
     mtch: &NodeMatch,
     slots: &'b mut Vec<match_path::MatchPathSlot>,
     alias_map: &'b mut HashMap<Arc<str>, usize>,
+    path_index: usize,
     optional: bool,
 ) -> Result<usize, EvaluationError> {
     match &mtch.annotation.name {
         Some(alias) => {
             if let Some(slot_num) = alias_map.get(alias) {
                 slots[*slot_num].optional = optional && slots[*slot_num].optional;
+                slots[*slot_num].paths.insert(path_index);
                 Ok(*slot_num)
             } else {
                 slots.push(match_path::MatchPathSlot {
@@ -389,6 +388,7 @@ fn merge_node_match<'b>(
                     in_slots: Vec::new(),
                     out_slots: Vec::new(),
                     optional,
+                    paths: HashSet::from([path_index])
                 });
                 alias_map.insert(alias.clone(), slots.len() - 1);
                 Ok(slots.len() - 1)
@@ -400,6 +400,7 @@ fn merge_node_match<'b>(
                 in_slots: Vec::new(),
                 out_slots: Vec::new(),
                 optional,
+                paths: HashSet::from([path_index])
             });
             Ok(slots.len() - 1)
         }
@@ -410,12 +411,14 @@ fn merge_relation_match<'b>(
     mtch: &RelationMatch,
     slots: &'b mut Vec<match_path::MatchPathSlot>,
     alias_map: &'b mut HashMap<Arc<str>, usize>,
+    path_index: usize,
     optional: bool,
 ) -> Result<usize, EvaluationError> {
     match &mtch.annotation.name {
         Some(alias) => {
             if let Some(slot_num) = alias_map.get(alias) {
                 slots[*slot_num].optional = optional && slots[*slot_num].optional;
+                slots[*slot_num].paths.insert(path_index);
                 Ok(*slot_num)
             } else {
                 slots.push(match_path::MatchPathSlot {
@@ -423,6 +426,7 @@ fn merge_relation_match<'b>(
                     in_slots: Vec::new(),
                     out_slots: Vec::new(),
                     optional,
+                    paths: HashSet::from([path_index])
                 });
                 alias_map.insert(alias.clone(), slots.len() - 1);
                 Ok(slots.len() - 1)
@@ -434,6 +438,7 @@ fn merge_relation_match<'b>(
                 in_slots: Vec::new(),
                 out_slots: Vec::new(),
                 optional,
+                paths: HashSet::from([path_index])
             });
             Ok(slots.len() - 1)
         }

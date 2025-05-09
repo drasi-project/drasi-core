@@ -22,7 +22,6 @@ use std::{
 
 use drasi_query_ast::ast::Query;
 use hashers::jenkins::spooky_hash::SpookyHasher;
-use serde::de;
 use tokio::{
     select,
     sync::{Mutex, Notify},
@@ -177,6 +176,9 @@ impl ContinuousQuery {
                     .await?;
 
                 for (signature, solution) in solutions {
+                    if let Some(blank_optional_solution) = solution.get_empty_optional_solution(&self.match_path) {
+                        before_change_solutions.insert(signature, blank_optional_solution);
+                    }
                     after_change_solutions.insert(signature, solution);
                 }
 
@@ -233,6 +235,10 @@ impl ContinuousQuery {
                         )
                         .await?;
                     for (signature, solution) in solutions {
+                        if let Some(blank_optional_solution) = solution.get_empty_optional_solution(&self.match_path) {
+                            after_change_solutions.insert(signature, blank_optional_solution);
+                        }
+
                         before_change_solutions.insert(signature, solution);
                     }
                     result.before_clock = Some(before_clock);

@@ -299,6 +299,37 @@ fn multiple_match_clauses() {
 }
 
 #[test]
+fn optional_match_clauses() {
+    assert_eq!(
+        cypher::query("MATCH (t:Thing)-[:AT]->(wh:Warehouse) OPTIONAL MATCH (t)-[:CONTAINS]->(c:Component) RETURN t.name", &TEST_CONFIG),
+        Ok(Query {
+            parts: vec![QueryPart {
+                match_clauses: vec![
+                  MatchClause {
+                    start: NodeMatch::with_annotation(Annotation::new("t".into()), "Thing".into()),
+                    path: vec![(
+                        RelationMatch::right(Annotation::empty(), vec!["AT".into()], vec![], None),
+                        NodeMatch::with_annotation(Annotation::new("wh".into()), "Warehouse".into())
+                    )],
+                    optional: false,
+                  },
+                  MatchClause {
+                    start: NodeMatch::without_label(Annotation::new("t".into())),
+                    path: vec![(
+                        RelationMatch::right(Annotation::empty(), vec!["CONTAINS".into()], vec![], None),
+                        NodeMatch::with_annotation(Annotation::new("c".into()), "Component".into())
+                    )],
+                    optional: true,
+                  }
+                ],
+                where_clauses: vec![],
+                return_clause: ProjectionClause::Item(vec![UnaryExpression::expression_property(UnaryExpression::ident("t"), "name".into())]),
+            }]
+        })
+    );
+}
+
+#[test]
 fn where_clauses() {
     assert_eq!(
       cypher::query("MATCH (a:Person) -[e:KNOWS]-> (b:Person) WHERE a.age > 42 AND b.name = 'Peter Parker' OR NOT e.fake RETURN e.since", &TEST_CONFIG),

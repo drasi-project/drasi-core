@@ -121,6 +121,14 @@ impl NodeMatch {
             property_predicates: vec![],
         }
     }
+
+    pub fn without_label(annotation: Annotation) -> Self {
+        Self {
+            annotation,
+            labels: vec![],
+            property_predicates: vec![],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

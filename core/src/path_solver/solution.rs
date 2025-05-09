@@ -19,7 +19,7 @@ use crate::evaluation::variable_value::VariableValue;
 
 use std::hash::{Hash, Hasher};
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use crate::models::Element;
 
@@ -57,11 +57,7 @@ impl MatchPathSolution {
     }
 
     pub fn mark_slot_solved(&mut self, slot_num: usize, value: Option<Arc<Element>>) {
-        println!("Marking slot {} as solved with value {:?}", slot_num, value);
         self.solved_slots.insert(slot_num, value);
-        
-        println!("Solved slots: {:?}", self.solved_slots.len());
-        println!("Total slots: {:?}", self.total_slots);
 
         if self.solved_slots.len() == self.total_slots {
             let mut hasher = SpookyHasher::default();
@@ -81,7 +77,6 @@ impl MatchPathSolution {
     }
 
     pub fn enqueue_slot(&mut self, slot_num: usize, value: Option<Arc<Element>>) {
-        println!("Enqueueing slot {} with value {:?}", slot_num, value);
         if !self.queued_slots[slot_num] {
             self.slot_cursors.push_back((slot_num, value));
             self.queued_slots[slot_num] = true;
@@ -94,6 +89,35 @@ impl MatchPathSolution {
 
     pub fn get_solution_signature(&self) -> Option<SolutionSignature> {
         self.solution_signature
+    }
+
+
+    pub fn get_empty_optional_solution(&self, match_path: &MatchPath) -> Option<MatchPathSolution> {
+        if !match_path.slots[self.anchor_slot].optional {
+            return None;
+        }
+
+        if self.solved_slots.len() != self.total_slots {
+            return None;
+        }
+
+        let empty_slots = self.solved_slots.iter()
+            .filter(|(_, value)| value.is_none())
+            .map(|(slot_num, _)| *slot_num)
+            .collect::<HashSet<_>>();
+
+        let opt_slots = match_path.get_optional_slots_on_common_paths(self.anchor_slot, empty_slots);
+        
+        let mut result = self.clone();
+        for slot_num in &opt_slots {
+            result.solved_slots.remove(slot_num);
+        }
+        result.solution_signature = None;
+        for slot_num in &opt_slots {
+            result.mark_slot_solved(*slot_num, None);
+        }
+
+        return Some(result);
     }
 
     #[allow(clippy::explicit_counter_loop)]

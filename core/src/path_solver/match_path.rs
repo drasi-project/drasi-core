@@ -20,6 +20,7 @@ use super::merge_node_match;
 
 use crate::evaluation::EvaluationError;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use drasi_query_ast::ast;
@@ -27,6 +28,7 @@ use drasi_query_ast::ast;
 #[derive(Debug)]
 pub struct MatchPath {
     pub slots: Vec<MatchPathSlot>,
+    optional_paths: HashSet<usize>,
 }
 
 impl MatchPath {
@@ -34,14 +36,19 @@ impl MatchPath {
         let mut slots = Vec::new();
 
         let mut alias_map = HashMap::new();
+        let mut path_index = 0;
+        let mut optional_paths = HashSet::new();
 
-        for mc in &query_part.match_clauses {
-            let slot_num = merge_node_match(&mc.start, &mut slots, &mut alias_map, mc.optional)?;
+        for mc in &query_part.match_clauses {            
+            if mc.optional {
+                optional_paths.insert(path_index);
+            }
+            let slot_num = merge_node_match(&mc.start, &mut slots, &mut alias_map, path_index, mc.optional)?;
             let mut prev_slot_num = slot_num;
 
             for p in &mc.path {
-                let rel_slot_num = merge_relation_match(&p.0, &mut slots, &mut alias_map, mc.optional)?;
-                let node_slot_num = merge_node_match(&p.1, &mut slots, &mut alias_map, mc.optional)?;
+                let rel_slot_num = merge_relation_match(&p.0, &mut slots, &mut alias_map, path_index, mc.optional)?;
+                let node_slot_num = merge_node_match(&p.1, &mut slots, &mut alias_map, path_index, mc.optional)?;
 
                 match p.0.direction {
                     ast::Direction::Right => {
@@ -73,11 +80,40 @@ impl MatchPath {
 
                 prev_slot_num = node_slot_num;
             }
+            path_index += 1;
         }
 
-        println!("MatchPath slots: {:#?}", slots);
+        Ok(MatchPath { slots, optional_paths })
+    }
 
-        Ok(MatchPath { slots })
+    pub fn get_optional_slots_on_common_paths(&self, anchor_slot_num: usize, empty_slots: HashSet<usize>) -> HashSet<usize> {
+        let mut optional_slots = HashSet::new();
+        for path in &self.slots[anchor_slot_num].paths {
+
+            let mut has_empty_slots = false;
+            let mut path_slots = HashSet::new();
+
+            for (slot_num, slot) in self.slots.iter().enumerate() {
+                if slot.optional && slot.paths.contains(path) {
+                    
+                    if empty_slots.contains(&slot_num) {
+                        has_empty_slots = true;
+                        break;
+                    }
+
+                    if slot_num != anchor_slot_num && slot.paths.len() > 1 {
+                        continue;
+                    }
+
+                    path_slots.insert(slot_num);
+                }
+            }
+            if !has_empty_slots {
+                optional_slots.extend(path_slots);
+            }
+        }
+            
+        optional_slots
     }
 }
 
@@ -86,6 +122,7 @@ pub struct MatchPathSlot {
     pub spec: SlotElementSpec,
     pub in_slots: Vec<usize>,
     pub out_slots: Vec<usize>,
+    pub paths: HashSet<usize>,
     pub optional: bool,
 }
 

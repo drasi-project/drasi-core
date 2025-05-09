@@ -39,3 +39,18 @@ pub fn optional_query_aggregating() -> &'static str {
     i.amount - sum(coalesce(p.amount, 0)) AS balance
     "
 }
+
+pub fn multi_optional_query() -> &'static str {
+  "
+MATCH
+  (c:Customer)
+OPTIONAL MATCH 
+  (c)-[:HAS]->(i:Invoice)
+OPTIONAL MATCH
+  (i)-[:RECONCILED_TO]->(p:Payment)
+RETURN
+  c.id AS customer_id,
+  i.id AS invoice_id,
+  p.id AS payment_id
+  "
+}
