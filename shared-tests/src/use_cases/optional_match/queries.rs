@@ -12,9 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 pub fn optional_query() -> &'static str {
-  "
+    "
 MATCH 
   (i:Invoice)
 OPTIONAL MATCH
@@ -41,7 +40,7 @@ pub fn optional_query_aggregating() -> &'static str {
 }
 
 pub fn multi_optional_query() -> &'static str {
-  "
+    "
 MATCH
   (c:Customer)
 OPTIONAL MATCH 

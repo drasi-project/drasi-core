@@ -51,7 +51,7 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
                     labels: Arc::new([Arc::from("Invoice")]),
                     effective_from: 0,
                 },
-                properties: ElementPropertyMap::from(json!({ 
+                properties: ElementPropertyMap::from(json!({
                     "id": "i1",
                     "amount": 100,
                 })),
@@ -64,7 +64,7 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
         println!("Result - Add i1: {:?}", result);
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {            
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "amount" => VariableValue::from(json!(100.0)),
               "id" => VariableValue::from(json!("i1")),
@@ -80,11 +80,11 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "r1"),
                     labels: Arc::new([Arc::from("RECONCILED_TO")]),
-                    effective_from: 0,                    
+                    effective_from: 0,
                 },
                 in_node: ElementReference::new("test", "i1"),
-                out_node: ElementReference::new("test", "p1"),                
-                properties: ElementPropertyMap::from(json!({ 
+                out_node: ElementReference::new("test", "p1"),
+                properties: ElementPropertyMap::from(json!({
                     "id": "r1",
                 })),
             },
@@ -107,7 +107,7 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
                     labels: Arc::new([Arc::from("Payment")]),
                     effective_from: 0,
                 },
-                properties: ElementPropertyMap::from(json!({ 
+                properties: ElementPropertyMap::from(json!({
                     "id": "p1",
                     "amount": 70,
                 })),
@@ -120,7 +120,7 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
         println!("Result - Add p1: {:?}", result);
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {            
+        assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
               "amount" => VariableValue::from(json!(100.0)),
               "id" => VariableValue::from(json!("i1")),
@@ -131,7 +131,7 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
               "id" => VariableValue::from(json!("i1")),
               "payment_amount" => VariableValue::from(json!(70.0))
             ),
-        }));        
+        }));
     }
 
     //Add relation 2
@@ -141,11 +141,11 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "r2"),
                     labels: Arc::new([Arc::from("RECONCILED_TO")]),
-                    effective_from: 0,                    
+                    effective_from: 0,
                 },
                 in_node: ElementReference::new("test", "i1"),
-                out_node: ElementReference::new("test", "p2"),                
-                properties: ElementPropertyMap::from(json!({ 
+                out_node: ElementReference::new("test", "p2"),
+                properties: ElementPropertyMap::from(json!({
                     "id": "r2",
                 })),
             },
@@ -168,7 +168,7 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
                     labels: Arc::new([Arc::from("Payment")]),
                     effective_from: 0,
                 },
-                properties: ElementPropertyMap::from(json!({ 
+                properties: ElementPropertyMap::from(json!({
                     "id": "p2",
                     "amount": 10,
                 })),
@@ -181,7 +181,7 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
         println!("Result - Add p2: {:?}", result);
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {            
+        assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
               "amount" => VariableValue::from(json!(100.0)),
               "id" => VariableValue::from(json!("i1")),
@@ -192,7 +192,7 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
               "id" => VariableValue::from(json!("i1")),
               "payment_amount" => VariableValue::from(json!(10.0))
             ),
-        }));        
+        }));
     }
 
     //update payment 2
@@ -204,7 +204,7 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
                     labels: Arc::new([Arc::from("Payment")]),
                     effective_from: 0,
                 },
-                properties: ElementPropertyMap::from(json!({ 
+                properties: ElementPropertyMap::from(json!({
                     "id": "p2",
                     "amount": 15,
                 })),
@@ -217,7 +217,7 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
         println!("Result - Update p2: {:?}", result);
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {            
+        assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
               "amount" => VariableValue::from(json!(100.0)),
               "id" => VariableValue::from(json!("i1")),
@@ -247,7 +247,7 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
         println!("Result - delete p2: {:?}", result);
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {            
+        assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
               "amount" => VariableValue::from(json!(100.0)),
               "id" => VariableValue::from(json!("i1")),
@@ -260,9 +260,7 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
             ),
         }));
     }
-
 }
-
 
 pub async fn optional_match_aggregating(config: &(impl QueryTestConfig + Send)) {
     let opt_query = {
@@ -280,7 +278,7 @@ pub async fn optional_match_aggregating(config: &(impl QueryTestConfig + Send)) 
                     labels: Arc::new([Arc::from("Invoice")]),
                     effective_from: 0,
                 },
-                properties: ElementPropertyMap::from(json!({ 
+                properties: ElementPropertyMap::from(json!({
                     "id": "i1",
                     "amount": 100,
                 })),
@@ -320,11 +318,11 @@ pub async fn optional_match_aggregating(config: &(impl QueryTestConfig + Send)) 
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "r1"),
                     labels: Arc::new([Arc::from("RECONCILED_TO")]),
-                    effective_from: 0,                    
+                    effective_from: 0,
                 },
                 in_node: ElementReference::new("test", "i1"),
-                out_node: ElementReference::new("test", "p1"),                
-                properties: ElementPropertyMap::from(json!({ 
+                out_node: ElementReference::new("test", "p1"),
+                properties: ElementPropertyMap::from(json!({
                     "id": "r1",
                 })),
             },
@@ -347,7 +345,7 @@ pub async fn optional_match_aggregating(config: &(impl QueryTestConfig + Send)) 
                     labels: Arc::new([Arc::from("Payment")]),
                     effective_from: 0,
                 },
-                properties: ElementPropertyMap::from(json!({ 
+                properties: ElementPropertyMap::from(json!({
                     "id": "p1",
                     "amount": 70,
                 })),
@@ -387,11 +385,11 @@ pub async fn optional_match_aggregating(config: &(impl QueryTestConfig + Send)) 
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "r2"),
                     labels: Arc::new([Arc::from("RECONCILED_TO")]),
-                    effective_from: 0,                    
+                    effective_from: 0,
                 },
                 in_node: ElementReference::new("test", "i1"),
-                out_node: ElementReference::new("test", "p2"),                
-                properties: ElementPropertyMap::from(json!({ 
+                out_node: ElementReference::new("test", "p2"),
+                properties: ElementPropertyMap::from(json!({
                     "id": "r2",
                 })),
             },
@@ -414,7 +412,7 @@ pub async fn optional_match_aggregating(config: &(impl QueryTestConfig + Send)) 
                     labels: Arc::new([Arc::from("Payment")]),
                     effective_from: 0,
                 },
-                properties: ElementPropertyMap::from(json!({ 
+                properties: ElementPropertyMap::from(json!({
                     "id": "p2",
                     "amount": 30,
                 })),
@@ -446,9 +444,7 @@ pub async fn optional_match_aggregating(config: &(impl QueryTestConfig + Send)) 
             ),
         }));
     }
-
 }
-
 
 pub async fn multi_optional_match(config: &(impl QueryTestConfig + Send)) {
     let opt_query = {
@@ -466,7 +462,7 @@ pub async fn multi_optional_match(config: &(impl QueryTestConfig + Send)) {
                     labels: Arc::new([Arc::from("Customer")]),
                     effective_from: 0,
                 },
-                properties: ElementPropertyMap::from(json!({ 
+                properties: ElementPropertyMap::from(json!({
                     "id": "c1",
                 })),
             },
@@ -478,7 +474,7 @@ pub async fn multi_optional_match(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
         println!("Result - Add c1: {:?}", result);
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {            
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
                 "customer_id" => VariableValue::from(json!("c1")),
                 "invoice_id" => VariableValue::Null,
@@ -494,11 +490,11 @@ pub async fn multi_optional_match(config: &(impl QueryTestConfig + Send)) {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "h1"),
                     labels: Arc::new([Arc::from("HAS")]),
-                    effective_from: 0,                    
+                    effective_from: 0,
                 },
                 in_node: ElementReference::new("test", "c1"),
-                out_node: ElementReference::new("test", "i1"),                
-                properties: ElementPropertyMap::from(json!({ 
+                out_node: ElementReference::new("test", "i1"),
+                properties: ElementPropertyMap::from(json!({
                     "id": "h1",
                 })),
             },
@@ -521,7 +517,7 @@ pub async fn multi_optional_match(config: &(impl QueryTestConfig + Send)) {
                     labels: Arc::new([Arc::from("Invoice")]),
                     effective_from: 0,
                 },
-                properties: ElementPropertyMap::from(json!({ 
+                properties: ElementPropertyMap::from(json!({
                     "id": "i1",
                     "amount": 100,
                 })),
@@ -534,7 +530,7 @@ pub async fn multi_optional_match(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         //assert_eq!(result.len(), 1);
         println!("Result - Add i1: {:?}", result);
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {            
+        assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
                 "customer_id" => VariableValue::from(json!("c1")),
                 "invoice_id" => VariableValue::Null,
@@ -555,11 +551,11 @@ pub async fn multi_optional_match(config: &(impl QueryTestConfig + Send)) {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "r1"),
                     labels: Arc::new([Arc::from("RECONCILED_TO")]),
-                    effective_from: 0,                    
+                    effective_from: 0,
                 },
                 in_node: ElementReference::new("test", "i1"),
-                out_node: ElementReference::new("test", "p1"),                
-                properties: ElementPropertyMap::from(json!({ 
+                out_node: ElementReference::new("test", "p1"),
+                properties: ElementPropertyMap::from(json!({
                     "id": "r1",
                 })),
             },
@@ -582,7 +578,7 @@ pub async fn multi_optional_match(config: &(impl QueryTestConfig + Send)) {
                     labels: Arc::new([Arc::from("Payment")]),
                     effective_from: 0,
                 },
-                properties: ElementPropertyMap::from(json!({ 
+                properties: ElementPropertyMap::from(json!({
                     "id": "p1",
                     "amount": 70,
                 })),
@@ -595,7 +591,7 @@ pub async fn multi_optional_match(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
         println!("Result - Add p1: {:?}", result);
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {            
+        assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
                 "customer_id" => VariableValue::from(json!("c1")),
                 "invoice_id" => VariableValue::from(json!("i1")),
@@ -608,6 +604,4 @@ pub async fn multi_optional_match(config: &(impl QueryTestConfig + Send)) {
             ),
         }));
     }
-
 }
-
