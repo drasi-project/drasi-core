@@ -28,6 +28,7 @@ peg::parser! {
         use drasi_query_ast::ast::*;
 
         rule kw_match()     = ("MATCH" / "match")
+        rule kw_optional()  = ("OPTIONAL" / "optional")
         rule kw_create()    = ("CREATE" / "create")
         rule kw_set()       = ("SET" / "set")
         rule kw_delete()    = ("DELETE" / "delete")
@@ -354,7 +355,11 @@ peg::parser! {
         rule match_clause() -> Vec<MatchClause>
             = kw_match() __+ items:( (start:node()
                     path:( (__* e:relation() __* n:node() { (e, n) }) ** "" ) {
-                    MatchClause { start, path }
+                    MatchClause { start, path, optional: false }
+                }) ++ (__* "," __*) ) { items }
+            / kw_optional() __+ kw_match() __+ items:( (start:node()
+                path:( (__* e:relation() __* n:node() { (e, n) }) ** "" ) {
+                    MatchClause { start, path, optional: true }
                 }) ++ (__* "," __*) ) { items }
 
         // e.g. 'WHERE a.name <> b.name', 'WHERE a.age > b.age AND a.age <= 42'
