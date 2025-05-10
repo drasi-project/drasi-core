@@ -36,10 +36,9 @@ impl MatchPath {
         let mut slots = Vec::new();
 
         let mut alias_map = HashMap::new();
-        let mut path_index = 0;
         let mut optional_paths = HashSet::new();
 
-        for mc in &query_part.match_clauses {
+        for (path_index, mc) in query_part.match_clauses.iter().enumerate() {
             if mc.optional {
                 optional_paths.insert(path_index);
             }
@@ -93,7 +92,6 @@ impl MatchPath {
 
                 prev_slot_num = node_slot_num;
             }
-            path_index += 1;
         }
 
         Ok(MatchPath {

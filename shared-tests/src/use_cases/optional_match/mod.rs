@@ -63,7 +63,6 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        println!("Result - Add i1: {:?}", result);
         assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
               "amount" => VariableValue::from(json!(100.0)),
@@ -95,7 +94,6 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 0);
-        println!("Result - Add r1: {:?}", result);
     }
 
     //Add payment 1
@@ -119,7 +117,6 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        println!("Result - Add p1: {:?}", result);
         assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
               "amount" => VariableValue::from(json!(100.0)),
@@ -156,7 +153,6 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 0);
-        println!("Result - Add r2: {:?}", result);
     }
 
     //Add payment 2
@@ -180,7 +176,6 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        println!("Result - Add p2: {:?}", result);
         assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
               "amount" => VariableValue::from(json!(100.0)),
@@ -216,7 +211,6 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        println!("Result - Update p2: {:?}", result);
         assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
               "amount" => VariableValue::from(json!(100.0)),
@@ -246,7 +240,6 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        println!("Result - delete p2: {:?}", result);
         assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
               "amount" => VariableValue::from(json!(100.0)),
@@ -290,7 +283,6 @@ pub async fn optional_match_aggregating(config: &(impl QueryTestConfig + Send)) 
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        println!("Result - Add i1: {:?}", result);
         assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec!["id".to_string(), "amount".to_string()],
             default_before: true,
@@ -333,7 +325,6 @@ pub async fn optional_match_aggregating(config: &(impl QueryTestConfig + Send)) 
             .await
             .unwrap();
         assert_eq!(result.len(), 0);
-        println!("Result - Add r1: {:?}", result);
     }
 
     //Add payment 1
@@ -357,7 +348,6 @@ pub async fn optional_match_aggregating(config: &(impl QueryTestConfig + Send)) 
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        println!("Result - Add p1: {:?}", result);
         assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec!["id".to_string(), "amount".to_string()],
             default_before: false,
@@ -400,7 +390,6 @@ pub async fn optional_match_aggregating(config: &(impl QueryTestConfig + Send)) 
             .await
             .unwrap();
         assert_eq!(result.len(), 0);
-        println!("Result - Add r2: {:?}", result);
     }
 
     //Add payment 2
@@ -424,7 +413,6 @@ pub async fn optional_match_aggregating(config: &(impl QueryTestConfig + Send)) 
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        println!("Result - Add p2: {:?}", result);
         assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec!["id".to_string(), "amount".to_string()],
             default_before: false,
@@ -473,7 +461,6 @@ pub async fn multi_optional_match(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        println!("Result - Add c1: {:?}", result);
         assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
                 "customer_id" => VariableValue::from(json!("c1")),
@@ -505,7 +492,6 @@ pub async fn multi_optional_match(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 0);
-        println!("Result - Add h1: {:?}", result);
     }
 
     //Add invoice 1
@@ -528,8 +514,7 @@ pub async fn multi_optional_match(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        //assert_eq!(result.len(), 1);
-        println!("Result - Add i1: {:?}", result);
+        assert_eq!(result.len(), 1);
         assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
                 "customer_id" => VariableValue::from(json!("c1")),
@@ -566,7 +551,6 @@ pub async fn multi_optional_match(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 0);
-        println!("Result - Add r1: {:?}", result);
     }
 
     //Add payment 1
@@ -590,7 +574,6 @@ pub async fn multi_optional_match(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        println!("Result - Add p1: {:?}", result);
         assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
                 "customer_id" => VariableValue::from(json!("c1")),

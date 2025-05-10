@@ -119,7 +119,7 @@ impl MatchPathSolution {
             result.mark_slot_solved(*slot_num, None);
         }
 
-        return Some(result);
+        Some(result)
     }
 
     #[allow(clippy::explicit_counter_loop)]
