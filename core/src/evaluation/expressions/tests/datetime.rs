@@ -1658,7 +1658,10 @@ async fn test_zoned_datetime_truncate() {
         NaiveDateTime::and_local_timezone(&naive_date_time, FixedOffset::east_opt(3600).unwrap())
             .unwrap();
     assert_eq!(*result.datetime(), date_time);
-    assert_eq!(*result.timezone_name(), Some("Europe/Stockholm".to_string()));
+    assert_eq!(
+        *result.timezone_name(),
+        Some("Europe/Stockholm".to_string())
+    );
 
     let expr = "datetime.truncate('year', $param1, {day: 5})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();

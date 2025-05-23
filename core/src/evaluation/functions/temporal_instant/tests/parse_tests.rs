@@ -37,18 +37,13 @@ async fn test_parse_date() {
     let context =
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
-    let args = vec![
-        VariableValue::String("2025-01-01".to_string()),
-    ];
-    let result = subject
-        .call(&context, &get_func_expr(), args.clone())
-        .await;
+    let args = vec![VariableValue::String("2025-01-01".to_string())];
+    let result = subject.call(&context, &get_func_expr(), args.clone()).await;
     assert_eq!(
         result.unwrap(),
         VariableValue::Date(NaiveDate::from_ymd_opt(2025, 1, 1).unwrap())
     );
 }
-
 
 #[tokio::test]
 async fn test_parse_zoned_datetime() {
@@ -58,10 +53,14 @@ async fn test_parse_zoned_datetime() {
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
     let result = subject
-        .call(&context, &get_func_expr(), vec![
-        //VariableValue::String("2025-01-01T12:00:00".to_string()),
-        VariableValue::String("2015-07-21T21:40:32.142+01:00".to_string()),
-    ])
+        .call(
+            &context,
+            &get_func_expr(),
+            vec![
+                //VariableValue::String("2025-01-01T12:00:00".to_string()),
+                VariableValue::String("2015-07-21T21:40:32.142+01:00".to_string()),
+            ],
+        )
         .await;
 
     assert_eq!(
@@ -73,9 +72,11 @@ async fn test_parse_zoned_datetime() {
     );
 
     let result = subject
-        .call(&context, &get_func_expr(), vec![
-        VariableValue::String("2025-01-01T12:00:00Z".to_string()),        
-    ])
+        .call(
+            &context,
+            &get_func_expr(),
+            vec![VariableValue::String("2025-01-01T12:00:00Z".to_string())],
+        )
         .await;
     assert_eq!(
         result.unwrap(),
@@ -86,9 +87,11 @@ async fn test_parse_zoned_datetime() {
     );
 
     let result = subject
-        .call(&context, &get_func_expr(), vec![
-        VariableValue::String("2025-01-01T12:00Z".to_string()),        
-    ])
+        .call(
+            &context,
+            &get_func_expr(),
+            vec![VariableValue::String("2025-01-01T12:00Z".to_string())],
+        )
         .await;
     assert_eq!(
         result.unwrap(),

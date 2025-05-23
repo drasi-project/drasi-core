@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::evaluation::{temporal_constants::{self, UTC_FIXED_OFFSET}, EvaluationError};
+use crate::evaluation::{
+    temporal_constants::{self, UTC_FIXED_OFFSET},
+    EvaluationError,
+};
 use chrono::{DateTime, FixedOffset, TimeZone};
 use chrono_tz::Tz;
 use core::fmt::{self, Display};
@@ -27,7 +30,10 @@ pub struct ZonedDateTime {
 
 impl ZonedDateTime {
     pub fn new(datetime: DateTime<FixedOffset>, timezone_name: Option<String>) -> Self {
-        ZonedDateTime { datetime, timezone_name }
+        ZonedDateTime {
+            datetime,
+            timezone_name,
+        }
     }
 
     pub fn from_epoch_millis(epoch_millis: i64) -> Self {
@@ -39,14 +45,15 @@ impl ZonedDateTime {
         }
     }
 
-    pub fn from_string(input : &str) -> Result<Self, EvaluationError> {
+    pub fn from_string(input: &str) -> Result<Self, EvaluationError> {
         if let Some(bracket_pos) = input.find('[') {
             let base_str = &input[..bracket_pos];
             let end_bracket = match input.find(']') {
                 Some(pos) => pos,
                 None => {
                     return Err(EvaluationError::FormatError {
-                        expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR.to_string(),
+                        expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR
+                            .to_string(),
                     })
                 }
             };
@@ -55,37 +62,53 @@ impl ZonedDateTime {
                 Some(tz) => tz,
                 None => {
                     return Err(EvaluationError::FormatError {
-                        expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR.to_string(),
+                        expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR
+                            .to_string(),
                     })
                 }
             };
 
-            let base_dt = match time::PrimitiveDateTime::parse(base_str, &time::format_description::well_known::Iso8601::DEFAULT) {
+            let base_dt = match time::PrimitiveDateTime::parse(
+                base_str,
+                &time::format_description::well_known::Iso8601::DEFAULT,
+            ) {
                 Ok(dt) => {
-                    DateTime::from_timestamp_nanos(dt.assume_utc().unix_timestamp_nanos() as i64).naive_utc()
-                },
+                    DateTime::from_timestamp_nanos(dt.assume_utc().unix_timestamp_nanos() as i64)
+                        .naive_utc()
+                }
                 Err(e) => {
                     return Err(EvaluationError::FormatError {
                         expected: e.to_string(),
                     })
                 }
             };
-            
+
             let dt2 = match tz.from_local_datetime(&base_dt) {
                 chrono::offset::LocalResult::Single(d) => d,
                 chrono::offset::LocalResult::Ambiguous(d1, _) => d1,
                 chrono::offset::LocalResult::None => {
                     return Err(EvaluationError::FormatError {
-                        expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR.to_string(),
+                        expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR
+                            .to_string(),
                     })
                 }
-            };            
-            
-            return Ok(ZonedDateTime::new(dt2.fixed_offset(), Some(tz.name().to_string())));
+            };
+
+            return Ok(ZonedDateTime::new(
+                dt2.fixed_offset(),
+                Some(tz.name().to_string()),
+            ));
         }
-        
-        match time::OffsetDateTime::parse(input, &time::format_description::well_known::Iso8601::DEFAULT) {
-            Ok(dt) => return Ok(Self::from_epoch_millis((dt.unix_timestamp_nanos() / 1_000_000) as i64)),
+
+        match time::OffsetDateTime::parse(
+            input,
+            &time::format_description::well_known::Iso8601::DEFAULT,
+        ) {
+            Ok(dt) => {
+                return Ok(Self::from_epoch_millis(
+                    (dt.unix_timestamp_nanos() / 1_000_000) as i64,
+                ))
+            }
             Err(e) => {
                 return Err(EvaluationError::FormatError {
                     expected: e.to_string(),
@@ -108,7 +131,6 @@ impl Display for ZonedDateTime {
         self.datetime.fmt(formatter)
     }
 }
-
 
 fn extract_iana_timezone(input: &str) -> Option<Tz> {
     let timezone_str = input.replace(' ', "_").replace(['[', ']'], "");

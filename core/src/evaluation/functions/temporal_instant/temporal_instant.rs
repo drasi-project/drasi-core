@@ -106,7 +106,7 @@ impl ScalarFunction for Date {
             _ => Err(FunctionError {
                 function_name: expression.name.to_string(),
                 error: FunctionEvaluationError::InvalidArgument(0),
-            }),            
+            }),
         }
     }
 }
