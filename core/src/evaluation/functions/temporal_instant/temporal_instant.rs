@@ -102,10 +102,11 @@ impl ScalarFunction for Date {
                 }
             }
             VariableValue::Date(d) => Ok(VariableValue::Date(*d)),
+            VariableValue::Null => Ok(VariableValue::Null),
             _ => Err(FunctionError {
                 function_name: expression.name.to_string(),
                 error: FunctionEvaluationError::InvalidArgument(0),
-            }),
+            }),            
         }
     }
 }
@@ -178,6 +179,7 @@ impl ScalarFunction for LocalTime {
                 }
             }
             VariableValue::LocalTime(t) => Ok(VariableValue::LocalTime(*t)),
+            VariableValue::Null => Ok(VariableValue::Null),
             _ => Err(FunctionError {
                 function_name: expression.name.to_string(),
                 error: FunctionEvaluationError::InvalidArgument(0),
@@ -416,7 +418,7 @@ impl ScalarFunction for Time {
                             VariableValue::String(s) => s.as_str(),
                             _ => "UTC",
                         };
-                        match handle_iana_timezone(tz_str).await {
+                        match handle_iana_timezone(tz_str) {
                             Some(tz) => tz,
                             None => {
                                 return Err(FunctionError {
@@ -509,6 +511,7 @@ impl ScalarFunction for Time {
                 }
             }
             VariableValue::ZonedTime(t) => Ok(VariableValue::ZonedTime(*t)),
+            VariableValue::Null => Ok(VariableValue::Null),
             _ => Err(FunctionError {
                 function_name: expression.name.to_string(),
                 error: FunctionEvaluationError::InvalidArgument(0),
@@ -545,7 +548,7 @@ impl ScalarFunction for DateTime {
         match &args[0] {
             VariableValue::String(s) => {
                 let time_str = s.as_str();
-                let time = parse_zoned_date_time_input(time_str).await;
+                let time = ZonedDateTime::from_string(time_str);
                 match time {
                     Ok(result_time) => Ok(VariableValue::ZonedDateTime(result_time)),
                     _ => Err(FunctionError {
@@ -621,7 +624,7 @@ impl ScalarFunction for DateTime {
                                     },
                                 }),
                             };
-                            match handle_iana_timezone(tz_str).await {
+                            match handle_iana_timezone(tz_str) {
                                 Some(tz) => tz,
                                 None => return Err(FunctionError {
                                     function_name: expression.name.to_string(),
@@ -749,6 +752,7 @@ impl ScalarFunction for DateTime {
                 }
             }
             VariableValue::ZonedDateTime(t) => Ok(VariableValue::ZonedDateTime(t.clone())),
+            VariableValue::Null => Ok(VariableValue::Null),
             _ => Err(FunctionError {
                 function_name: expression.name.to_string(),
                 error: FunctionEvaluationError::InvalidArgument(0),
@@ -1135,7 +1139,7 @@ impl ScalarFunction for Truncate {
             }
             (VariableValue::String(s), VariableValue::ZonedDateTime(dt), None) => {
                 let datetime = *dt.datetime();
-                let timezone = dt.timezone().clone();
+                let timezone = dt.timezone_name().clone();
                 let naive_date = datetime.date_naive();
                 let naive_time = datetime.time();
                 let offset = datetime.offset();
@@ -1181,7 +1185,7 @@ impl ScalarFunction for Truncate {
                 Some(VariableValue::Object(m)),
             ) => {
                 let datetime = *dt.datetime();
-                let timezone = dt.timezone().clone();
+                let timezone = dt.timezone_name().clone();
                 let naive_date = datetime.date_naive();
                 let naive_time = datetime.time();
                 let offset = datetime.offset();
@@ -1225,7 +1229,7 @@ impl ScalarFunction for Truncate {
                                     },
                                 }),
                             };
-                            match handle_iana_timezone(tz_str).await {
+                            match handle_iana_timezone(tz_str) {
                                 Some(tz) => tz,
                                 None => return Err(FunctionError {
                                     function_name: expression.name.to_string(),
@@ -1349,7 +1353,7 @@ impl ScalarFunction for ClockFunction {
         };
 
         if args.is_empty() {
-            let zdt = ZonedDateTime::from_epoch_millis(timestamp);
+            let zdt = ZonedDateTime::from_epoch_millis(timestamp as i64);
             return Ok(match self.result {
                 ClockResult::Date => VariableValue::Date(zdt.datetime().date_naive()),
                 ClockResult::LocalTime => VariableValue::LocalTime(zdt.datetime().time()),
@@ -1372,7 +1376,7 @@ impl ScalarFunction for ClockFunction {
                     })
                 }
             };
-            let tz = match handle_iana_timezone(timezone_string).await {
+            let tz = match handle_iana_timezone(timezone_string) {
                 Some(tz) => tz,
                 None => {
                     return Err(FunctionError {
@@ -1976,7 +1980,7 @@ async fn truncate_local_time_with_map(
     Ok(truncated_time)
 }
 
-async fn handle_iana_timezone(input: &str) -> Option<Tz> {
+fn handle_iana_timezone(input: &str) -> Option<Tz> {
     let timezone_str = input.replace(' ', "_").replace(['[', ']'], "");
     if timezone_str == "Z" || timezone_str.contains('+') || timezone_str.contains('-') {
         return Some(Tz::UTC);
@@ -2311,108 +2315,4 @@ async fn extract_timezone(input: &str) -> Option<&str> {
     } else {
         None
     }
-}
-
-async fn parse_zoned_date_time_input(
-    input: &str,
-) -> Result<ZonedDateTime, FunctionEvaluationError> {
-    let is_utc = input.contains('Z');
-
-    let date_part = match input.split('T').next() {
-        Some(date) => date.replace('-', ""),
-        None => {
-            return Err(FunctionEvaluationError::InvalidFormat {
-                expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR.to_string(),
-            })
-        }
-    };
-    let date_string = date_part.as_str();
-
-    let timezone_part = match input.split('T').last() {
-        Some(timezone) => timezone.replace(':', ""),
-        None => {
-            return Err(FunctionEvaluationError::InvalidFormat {
-                expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR.to_string(),
-            })
-        }
-    };
-    let timezone_string = timezone_part.as_str();
-
-    let time_string = match timezone_string.split(['[', 'Z', '+', '-']).next() {
-        Some(time) => time,
-        None => {
-            return Err(FunctionEvaluationError::InvalidFormat {
-                expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR.to_string(),
-            })
-        }
-    };
-    let timezone = match extract_timezone(timezone_string).await {
-        Some(tz) => tz,
-        None => {
-            return Err(FunctionEvaluationError::InvalidFormat {
-                expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR.to_string(),
-            })
-        }
-    };
-
-    let naive_date = parse_date_string(date_string).await?;
-    let naive_time = parse_local_time_input(time_string).await?;
-
-    let naive_date_time = NaiveDateTime::new(naive_date, naive_time);
-    if is_utc {
-        let date_time = match NaiveDateTime::and_local_timezone(
-            &naive_date_time,
-            *temporal_constants::UTC_FIXED_OFFSET,
-        ) {
-            LocalResult::Single(dt) => dt,
-            _ => {
-                return Err(FunctionEvaluationError::InvalidFormat {
-                    expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR.to_string(),
-                })
-            }
-        };
-        let zoned_date_time = ZonedDateTime::new(date_time, None);
-        return Ok(zoned_date_time);
-    }
-
-    if timezone.contains('[') && timezone.contains(']') {
-        let tz = match handle_iana_timezone(timezone).await {
-            Some(t) => t,
-            _err => {
-                return Err(FunctionEvaluationError::InvalidFormat {
-                    expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR.to_string(),
-                })
-            }
-        };
-        let date_time = match NaiveDateTime::and_local_timezone(&naive_date_time, tz) {
-            LocalResult::Single(dt) => dt,
-            _ => {
-                return Err(FunctionEvaluationError::InvalidFormat {
-                    expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR.to_string(),
-                })
-            }
-        };
-        let date_time_offset = date_time.fixed_offset();
-        let zoned_date_time = ZonedDateTime::new(date_time_offset, Some(timezone.to_string()));
-        return Ok(zoned_date_time);
-    }
-
-    let offset = match FixedOffset::from_str(timezone) {
-        Ok(o) => o,
-        Err(_) => {
-            return Err(FunctionEvaluationError::InvalidFormat {
-                expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR.to_string(),
-            });
-        }
-    };
-    let date_time = match NaiveDateTime::and_local_timezone(&naive_date_time, offset) {
-        LocalResult::Single(dt) => dt,
-        _ => {
-            return Err(FunctionEvaluationError::InvalidFormat {
-                expected: temporal_constants::INVALID_ZONED_DATETIME_FORMAT_ERROR.to_string(),
-            })
-        }
-    };
-    let zoned_date_time = ZonedDateTime::new(date_time, None);
-    Ok(zoned_date_time)
 }

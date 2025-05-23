@@ -355,7 +355,7 @@ async fn evaluate_zoned_date_time_yy_mm_dd_timezone() {
         let date_time =
             NaiveDateTime::and_local_timezone(&naive_date_time, FixedOffset::east_opt(0).unwrap())
                 .unwrap();
-        let zoned_date_time = ZonedDateTime::new(date_time, Some("[America/New_York]".to_string()));
+        let zoned_date_time = ZonedDateTime::new(date_time, Some("America/New_York".to_string()));
         assert_eq!(
             evaluator
                 .evaluate_expression(&context, &expr)
@@ -386,7 +386,7 @@ async fn evaluate_zoned_date_time_yy_ww_dd_timezone() {
         let date_time =
             NaiveDateTime::and_local_timezone(&naive_date_time, FixedOffset::east_opt(0).unwrap())
                 .unwrap();
-        let zoned_date_time = ZonedDateTime::new(date_time, Some("[Europe/London]".to_string()));
+        let zoned_date_time = ZonedDateTime::new(date_time, Some("Europe/London".to_string()));
         assert_eq!(
             evaluator
                 .evaluate_expression(&context, &expr)
@@ -445,7 +445,7 @@ async fn evaluate_zoned_date_time_yy_ww_dd_timezone_with_frac() {
         let date_time =
             NaiveDateTime::and_local_timezone(&naive_date_time, FixedOffset::east_opt(0).unwrap())
                 .unwrap();
-        let zoned_date_time = ZonedDateTime::new(date_time, Some("[Europe/London]".to_string()));
+        let zoned_date_time = ZonedDateTime::new(date_time, Some("Europe/London".to_string()));
         assert_eq!(
             evaluator
                 .evaluate_expression(&context, &expr)
@@ -1658,7 +1658,7 @@ async fn test_zoned_datetime_truncate() {
         NaiveDateTime::and_local_timezone(&naive_date_time, FixedOffset::east_opt(3600).unwrap())
             .unwrap();
     assert_eq!(*result.datetime(), date_time);
-    assert_eq!(*result.timezone(), Some("Europe/Stockholm".to_string()));
+    assert_eq!(*result.timezone_name(), Some("Europe/Stockholm".to_string()));
 
     let expr = "datetime.truncate('year', $param1, {day: 5})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();

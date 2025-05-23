@@ -49,6 +49,7 @@ pub enum EvaluationError {
     CorruptData,
     InvalidArgument,
     UnknownProperty { property_name: String },
+    FormatError { expected: String },
 }
 
 #[derive(Debug)]

@@ -1246,7 +1246,7 @@ impl ExpressionEvaluator {
                         .map_or(VariableValue::Null, |new_zdt| {
                             VariableValue::ZonedDateTime(ZonedDateTime::new(
                                 new_zdt,
-                                zdt.timezone().clone(),
+                                zdt.timezone_name().clone(),
                             ))
                         }),
                     (VariableValue::Duration(duration1), VariableValue::Duration(duration2)) => {
@@ -1305,7 +1305,7 @@ impl ExpressionEvaluator {
                         .map_or(VariableValue::Null, |new_zdt| {
                             VariableValue::ZonedDateTime(ZonedDateTime::new(
                                 new_zdt,
-                                zdt.timezone().clone(),
+                                zdt.timezone_name().clone(),
                             ))
                         }),
                     (VariableValue::Duration(duration1), VariableValue::Duration(duration2)) => {
@@ -2072,7 +2072,7 @@ async fn get_datetime_property(zoned_datetime: ZonedDateTime, property: String) 
     let date = datetime.date_naive();
     let time = datetime.time();
     let offset = datetime.offset();
-    let timezone = zoned_datetime.timezone();
+    let timezone = zoned_datetime.timezone_name();
 
     match property.as_str() {
         "year" => Some(date.year().to_string()),

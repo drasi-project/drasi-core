@@ -18,3 +18,6 @@ mod truncate_datetime_tests;
 mod truncate_localdatetime_tests;
 mod truncate_localtime_tests;
 mod truncate_time_tests;
+mod parse_tests;
+
+
