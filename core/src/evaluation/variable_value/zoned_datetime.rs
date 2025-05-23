@@ -105,16 +105,16 @@ impl ZonedDateTime {
             &time::format_description::well_known::Iso8601::DEFAULT,
         ) {
             Ok(dt) => {
-                return Ok(Self::from_epoch_millis(
+                Ok(Self::from_epoch_millis(
                     (dt.unix_timestamp_nanos() / 1_000_000) as i64,
                 ))
             }
             Err(e) => {
-                return Err(EvaluationError::FormatError {
+                Err(EvaluationError::FormatError {
                     expected: e.to_string(),
                 })
             }
-        };
+        }
     }
 
     pub fn datetime(&self) -> &DateTime<FixedOffset> {
