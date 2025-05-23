@@ -84,7 +84,7 @@ impl ScalarFunction for ChangeDateTime {
         }
         match &args[0] {
             VariableValue::Element(e) => Ok(VariableValue::ZonedDateTime(
-                ZonedDateTime::from_epoch_millis(e.get_effective_from()),
+                ZonedDateTime::from_epoch_millis(e.get_effective_from() as i64),
             )),
             _ => Err(FunctionError {
                 function_name: expression.name.to_string(),

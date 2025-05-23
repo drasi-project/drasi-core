@@ -130,7 +130,7 @@ pub async fn not_reported(config: &(impl QueryTestConfig + Send)) {
             after: variablemap!(
                 "equipment" => VariableValue::String("Turbine 1".into()),
                 "sensor" => VariableValue::String("Temp".into()),
-                "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(time0))
+                "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(time0 as i64))
             ),
         }));
 
@@ -138,7 +138,7 @@ pub async fn not_reported(config: &(impl QueryTestConfig + Send)) {
             after: variablemap!(
                 "equipment" => VariableValue::String("Turbine 2".into()),
                 "sensor" => VariableValue::String("Temp".into()),
-                "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(time0))
+                "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(time0 as i64))
             ),
         }));
 
@@ -146,7 +146,7 @@ pub async fn not_reported(config: &(impl QueryTestConfig + Send)) {
             after: variablemap!(
                 "equipment" => VariableValue::String("Turbine 2".into()),
                 "sensor" => VariableValue::String("RPM".into()),
-                "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(time0))
+                "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(time0 as i64))
             ),
         }));
     }
@@ -189,7 +189,7 @@ pub async fn not_reported(config: &(impl QueryTestConfig + Send)) {
             before: variablemap!(
                 "equipment" => VariableValue::String("Turbine 2".into()),
                 "sensor" => VariableValue::String("RPM".into()),
-                "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(init_time.and_utc().timestamp_millis() as u64))
+                "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(init_time.and_utc().timestamp_millis()))
             ),
         }));
     }
@@ -205,7 +205,7 @@ pub async fn not_reported(config: &(impl QueryTestConfig + Send)) {
             after: variablemap!(
                 "equipment" => VariableValue::String("Turbine 1".into()),
                 "sensor" => VariableValue::String("RPM".into()),
-                "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(time1))
+                "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(time1 as i64))
             ),
         }));
     }
