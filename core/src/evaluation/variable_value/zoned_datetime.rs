@@ -104,16 +104,12 @@ impl ZonedDateTime {
             input,
             &time::format_description::well_known::Iso8601::DEFAULT,
         ) {
-            Ok(dt) => {
-                Ok(Self::from_epoch_millis(
-                    (dt.unix_timestamp_nanos() / 1_000_000) as i64,
-                ))
-            }
-            Err(e) => {
-                Err(EvaluationError::FormatError {
-                    expected: e.to_string(),
-                })
-            }
+            Ok(dt) => Ok(Self::from_epoch_millis(
+                (dt.unix_timestamp_nanos() / 1_000_000) as i64,
+            )),
+            Err(e) => Err(EvaluationError::FormatError {
+                expected: e.to_string(),
+            }),
         }
     }
 
