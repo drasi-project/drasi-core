@@ -38,8 +38,8 @@ pub const INVALID_LOCAL_DATETIME_FORMAT_ERROR: &str = "A valid string representa
 pub const INVALID_ZONED_TIME_FORMAT_ERROR: &str = "A valid string representation of a zoned time or a map of zoned time components. \n\
                                 Examples include: time('214032.142Z'), time('21:40:32+01:00'), time('214032-0100'), time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'})";
 
-pub const INVALID_ZONED_DATETIME_FORMAT_ERROR: &str = "A valid string representation of a zoned datetime or a map of zoned datetime components.\n\
-                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+0100'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})";
+pub const INVALID_ZONED_DATETIME_FORMAT_ERROR: &str = "A valid string representation of an RFC 3339 datetime or a map of zoned datetime components.\n\
+                                Examples include: datetime('20150721T21:40-01:30'), datetime('2015-07-21T21:40:32.142+01:00'), datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'})";
 
 pub const INVALID_LOCAL_TIME_FORMAT_ERROR: &str = "A valid string representation of a local time or a map of local time components.\n\
                                 Examples include: localtime('21:40:32.142'), localtime('214032.142'), localtime({hour: 12, minute: 31, second: 14, nanosecond: 789, millisecond: 123, microsecond: 456})";
