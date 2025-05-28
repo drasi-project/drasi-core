@@ -15,10 +15,11 @@
 use hashers::jenkins::spooky_hash::SpookyHasher;
 
 use crate::evaluation::context::QueryVariables;
+use crate::evaluation::variable_value::VariableValue;
 
 use std::hash::{Hash, Hasher};
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use crate::models::Element;
 
@@ -32,15 +33,16 @@ pub(crate) type SolutionSignature = u64;
 
 #[derive(Clone, Debug)]
 pub struct MatchPathSolution {
-    pub(crate) solved_slots: BTreeMap<usize, Arc<Element>>,
+    pub(crate) solved_slots: BTreeMap<usize, Option<Arc<Element>>>,
     pub(crate) total_slots: usize,
     pub(crate) queued_slots: Vec<bool>,
-    pub(crate) slot_cursors: VecDeque<(usize, Arc<Element>)>,
+    pub(crate) slot_cursors: VecDeque<(usize, Option<Arc<Element>>)>,
     pub(crate) solution_signature: Option<SolutionSignature>,
+    pub(crate) anchor_slot: usize,
 }
 
 impl MatchPathSolution {
-    pub fn new(total_slots: usize) -> Self {
+    pub fn new(total_slots: usize, anchor_slot: usize) -> Self {
         let mut queued_slots = Vec::new();
         queued_slots.resize(total_slots, false);
 
@@ -50,24 +52,31 @@ impl MatchPathSolution {
             queued_slots,
             slot_cursors: VecDeque::new(),
             solution_signature: None,
+            anchor_slot,
         }
     }
 
-    pub fn mark_slot_solved(&mut self, slot_num: usize, value: Arc<Element>) {
+    pub fn mark_slot_solved(&mut self, slot_num: usize, value: Option<Arc<Element>>) {
         self.solved_slots.insert(slot_num, value);
+
         if self.solved_slots.len() == self.total_slots {
             let mut hasher = SpookyHasher::default();
             for (slot_num, value) in &self.solved_slots {
                 slot_num.hash(&mut hasher);
-                let elem_ref = value.get_reference();
-                elem_ref.source_id.hash(&mut hasher);
-                elem_ref.element_id.hash(&mut hasher);
+                match value {
+                    Some(value) => {
+                        let elem_ref = value.get_reference();
+                        elem_ref.source_id.hash(&mut hasher);
+                        elem_ref.element_id.hash(&mut hasher);
+                    }
+                    None => 0.hash(&mut hasher),
+                }
             }
             self.solution_signature = Some(hasher.finish());
         }
     }
 
-    pub fn enqueue_slot(&mut self, slot_num: usize, value: Arc<Element>) {
+    pub fn enqueue_slot(&mut self, slot_num: usize, value: Option<Arc<Element>>) {
         if !self.queued_slots[slot_num] {
             self.slot_cursors.push_back((slot_num, value));
             self.queued_slots[slot_num] = true;
@@ -80,6 +89,37 @@ impl MatchPathSolution {
 
     pub fn get_solution_signature(&self) -> Option<SolutionSignature> {
         self.solution_signature
+    }
+
+    pub fn get_empty_optional_solution(&self, match_path: &MatchPath) -> Option<MatchPathSolution> {
+        if !match_path.slots[self.anchor_slot].optional {
+            return None;
+        }
+
+        if self.solved_slots.len() != self.total_slots {
+            return None;
+        }
+
+        let empty_slots = self
+            .solved_slots
+            .iter()
+            .filter(|(_, value)| value.is_none())
+            .map(|(slot_num, _)| *slot_num)
+            .collect::<HashSet<_>>();
+
+        let opt_slots =
+            match_path.get_optional_slots_on_common_paths(self.anchor_slot, empty_slots);
+
+        let mut result = self.clone();
+        for slot_num in &opt_slots {
+            result.solved_slots.remove(slot_num);
+        }
+        result.solution_signature = None;
+        for slot_num in &opt_slots {
+            result.mark_slot_solved(*slot_num, None);
+        }
+
+        Some(result)
     }
 
     #[allow(clippy::explicit_counter_loop)]
@@ -96,7 +136,10 @@ impl MatchPathSolution {
                     if let Some(annotation) = &slot.spec.annotation {
                         result.insert(
                             annotation.to_string().into_boxed_str(),
-                            element.to_expression_variable(),
+                            match element {
+                                Some(element) => element.to_expression_variable(),
+                                None => VariableValue::Null,
+                            },
                         );
                     }
                 }
