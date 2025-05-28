@@ -17,7 +17,7 @@ pub mod match_path;
 pub mod solution;
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -74,8 +74,8 @@ impl MatchPathSolver {
         anchor_slot: usize,
     ) -> Result<HashMap<u64, solution::MatchPathSolution>, EvaluationError> {
         let total_slots = path.slots.len();
-        let mut start_solution = MatchPathSolution::new(total_slots);
-        start_solution.enqueue_slot(anchor_slot, anchor_element);
+        let mut start_solution = MatchPathSolution::new(total_slots, anchor_slot);
+        start_solution.enqueue_slot(anchor_slot, Some(anchor_element));
 
         let sol_stream =
             create_solution_stream(start_solution, path.clone(), self.element_index.clone()).await;
@@ -201,30 +201,40 @@ async fn try_complete_solution(
             if solution.is_slot_solved(*out_slot) {
                 continue;
             }
-            let mut adjacent_stream = match get_adjacent_elements(
-                element_index.clone(),
-                element.clone(),
-                *out_slot,
-                SolveDirection::Outward,
-            )
-            .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    cmd_tx.send(SolutionStreamCommand::Error(e.into())).unwrap();
-                    return;
-                }
-            };
-            let adjacent_elements = alt_by_slot.entry(*out_slot).or_insert_with(Vec::new);
 
-            while let Some(adjacent_element) = adjacent_stream.next().await {
-                match adjacent_element {
-                    Ok(adjacent_element) => adjacent_elements.push(adjacent_element),
+            let adjacent_elements = alt_by_slot.entry(*out_slot).or_insert_with(Vec::new);
+            let mut found_adjacent = false;
+
+            if let Some(element) = &element {
+                let mut adjacent_stream = match get_adjacent_elements(
+                    element_index.clone(),
+                    element.clone(),
+                    *out_slot,
+                    SolveDirection::Outward,
+                )
+                .await
+                {
+                    Ok(s) => s,
                     Err(e) => {
                         cmd_tx.send(SolutionStreamCommand::Error(e.into())).unwrap();
                         return;
                     }
+                };
+
+                while let Some(adjacent_element) = adjacent_stream.next().await {
+                    found_adjacent = true;
+                    match adjacent_element {
+                        Ok(adjacent_element) => adjacent_elements.push(Some(adjacent_element)),
+                        Err(e) => {
+                            cmd_tx.send(SolutionStreamCommand::Error(e.into())).unwrap();
+                            return;
+                        }
+                    }
                 }
+            }
+
+            if path.slots[*out_slot].optional && !found_adjacent {
+                adjacent_elements.push(None);
             }
         }
 
@@ -233,30 +243,39 @@ async fn try_complete_solution(
                 continue;
             }
 
-            let mut adjacent_stream = match get_adjacent_elements(
-                element_index.clone(),
-                element.clone(),
-                *in_slot,
-                SolveDirection::Inward,
-            )
-            .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    cmd_tx.send(SolutionStreamCommand::Error(e.into())).unwrap();
-                    return;
-                }
-            };
             let adjacent_elements = alt_by_slot.entry(*in_slot).or_insert_with(Vec::new);
+            let mut found_adjacent = false;
 
-            while let Some(adjacent_element) = adjacent_stream.next().await {
-                match adjacent_element {
-                    Ok(adjacent_element) => adjacent_elements.push(adjacent_element),
+            if let Some(element) = &element {
+                let mut adjacent_stream = match get_adjacent_elements(
+                    element_index.clone(),
+                    element.clone(),
+                    *in_slot,
+                    SolveDirection::Inward,
+                )
+                .await
+                {
+                    Ok(s) => s,
                     Err(e) => {
                         cmd_tx.send(SolutionStreamCommand::Error(e.into())).unwrap();
                         return;
                     }
+                };
+
+                while let Some(adjacent_element) = adjacent_stream.next().await {
+                    found_adjacent = true;
+                    match adjacent_element {
+                        Ok(adjacent_element) => adjacent_elements.push(Some(adjacent_element)),
+                        Err(e) => {
+                            cmd_tx.send(SolutionStreamCommand::Error(e.into())).unwrap();
+                            return;
+                        }
+                    }
                 }
+            }
+
+            if path.slots[*in_slot].optional && !found_adjacent {
+                adjacent_elements.push(None);
             }
         }
 
@@ -354,16 +373,22 @@ fn merge_node_match<'b>(
     mtch: &NodeMatch,
     slots: &'b mut Vec<match_path::MatchPathSlot>,
     alias_map: &'b mut HashMap<Arc<str>, usize>,
+    path_index: usize,
+    optional: bool,
 ) -> Result<usize, EvaluationError> {
     match &mtch.annotation.name {
         Some(alias) => {
             if let Some(slot_num) = alias_map.get(alias) {
+                slots[*slot_num].optional = optional && slots[*slot_num].optional;
+                slots[*slot_num].paths.insert(path_index);
                 Ok(*slot_num)
             } else {
                 slots.push(match_path::MatchPathSlot {
                     spec: match_path::SlotElementSpec::from_node_match(mtch),
                     in_slots: Vec::new(),
                     out_slots: Vec::new(),
+                    optional,
+                    paths: HashSet::from([path_index]),
                 });
                 alias_map.insert(alias.clone(), slots.len() - 1);
                 Ok(slots.len() - 1)
@@ -374,6 +399,8 @@ fn merge_node_match<'b>(
                 spec: match_path::SlotElementSpec::from_node_match(mtch),
                 in_slots: Vec::new(),
                 out_slots: Vec::new(),
+                optional,
+                paths: HashSet::from([path_index]),
             });
             Ok(slots.len() - 1)
         }
@@ -384,16 +411,22 @@ fn merge_relation_match<'b>(
     mtch: &RelationMatch,
     slots: &'b mut Vec<match_path::MatchPathSlot>,
     alias_map: &'b mut HashMap<Arc<str>, usize>,
+    path_index: usize,
+    optional: bool,
 ) -> Result<usize, EvaluationError> {
     match &mtch.annotation.name {
         Some(alias) => {
             if let Some(slot_num) = alias_map.get(alias) {
+                slots[*slot_num].optional = optional && slots[*slot_num].optional;
+                slots[*slot_num].paths.insert(path_index);
                 Ok(*slot_num)
             } else {
                 slots.push(match_path::MatchPathSlot {
                     spec: match_path::SlotElementSpec::from_relation_match(mtch),
                     in_slots: Vec::new(),
                     out_slots: Vec::new(),
+                    optional,
+                    paths: HashSet::from([path_index]),
                 });
                 alias_map.insert(alias.clone(), slots.len() - 1);
                 Ok(slots.len() - 1)
@@ -404,6 +437,8 @@ fn merge_relation_match<'b>(
                 spec: match_path::SlotElementSpec::from_relation_match(mtch),
                 in_slots: Vec::new(),
                 out_slots: Vec::new(),
+                optional,
+                paths: HashSet::from([path_index]),
             });
             Ok(slots.len() - 1)
         }

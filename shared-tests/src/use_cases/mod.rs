@@ -23,6 +23,7 @@ pub mod curbside_pickup;
 pub mod incident_alert;
 pub mod linear_regression;
 pub mod min_value;
+pub mod optional_match;
 pub mod overdue_invoice;
 pub mod remap;
 pub mod sensor_heartbeat;
