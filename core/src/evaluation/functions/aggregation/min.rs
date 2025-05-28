@@ -139,7 +139,7 @@ impl AggregatingFunction for Min {
                 accumulator.insert(value).await;
                 match accumulator.get_head().await {
                     Ok(Some(head)) => Ok(VariableValue::ZonedDateTime(
-                        ZonedDateTime::from_epoch_millis(head as u64),
+                        ZonedDateTime::from_epoch_millis(head as i64),
                     )),
                     Ok(None) => Ok(VariableValue::Null),
                     Err(e) => Err(FunctionError {
@@ -330,7 +330,7 @@ impl AggregatingFunction for Min {
                 accumulator.remove(value).await;
                 match accumulator.get_head().await {
                     Ok(Some(head)) => Ok(VariableValue::ZonedDateTime(
-                        ZonedDateTime::from_epoch_millis(head as u64),
+                        ZonedDateTime::from_epoch_millis(head as i64),
                     )),
                     Ok(None) => Ok(VariableValue::Null),
                     Err(e) => Err(FunctionError {
@@ -489,7 +489,7 @@ impl AggregatingFunction for Min {
             })),
             VariableValue::Integer(_) => Ok(VariableValue::Integer((value as i64).into())),
             VariableValue::ZonedDateTime(_) => Ok(VariableValue::ZonedDateTime(
-                ZonedDateTime::from_epoch_millis(value as u64),
+                ZonedDateTime::from_epoch_millis(value as i64),
             )),
             VariableValue::Duration(_) => Ok(VariableValue::Duration(Duration::new(
                 ChronoDuration::milliseconds(value as i64),
