@@ -25,6 +25,7 @@ pub mod decoder;
 pub mod incident_alert;
 pub mod linear_regression;
 pub mod min_value;
+pub mod optional_match;
 pub mod overdue_invoice;
 pub mod parse_json;
 pub mod promote;

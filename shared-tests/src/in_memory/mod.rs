@@ -360,6 +360,29 @@ mod unwind {
     }
 }
 
+mod optional_match {
+    use super::InMemoryQueryConfig;
+    use crate::use_cases::*;
+
+    #[tokio::test]
+    async fn optional_match() {
+        let test_config = InMemoryQueryConfig::new();
+        optional_match::optional_match(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn optional_match_aggregating() {
+        let test_config = InMemoryQueryConfig::new();
+        optional_match::optional_match_aggregating(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn multi_optional_match() {
+        let test_config = InMemoryQueryConfig::new();
+        optional_match::multi_optional_match(&test_config).await;
+    }
+}
+
 mod decoder {
     use super::InMemoryQueryConfig;
     use crate::use_cases::*;
