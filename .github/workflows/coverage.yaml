@@ -15,6 +15,9 @@
 name: Generate Rust Code Coverage
 
 on:
+  push:
+    branches:
+      - codecov-test
   pull_request:
     branches:
       - main
@@ -42,7 +45,7 @@ jobs:
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
 
       - name: Cache Cargo registry
-        uses: actions/cache@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9 # v4.0.2
+        uses: actions/cache@v4.2.2 # v4.0.2
         with:
           path: ~/.cargo/registry
           key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
@@ -50,7 +53,7 @@ jobs:
             ${{ runner.os }}-cargo-registry-
 
       - name: Cache Cargo index
-        uses: actions/cache@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9 # v4.0.2
+        uses: actions/cache@v4.2.2 # v4.0.2
         with:
           path: ~/.cargo/git
           key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
@@ -58,7 +61,7 @@ jobs:
             ${{ runner.os }}-cargo-index-
 
       - name: Cache Cargo build
-        uses: actions/cache@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9 # v4.0.2
+        uses: actions/cache@v4.2.2 # v4.0.2
         with:
           path: target
           key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
@@ -77,15 +80,8 @@ jobs:
           mv cobertura.xml drasi-core-tarpaulin-report.xml
           echo "Code coverage report generated"
 
-      - name: Code Coverage Report
-        uses: irongut/CodeCoverageSummary@v1.3.0
+      - name: Upload Code Coverage Report to Codecov
+        uses: codecov/codecov-action@v5
         with:
-          filename: drasi-core-tarpaulin-report.xml
-          badge: true
-          fail_below_min: true
-          format: markdown
-          indicators: true
-          output: both
-
-      - name: Write to Job Summary
-        run: cat code-coverage-results.md >> $GITHUB_STEP_SUMMARY
+          files: drasi-core-tarpaulin-report.xml
+          name: codecov-drasi-core

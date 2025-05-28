@@ -38,8 +38,7 @@ jobs:
           override: true
 
       - name: Install Clippy
-        run: rustup component add clippy
-
+        run: rustup component add clippy rustfmt
       - name: Run Cargo Clippy
         run: cargo clippy --all-targets --all-features
 
