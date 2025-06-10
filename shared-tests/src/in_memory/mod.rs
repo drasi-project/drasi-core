@@ -426,3 +426,85 @@ mod dapr_state_store {
         dapr_state_store::run_tests(&test_config).await;
     }
 }
+
+mod product_aggregation {
+    use super::InMemoryQueryConfig;
+    use crate::use_cases::*;
+
+    #[tokio::test]
+    async fn product_aggregation_test() {
+        let test_config = InMemoryQueryConfig::new();
+        product_aggregation::product_aggregation_test(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn simple_product_order_aggregation_test() {
+        let test_config = InMemoryQueryConfig::new();
+        product_aggregation::simple_product_order_aggregation_test(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn product_aggregation_alternative1_test() {
+        let test_config = InMemoryQueryConfig::new();
+        product_aggregation::product_aggregation_alternative1_test(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn product_aggregation_alternative2_test() {
+        let test_config = InMemoryQueryConfig::new();
+        product_aggregation::product_aggregation_alternative2_test(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn product_aggregation_alternative3_test() {
+        let test_config = InMemoryQueryConfig::new();
+        product_aggregation::product_aggregation_alternative3_test(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn test_collect_function() {
+        let test_config = InMemoryQueryConfig::new();
+        product_aggregation::test_collect::test_collect_function(&test_config).await;
+    }
+}
+
+mod collect_aggregation {
+    use super::InMemoryQueryConfig;
+    use crate::use_cases::*;
+
+    #[tokio::test]
+    async fn collect_based_aggregation_test() {
+        let test_config = InMemoryQueryConfig::new();
+        collect_aggregation::collect_based_aggregation_test(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn simple_aggregation_test() {
+        let test_config = InMemoryQueryConfig::new();
+        collect_aggregation::simple_aggregation_test(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn collect_with_filter() {
+        let test_config = InMemoryQueryConfig::new();
+        collect_aggregation::collect_with_filter_test(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn collect_objects() {
+        let test_config = InMemoryQueryConfig::new();
+        collect_aggregation::collect_objects_test(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn collect_mixed_types() {
+        let test_config = InMemoryQueryConfig::new();
+        collect_aggregation::collect_mixed_types_test(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn multiple_collects() {
+        let test_config = InMemoryQueryConfig::new();
+        collect_aggregation::multiple_collects_test(&test_config).await;
+    }
+}
