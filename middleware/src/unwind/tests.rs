@@ -550,6 +550,114 @@ mod process {
             }
         }));
     }
+
+    #[tokio::test]
+    pub async fn conditional_unwind_array() {
+        let factory = UnwindFactory::new();
+        let config = json!({
+            "Pod": [{
+                "selector": "$.status.containerStatuses[*]",
+                "label": "Container",
+                "key": "$.containerID",
+                "condition": "$[?(@.action == 'update')]"
+            }]
+        });
+
+        let element_index = Arc::new(InMemoryElementIndex::new());
+        let mw_config = SourceMiddlewareConfig {
+            name: "test".into(),
+            kind: "unwind".into(),
+            config: config.as_object().unwrap().clone(),
+        };
+
+        let subject = factory.create(&mw_config).unwrap();
+
+        let result = subject
+            .process(
+                SourceChange::Insert {
+                    element: Element::Node {
+                        metadata: ElementMetadata {
+                            reference: ElementReference::new("test", "p1"),
+                            labels: vec!["Pod".into()].into(),
+                            effective_from: 0,
+                        },
+                        properties: ElementPropertyMap::from(json!({
+                            "action": "update",
+                            "metadata": {
+                                "name": "pod-1",
+                                "namespace": "default",
+                                "labels": {
+                                    "app": "nginx",
+                                    "env": "prod"
+                                }
+                            },
+                            "status": {
+                                "containerStatuses": [
+                                    {
+                                        "containerID": "c1",
+                                        "name": "nginx"
+                                    },
+                                    {
+                                        "containerID": "c2",
+                                        "name": "redis"
+                                    }
+                                ]
+                            }
+                        })),
+                    },
+                },
+                element_index.as_ref(),
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let result = result.unwrap();
+
+        assert_eq!(result.len(), 3);
+
+        let result = subject
+            .process(
+                SourceChange::Insert {
+                    element: Element::Node {
+                        metadata: ElementMetadata {
+                            reference: ElementReference::new("test", "p1"),
+                            labels: vec!["Pod".into()].into(),
+                            effective_from: 0,
+                        },
+                        properties: ElementPropertyMap::from(json!({
+                            "action": "delete",
+                            "metadata": {
+                                "name": "pod-1",
+                                "namespace": "default",
+                                "labels": {
+                                    "app": "nginx",
+                                    "env": "prod"
+                                }
+                            },
+                            "status": {
+                                "containerStatuses": [
+                                    {
+                                        "containerID": "c1",
+                                        "name": "nginx"
+                                    },
+                                    {
+                                        "containerID": "c2",
+                                        "name": "redis"
+                                    }
+                                ]
+                            }
+                        })),
+                    },
+                },
+                element_index.as_ref(),
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let result = result.unwrap();
+
+        assert_eq!(result.len(), 1);
+    }
 }
 
 mod factory {

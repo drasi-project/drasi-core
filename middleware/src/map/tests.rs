@@ -214,6 +214,131 @@ mod process {
             }
         }));
     }
+
+    #[tokio::test]
+    pub async fn conditional_map() {
+        let factory = MapFactory::new();
+        let config = json!({
+            "Telemetry": {
+                "insert": [{
+                    "selector": "$[?(@.additionalProperties.Source == 'provider.telemetry')]",
+                    "op": "Update",
+                    "label": "Vehicle",
+                    "id": "$.vehicleId",
+                    "condition": "$[?(@.action == 'update')]",
+                    "properties": {
+                        "id": "$.vehicleId",
+                        "currentSpeed": "$.signals[?(@.name == 'Vehicle.Speed')].value"
+                    }
+                }]
+            }
+        });
+
+        let element_index = Arc::new(InMemoryElementIndex::new());
+        let mw_config = SourceMiddlewareConfig {
+            name: "test".into(),
+            kind: "map".into(),
+            config: config.as_object().unwrap().clone(),
+        };
+
+        let subject = factory.create(&mw_config).unwrap();
+
+        let result = subject
+            .process(
+                SourceChange::Insert {
+                    element: Element::Node {
+                        metadata: ElementMetadata {
+                            reference: ElementReference::new("test", "t1"),
+                            labels: vec!["Telemetry".into()].into(),
+                            effective_from: 0,
+                        },
+                        properties: ElementPropertyMap::from(json!({
+                            "signals": [
+                                {
+                                    "name": "Vehicle.CurrentLocation.Heading",
+                                    "value": "96"
+                                },
+                                {
+                                    "name": "Vehicle.Speed",
+                                    "value": "119"
+                                },
+                                {
+                                    "name": "Vehicle.TraveledDistance",
+                                    "value": "4563"
+                                }
+                            ],
+                            "additionalProperties": {
+                                "Source": "provider.telemetry"
+                            },
+                            "action": "update",
+                            "vehicleId": "v1"
+                        })),
+                    },
+                },
+                element_index.as_ref(),
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0],
+            SourceChange::Update {
+                element: Element::Node {
+                    metadata: ElementMetadata {
+                        reference: ElementReference::new("test", "v1"),
+                        labels: vec!["Vehicle".into()].into(),
+                        effective_from: 0
+                    },
+                    properties: ElementPropertyMap::from(json!({
+                        "id": "v1",
+                        "currentSpeed": "119"
+                    }))
+                }
+            }
+        );
+
+        let result = subject
+            .process(
+                SourceChange::Insert {
+                    element: Element::Node {
+                        metadata: ElementMetadata {
+                            reference: ElementReference::new("test", "t1"),
+                            labels: vec!["Telemetry".into()].into(),
+                            effective_from: 0,
+                        },
+                        properties: ElementPropertyMap::from(json!({
+                            "signals": [
+                                {
+                                    "name": "Vehicle.CurrentLocation.Heading",
+                                    "value": "96"
+                                },
+                                {
+                                    "name": "Vehicle.Speed",
+                                    "value": "119"
+                                },
+                                {
+                                    "name": "Vehicle.TraveledDistance",
+                                    "value": "4563"
+                                }
+                            ],
+                            "additionalProperties": {
+                                "Source": "provider.telemetry"
+                            },
+                            "action": "delete",
+                            "vehicleId": "v1"
+                        })),
+                    },
+                },
+                element_index.as_ref(),
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        assert_eq!(result.len(), 0);
+    }
 }
 
 mod factory {
