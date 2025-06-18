@@ -230,6 +230,13 @@ mod process {
                         "id": "$.vehicleId",
                         "currentSpeed": "$.signals[?(@.name == 'Vehicle.Speed')].value"
                     }
+                },
+                {
+                    "selector": "$[?(@.additionalProperties.Source == 'provider.telemetry')]",
+                    "op": "Delete",
+                    "label": "Vehicle",
+                    "id": "$.vehicleId",
+                    "condition": "$[?(@.action == 'delete')]"
                 }]
             }
         });
@@ -337,7 +344,17 @@ mod process {
 
         assert!(result.is_ok());
         let result = result.unwrap();
-        assert_eq!(result.len(), 0);
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0],
+            SourceChange::Delete {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("test", "v1"),
+                    labels: vec!["Vehicle".into()].into(),
+                    effective_from: 0
+                }
+            }
+        );
     }
 }
 
