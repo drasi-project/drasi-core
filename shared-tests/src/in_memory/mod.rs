@@ -270,6 +270,7 @@ mod rolling_average_decrease_by_ten {
         rolling_average_decrease_by_ten::rolling_average_decrease_by_ten(&test_config).await;
     }
 }
+
 mod decreases_by_ten {
     use super::InMemoryQueryConfig;
     use crate::use_cases::*;
@@ -286,6 +287,7 @@ mod decreases_by_ten {
         decrease_by_ten::decrease_by_ten_percent(&test_config).await;
     }
 }
+
 mod exceeds_one_standard_deviation {
     use super::InMemoryQueryConfig;
     use crate::use_cases::*;
@@ -296,6 +298,7 @@ mod exceeds_one_standard_deviation {
         exceeds_one_standard_deviation::exceeds_one_standard_deviation(&test_config).await;
     }
 }
+
 mod unit_tests {
     use crate::sequence_counter;
     use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
@@ -354,5 +357,72 @@ mod unwind {
     async fn unwind() {
         let test_config = InMemoryQueryConfig::new();
         unwind::unwind(&test_config).await;
+    }
+}
+
+mod optional_match {
+    use super::InMemoryQueryConfig;
+    use crate::use_cases::*;
+
+    #[tokio::test]
+    async fn optional_match() {
+        let test_config = InMemoryQueryConfig::new();
+        optional_match::optional_match(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn optional_match_aggregating() {
+        let test_config = InMemoryQueryConfig::new();
+        optional_match::optional_match_aggregating(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn multi_optional_match() {
+        let test_config = InMemoryQueryConfig::new();
+        optional_match::multi_optional_match(&test_config).await;
+    }
+}
+
+mod decoder {
+    use super::InMemoryQueryConfig;
+    use crate::use_cases::*;
+
+    #[tokio::test]
+    async fn decoder() {
+        let test_config = InMemoryQueryConfig::new();
+        decoder::decoder(&test_config).await;
+    }
+}
+
+mod parse_json {
+    use super::InMemoryQueryConfig;
+    use crate::use_cases::*;
+
+    #[tokio::test]
+    async fn parse_json_test() {
+        let test_config = InMemoryQueryConfig::new();
+        parse_json::parse_json_test(&test_config).await;
+    }
+}
+
+mod promote {
+    use super::InMemoryQueryConfig;
+    use crate::use_cases::*;
+
+    #[tokio::test]
+    async fn promote_test() {
+        let test_config = InMemoryQueryConfig::new();
+        promote::promote_test(&test_config).await;
+    }
+}
+
+mod dapr_state_store {
+    use super::InMemoryQueryConfig;
+    use crate::use_cases::*;
+
+    #[tokio::test]
+    async fn dapr_state_store_test_suite() {
+        let test_config = InMemoryQueryConfig::new();
+        dapr_state_store::run_tests(&test_config).await;
     }
 }
