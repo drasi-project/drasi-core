@@ -19,6 +19,7 @@ use drasi_core::query::QueryBuilder;
 use drasi_query_ast::ast::Query;
 
 pub mod building_comfort;
+pub mod collect_aggregation;
 pub mod curbside_pickup;
 pub mod dapr_state_store;
 pub mod decoder;
@@ -28,6 +29,7 @@ pub mod min_value;
 pub mod optional_match;
 pub mod overdue_invoice;
 pub mod parse_json;
+pub mod product_aggregation;
 pub mod promote;
 pub mod remap;
 pub mod sensor_heartbeat;
