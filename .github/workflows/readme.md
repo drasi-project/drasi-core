@@ -4,6 +4,13 @@ This document describes the GitHub Actions workflows in the `.github/workflows` 
 
 ## Workflows
 
+### [automerge.yml](automerge.yml)
+- **Purpose**: Automatically merges Renovate dependency update PRs after a waiting period based on the update type (patch vs minor versions).
+- **Triggers**:
+  - Scheduled to run every Wednesday at 12:00 PM Pacific Time (19:00 UTC)
+  - Can be manually triggered via workflow dispatch
+
+
 ### [ci-lint.yml](ci-lint.yml)
 - **Purpose**: Runs linting checks to ensure code quality and adherence to coding standards.
 - **Trigger**: 
@@ -15,7 +22,6 @@ This document describes the GitHub Actions workflows in the `.github/workflows` 
 
 ### [devskim.yml](devskim.yml)
 - **Purpose**: Performs security analysis using DevSkim to detect potential vulnerabilities.
-- **Trigger**: 
 - **Triggers**:
   - Pushes to `main`.
   - Pull requests targeting `main`.
