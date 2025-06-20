@@ -22,6 +22,7 @@ use crate::{
 use super::*;
 
 mod arithmetic;
+mod collect;
 mod comparison;
 mod cypher_scalar;
 mod date;
