@@ -42,6 +42,7 @@ pub struct SourceMappedOutput {
     label: Option<String>,
     id: Option<JsonPathExpression>,
     element_type: Option<MapElementType>,
+    condition: Option<JsonPathExpression>,
 
     #[serde(default)]
     properties: BTreeMap<String, JsonPathExpression>,
@@ -188,8 +189,16 @@ impl SourceMiddleware for Map {
 
                 for s in selected {
                     log::info!("Processing mapping for selector: {:#?}", s);
+
                     if let Some(obj) = source_obj.as_object_mut() {
                         obj.insert("$selected".to_string(), s);
+                    }
+
+                    if let Some(condition) = &mapping.condition {
+                        let condition_result = condition.execute_one(&source_obj);
+                        if condition_result.is_none() {
+                            continue; // skip this mapping if condition is not met
+                        }
                     }
 
                     let mut new_metadata = metadata.clone();
