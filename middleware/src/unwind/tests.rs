@@ -657,6 +657,24 @@ mod process {
         let result = result.unwrap();
 
         assert_eq!(result.len(), 1);
+
+        let result = subject
+            .process(
+                SourceChange::Delete {
+                    metadata: ElementMetadata {
+                        reference: ElementReference::new("test", "p1"),
+                        labels: vec!["Pod".into()].into(),
+                        effective_from: 0,
+                    },
+                },
+                element_index.as_ref(),
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let result = result.unwrap();
+
+        assert_eq!(result.len(), 1);
     }
 }
 
