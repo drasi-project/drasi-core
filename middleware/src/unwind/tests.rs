@@ -658,6 +658,42 @@ mod process {
 
         assert_eq!(result.len(), 1);
 
+        element_index
+            .set_element(
+                &Element::Node {
+                    metadata: ElementMetadata {
+                        reference: ElementReference::new("test", "p1"),
+                        labels: vec!["Pod".into()].into(),
+                        effective_from: 0,
+                    },
+                    properties: ElementPropertyMap::from(json!({
+                        "metadata": {
+                            "name": "pod-1",
+                            "namespace": "default",
+                            "labels": {
+                                "app": "nginx",
+                                "env": "prod"
+                            }
+                        },
+                        "status": {
+                            "containerStatuses": [
+                                {
+                                    "containerID": "c1",
+                                    "name": "nginx"
+                                },
+                                {
+                                    "containerID": "c2",
+                                    "name": "redis"
+                                }
+                            ]
+                        }
+                    })),
+                },
+                &vec![],
+            )
+            .await
+            .unwrap();
+
         let result = subject
             .process(
                 SourceChange::Delete {
