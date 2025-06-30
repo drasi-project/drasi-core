@@ -39,6 +39,7 @@ pub struct UnwindMapping {
     label: String,
     key: Option<JsonPathExpression>,
     relation: Option<String>,
+    condition: Option<JsonPathExpression>,
 }
 
 #[derive(Clone)]
@@ -137,6 +138,13 @@ impl SourceMiddleware for Unwind {
                 let mut change_map = HashMap::new();
 
                 if let Some(new_obj) = &new_element_obj {
+                    if let Some(condition) = &mapping.condition {
+                        let condition_result = condition.execute_one(new_obj);
+                        if condition_result.is_none() {
+                            continue; // Skip this mapping if the condition is not met
+                        }
+                    }
+
                     let selected = mapping.selector.execute(new_obj);
 
                     for (index, obj) in selected.iter().enumerate() {
@@ -225,6 +233,13 @@ impl SourceMiddleware for Unwind {
                 }
 
                 if let Some(old_obj) = &old_element_obj {
+                    if let Some(condition) = &mapping.condition {
+                        let condition_result = condition.execute_one(old_obj);
+                        if condition_result.is_none() {
+                            continue; // Skip this mapping if the condition is not met
+                        }
+                    }
+
                     let selected = mapping.selector.execute(old_obj);
 
                     for (index, obj) in selected.iter().enumerate() {
