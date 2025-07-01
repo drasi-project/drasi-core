@@ -324,6 +324,105 @@ pub async fn not_reported(config: &(impl QueryTestConfig + Send)) {
     }
 }
 
+pub async fn not_reported_with_true_now_or_later(config: &(impl QueryTestConfig + Send)) {
+    let cq = {
+        let mut builder = QueryBuilder::new(queries::not_reported_query_v2());
+        builder = config.config_query(builder).await;
+        Arc::new(builder.build().await)
+    };
+
+    let now_override = Arc::new(AtomicU64::new(0));
+    let fqc =
+        Arc::new(AutoFutureQueueConsumer::new(cq.clone()).with_now_override(now_override.clone()));
+    cq.set_future_consumer(fqc.clone()).await;
+
+    let init_time =
+        NaiveDateTime::new(NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(), NaiveTime::MIN);
+    let time0 = init_time.and_utc().timestamp_millis() as u64;
+    let time1 = time0 + Duration::minutes(30).num_milliseconds() as u64;
+    let time2 = time1 + Duration::minutes(30).num_milliseconds() as u64;
+    let time3 = time2 + Duration::minutes(30).num_milliseconds() as u64;
+    let time4 = time3 + Duration::minutes(30).num_milliseconds() as u64;
+
+    now_override.store(time0, Ordering::Relaxed);
+
+    bootstrap_query(&cq, time0).await;
+
+    //jump forward 30 minutes, add sensor value for Turbine 1 / RPM
+    {
+        now_override.store(time1, Ordering::Relaxed);
+
+        let value_node = SourceChange::Insert {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("test", "sv1"),
+                    labels: Arc::new([Arc::from("SensorValue")]),
+                    effective_from: time1,
+                },
+                properties: ElementPropertyMap::from(json!({
+                    "value": 3000
+                })),
+            },
+        };
+
+        let value_rel = SourceChange::Insert {
+            element: Element::Relation {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("test", "r-sv1"),
+                    labels: Arc::new([Arc::from("HAS_VALUE")]),
+                    effective_from: time1,
+                },
+                properties: ElementPropertyMap::new(),
+                in_node: ElementReference::new("test", "e1-s1"),
+                out_node: ElementReference::new("test", "sv1"),
+            },
+        };
+
+        _ = cq.process_source_change(value_node.clone()).await.unwrap();
+
+        let result = cq.process_source_change(value_rel.clone()).await.unwrap();
+
+        assert_eq!(result, vec![]);
+    }
+
+    //jump forward another 30 minutes
+    {
+        now_override.store(time2, Ordering::Relaxed);
+
+        let mut results = Vec::new();
+        for _ in 0..3 {
+            let result = fqc.recv(std::time::Duration::from_secs(5)).await.unwrap();
+            results.extend(result);
+        }
+        assert_eq!(fqc.recv(std::time::Duration::from_millis(100)).await, None); // no more results
+        assert_eq!(results.len(), 3);
+
+        assert!(results.contains(&QueryPartEvaluationContext::Adding {
+            after: variablemap!(
+                "equipment" => VariableValue::String("Turbine 1".into()),
+                "sensor" => VariableValue::String("Temp".into()),
+                "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(time0 as i64))
+            ),
+        }));
+
+        assert!(results.contains(&QueryPartEvaluationContext::Adding {
+            after: variablemap!(
+                "equipment" => VariableValue::String("Turbine 2".into()),
+                "sensor" => VariableValue::String("Temp".into()),
+                "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(time0 as i64))
+            ),
+        }));
+
+        assert!(results.contains(&QueryPartEvaluationContext::Adding {
+            after: variablemap!(
+                "equipment" => VariableValue::String("Turbine 2".into()),
+                "sensor" => VariableValue::String("RPM".into()),
+                "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(time0 as i64))
+            ),
+        }));
+    }
+}
+
 #[allow(clippy::print_stdout, clippy::unwrap_used)]
 pub async fn percent_not_reported(config: &(impl QueryTestConfig + Send)) {
     let cq = {

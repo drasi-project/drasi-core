@@ -49,12 +49,10 @@ impl ScalarFunction for TrueNowOrLater {
                 error: FunctionEvaluationError::InvalidArgumentCount,
             });
         }
-        println!("TrueNowOrLater called:");
 
         let anchor_ref = match context.get_anchor_element() {
             Some(anchor) => anchor.get_reference().clone(),
             None => {
-                println!("No anchor element found");
                 return Ok(VariableValue::Null);
             }
         };
@@ -70,10 +68,7 @@ impl ScalarFunction for TrueNowOrLater {
             }
         };
 
-        println!("Condition: {}", condition);
-
         if *condition {
-            println!("Condition is true now");
             return Ok(VariableValue::Bool(true));
         }
 
@@ -101,19 +96,13 @@ impl ScalarFunction for TrueNowOrLater {
             }
         };
 
-        println!("Due time: {}", due_time);
-
         let group_signature = context.get_input_grouping_hash();
 
-        println!("Group signature: {}", group_signature);
-
         if due_time <= context.get_realtime() {
-            println!("Due time is in the past");
             return Ok(VariableValue::Bool(*condition));
         }
 
         if let SideEffects::Apply = context.get_side_effects() {
-            println!("Adding to future queue");
             match self
                 .future_queue
                 .push(
@@ -135,8 +124,6 @@ impl ScalarFunction for TrueNowOrLater {
                 }
             }
         }
-
-        println!("Returning Awaiting");
 
         Ok(VariableValue::Awaiting)
     }

@@ -150,6 +150,12 @@ mod sensor_heartbeat {
     }
 
     #[tokio::test]
+    pub async fn not_reported_with_true_now_or_later() {
+        let test_config = InMemoryQueryConfig::new();
+        sensor_heartbeat::not_reported_with_true_now_or_later(&test_config).await;
+    }
+
+    #[tokio::test]
     pub async fn percent_not_reported() {
         let test_config = InMemoryQueryConfig::new();
         sensor_heartbeat::percent_not_reported(&test_config).await;
