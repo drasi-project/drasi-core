@@ -27,8 +27,8 @@ mod awaiting;
 mod future_element;
 mod true_for;
 mod true_later;
-mod true_until;
 mod true_now_or_later;
+mod true_until;
 
 pub trait RegisterFutureFunctions {
     fn register_future_functions(
@@ -77,7 +77,9 @@ impl RegisterFutureFunctions for FunctionRegistry {
 
         self.register_function(
             "drasi.trueNowOrLater",
-            Function::Scalar(Arc::new(true_now_or_later::TrueNowOrLater::new(future_queue.clone()))),
+            Function::Scalar(Arc::new(true_now_or_later::TrueNowOrLater::new(
+                future_queue.clone(),
+            ))),
         );
     }
 }
