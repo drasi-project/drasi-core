@@ -24,12 +24,16 @@ use self::temporal_instant::{
 
 use super::{Function, FunctionRegistry};
 
-pub trait RegisterTemporalInstantFunctions {
-    fn register_temporal_instant_functions(&self);
+pub trait RegisterCypherTemporalInstantFunctions {
+    fn register_cypher_temporal_instant_functions(&self);
 }
 
-impl RegisterTemporalInstantFunctions for FunctionRegistry {
-    fn register_temporal_instant_functions(&self) {
+pub trait RegisterGqlTemporalInstantFunctions {
+    fn register_gql_temporal_instant_functions(&self);
+}
+
+impl RegisterCypherTemporalInstantFunctions for FunctionRegistry {
+    fn register_cypher_temporal_instant_functions(&self) {
         self.register_function("date", Function::Scalar(Arc::new(Date {})));
         self.register_function("date.truncate", Function::Scalar(Arc::new(Truncate {})));
         self.register_function(
@@ -155,6 +159,18 @@ impl RegisterTemporalInstantFunctions for FunctionRegistry {
         self.register_function(
             "localdatetime.truncate",
             Function::Scalar(Arc::new(Truncate {})),
+        );
+    }
+}
+
+impl RegisterGqlTemporalInstantFunctions for FunctionRegistry {
+    fn register_gql_temporal_instant_functions(&self) {
+        self.register_function(
+            "now",
+            Function::Scalar(Arc::new(ClockFunction::new(
+                Clock::RealTime,
+                ClockResult::ZonedDateTime,
+            ))),
         );
     }
 }

@@ -25,12 +25,16 @@ use self::text::{
 
 use super::{Function, FunctionRegistry};
 
-pub trait RegisterTextFunctions {
-    fn register_text_functions(&self);
+pub trait RegisterCypherTextFunctions {
+    fn register_cypher_text_functions(&self);
 }
 
-impl RegisterTextFunctions for FunctionRegistry {
-    fn register_text_functions(&self) {
+pub trait RegisterGqlTextFunctions {
+    fn register_gql_text_functions(&self);
+}
+
+impl RegisterCypherTextFunctions for FunctionRegistry {
+    fn register_cypher_text_functions(&self) {
         self.register_function("toUpper", Function::Scalar(Arc::new(ToUpper {})));
         self.register_function("toLower", Function::Scalar(Arc::new(ToLower {})));
         self.register_function("trim", Function::Scalar(Arc::new(Trim {})));
@@ -47,5 +51,17 @@ impl RegisterTextFunctions for FunctionRegistry {
             "toStringOrNull",
             Function::Scalar(Arc::new(ToStringOrNull {})),
         );
+    }
+}
+
+impl RegisterGqlTextFunctions for FunctionRegistry {
+    fn register_gql_text_functions(&self) {
+        self.register_function("upper", Function::Scalar(Arc::new(ToUpper {})));
+        self.register_function("lower", Function::Scalar(Arc::new(ToLower {})));
+        self.register_function("trim", Function::Scalar(Arc::new(Trim {})));
+        self.register_function("ltrim", Function::Scalar(Arc::new(LTrim {})));
+        self.register_function("rtrim", Function::Scalar(Arc::new(RTrim {})));
+        self.register_function("left", Function::Scalar(Arc::new(Left {})));
+        self.register_function("right", Function::Scalar(Arc::new(Right {})));
     }
 }

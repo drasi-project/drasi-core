@@ -30,7 +30,8 @@ use std::sync::Arc;
 use char_length::CharLength;
 use coalesce::Coalesce;
 
-use super::{Function, FunctionRegistry};
+use super::{Function, FunctionRegistry, FunctionError};
+use crate::evaluation::FunctionEvaluationError;
 use head::Head;
 use last::Last;
 use size::Size;
@@ -39,12 +40,37 @@ use to_boolean::{ToBoolean, ToBooleanOrNull};
 use to_float::{ToFloat, ToFloatOrNull};
 use to_integer::{ToInteger, ToIntegerOrNull};
 
-pub trait RegisterCypherScalarFunctions {
-    fn register_scalar_functions(&self);
+// Placeholder for GQL cast function - TODO: implement proper GQL cast functionality
+#[derive(Debug)]
+pub struct GqlCast {}
+
+#[async_trait::async_trait]
+impl super::ScalarFunction for GqlCast {
+    async fn call(
+        &self,
+        _context: &super::ExpressionEvaluationContext,
+        _expression: &drasi_query_ast::ast::FunctionExpression,
+        _args: Vec<super::VariableValue>,
+    ) -> Result<super::VariableValue, FunctionError> {
+        // TODO: Implement proper GQL cast functionality
+        Err(FunctionError {
+            function_name: "cast".to_string(),
+            error: FunctionEvaluationError::InvalidArgumentCount,
+        })
+    }
 }
 
+pub trait RegisterCypherScalarFunctions {
+    fn register_cypher_scalar_functions(&self);
+}
+
+pub trait RegisterGqlScalarFunctions {
+    fn register_gql_scalar_functions(&self);
+}
+
+
 impl RegisterCypherScalarFunctions for FunctionRegistry {
-    fn register_scalar_functions(&self) {
+    fn register_cypher_scalar_functions(&self) {
         self.register_function("char_length", Function::Scalar(Arc::new(CharLength {})));
         self.register_function(
             "character_length",
@@ -70,5 +96,17 @@ impl RegisterCypherScalarFunctions for FunctionRegistry {
         self.register_function("head", Function::Scalar(Arc::new(Head {})));
         self.register_function("last", Function::Scalar(Arc::new(Last {})));
         self.register_function("timestamp", Function::Scalar(Arc::new(Timestamp {})));
+    }
+}
+
+// NEED TO IMPLEMENT GQL CAST FUNCTION
+impl RegisterGqlScalarFunctions for FunctionRegistry {
+    fn register_gql_scalar_functions(&self) {
+        self.register_function("char_length", Function::Scalar(Arc::new(CharLength {})));
+        self.register_function("size", Function::Scalar(Arc::new(Size {})));
+        self.register_function("coalesce", Function::Scalar(Arc::new(Coalesce {})));
+        self.register_function("last", Function::Scalar(Arc::new(Last {})));
+        // Register a placeholder cast function for GQL
+        self.register_function("cast", Function::Scalar(Arc::new(GqlCast {})));
     }
 }
