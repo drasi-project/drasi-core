@@ -262,7 +262,7 @@ async fn test_true_now_or_later_with_date() {
 
     // Calculate expected timestamp
     let date = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
-    let expected_timestamp = date.and_hms_opt(0, 0, 0).unwrap().timestamp_millis() as u64;
+    let expected_timestamp = date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis() as u64;
 
     mock_queue
         .expect_push()
