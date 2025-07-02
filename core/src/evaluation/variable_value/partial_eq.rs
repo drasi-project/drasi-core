@@ -181,6 +181,7 @@ impl PartialEq<VariableValue> for VariableValue {
             ) => metadata1 == metadata2,
             (VariableValue::Expression(e1), VariableValue::Expression(e2)) => e1 == e2,
             (VariableValue::ListRange(r1), VariableValue::ListRange(r2)) => r1 == r2,
+            (VariableValue::Awaiting, VariableValue::Awaiting) => true,
             _ => false,
         }
     }
