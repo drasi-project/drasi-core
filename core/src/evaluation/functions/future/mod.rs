@@ -30,6 +30,9 @@ mod true_later;
 mod true_now_or_later;
 mod true_until;
 
+#[cfg(test)]
+mod tests;
+
 pub trait RegisterFutureFunctions {
     fn register_future_functions(
         &self,
