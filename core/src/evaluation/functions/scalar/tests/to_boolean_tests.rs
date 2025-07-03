@@ -17,7 +17,7 @@ use std::sync::Arc;
 use drasi_query_ast::ast;
 
 use crate::evaluation::context::QueryVariables;
-use crate::evaluation::functions::cypher_scalar::{ToBoolean, ToBooleanOrNull};
+use crate::evaluation::functions::scalar::{ToBoolean, ToBooleanOrNull};
 use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::variable_value::VariableValue;
 use crate::evaluation::{ExpressionEvaluationContext, InstantQueryClock};

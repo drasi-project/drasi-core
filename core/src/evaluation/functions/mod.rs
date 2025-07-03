@@ -22,28 +22,35 @@ use async_trait::async_trait;
 
 use drasi_query_ast::ast;
 use drasi_query_cypher::CypherConfiguration;
+use drasi_query_gql::GQLConfiguration;
 
 use crate::evaluation::variable_value::VariableValue;
 use crate::interface::ResultIndex;
 
 use self::{
-    aggregation::{Accumulator, RegisterAggregationFunctions},
+    aggregation::{Accumulator, RegisterCypherAggregationFunctions, RegisterGqlAggregationFunctions},
     context_mutators::RegisterContextMutatorFunctions,
-    cypher_scalar::RegisterCypherScalarFunctions,
+    scalar::{RegisterCypherScalarFunctions, RegisterGqlScalarFunctions},
     drasi::RegisterDrasiFunctions,
-    list::RegisterListFunctions,
-    metadata::RegisterMetadataFunctions,
-    numeric::RegisterNumericFunctions,
-    temporal_duration::RegisterTemporalDurationFunctions,
-    temporal_instant::RegisterTemporalInstantFunctions,
-    text::RegisterTextFunctions,
+    list::{RegisterCypherListFunctions, RegisterGqlListFunctions},
+    metadata::{RegisterCypherMetadataFunctions, RegisterGqlMetadataFunctions},
+    numeric::{RegisterCypherNumericFunctions, RegisterGqlNumericFunctions},
+    temporal_duration::{RegisterCypherTemporalDurationFunctions, RegisterGqlTemporalDurationFunctions},
+    temporal_instant::{RegisterCypherTemporalInstantFunctions, RegisterGqlTemporalInstantFunctions},
+    text::{RegisterCypherTextFunctions, RegisterGqlTextFunctions},
 };
 
 use super::{ExpressionEvaluationContext, FunctionError};
 
+#[derive(Debug, Clone, Copy)]
+pub enum FunctionType {
+    Cypher,
+    GQL,
+}
+
 pub mod aggregation;
 pub mod context_mutators;
-pub mod cypher_scalar;
+pub mod scalar;
 pub mod drasi;
 pub mod future;
 pub mod list;
@@ -132,19 +139,49 @@ impl Default for FunctionRegistry {
 
 impl FunctionRegistry {
     pub fn new() -> FunctionRegistry {
+        Self::with_type(FunctionType::Cypher)
+    }
+
+    pub fn with_type(function_type: FunctionType) -> FunctionRegistry {
+        match function_type {
+            FunctionType::Cypher => Self::cypher_functions(),
+            FunctionType::GQL => Self::gql_functions(),
+        }
+    }
+
+    pub fn cypher_functions() -> FunctionRegistry {
         let result = FunctionRegistry {
             functions: Arc::new(RwLock::new(HashMap::new())),
         };
 
-        result.register_text_functions();
-        result.register_metadata_functions();
-        result.register_numeric_functions();
-        result.register_aggregation_functions();
-        result.register_temporal_instant_functions();
-        result.register_temporal_duration_functions();
-        result.register_list_functions();
+        result.register_cypher_text_functions();
+        result.register_cypher_metadata_functions();
+        result.register_cypher_numeric_functions();
+        result.register_cypher_aggregation_functions();
+        result.register_cypher_temporal_instant_functions();
+        result.register_cypher_temporal_duration_functions();
+        result.register_cypher_list_functions();
         result.register_drasi_functions();
-        result.register_scalar_functions();
+        result.register_cypher_scalar_functions();
+        result.register_context_mutators();
+
+        result
+    }
+
+    pub fn gql_functions() -> FunctionRegistry {
+        let result = FunctionRegistry {
+            functions: Arc::new(RwLock::new(HashMap::new())),
+        };
+
+        result.register_gql_text_functions();
+        result.register_gql_metadata_functions();
+        result.register_gql_numeric_functions();
+        result.register_gql_aggregation_functions();
+        result.register_gql_temporal_instant_functions();
+        result.register_gql_temporal_duration_functions();
+        result.register_gql_list_functions();
+        result.register_drasi_functions();
+        result.register_gql_scalar_functions();
         result.register_context_mutators();
 
         result
@@ -164,6 +201,19 @@ impl FunctionRegistry {
 }
 
 impl CypherConfiguration for FunctionRegistry {
+    #[allow(clippy::unwrap_used)]
+    fn get_aggregating_function_names(&self) -> std::collections::HashSet<String> {
+        let lock = self.functions.read().unwrap();
+        lock.iter()
+            .filter_map(|(name, function)| match function.as_ref() {
+                Function::Aggregating(_) => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+impl GQLConfiguration for FunctionRegistry {
     #[allow(clippy::unwrap_used)]
     fn get_aggregating_function_names(&self) -> std::collections::HashSet<String> {
         let lock = self.functions.read().unwrap();

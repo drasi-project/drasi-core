@@ -22,17 +22,32 @@ use crate::evaluation::{ExpressionEvaluationContext, FunctionError, FunctionEval
 
 use super::{Function, FunctionRegistry, ScalarFunction};
 
-pub trait RegisterMetadataFunctions {
-    fn register_metadata_functions(&self);
+pub trait RegisterCypherMetadataFunctions {
+    fn register_cypher_metadata_functions(&self);
 }
 
-impl RegisterMetadataFunctions for FunctionRegistry {
-    fn register_metadata_functions(&self) {
+pub trait RegisterGqlMetadataFunctions {
+    fn register_gql_metadata_functions(&self);
+}
+
+impl RegisterCypherMetadataFunctions for FunctionRegistry {
+    fn register_cypher_metadata_functions(&self) {
         self.register_function("elementId", Function::Scalar(Arc::new(ElementId {})));
         self.register_function(
             "drasi.changeDateTime",
             Function::Scalar(Arc::new(ChangeDateTime {})),
         );
+    }
+}
+
+impl RegisterGqlMetadataFunctions for FunctionRegistry {
+    fn register_gql_metadata_functions(&self) {
+        self.register_function("element_id", Function::Scalar(Arc::new(ElementId {})));
+        self.register_function(
+            "drasi.changeDateTime",
+            Function::Scalar(Arc::new(ChangeDateTime {})),
+        );
+
     }
 }
 

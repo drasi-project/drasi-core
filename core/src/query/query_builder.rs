@@ -15,12 +15,14 @@
 use std::{collections::HashMap, sync::Arc};
 
 use drasi_query_ast::api::QueryParser;
+use drasi_query_ast::ast::Query;
 use drasi_query_cypher::CypherParser;
+use drasi_query_gql::GQLParser;
 
 use crate::{
     evaluation::{
         functions::{
-            future::RegisterFutureFunctions, past::RegisterPastFunctions, FunctionRegistry,
+            future::RegisterFutureFunctions, past::RegisterPastFunctions, FunctionRegistry, FunctionType,
         },
         ExpressionEvaluator, QueryPartEvaluator,
     },
@@ -43,6 +45,18 @@ use crate::{
 
 use super::ContinuousQuery;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum QueryParserType {
+    Cypher,
+    GQL,
+}
+
+impl Default for QueryParserType {
+    fn default() -> Self {
+        QueryParserType::Cypher
+    }
+}
+
 pub struct QueryBuilder {
     function_registry: Option<Arc<FunctionRegistry>>,
     expr_evaluator: Option<Arc<ExpressionEvaluator>>,
@@ -58,6 +72,7 @@ pub struct QueryBuilder {
 
     query_source: String,
     query_parser: Option<Arc<dyn QueryParser>>,
+    parser_type: QueryParserType,
 }
 
 impl QueryBuilder {
@@ -76,11 +91,12 @@ impl QueryBuilder {
             source_pipelines: HashMap::new(),
             query_source: query.into(),
             query_parser: None,
+            parser_type: QueryParserType::default(),
         }
     }
 
-    pub fn with_query_parser(mut self, query_parser: Arc<dyn QueryParser>) -> Self {
-        self.query_parser = Some(query_parser);
+    pub fn with_query_parser(mut self, parser_type: QueryParserType) -> Self {
+        self.parser_type = parser_type;
         self
     }
 
@@ -144,6 +160,7 @@ impl QueryBuilder {
         self
     }
 
+
     pub fn get_joins(&self) -> &Vec<Arc<QueryJoin>> {
         &self.joins
     }
@@ -155,12 +172,26 @@ impl QueryBuilder {
     pub async fn try_build(mut self) -> Result<ContinuousQuery, QueryBuilderError> {
         let function_registry = match self.function_registry.take() {
             Some(registry) => registry,
-            None => Arc::new(FunctionRegistry::new()),
+            None => match self.parser_type {
+                QueryParserType::Cypher => Arc::new(FunctionRegistry::new()),
+                QueryParserType::GQL => Arc::new(FunctionRegistry::with_type(FunctionType::GQL)),
+            },
         };
 
         let query_parser = match self.query_parser.take() {
-            Some(index) => index,
-            None => Arc::new(CypherParser::new(function_registry.clone())),
+            Some(parser) => parser,
+            None => {
+                match self.parser_type {
+                    QueryParserType::Cypher => {
+                        let cypher_parser = CypherParser::new(function_registry.clone());
+                        Arc::new(cypher_parser) as Arc<dyn QueryParser>
+                    }
+                    QueryParserType::GQL => {
+                        let gql_parser = GQLParser::new(function_registry.clone());
+                        Arc::new(gql_parser) as Arc<dyn QueryParser>
+                    }
+                }
+            }
         };
 
         let query = query_parser.parse(self.query_source.as_str())?;

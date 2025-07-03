@@ -23,7 +23,7 @@ use super::*;
 
 mod arithmetic;
 mod comparison;
-mod cypher_scalar;
+mod scalar;
 mod date;
 mod datetime;
 mod duration;

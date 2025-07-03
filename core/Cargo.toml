@@ -19,6 +19,7 @@ parallel_solver = []
 async-trait = "0.1.68"
 drasi-query-ast = { path = "../query-ast" }
 drasi-query-cypher = { path = "../query-cypher" }
+drasi-query-gql = { path = "../query-gql" }
 hashers = "1.0.1"
 ordered-float = "3.7.0"
 serde = { version = "1", features = ["derive"] }

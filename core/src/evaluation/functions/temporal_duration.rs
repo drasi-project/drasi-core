@@ -23,12 +23,15 @@ use self::temporal_duration::{Between, DurationFunc, InDays, InMonths, InSeconds
 
 use super::{Function, FunctionRegistry};
 
-pub trait RegisterTemporalDurationFunctions {
-    fn register_temporal_duration_functions(&self);
+pub trait RegisterCypherTemporalDurationFunctions {
+    fn register_cypher_temporal_duration_functions(&self);
+}
+pub trait RegisterGqlTemporalDurationFunctions {
+    fn register_gql_temporal_duration_functions(&self);
 }
 
-impl RegisterTemporalDurationFunctions for FunctionRegistry {
-    fn register_temporal_duration_functions(&self) {
+impl RegisterCypherTemporalDurationFunctions for FunctionRegistry {
+    fn register_cypher_temporal_duration_functions(&self) {
         self.register_function("duration.between", Function::Scalar(Arc::new(Between {})));
         self.register_function("duration.inMonths", Function::Scalar(Arc::new(InMonths {})));
         self.register_function("duration.inDays", Function::Scalar(Arc::new(InDays {})));
@@ -37,5 +40,11 @@ impl RegisterTemporalDurationFunctions for FunctionRegistry {
             Function::Scalar(Arc::new(InSeconds {})),
         );
         self.register_function("duration", Function::Scalar(Arc::new(DurationFunc {})));
+    }
+}
+
+impl RegisterGqlTemporalDurationFunctions for FunctionRegistry {
+    fn register_gql_temporal_duration_functions(&self) {
+        self.register_function("dateDiff", Function::Scalar(Arc::new(Between {})));
     }
 }

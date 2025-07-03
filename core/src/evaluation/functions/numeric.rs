@@ -33,17 +33,30 @@ pub use sign::Sign;
 
 use super::{Function, FunctionRegistry};
 
-pub trait RegisterNumericFunctions {
-    fn register_numeric_functions(&self);
+pub trait RegisterCypherNumericFunctions {
+    fn register_cypher_numeric_functions(&self);
 }
 
-impl RegisterNumericFunctions for FunctionRegistry {
-    fn register_numeric_functions(&self) {
+pub trait RegisterGqlNumericFunctions {
+    fn register_gql_numeric_functions(&self);
+}
+
+impl RegisterCypherNumericFunctions for FunctionRegistry {
+    fn register_cypher_numeric_functions(&self) {
         self.register_function("abs", Function::Scalar(Arc::new(Abs {})));
         self.register_function("ceil", Function::Scalar(Arc::new(Ceil {})));
         self.register_function("floor", Function::Scalar(Arc::new(Floor {})));
         self.register_function("rand", Function::Scalar(Arc::new(Rand {})));
         self.register_function("round", Function::Scalar(Arc::new(Round {})));
         self.register_function("sign", Function::Scalar(Arc::new(Sign {})));
+    }
+}
+
+impl RegisterGqlNumericFunctions for FunctionRegistry {
+    fn register_gql_numeric_functions(&self) {
+        self.register_function("abs", Function::Scalar(Arc::new(Abs {})));
+        self.register_function("ceil", Function::Scalar(Arc::new(Ceil {})));
+        self.register_function("floor", Function::Scalar(Arc::new(Floor {})));
+        self.register_function("round", Function::Scalar(Arc::new(Round {})));
     }
 }

@@ -1,0 +1,18 @@
+[package]
+name = "drasi-query-gql"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Drasi Core GQL Parser"
+repository = "https://github.com/drasi-project/drasi-core"
+keywords = ["drasi"]
+categories = ["database"]
+readme = "../readme.md"    
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+drasi-query-ast = { path = "../query-ast" }
+peg = "0.8.1"
+serde = "1.0.164"
+serde_json = "1.0.96"

@@ -17,8 +17,9 @@ use std::sync::Arc;
 use drasi_query_ast::ast;
 
 use crate::evaluation::context::QueryVariables;
-use crate::evaluation::functions::cypher_scalar::timestamp;
+use crate::evaluation::functions::scalar::CharLength;
 use crate::evaluation::functions::ScalarFunction;
+use crate::evaluation::variable_value::VariableValue;
 use crate::evaluation::{ExpressionEvaluationContext, InstantQueryClock};
 
 fn get_func_expr() -> ast::FunctionExpression {
@@ -30,27 +31,31 @@ fn get_func_expr() -> ast::FunctionExpression {
 }
 
 #[tokio::test]
-async fn test_timestamp() {
-    let timestamp = timestamp::Timestamp {};
+async fn test_char_length() {
+    let char_length = CharLength {};
 
     let binding = QueryVariables::new();
     let context =
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
-    let args = vec![];
-    let result = match timestamp
+    let args = vec![VariableValue::String("drasi".to_string())];
+    let result = char_length
         .call(&context, &get_func_expr(), args.clone())
-        .await
-    {
-        Ok(result) => result,
-        Err(e) => panic!("Error: {:?}", e),
-    };
+        .await;
+    assert_eq!(result.unwrap(), VariableValue::Integer(5.into()));
+}
 
-    let time_since_epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap();
-    let time_since_epoch = time_since_epoch.as_millis() as i64;
+#[tokio::test]
+async fn test_char_length_with_null() {
+    let char_length = CharLength {};
 
-    //abs diff should be less than 500
-    assert!((result.as_i64().unwrap() - time_since_epoch).abs() < 500);
+    let binding = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
+
+    let args = vec![VariableValue::Null];
+    let result = char_length
+        .call(&context, &get_func_expr(), args.clone())
+        .await;
+    assert_eq!(result.unwrap(), VariableValue::Null);
 }
