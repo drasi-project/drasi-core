@@ -372,33 +372,15 @@ peg::parser! {
 
         rule with_or_return() -> Vec<Expression>
             = r:return_clause() { r }
-        
+
         rule part(config: &dyn GQLConfiguration) -> Vec<QueryPart>
-            = match_clauses:( __* m:(match_clause() ** (__+) )? { m.unwrap_or_else(Vec::new).into_iter().flatten().collect() } )
-            where_clauses:( __* w:(where_clause() ** (__+) )? { w.unwrap_or_else(Vec::new) } )
-            return_clause:( with_or_return() )
-            group_by_exprs:( __* g:group_by_clause()? { g } )
+            = match_clauses:( __* m:(match_clause() ** (__+) )? { m.unwrap_or_default().into_iter().flatten().collect() } )
+              where_clauses:( __* w:(where_clause() ** (__+) )? { w.unwrap_or_default() } )
               __*
-              {
-                match group_by_exprs {
-                    // Explicit GROUP BY
-                    Some(keys) => handle_explicit_group_by(
-                        match_clauses,
-                        where_clauses,
-                        return_clause,
-                        keys,
-                        config,
-                    ),
-                    // No GROUP BY
-                    None => vec![
-                        QueryPart {
-                            match_clauses,
-                            where_clauses,
-                            return_clause: return_clause.into_projection_clause(config),
-                        }
-                    ],
-                }
-              }
+              return_clause:(with_or_return())
+              group_by_exprs:( __* g:group_by_clause()? { g } )
+              __*
+              { build_query_parts(match_clauses, where_clauses, return_clause, group_by_exprs, config).unwrap() }
 
         pub rule query(config: &dyn GQLConfiguration) -> Query
             = __*
@@ -408,8 +390,8 @@ peg::parser! {
                     parts,
                 }
             }
-            
     }
+
 }
 
 pub fn parse(
@@ -427,80 +409,98 @@ pub trait GQLConfiguration: Send + Sync {
     fn get_aggregating_function_names(&self) -> HashSet<String>;
 }
 
+pub fn build_query_parts(
+    match_clauses: Vec<MatchClause>,
+    where_clauses: Vec<Expression>,
+    final_return: Vec<Expression>,
+    group_by_exprs: Option<Vec<Expression>>,
+    config: &dyn GQLConfiguration,
+) -> Result<Vec<QueryPart>, QueryParseError> {
+    return if let Some(keys) = group_by_exprs {
+        handle_explicit_group_by(
+            match_clauses,
+            where_clauses,
+            final_return,
+            keys,
+            config,
+        )
+    } else {
+        Ok(vec![QueryPart {
+            match_clauses,
+            where_clauses,
+            return_clause: final_return.into_projection_clause(config),
+        }])
+    };
+
+}
+
 fn handle_explicit_group_by(
     match_clauses: Vec<MatchClause>,
     where_clauses: Vec<Expression>,
     return_expressions: Vec<Expression>,
     group_by_keys: Vec<Expression>,
     config: &dyn GQLConfiguration,
-) -> Vec<QueryPart> {
-    // Split the RETURN expressions into non-aggregates and aggregates
+) -> Result<Vec<QueryPart>, QueryParseError> {
     let mut return_non_aggs    = Vec::new();
-    let mut aggregates  = Vec::new();
+    let mut return_aggs  = Vec::new();
     for expr in &return_expressions {
         if contains_aggregating_function(expr, config) {
-            aggregates.push(expr.clone());
+            return_aggs.push(expr.clone());
         } else {
             return_non_aggs.push(expr.clone());
         }
     }
 
-    // Non-aggregated columns in RETURN that are not in the GROUP BY clause are invalid and cause an error.
-    let invalid: Vec<_> = return_non_aggs.iter()
-        .filter(|e| !group_by_keys.iter().any(|k| expr_covers(e, k)))
-        .cloned()
-        .collect();
-    if !invalid.is_empty() {
-        panic!("Projection contains non-grouped columns");
+    if return_non_aggs
+    .iter()
+    .find(|expr| group_by_keys.iter().all(|key| !matches_group_by_key(expr, key)))
+    .is_some()
+    {
+        return Err(QueryParseError::ParserError(Box::new(
+            std::io::Error::new(std::io::ErrorKind::Other, "Non-grouped RETURN expressions must appear in GROUP BY clause")
+        )));
     }
 
-    // All GROUP BY keys appear in the RETURN non-aggregates. This is the simple case.
-    if group_by_keys.iter().all(|k| return_non_aggs.iter().any(|e| expr_covers(e, k))) {
-        return vec![ QueryPart {
+    // All GROUP BY keys appear in the RETURN non-aggregates
+    if group_by_keys.iter().all(|k| return_non_aggs.iter().any(|e| matches_group_by_key(e, k))) {
+        return Ok(vec![ QueryPart {
             match_clauses,
             where_clauses,
             return_clause: return_expressions.into_projection_clause(config),
-        } ];
+        } ]);
     }
 
     // Fewer keys are projected in the RETURN than are in the GROUP BY clause.
-    // For each GROUP BY key, use the matching expression from RETURN if available (to preserve aliases or formatting)
-    //otherwise, retain the original GROUP BY key.
     let full_keys: Vec<_> = group_by_keys
         .into_iter()
         .map(|key| {
             return_expressions
                 .iter()
-                .find(|e| expr_covers(e, &key))
+                .find(|e| matches_group_by_key(e, &key))
                 .cloned()
                 .unwrap_or(key)
         })
         .collect();
 
-    two_step_parts(
+        Ok(group_all_keys_then_project_return(
         &match_clauses,
         &where_clauses,
         full_keys,
-        aggregates,
-        &return_expressions,
+        return_aggs,
+        &return_expressions),
     )
 }
 
-fn expr_covers(expr: &Expression, key: &Expression) -> bool {
-    // If the two expressions are exactly structurally equal, it is a match
+fn matches_group_by_key(expr: &Expression, key: &Expression) -> bool {
     if expr == key {
         return true;
     }
 
     match (expr, key) {
-         // If both expressions are function calls, it compares them ignoring their position
         (Expression::FunctionExpression(f1), Expression::FunctionExpression(f2)) => {
             f1.eq_ignore_position_in_query(f2)
         }
-        // If both expressions are binary expressions (*, +), it compares them ignoring operand order for commutative operations.
-        (Expression::BinaryExpression(b1), Expression::BinaryExpression(b2)) => {
-            b1.eq_ignore_commutativity(b2)
-        }
+
          // If the RETURN expression is an alias (a.name AS person_name) and the GROUP BY references the alias name (person_name), it is a match.
         (Expression::UnaryExpression(UnaryExpression::Alias { alias, .. }),
          Expression::UnaryExpression(UnaryExpression::Identifier(id))) => {
@@ -510,7 +510,7 @@ fn expr_covers(expr: &Expression, key: &Expression) -> bool {
     }
 }
 
-fn two_step_parts(
+fn group_all_keys_then_project_return(
     match_clauses: &Vec<MatchClause>,
     where_clauses: &Vec<Expression>,
     grouping: Vec<Expression>,
@@ -518,34 +518,30 @@ fn two_step_parts(
     original_return: &Vec<Expression>,
 ) -> Vec<QueryPart> {
     let first_return = if aggregates.is_empty() {
-        // No aggregates, so simple projection of grouping keys
         ProjectionClause::Item(grouping.clone())
     } else {
-        // Aggregates present, so use GROUP BY clause
         ProjectionClause::GroupBy { grouping: grouping.clone(), aggregates: aggregates.clone() }
     };
 
-   
     let stage1 = QueryPart {
         match_clauses: match_clauses.clone(),
         where_clauses: where_clauses.clone(),
         return_clause: first_return,
     };
 
-    // Project original return expressions
     let stage2 = QueryPart {
         match_clauses: vec![],
         where_clauses: vec![],
         return_clause: ProjectionClause::Item(
-            original_return.iter().map(strip_alias).collect()
+            original_return.iter().map(remove_alias_wrapper).collect()
         ),
     };
 
     vec![stage1, stage2]
 }
 
-// If the expression is an alias (x + 1 AS sum), replace it with just the alias identifier.
-fn strip_alias(expr: &Expression) -> Expression {
+// Converts an expression (x + 1 AS sum) to just the alias (sum).
+fn remove_alias_wrapper(expr: &Expression) -> Expression {
     if let Expression::UnaryExpression(UnaryExpression::Alias { alias, .. }) = expr {
         UnaryExpression::ident(alias)
     } else {

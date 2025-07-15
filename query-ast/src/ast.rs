@@ -471,17 +471,6 @@ impl BinaryExpression {
         Expression::BinaryExpression(Self::Index(Box::new(a), Box::new(b)))
     }
 
-    // Checks if two binary expressions are equal, ignoring operand order for commutative operations.
-    pub fn eq_ignore_commutativity(&self, other: &Self) -> bool {
-        use BinaryExpression::*;
-
-        match (self, other) {
-            (Add(a1, b1), Add(a2, b2)) | (Multiply(a1, b1), Multiply(a2, b2)) => {
-                (a1 == a2 && b1 == b2) || (a1 == b2 && b1 == a2)
-            }
-            _ => self == other,
-        }
-    }
 }
 
 impl ParentExpression for BinaryExpression {
