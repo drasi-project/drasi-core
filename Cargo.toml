@@ -4,6 +4,7 @@ members = [
   "core",
   "query-ast",
   "query-cypher",
+  "query-gql",
   "index-rocksdb",
   "index-garnet",
   "middleware",

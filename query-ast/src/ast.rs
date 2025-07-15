@@ -511,6 +511,10 @@ impl FunctionExpression {
             position_in_query,
         })
     }
+
+    pub fn eq_ignore_position_in_query(&self, other: &Self) -> bool {
+        self.name == other.name && self.args == other.args
+    }
 }
 
 impl ParentExpression for FunctionExpression {
