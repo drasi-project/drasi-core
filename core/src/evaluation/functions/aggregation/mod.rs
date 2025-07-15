@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod avg;
+mod collect;
 mod count;
 mod last;
 pub mod lazy_sorted_set;
@@ -24,6 +25,7 @@ mod sum;
 use std::sync::Arc;
 
 pub use avg::Avg;
+pub use collect::Collect;
 pub use count::Count;
 pub use last::Last;
 pub use linear_gradient::LinearGradient;
@@ -48,6 +50,7 @@ impl RegisterAggregationFunctions for FunctionRegistry {
         self.register_function("count", Function::Aggregating(Arc::new(Count {})));
         self.register_function("min", Function::Aggregating(Arc::new(Min {})));
         self.register_function("max", Function::Aggregating(Arc::new(Max {})));
+        self.register_function("collect", Function::Aggregating(Arc::new(Collect {})));
         self.register_function(
             "drasi.linearGradient",
             Function::Aggregating(Arc::new(LinearGradient {})),
