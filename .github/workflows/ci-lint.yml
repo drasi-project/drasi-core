@@ -7,7 +7,6 @@ on:
     branches:
       - main
       - feature/*
-      - release/*
       - feature-gql
 
 jobs:

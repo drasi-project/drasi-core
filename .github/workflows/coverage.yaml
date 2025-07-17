@@ -21,7 +21,6 @@ on:
   pull_request:
     branches:
       - main
-      - release/*
       - feature/*
       - feature-gql
 
