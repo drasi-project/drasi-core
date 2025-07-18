@@ -3108,3 +3108,123 @@ fn let_filter_yield_with_param() {
         "GQL AST should match expected structure for LET, FILTER, YIELD, and $param"
     );
 }
+
+#[test]
+fn filter_filter_let_filter() {
+    // Test the sequence FILTER FILTER LET FILTER
+
+    let query = "MATCH (v:Vehicle)
+         FILTER v.color = 'Red'
+         FILTER v.miles > 50000 AND v.miles < 100000
+         LET isExpensive = v.price > 40000
+         FILTER isExpensive
+         RETURN v.color, v.miles, v.price, isExpensive";
+
+    let gql_ast = gql::query(query, &TEST_CONFIG).unwrap();
+
+    let expected_ast = Query {
+        parts: vec![
+            // First query part: Match vehicles
+            QueryPart {
+                match_clauses: vec![MatchClause {
+                    start: NodeMatch {
+                        annotation: Annotation {
+                            name: Some("v".into()),
+                        },
+                        labels: vec!["Vehicle".into()],
+                        property_predicates: vec![],
+                    },
+                    path: vec![],
+                    optional: false,
+                }],
+                where_clauses: vec![],
+                return_clause: ProjectionClause::Item(vec![UnaryExpression::ident("v")]),
+            },
+            // Second query part: First FILTER - v.color = 'Red'
+            QueryPart {
+                match_clauses: vec![],
+                where_clauses: vec![BinaryExpression::eq(
+                    UnaryExpression::expression_property(
+                        UnaryExpression::ident("v"),
+                        "color".into(),
+                    ),
+                    UnaryExpression::literal(Literal::Text("Red".into())),
+                )],
+                return_clause: ProjectionClause::Item(vec![UnaryExpression::ident("v")]),
+            },
+            // Third query part: Second FILTER - v.miles > 50000 AND v.miles < 100000
+            QueryPart {
+                match_clauses: vec![],
+                where_clauses: vec![BinaryExpression::and(
+                    BinaryExpression::gt(
+                        UnaryExpression::expression_property(
+                            UnaryExpression::ident("v"),
+                            "miles".into(),
+                        ),
+                        UnaryExpression::literal(Literal::Integer(50000)),
+                    ),
+                    BinaryExpression::lt(
+                        UnaryExpression::expression_property(
+                            UnaryExpression::ident("v"),
+                            "miles".into(),
+                        ),
+                        UnaryExpression::literal(Literal::Integer(100000)),
+                    ),
+                )],
+                return_clause: ProjectionClause::Item(vec![UnaryExpression::ident("v")]),
+            },
+            // Fourth query part: LET - define isExpensive
+            QueryPart {
+                match_clauses: vec![],
+                where_clauses: vec![],
+                return_clause: ProjectionClause::Item(vec![
+                    UnaryExpression::ident("v"),
+                    UnaryExpression::alias(
+                        BinaryExpression::gt(
+                            UnaryExpression::expression_property(
+                                UnaryExpression::ident("v"),
+                                "price".into(),
+                            ),
+                            UnaryExpression::literal(Literal::Integer(40000)),
+                        ),
+                        "isExpensive".into(),
+                    ),
+                ]),
+            },
+            // Fifth query part: Third FILTER - isExpensive
+            QueryPart {
+                match_clauses: vec![],
+                where_clauses: vec![UnaryExpression::ident("isExpensive")],
+                return_clause: ProjectionClause::Item(vec![
+                    UnaryExpression::ident("v"),
+                    UnaryExpression::ident("isExpensive"),
+                ]),
+            },
+            // Sixth query part: Final projection
+            QueryPart {
+                match_clauses: vec![],
+                where_clauses: vec![],
+                return_clause: ProjectionClause::Item(vec![
+                    UnaryExpression::expression_property(
+                        UnaryExpression::ident("v"),
+                        "color".into(),
+                    ),
+                    UnaryExpression::expression_property(
+                        UnaryExpression::ident("v"),
+                        "miles".into(),
+                    ),
+                    UnaryExpression::expression_property(
+                        UnaryExpression::ident("v"),
+                        "price".into(),
+                    ),
+                    UnaryExpression::ident("isExpensive"),
+                ]),
+            },
+        ],
+    };
+
+    assert_eq!(
+        gql_ast, expected_ast,
+        "GQL AST should match expected structure for FILTER FILTER LET FILTER sequence"
+    );
+}

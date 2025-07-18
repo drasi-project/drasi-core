@@ -228,7 +228,7 @@ peg::parser! {
         rule statement_clause() -> StatementClause
             = l:let_statement()    { StatementClause::Let(l) }
             / y:yield_statement()  { StatementClause::Yield(y) }
-            / f:filter_statement() { StatementClause::Filter(vec![f]) }
+            / f:filter_statement() { StatementClause::Filter(f) }
 
             #[cache_left_rec]
         pub rule expression() -> Expression
@@ -434,7 +434,7 @@ peg::parser! {
 pub enum StatementClause {
     Let(Vec<(Arc<str>, Expression)>),
     Yield(Vec<(Expression, Option<Arc<str>>)>),
-    Filter(Vec<Expression>),
+    Filter(Expression),
 }
 
 pub fn parse(
@@ -543,7 +543,7 @@ fn build_parts_for_statements(
                 });
             }
 
-            StatementClause::Filter(filters) => {
+            StatementClause::Filter(filter) => {
                 if !match_clause.is_empty() || !where_clause.is_empty() {
                     parts.push(QueryPart {
                         match_clauses: match_clause,
@@ -551,13 +551,11 @@ fn build_parts_for_statements(
                         return_clause: scope.clone().into_projection_clause(config),
                     });
                 }
-                for filter_expr in filters {
-                    parts.push(QueryPart {
-                        match_clauses: Vec::new(),
-                        where_clauses: vec![filter_expr],
-                        return_clause: scope.clone().into_projection_clause(config),
-                    });
-                }
+                parts.push(QueryPart {
+                    match_clauses: Vec::new(),
+                    where_clauses: vec![filter],
+                    return_clause: scope.clone().into_projection_clause(config),
+                });
             }
         }
     }
