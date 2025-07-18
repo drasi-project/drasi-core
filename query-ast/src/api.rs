@@ -24,4 +24,7 @@ pub trait QueryParser: Send + Sync {
 pub enum QueryParseError {
     #[error("parser error: {0}")]
     ParserError(Box<dyn std::error::Error + Send + Sync>),
+
+    #[error("Non-grouped RETURN expressions must appear in GROUP BY clause")]
+    MissingGroupByKey,
 }

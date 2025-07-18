@@ -4,8 +4,10 @@ on:
   push:
     branches: ['*']
   pull_request:
-    branches: [ "main" ]
-  
+    branches:
+      - main
+      - feature/*
+      - feature-gql
 
 jobs:
   clippy_check:

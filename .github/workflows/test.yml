@@ -1,10 +1,19 @@
 name: Run Tests
 
 on:
+  workflow_dispatch:
   push:
-    branches: [ "main" ]
+    branches:
+      - main
+      - release/*
+    tags:
+      - v*
   pull_request:
-    branches: [ "main" ]
+    branches:
+      - main
+      - feature/*
+      - release/*
+      - feature-gql
 
 env:
   CARGO_TERM_COLOR: always
