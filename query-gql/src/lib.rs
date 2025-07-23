@@ -402,22 +402,24 @@ peg::parser! {
             = kw_group() __+ kw_by() __+ "(" __* ")" { Vec::new() }  // Handle GROUP BY ()
             / kw_group() __+ kw_by() __+ items:( expression() ++ (__* "," __*) ) { items }
 
-        rule with_or_return() -> Vec<Expression>
-            = r:return_clause() { r }
-
+        rule match_with_where() -> (Vec<MatchClause>, Vec<Expression>)
+            = ms:(match_clause() ++ (__+)) __*
+            w:where_clause()? { (ms.into_iter().flatten().collect(), w.into_iter().collect()) }
+        
         rule part(config: &dyn GQLConfiguration) -> Vec<QueryPart>
-            = match_clauses:( __* m:(match_clause() ** (__+) )? { m.unwrap_or_default().into_iter().flatten().collect() } )
-              where_clauses:( __* w:(where_clause() ** (__+) )? { w.unwrap_or_default() } )
-              statement_clauses:( __* s:statement_clause() __* { s } )*
-              __*
-              return_clause:(with_or_return())
-              group_by_exprs:( __* g:group_by_clause()? { g } )
-              __*
-              // Will return full expected set in addition to the error message
-                {? build_query_parts(match_clauses, where_clauses, statement_clauses, return_clause, group_by_exprs, config).map_err(|e| match e {
-                    QueryParseError::MissingGroupByKey => "Non-grouped RETURN expressions must appear in GROUP BY clause",
-                    QueryParseError::ParserError(_) => "Parser error",
-                }) }
+              = __*
+                match_and_where:(match_with_where() ** (__+))
+                statement_clauses:( __* s:statement_clause() __* { s } )*
+                __* final_return:return_clause()
+                __* group_by:group_by_clause()?
+                __*
+                  {? build_query_parts(match_and_where, statement_clauses, final_return, group_by, config).map_err(|e| match e {
+                    // Will return full expected set in addition to the error message
+                      QueryParseError::MissingGroupByKey => "Non-grouped RETURN expressions must appear in GROUP BY clause",
+                      QueryParseError::ParserError(_) => "Parser error",
+                  }) }
+          
+          
 
         pub rule query(config: &dyn GQLConfiguration) -> Query
             = __*
@@ -453,13 +455,18 @@ pub trait GQLConfiguration: Send + Sync {
 }
 
 fn build_query_parts(
-    mut match_clauses: Vec<MatchClause>,
-    mut where_clauses: Vec<Expression>,
+    match_and_where: Vec<(Vec<MatchClause>, Vec<Expression>)>,
     statement_clauses: Vec<StatementClause>,
     final_return_expressions: Vec<Expression>,
     group_by_expressions: Option<Vec<Expression>>,
     config: &dyn GQLConfiguration,
 ) -> Result<Vec<QueryPart>, QueryParseError> {
+    let mut match_clauses = Vec::new();
+    let mut where_clauses = Vec::new();
+    for (m, ws) in match_and_where {
+        match_clauses.extend(m);
+        where_clauses.extend(ws);
+    }
     let mut query_parts = Vec::new();
 
     if !statement_clauses.is_empty() {
@@ -565,20 +572,26 @@ fn build_parts_for_statements(
 
 fn get_starting_scope(match_clauses: &[MatchClause]) -> Vec<Expression> {
     let mut expressions = Vec::new();
+    let mut seen: HashSet<Arc<str>> = HashSet::new();
 
     for clause in match_clauses {
         if let Some(name) = &clause.start.annotation.name {
-            expressions.push(UnaryExpression::ident(name.as_ref()));
+            if seen.insert(name.clone()) {
+                expressions.push(UnaryExpression::ident(name.as_ref()));
+            }
         }
         for (_rel, node) in &clause.path {
             if let Some(name) = &node.annotation.name {
-                expressions.push(UnaryExpression::ident(name.as_ref()));
+                if seen.insert(name.clone()) {
+                    expressions.push(UnaryExpression::ident(name.as_ref()));
+                }
             }
         }
     }
 
     expressions
 }
+
 
 fn handle_explicit_group_by(
     match_clauses: Vec<MatchClause>,

@@ -3228,3 +3228,421 @@ fn filter_filter_let_filter() {
         "GQL AST should match expected structure for FILTER FILTER LET FILTER sequence"
     );
 }
+
+#[test]
+fn muliple_match_comma_match_where() {
+    let query = "MATCH (:Person {name: 'Martin Sheen'})-[:ACTED_IN]->(movie:Movie),
+    (director:Person)-[:DIRECTED]->(movie)
+    WHERE director.age > 60
+    RETURN director.name AS director, movie.title AS movieTitle";
+
+    let gql_ast = gql::query(query, &TEST_CONFIG).unwrap();
+
+    let expected_ast = Query {
+        parts: vec![
+            QueryPart {
+                match_clauses: vec![
+                    // MATCH (:Person {name: "Martin Sheen"})-[:ACTED_IN]->(movie:Movie)
+                    MatchClause {
+                        start: NodeMatch {
+                            annotation: Annotation { name: None },
+                            labels: vec!["Person".into()],
+                            property_predicates: vec![BinaryExpression::eq(
+                                Expression::UnaryExpression(UnaryExpression::Property {
+                                    name: "".into(),
+                                    key: "name".into(),
+                                }),
+                                UnaryExpression::literal(Literal::Text("Martin Sheen".into())),
+                            )],
+                        },
+                        path: vec![(
+                            RelationMatch {
+                                direction: Direction::Right,
+                                annotation: Annotation { name: None },
+                                variable_length: None,
+                                labels: vec!["ACTED_IN".into()],
+                                property_predicates: vec![],
+                            },
+                            NodeMatch {
+                                annotation: Annotation { name: Some("movie".into()) },
+                                labels: vec!["Movie".into()],
+                                property_predicates: vec![],
+                            }
+                        )],
+                        optional: false,
+                    },
+                    // MATCH (director:Person)-[:DIRECTED]->(movie)
+                    MatchClause {
+                        start: NodeMatch {
+                            annotation: Annotation { name: Some("director".into()) },
+                            labels: vec!["Person".into()],
+                            property_predicates: vec![],
+                        },
+                        path: vec![(
+                            RelationMatch {
+                                direction: Direction::Right,
+                                annotation: Annotation { name: None },
+                                variable_length: None,
+                                labels: vec!["DIRECTED".into()],
+                                property_predicates: vec![],
+                            },
+                            NodeMatch {
+                                annotation: Annotation { name: Some("movie".into()) },
+                                labels: vec![],
+                                property_predicates: vec![],
+                            }
+                        )],
+                        optional: false,
+                    }
+                ],
+                // WHERE director.age > 60
+                where_clauses: vec![BinaryExpression::gt(
+                    UnaryExpression::expression_property(
+                        UnaryExpression::ident("director"),
+                        "age".into(),
+                    ),
+                    UnaryExpression::literal(Literal::Integer(60)),
+                )],
+                // RETURN director.name AS director, movie.title AS movieTitle
+                return_clause: ProjectionClause::Item(vec![
+                    UnaryExpression::alias(
+                        UnaryExpression::expression_property(
+                            UnaryExpression::ident("director"),
+                            "name".into(),
+                        ),
+                        "director".into(),
+                    ),
+                    UnaryExpression::alias(
+                        UnaryExpression::expression_property(
+                            UnaryExpression::ident("movie"),
+                            "title".into(),
+                        ),
+                        "movieTitle".into(),
+                    ),
+                ]),
+            }
+        ],
+    };    
+
+
+    assert_eq!(
+        gql_ast, expected_ast,
+        "GQL AST should match expected structure for multiple MATCH with comma and WHERE"
+    );
+}
+
+#[test]
+fn multiple_match_match_where() {
+    let query = "MATCH (:Person {name: 'Martin Sheen'})-[:ACTED_IN]->(movie:Movie)
+    MATCH (director:Person)-[:DIRECTED]->(movie)
+    WHERE movie.budget > 100000000
+    RETURN director.name AS director, movie.title AS movieTitle";
+
+    let gql_ast = gql::query(query, &TEST_CONFIG).unwrap();
+
+    let expected_ast = Query {
+        parts: vec![
+            QueryPart {
+                match_clauses: vec![
+                    // First MATCH clause
+                    MatchClause {
+                        start: NodeMatch {
+                            annotation: Annotation { name: None },
+                            labels: vec!["Person".into()],
+                            property_predicates: vec![BinaryExpression::eq(
+                                Expression::UnaryExpression(UnaryExpression::Property {
+                                    name: "".into(),
+                                    key: "name".into(),
+                                }),
+                                Expression::UnaryExpression(UnaryExpression::Literal(
+                                    Literal::Text("Martin Sheen".into()),
+                                )),
+                            )],
+                        },
+                        path: vec![(
+                            RelationMatch {
+                                direction: Direction::Right,
+                                annotation: Annotation { name: None },
+                                variable_length: None,
+                                labels: vec!["ACTED_IN".into()],
+                                property_predicates: vec![],
+                            },
+                            NodeMatch {
+                                annotation: Annotation {
+                                    name: Some("movie".into()),
+                                },
+                                labels: vec!["Movie".into()],
+                                property_predicates: vec![],
+                            },
+                        )],
+                        optional: false,
+                    },
+                    // Second MATCH clause
+                    MatchClause {
+                        start: NodeMatch {
+                            annotation: Annotation {
+                                name: Some("director".into()),
+                            },
+                            labels: vec!["Person".into()],
+                            property_predicates: vec![],
+                        },
+                        path: vec![(
+                            RelationMatch {
+                                direction: Direction::Right,
+                                annotation: Annotation { name: None },
+                                variable_length: None,
+                                labels: vec!["DIRECTED".into()],
+                                property_predicates: vec![],
+                            },
+                            NodeMatch {
+                                annotation: Annotation {
+                                    name: Some("movie".into()),
+                                },
+                                labels: vec![],
+                                property_predicates: vec![],
+                            },
+                        )],
+                        optional: false,
+                    },
+                ],
+                // WHERE clause: movie.budget > 100000000
+                where_clauses: vec![BinaryExpression::gt(
+                    UnaryExpression::expression_property(
+                        UnaryExpression::ident("movie"),
+                        "budget".into(),
+                    ),
+                    UnaryExpression::literal(Literal::Integer(100000000)),
+                )],
+                // RETURN clause
+                return_clause: ProjectionClause::Item(vec![
+                    UnaryExpression::alias(
+                        UnaryExpression::expression_property(
+                            UnaryExpression::ident("director"),
+                            "name".into(),
+                        ),
+                        "director".into(),
+                    ),
+                    UnaryExpression::alias(
+                        UnaryExpression::expression_property(
+                            UnaryExpression::ident("movie"),
+                            "title".into(),
+                        ),
+                        "movieTitle".into(),
+                    ),
+                ]),
+            },
+        ],
+    };
+
+    assert_eq!(
+        gql_ast, expected_ast,
+        "GQL AST should match expected structure for multiple MATCH with WHERE clause"
+    );
+}
+
+#[test]
+fn multiple_match_where_match_where_let_filter_return() {
+    let query = "MATCH (:Person {name: 'Martin Sheen'})-[:ACTED_IN]->(movie:Movie)
+    MATCH (director:Person)-[:DIRECTED]->(movie)
+    WHERE director.age > 60
+    LET isExpensive = movie.budget > 100000000
+    FILTER isExpensive
+    RETURN director.name AS director, movie.title AS movieTitle";
+
+    let gql_ast = gql::query(query, &TEST_CONFIG).unwrap();
+    let expected_ast = Query {
+        parts: vec![
+            // MATCH + MATCH + WHERE + LET (single part)
+            QueryPart {
+                match_clauses: vec![
+                    MatchClause {
+                        start: NodeMatch {
+                            annotation: Annotation { name: None },
+                            labels: vec!["Person".into()],
+                            property_predicates: vec![BinaryExpression::eq(
+                                Expression::UnaryExpression(UnaryExpression::Property {
+                                    name: "".into(),
+                                    key: "name".into(),
+                                }),
+                                Expression::UnaryExpression(UnaryExpression::Literal(
+                                    Literal::Text("Martin Sheen".into()),
+                                )),
+                            )],
+                        },
+                        path: vec![(
+                            RelationMatch {
+                                direction: Direction::Right,
+                                annotation: Annotation { name: None },
+                                variable_length: None,
+                                labels: vec!["ACTED_IN".into()],
+                                property_predicates: vec![],
+                            },
+                            NodeMatch {
+                                annotation: Annotation { name: Some("movie".into()) },
+                                labels: vec!["Movie".into()],
+                                property_predicates: vec![],
+                            }
+                        )],
+                        optional: false,
+                    },
+                    MatchClause {
+                        start: NodeMatch {
+                            annotation: Annotation { name: Some("director".into()) },
+                            labels: vec!["Person".into()],
+                            property_predicates: vec![],
+                        },
+                        path: vec![(
+                            RelationMatch {
+                                direction: Direction::Right,
+                                annotation: Annotation { name: None },
+                                variable_length: None,
+                                labels: vec!["DIRECTED".into()],
+                                property_predicates: vec![],
+                            },
+                            NodeMatch {
+                                annotation: Annotation { name: Some("movie".into()) },
+                                labels: vec![],
+                                property_predicates: vec![],
+                            }
+                        )],
+                        optional: false,
+                    },
+                ],
+                where_clauses: vec![BinaryExpression::gt(
+                    UnaryExpression::expression_property(
+                        UnaryExpression::ident("director"),
+                        "age".into(),
+                    ),
+                    UnaryExpression::literal(Literal::Integer(60)),
+                )],
+                // NOTE: order: movie, director, then isExpensive
+                return_clause: ProjectionClause::Item(vec![
+                    UnaryExpression::ident("movie"),
+                    UnaryExpression::ident("director"),
+                    UnaryExpression::alias(
+                        BinaryExpression::gt(
+                            UnaryExpression::expression_property(
+                                UnaryExpression::ident("movie"),
+                                "budget".into(),
+                            ),
+                            UnaryExpression::literal(Literal::Integer(100_000_000)),
+                        ),
+                        "isExpensive".into(),
+                    ),
+                ]),
+            },
+    
+            // FILTER isExpensive (own part, same order movie, director, isExpensive)
+            QueryPart {
+                match_clauses: vec![],
+                where_clauses: vec![UnaryExpression::ident("isExpensive")],
+                return_clause: ProjectionClause::Item(vec![
+                    UnaryExpression::ident("movie"),
+                    UnaryExpression::ident("director"),
+                    UnaryExpression::ident("isExpensive"),
+                ]),
+            },
+    
+            // Final RETURN (aliases only)
+            QueryPart {
+                match_clauses: vec![],
+                where_clauses: vec![],
+                return_clause: ProjectionClause::Item(vec![
+                    UnaryExpression::alias(
+                        UnaryExpression::expression_property(
+                            UnaryExpression::ident("director"),
+                            "name".into(),
+                        ),
+                        "director".into(),
+                    ),
+                    UnaryExpression::alias(
+                        UnaryExpression::expression_property(
+                            UnaryExpression::ident("movie"),
+                            "title".into(),
+                        ),
+                        "movieTitle".into(),
+                    ),
+                ]),
+            },
+        ],
+    };
+    
+    
+    
+    assert_eq!(
+        gql_ast, expected_ast,
+        "GQL AST should match expected structure for multiple MATCH with WHERE clause"
+    );
+
+
+}
+
+#[test]
+fn match_with_where_inside_match() {
+    let query = "MATCH (a:Person WHERE a.name = 'Andy')-[:KNOWS]->(b:Person WHERE b.age > minAge)
+    RETURN b.name AS name";
+
+    let gql_ast = gql::query(query, &TEST_CONFIG).unwrap();
+
+    let expected_ast = Query {
+        parts: vec![
+            QueryPart {
+                match_clauses: vec![
+                    MatchClause {
+                        start: NodeMatch {
+                            annotation: Annotation {
+                                name: Some("a".into()),
+                            },
+                            labels: vec!["Person".into()],
+                            property_predicates: vec![BinaryExpression::eq(
+                                UnaryExpression::expression_property(
+                                    UnaryExpression::ident("a"),
+                                    "name".into(),
+                                ),
+                                UnaryExpression::literal(Literal::Text("Andy".into())),
+                            )],
+                        },
+                        path: vec![(
+                            RelationMatch {
+                                direction: Direction::Right,
+                                annotation: Annotation { name: None },
+                                variable_length: None,
+                                labels: vec!["KNOWS".into()],
+                                property_predicates: vec![],
+                            },
+                            NodeMatch {
+                                annotation: Annotation {
+                                    name: Some("b".into()),
+                                },
+                                labels: vec!["Person".into()],
+                                property_predicates: vec![BinaryExpression::gt(
+                                    UnaryExpression::expression_property(
+                                        UnaryExpression::ident("b"),
+                                        "age".into(),
+                                    ),
+                                    UnaryExpression::ident("minAge"),
+                                )],
+                            },
+                        )],
+                        optional: false,
+                    },
+                ],
+                where_clauses: vec![],
+                return_clause: ProjectionClause::Item(vec![
+                    UnaryExpression::alias(
+                        UnaryExpression::expression_property(
+                            UnaryExpression::ident("b"),
+                            "name".into(),
+                        ),
+                        "name".into(),
+                    ),
+                ]),
+            },
+        ],
+    };
+
+    assert_eq!(
+        gql_ast, expected_ast,
+        "GQL AST should match expected structure for MATCH with inline WHEREs"
+    );
+}
