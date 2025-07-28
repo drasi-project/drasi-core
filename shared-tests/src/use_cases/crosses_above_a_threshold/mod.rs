@@ -20,11 +20,14 @@ use serde_json::json;
 use drasi_core::{
     evaluation::{
         context::QueryPartEvaluationContext,
+        functions::FunctionRegistry,
         variable_value::{duration::Duration, VariableValue},
     },
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{ContinuousQuery, QueryBuilder},
 };
+use drasi_functions_cypher::CypherFunctionSet;
+use drasi_query_cypher::CypherParser;
 
 use self::data::get_bootstrap_data;
 use crate::QueryTestConfig;
@@ -53,7 +56,10 @@ async fn bootstrap_query(query: &ContinuousQuery) {
 // number of days overdue changes.
 pub async fn crosses_above_a_threshold(config: &(impl QueryTestConfig + Send)) {
     let crosses_above_a_threshold_query = {
-        let mut builder = QueryBuilder::new(queries::crosses_above_a_threshold_query())
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::crosses_above_a_threshold_query(), parser)
+            .with_function_registry(function_registry)
             .with_joins(queries::crosses_above_a_threshold_metadata());
         builder = config.config_query(builder).await;
         builder.build().await
@@ -247,9 +253,14 @@ pub async fn crosses_above_a_threshold(config: &(impl QueryTestConfig + Send)) {
 // by 10 days and when it is no longer overdue.
 pub async fn crosses_above_a_threshold_with_overdue_days(config: &(impl QueryTestConfig + Send)) {
     let crosses_above_a_threshold_query = {
-        let mut builder =
-            QueryBuilder::new(queries::crosses_above_a_threshold_with_overduedays_query())
-                .with_joins(queries::crosses_above_a_threshold_metadata());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(
+            queries::crosses_above_a_threshold_with_overduedays_query(),
+            parser,
+        )
+        .with_function_registry(function_registry)
+        .with_joins(queries::crosses_above_a_threshold_metadata());
         builder = config.config_query(builder).await;
         builder.build().await
     };

@@ -12,29 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use drasi_query_ast::ast;
 
 use crate::evaluation::{context::SideEffects, ExpressionEvaluationContext, FunctionError};
 
 use super::ContextMutatorFunction;
-
-use super::{Function, FunctionRegistry};
-
-pub trait RegisterContextMutatorFunctions {
-    fn register_context_mutators(&self);
-}
-
-impl RegisterContextMutatorFunctions for FunctionRegistry {
-    fn register_context_mutators(&self) {
-        self.register_function(
-            "retainHistory",
-            Function::ContextMutator(Arc::new(RetainHistory {})),
-        );
-    }
-}
 
 pub struct RetainHistory {}
 

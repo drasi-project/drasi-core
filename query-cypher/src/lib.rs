@@ -14,11 +14,11 @@
 // limitations under the License.
 
 use drasi_query_ast::{
-    api::{QueryParseError, QueryParser},
+    api::{QueryConfiguration, QueryParseError, QueryParser},
     ast::{self, Expression, ParentExpression, ProjectionClause},
 };
 use peg::{error::ParseError, str::LineCol};
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 
 #[cfg(test)]
 mod tests;
@@ -387,7 +387,7 @@ peg::parser! {
             = w:with_clause() { w }
             / r:return_clause() { r }
 
-        rule part(config: &dyn CypherConfiguration) -> QueryPart
+        rule part(config: &dyn QueryConfiguration) -> QueryPart
             = match_clauses:( __* m:(match_clause() ** (__+) )? { m.unwrap_or_else(Vec::new).into_iter().flatten().collect() } )
                 where_clauses:( __* w:(where_clause() ** (__+) )? { w.unwrap_or_else(Vec::new) } )
                 //create_clauses:( __* c:(create_clause() ** (__+) )? { c.unwrap_or_else(Vec::new) } )
@@ -402,7 +402,7 @@ peg::parser! {
                     }
                 }
 
-        pub rule query(config: &dyn CypherConfiguration) -> Query
+        pub rule query(config: &dyn QueryConfiguration) -> Query
             = __*
               parts:(w:( part(config)+ ) { w } )
               __* {
@@ -415,7 +415,7 @@ peg::parser! {
 
 pub fn parse(
     input: &str,
-    config: &dyn CypherConfiguration,
+    config: &dyn QueryConfiguration,
 ) -> Result<ast::Query, ParseError<LineCol>> {
     cypher::query(input, config)
 }
@@ -424,16 +424,12 @@ pub fn parse_expression(input: &str) -> Result<ast::Expression, ParseError<LineC
     cypher::expression(input)
 }
 
-pub trait CypherConfiguration: Send + Sync {
-    fn get_aggregating_function_names(&self) -> HashSet<String>;
-}
-
 pub trait IntoProjectionClause {
-    fn into_projection_clause(self, config: &dyn CypherConfiguration) -> ProjectionClause;
+    fn into_projection_clause(self, config: &dyn QueryConfiguration) -> ProjectionClause;
 }
 
 impl IntoProjectionClause for Vec<Expression> {
-    fn into_projection_clause(self, config: &dyn CypherConfiguration) -> ProjectionClause {
+    fn into_projection_clause(self, config: &dyn QueryConfiguration) -> ProjectionClause {
         let mut keys = Vec::new();
         let mut aggs = Vec::new();
 
@@ -458,7 +454,7 @@ impl IntoProjectionClause for Vec<Expression> {
 
 pub fn contains_aggregating_function(
     expression: &Expression,
-    config: &dyn CypherConfiguration,
+    config: &dyn QueryConfiguration,
 ) -> bool {
     let stack = &mut vec![expression];
     let aggr_funcs = config.get_aggregating_function_names();
@@ -479,11 +475,11 @@ pub fn contains_aggregating_function(
 }
 
 pub struct CypherParser {
-    config: Arc<dyn CypherConfiguration>,
+    config: Arc<dyn QueryConfiguration>,
 }
 
 impl CypherParser {
-    pub fn new(config: Arc<dyn CypherConfiguration>) -> Self {
+    pub fn new(config: Arc<dyn QueryConfiguration>) -> Self {
         CypherParser { config }
     }
 }

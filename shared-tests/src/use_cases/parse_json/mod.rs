@@ -20,6 +20,7 @@ use serde_json::json;
 use drasi_core::{
     evaluation::{
         context::QueryPartEvaluationContext,
+        functions::FunctionRegistry,
         variable_value::{float::Float, integer::Integer, VariableValue},
     },
     middleware::MiddlewareTypeRegistry,
@@ -28,6 +29,8 @@ use drasi_core::{
     },
     query::QueryBuilder,
 };
+use drasi_functions_cypher::CypherFunctionSet;
+use drasi_query_cypher::CypherParser;
 
 use crate::QueryTestConfig;
 
@@ -107,7 +110,10 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
     println!("--- Test Case 1: Basic Parse & Overwrite ---");
     let mw_name1 = "parse_overwrite";
     let query1 = {
-        let mut builder = QueryBuilder::new(queries::parse_json_observer_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::parse_json_observer_query(), parser)
+            .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder = builder.with_middleware_registry(middleware_registry.clone());
         let mw_config =
@@ -141,7 +147,10 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
     println!("\n--- Test Case 2: Parse & Output Property ---");
     let mw_name2 = "parse_output";
     let query2 = {
-        let mut builder = QueryBuilder::new(queries::parse_json_observer_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::parse_json_observer_query(), parser)
+            .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder = builder.with_middleware_registry(middleware_registry.clone());
         let mw_config = queries::create_parse_json_middleware(
@@ -278,7 +287,10 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
     println!("\n--- Test Case 6: Error Handling - Skip (Invalid JSON) ---");
     let mw_name6 = "parse_skip_invalid";
     let query6 = {
-        let mut builder = QueryBuilder::new(queries::parse_json_observer_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::parse_json_observer_query(), parser)
+            .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder = builder.with_middleware_registry(middleware_registry.clone());
         let mw_config = queries::create_parse_json_middleware(
@@ -313,7 +325,10 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
     println!("\n--- Test Case 7: Error Handling - Fail (Invalid JSON) ---");
     let mw_name7 = "parse_fail_invalid";
     let query7 = {
-        let mut builder = QueryBuilder::new(queries::parse_json_observer_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::parse_json_observer_query(), parser)
+            .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder = builder.with_middleware_registry(middleware_registry.clone());
         let mw_config = queries::create_parse_json_middleware(
@@ -372,7 +387,10 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
     println!("\n--- Test Case 10: Size Limit - Skip ---");
     let mw_name10 = "parse_skip_size";
     let query10 = {
-        let mut builder = QueryBuilder::new(queries::parse_json_observer_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::parse_json_observer_query(), parser)
+            .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder = builder.with_middleware_registry(middleware_registry.clone());
         let mw_config = queries::create_parse_json_middleware(
@@ -408,7 +426,10 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
     println!("\n--- Test Case 11: Size Limit - Fail ---");
     let mw_name11 = "parse_fail_size";
     let query11 = {
-        let mut builder = QueryBuilder::new(queries::parse_json_observer_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::parse_json_observer_query(), parser)
+            .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder = builder.with_middleware_registry(middleware_registry.clone());
         let mw_config = queries::create_parse_json_middleware(
@@ -436,7 +457,10 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
     println!("\n--- Test Case 12: Nesting Depth - Skip ---");
     let mw_name12 = "parse_skip_depth";
     let query12 = {
-        let mut builder = QueryBuilder::new(queries::parse_json_observer_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::parse_json_observer_query(), parser)
+            .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder = builder.with_middleware_registry(middleware_registry.clone());
         let mw_config = queries::create_parse_json_middleware(
@@ -472,7 +496,10 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
     println!("\n--- Test Case 13: Nesting Depth - Fail ---");
     let mw_name13 = "parse_fail_depth";
     let query13 = {
-        let mut builder = QueryBuilder::new(queries::parse_json_observer_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::parse_json_observer_query(), parser)
+            .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder = builder.with_middleware_registry(middleware_registry.clone());
         let mw_config = queries::create_parse_json_middleware(

@@ -21,6 +21,7 @@ use base64::{engine::general_purpose::STANDARD as base64_engine, Engine as _};
 use drasi_core::{
     evaluation::{
         context::QueryPartEvaluationContext,
+        functions::FunctionRegistry,
         variable_value::{float::Float, integer::Integer, VariableValue},
     },
     middleware::MiddlewareTypeRegistry,
@@ -29,9 +30,11 @@ use drasi_core::{
     },
     query::{ContinuousQuery, QueryBuilder},
 };
+use drasi_functions_cypher::CypherFunctionSet;
 use drasi_middleware::{
     decoder::DecoderFactory, parse_json::ParseJsonFactory, promote::PromoteMiddlewareFactory,
 };
+use drasi_query_cypher::CypherParser;
 use serde_json::{json, Value as JsonValue};
 
 use crate::QueryTestConfig;
@@ -130,7 +133,10 @@ async fn setup_query(
     promoter_on_error: Option<&str>,
 ) -> ContinuousQuery {
     let registry = create_middleware_registry();
-    let mut builder = QueryBuilder::new(queries::observer_query());
+    let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+    let parser = Arc::new(CypherParser::new(function_registry.clone()));
+    let mut builder = QueryBuilder::new(queries::observer_query(), parser)
+        .with_function_registry(function_registry);
     builder = config.config_query(builder).await;
     builder = builder.with_middleware_registry(registry);
 

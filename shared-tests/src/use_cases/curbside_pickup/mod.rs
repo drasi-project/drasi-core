@@ -16,10 +16,15 @@
 use std::sync::Arc;
 
 use drasi_core::{
-    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
+    evaluation::{
+        context::QueryPartEvaluationContext, functions::FunctionRegistry,
+        variable_value::VariableValue,
+    },
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{ContinuousQuery, QueryBuilder},
 };
+use drasi_functions_cypher::CypherFunctionSet;
+use drasi_query_cypher::CypherParser;
 use serde_json::json;
 
 use self::data::get_bootstrap_data;
@@ -47,7 +52,10 @@ async fn bootstrap_query(query: &ContinuousQuery) {
 
 pub async fn order_ready_then_vehicle_arrives(config: &(impl QueryTestConfig + Send)) {
     let query = {
-        let mut builder = QueryBuilder::new(queries::pickup_order_ready_query())
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::pickup_order_ready_query(), parser)
+            .with_function_registry(function_registry)
             .with_joins(queries::pickup_order_ready_metadata());
         builder = config.config_query(builder).await;
         builder.build().await
@@ -155,7 +163,10 @@ pub async fn order_ready_then_vehicle_arrives(config: &(impl QueryTestConfig + S
 
 pub async fn vehicle_arrives_then_order_ready(config: &(impl QueryTestConfig + Send)) {
     let query = {
-        let mut builder = QueryBuilder::new(queries::pickup_order_ready_query())
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::pickup_order_ready_query(), parser)
+            .with_function_registry(function_registry)
             .with_joins(queries::pickup_order_ready_metadata());
         builder = config.config_query(builder).await;
         builder.build().await
@@ -261,7 +272,10 @@ pub async fn vehicle_arrives_then_order_ready(config: &(impl QueryTestConfig + S
 
 pub async fn vehicle_arrives_then_order_ready_duplicate(config: &(impl QueryTestConfig + Send)) {
     let query = {
-        let mut builder = QueryBuilder::new(queries::pickup_order_ready_query())
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::pickup_order_ready_query(), parser)
+            .with_function_registry(function_registry)
             .with_joins(queries::pickup_order_ready_metadata());
         builder = config.config_query(builder).await;
         builder.build().await

@@ -1,0 +1,7 @@
+[package]
+name = "drasi-functions-gql"
+version.workspace = true
+edition = "2021"
+
+[dependencies]
+drasi-core = { path = "../core" }

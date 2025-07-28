@@ -54,8 +54,8 @@ pub enum EvaluationError {
 
 #[derive(Debug)]
 pub struct FunctionError {
-    function_name: String,
-    error: FunctionEvaluationError,
+    pub function_name: String,
+    pub error: FunctionEvaluationError,
 }
 
 impl PartialEq for FunctionError {

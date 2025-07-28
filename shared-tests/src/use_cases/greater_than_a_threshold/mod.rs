@@ -18,10 +18,15 @@ use std::sync::Arc;
 use serde_json::json;
 
 use drasi_core::{
-    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
+    evaluation::{
+        context::QueryPartEvaluationContext, functions::FunctionRegistry,
+        variable_value::VariableValue,
+    },
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{ContinuousQuery, QueryBuilder},
 };
+use drasi_functions_cypher::CypherFunctionSet;
+use drasi_query_cypher::CypherParser;
 
 use self::data::get_bootstrap_data;
 use crate::QueryTestConfig;
@@ -48,7 +53,10 @@ async fn bootstrap_query(query: &ContinuousQuery) {
 // Query identifies when the total number of support calls on any day exceeds 10.
 pub async fn greater_than_a_threshold(config: &(impl QueryTestConfig + Send)) {
     let greater_than_a_threshold_query = {
-        let mut builder = QueryBuilder::new(queries::greater_than_a_threshold_query())
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::greater_than_a_threshold_query(), parser)
+            .with_function_registry(function_registry)
             .with_joins(queries::greater_than_a_threshold_metadata());
         builder = config.config_query(builder).await;
         builder.build().await
@@ -139,8 +147,14 @@ pub async fn greater_than_a_threshold(config: &(impl QueryTestConfig + Send)) {
 // Query identifies when the total number of support calls for a customer on any day exceeds 5.
 pub async fn greater_than_a_threshold_by_customer(config: &(impl QueryTestConfig + Send)) {
     let greater_than_a_threshold_query = {
-        let mut builder = QueryBuilder::new(queries::greater_than_a_threshold_by_customer_query())
-            .with_joins(queries::greater_than_a_threshold_metadata());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(
+            queries::greater_than_a_threshold_by_customer_query(),
+            parser,
+        )
+        .with_function_registry(function_registry)
+        .with_joins(queries::greater_than_a_threshold_metadata());
         builder = config.config_query(builder).await;
         builder.build().await
     };

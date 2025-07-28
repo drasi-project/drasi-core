@@ -17,19 +17,81 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::evaluation::context::QueryVariables;
+use crate::evaluation::functions::FunctionRegistry;
+use crate::evaluation::functions::{
+    Clock, ClockFunction, ClockResult, DurationFunc, Function, LocalTime, Time, Truncate,
+};
 use crate::evaluation::variable_value::zoned_time::ZonedTime;
 use crate::evaluation::variable_value::VariableValue;
 use crate::evaluation::{ExpressionEvaluationContext, ExpressionEvaluator, InstantQueryClock};
 
-use crate::evaluation::functions::FunctionRegistry;
 use crate::in_memory_index::in_memory_result_index::InMemoryResultIndex;
+
+fn create_time_expression_test_function_registry() -> Arc<FunctionRegistry> {
+    let registry = Arc::new(FunctionRegistry::new());
+
+    registry.register_function("time", Function::Scalar(Arc::new(Time {})));
+    registry.register_function("localtime", Function::Scalar(Arc::new(LocalTime {})));
+    registry.register_function("time.truncate", Function::Scalar(Arc::new(Truncate {})));
+    registry.register_function(
+        "localtime.truncate",
+        Function::Scalar(Arc::new(Truncate {})),
+    );
+    registry.register_function("duration", Function::Scalar(Arc::new(DurationFunc {})));
+
+    // Clock functions
+    registry.register_function(
+        "time.realtime",
+        Function::Scalar(Arc::new(ClockFunction::new(
+            Clock::RealTime,
+            ClockResult::ZonedTime,
+        ))),
+    );
+    registry.register_function(
+        "time.statement",
+        Function::Scalar(Arc::new(ClockFunction::new(
+            Clock::Statement,
+            ClockResult::ZonedTime,
+        ))),
+    );
+    registry.register_function(
+        "time.transaction",
+        Function::Scalar(Arc::new(ClockFunction::new(
+            Clock::Transaction,
+            ClockResult::ZonedTime,
+        ))),
+    );
+    registry.register_function(
+        "localtime.realtime",
+        Function::Scalar(Arc::new(ClockFunction::new(
+            Clock::RealTime,
+            ClockResult::LocalTime,
+        ))),
+    );
+    registry.register_function(
+        "localtime.statement",
+        Function::Scalar(Arc::new(ClockFunction::new(
+            Clock::Statement,
+            ClockResult::LocalTime,
+        ))),
+    );
+    registry.register_function(
+        "localtime.transaction",
+        Function::Scalar(Arc::new(ClockFunction::new(
+            Clock::Transaction,
+            ClockResult::LocalTime,
+        ))),
+    );
+
+    registry
+}
 
 #[tokio::test]
 async fn evalute_local_time_hh_mm_ss() {
     let expr = "localtime('12:54:03')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -50,7 +112,7 @@ async fn evalute_local_time_hh_mm_ss() {
     let expr = "localtime('125403')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -74,7 +136,7 @@ async fn evalute_local_time_fraction() {
     let expr = "localtime('12:54:03.1234')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -95,7 +157,7 @@ async fn evalute_local_time_fraction() {
     let expr = "localtime('125403.1234')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -119,7 +181,7 @@ async fn evalute_local_time_hh_mm() {
     let expr = "localtime('12:54')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -143,7 +205,7 @@ async fn evalute_zoned_time_hh_mm_utc() {
     let expr = "time('12:54:51Z')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -172,7 +234,7 @@ async fn evalute_zoned_time_hh_mm_offset() {
     let expr = "time('12:54:51+03:00')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -198,7 +260,7 @@ async fn evalute_zoned_time_hh_mm_offset() {
     let expr = "time('12:54:51-12:00')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -227,7 +289,7 @@ async fn evalute_zoned_time_hh_mm_frac_offset() {
     let expr = "time('12:54:51.1234+03:00')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -255,7 +317,7 @@ async fn test_local_time_property_hour() {
     let expr = "$param1.hour";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
 
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
@@ -284,7 +346,7 @@ async fn test_local_time_property_minute() {
     let expr = "$param1.minute";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
 
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
@@ -313,7 +375,7 @@ async fn test_local_time_property_second() {
     let expr = "$param1.second";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
 
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
@@ -342,7 +404,7 @@ async fn test_local_time_property_millisecond() {
     let expr = "$param1.millisecond";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
 
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
@@ -371,7 +433,7 @@ async fn test_local_time_property_microsecond() {
     let expr = "$param1.microsecond";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
 
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
@@ -400,7 +462,7 @@ async fn test_local_time_property_nanosecond() {
     let expr = "$param1.nanosecond";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
 
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
@@ -429,7 +491,7 @@ async fn test_time_property_hour() {
     let expr = "$param1.hour";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
 
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
@@ -459,7 +521,7 @@ async fn test_time_property_minute() {
     let expr = "$param1.minute";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
 
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
@@ -487,7 +549,7 @@ async fn test_time_property_minute() {
 async fn test_time_property_second() {
     let expr = "$param1.second";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let mut variables = QueryVariables::new();
@@ -513,7 +575,7 @@ async fn test_time_property_second() {
 async fn test_time_property_microsecond() {
     let expr = "$param1.microsecond";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let mut variables = QueryVariables::new();
@@ -539,7 +601,7 @@ async fn test_time_property_microsecond() {
 async fn test_time_property_offset() {
     let expr = "$param1.offset";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let mut variables = QueryVariables::new();
@@ -566,7 +628,7 @@ async fn test_time_property_offset() {
 async fn test_time_property_timezone() {
     let expr = "$param1.timezone";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let mut variables = QueryVariables::new();
@@ -593,7 +655,7 @@ async fn test_time_property_timezone() {
 async fn test_time_property_offset_second() {
     let expr = "$param1.offsetSeconds";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let mut variables = QueryVariables::new();
@@ -639,7 +701,7 @@ async fn test_time_property_offset_second() {
 async fn test_time_property_offset_minute() {
     let expr = "$param1.offsetMinutes";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
 
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
@@ -667,7 +729,7 @@ async fn test_time_property_offset_minute() {
 async fn test_evaluate_zoned_time_realtime() {
     let expr = "time.realtime()";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -691,7 +753,7 @@ async fn test_evaluate_zoned_time_realtime() {
 
     let expr = "time.realtime('America/Los Angeles')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -718,7 +780,7 @@ async fn test_evaluate_zoned_time_realtime() {
 async fn test_local_time_creation_from_component() {
     let expr = "localtime({hour: 12, minute: 31, second: 14, nanosecond: 789, millisecond: 123, microsecond: 456})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -742,7 +804,7 @@ async fn test_local_time_creation_from_component() {
 async fn test_zoned_time_creation_from_component() {
     let expr = "time({hour: 12, minute: 31, second: 14, millisecond: 123, microsecond: 456, nanosecond: 789})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -770,7 +832,7 @@ async fn test_zoned_time_creation_from_component() {
 async fn test_zoned_time_creation_from_component_with_timezone() {
     let expr = "time({hour: 12, minute: 31, timezone: '+01:00'})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -799,7 +861,7 @@ async fn test_local_time_duration_addition() {
     let expr =
         "localtime('12:31:14') + duration({hours: 1, minutes: 2, seconds: 3, milliseconds: 4})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -826,7 +888,7 @@ async fn test_zoned_time_duration_addition() {
     let expr =
         "time('12:31:14+01:00') + duration({hours: 1, minutes: 2, seconds: 3, milliseconds: 4})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -857,7 +919,7 @@ async fn test_local_time_duration_subtraction() {
     let expr =
         "localtime('12:31:14') - duration({hours: 1, minutes: 2, seconds: 3, milliseconds: 4})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let variables = QueryVariables::new();
@@ -882,7 +944,7 @@ async fn test_zoned_time_duration_subtraction() {
     let expr =
         "time('12:31:14-01:00') - duration({hours: 1, minutes: 2, seconds: 3, milliseconds: 4})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let variables = QueryVariables::new();
@@ -909,7 +971,7 @@ async fn test_zoned_time_duration_subtraction() {
 async fn test_local_time_lt() {
     let expr = "localtime('12:31:14') < localtime('13:33:17')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let variables = QueryVariables::new();
@@ -932,7 +994,7 @@ async fn test_local_time_lt() {
 async fn test_local_time_le() {
     let expr = "localtime('12:31:14') <= localtime('13:33:17')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let variables = QueryVariables::new();
@@ -955,7 +1017,7 @@ async fn test_local_time_le() {
 async fn test_local_time_ge() {
     let expr = "localtime('13:33:17') >= localtime('12:31:14')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let variables = QueryVariables::new();
@@ -993,7 +1055,7 @@ async fn test_local_time_ge() {
 async fn test_local_time_gt() {
     let expr = "localtime('13:33:17') > localtime('12:31:14')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let variables = QueryVariables::new();
@@ -1016,7 +1078,7 @@ async fn test_local_time_gt() {
 async fn test_zoned_time_lt() {
     let expr = "time('12:00:00Z') < time('13:00:00Z')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let variables = QueryVariables::new();
@@ -1039,7 +1101,7 @@ async fn test_zoned_time_lt() {
 async fn test_zoned_time_le() {
     let expr = "time('12:00:00Z') <= time('13:00:00Z')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let variables = QueryVariables::new();
@@ -1077,7 +1139,7 @@ async fn test_zoned_time_le() {
 async fn test_zoned_time_gt() {
     let expr = "time('13:00:00Z') > time('12:00:00Z')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let variables = QueryVariables::new();
@@ -1100,7 +1162,7 @@ async fn test_zoned_time_gt() {
 async fn test_zoned_time_ge() {
     let expr = "time('13:00:00Z') >= time('12:00:00Z')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let variables = QueryVariables::new();
@@ -1124,7 +1186,7 @@ async fn evaluate_local_time_empty_param() {
     let expr = "localtime()";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -1159,7 +1221,7 @@ async fn test_local_time_transaction() {
     let expr = "localtime.transaction()";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -1184,7 +1246,7 @@ async fn test_local_time_statement() {
     let expr = "localtime.statement()";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -1209,7 +1271,7 @@ async fn test_local_time_realtime() {
     let expr = "localtime.realtime()";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -1237,7 +1299,7 @@ async fn test_create_local_time_with_components() {
     let expr = "localtime({hour: 12, minute: 31, second: 14, millisecond: 123, microsecond: 456, nanosecond: 789})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -1278,7 +1340,7 @@ async fn test_local_time_truncate() {
     let naive_time = NaiveTime::from_hms_nano_opt(12, 31, 14, 645876123).unwrap();
     let local_time = VariableValue::LocalTime(naive_time);
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let mut variables = QueryVariables::new();
@@ -1376,7 +1438,7 @@ async fn evaluate_zoned_time_empty_param() {
     let expr = "time()";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -1411,7 +1473,7 @@ async fn evaluate_zoned_time_with_timezone() {
     let expr = "time({timezone: 'Asia/Shanghai'})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -1448,7 +1510,7 @@ async fn evaluate_zoned_time_statement() {
     let expr = "time.statement()";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -1475,7 +1537,7 @@ async fn evaluate_zoned_time_transaction() {
     let expr = "time.transaction()";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -1503,7 +1565,7 @@ async fn test_zoned_time_truncate() {
     let fixed_offset = FixedOffset::from_str("-01:00").unwrap();
 
     let zoned_time = VariableValue::ZonedTime(ZonedTime::new(time, fixed_offset));
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_time_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let mut variables = QueryVariables::new();

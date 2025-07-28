@@ -19,7 +19,7 @@ use ast::*;
 
 struct TestCypherConfig {}
 
-impl CypherConfiguration for TestCypherConfig {
+impl QueryConfiguration for TestCypherConfig {
     fn get_aggregating_function_names(&self) -> HashSet<String> {
         let mut set = HashSet::new();
         set.insert("count".into());

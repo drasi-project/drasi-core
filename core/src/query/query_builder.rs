@@ -15,7 +15,6 @@
 use std::{collections::HashMap, sync::Arc};
 
 use drasi_query_ast::api::QueryParser;
-use drasi_query_cypher::CypherParser;
 
 use crate::{
     evaluation::{
@@ -57,11 +56,11 @@ pub struct QueryBuilder {
     source_pipelines: HashMap<Arc<str>, Vec<Arc<str>>>,
 
     query_source: String,
-    query_parser: Option<Arc<dyn QueryParser>>,
+    query_parser: Arc<dyn QueryParser>,
 }
 
 impl QueryBuilder {
-    pub fn new(query: impl Into<String>) -> Self {
+    pub fn new(query: impl Into<String>, parser: Arc<dyn QueryParser>) -> Self {
         QueryBuilder {
             function_registry: None,
             expr_evaluator: None,
@@ -75,13 +74,8 @@ impl QueryBuilder {
             source_middleware: Vec::new(),
             source_pipelines: HashMap::new(),
             query_source: query.into(),
-            query_parser: None,
+            query_parser: parser,
         }
-    }
-
-    pub fn with_query_parser(mut self, query_parser: Arc<dyn QueryParser>) -> Self {
-        self.query_parser = Some(query_parser);
-        self
     }
 
     pub fn with_middleware_registry(
@@ -158,12 +152,8 @@ impl QueryBuilder {
             None => Arc::new(FunctionRegistry::new()),
         };
 
-        let query_parser = match self.query_parser.take() {
-            Some(index) => index,
-            None => Arc::new(CypherParser::new(function_registry.clone())),
-        };
+        let query = self.query_parser.parse(self.query_source.as_str())?;
 
-        let query = query_parser.parse(self.query_source.as_str())?;
         let match_path = Arc::new(MatchPath::from_query(&query.parts[0])?);
 
         let element_index = match self.element_index.take() {

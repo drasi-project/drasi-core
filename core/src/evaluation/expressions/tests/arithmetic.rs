@@ -15,12 +15,12 @@
 use std::sync::Arc;
 
 use crate::evaluation::context::QueryVariables;
+use crate::evaluation::functions::FunctionRegistry;
 use crate::evaluation::variable_value::float::Float;
 use crate::evaluation::variable_value::integer::Integer;
 use crate::evaluation::variable_value::VariableValue;
 use crate::evaluation::{ExpressionEvaluationContext, ExpressionEvaluator, InstantQueryClock};
 
-use crate::evaluation::functions::FunctionRegistry;
 use crate::in_memory_index::in_memory_result_index::InMemoryResultIndex;
 
 #[tokio::test]

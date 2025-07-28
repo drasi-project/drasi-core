@@ -18,11 +18,16 @@ use drasi_middleware::decoder::DecoderFactory;
 use serde_json::json;
 
 use drasi_core::{
-    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
+    evaluation::{
+        context::QueryPartEvaluationContext, functions::FunctionRegistry,
+        variable_value::VariableValue,
+    },
     middleware::MiddlewareTypeRegistry,
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::QueryBuilder,
 };
+use drasi_functions_cypher::CypherFunctionSet;
+use drasi_query_cypher::CypherParser;
 
 use crate::QueryTestConfig;
 
@@ -52,7 +57,10 @@ pub async fn decoder(config: &(impl QueryTestConfig + Send)) {
     println!("--- Test Case 1: Base64 Decode, Overwrite Target ---");
     let mw_name1 = "base64_overwrite";
     let query1 = {
-        let mut builder = QueryBuilder::new(queries::decoder_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::decoder_query(), parser)
+            .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder = builder.with_middleware_registry(middleware_registry.clone());
         let mw_config = queries::create_decoder_middleware(
@@ -101,7 +109,10 @@ pub async fn decoder(config: &(impl QueryTestConfig + Send)) {
     println!("\n--- Test Case 2: Hex Decode, Output Property, Strip Quotes ---");
     let mw_name2 = "hex_output_strip";
     let query2 = {
-        let mut builder = QueryBuilder::new(queries::decoder_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::decoder_query(), parser)
+            .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder = builder.with_middleware_registry(middleware_registry.clone());
         let mw_config = queries::create_decoder_middleware(
@@ -152,7 +163,10 @@ pub async fn decoder(config: &(impl QueryTestConfig + Send)) {
     println!("\n--- Test Case 3: URL Decode Failure, on_error: skip ---");
     let mw_name3 = "url_fail_skip";
     let query3 = {
-        let mut builder = QueryBuilder::new(queries::decoder_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::decoder_query(), parser)
+            .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder = builder.with_middleware_registry(middleware_registry.clone());
         let mw_config = queries::create_decoder_middleware(
@@ -201,7 +215,10 @@ pub async fn decoder(config: &(impl QueryTestConfig + Send)) {
     println!("\n--- Test Case 4: JSON Escape Decode ---");
     let mw_name4 = "json_escape_decode";
     let query4 = {
-        let mut builder = QueryBuilder::new(queries::decoder_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::decoder_query(), parser)
+            .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder = builder.with_middleware_registry(middleware_registry.clone());
         let mw_config = queries::create_decoder_middleware(
@@ -251,7 +268,10 @@ pub async fn decoder(config: &(impl QueryTestConfig + Send)) {
     println!("\n--- Test Case 5: Missing Target Property, on_error: fail ---");
     let mw_name5 = "missing_prop_fail";
     let query5 = {
-        let mut builder = QueryBuilder::new(queries::decoder_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::decoder_query(), parser)
+            .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder = builder.with_middleware_registry(middleware_registry.clone());
         let mw_config = queries::create_decoder_middleware(
@@ -296,7 +316,10 @@ pub async fn decoder(config: &(impl QueryTestConfig + Send)) {
     println!("\n--- Test Case 6: Wrong Target Property Type, on_error: skip ---");
     let mw_name6 = "wrong_type_skip";
     let query6 = {
-        let mut builder = QueryBuilder::new(queries::decoder_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::decoder_query(), parser)
+            .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder = builder.with_middleware_registry(middleware_registry.clone());
         let mw_config = queries::create_decoder_middleware(
@@ -345,7 +368,10 @@ pub async fn decoder(config: &(impl QueryTestConfig + Send)) {
     println!("\n--- Test Case 7: Size Limit Exceeded, on_error: fail ---");
     let mw_name7 = "size_limit_fail";
     let query7 = {
-        let mut builder = QueryBuilder::new(queries::decoder_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::decoder_query(), parser)
+            .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder = builder.with_middleware_registry(middleware_registry.clone());
         let mw_config = queries::create_decoder_middleware(

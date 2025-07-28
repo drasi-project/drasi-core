@@ -12,12 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use thiserror::Error;
 
 use crate::ast;
 
 pub trait QueryParser: Send + Sync {
     fn parse(&self, input: &str) -> Result<ast::Query, QueryParseError>;
+}
+
+pub trait QueryConfiguration: Send + Sync {
+    fn get_aggregating_function_names(&self) -> HashSet<String>;
 }
 
 #[derive(Error, Debug)]

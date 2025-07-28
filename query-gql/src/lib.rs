@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use drasi_query_ast::{
-    api::{QueryParseError, QueryParser},
+    api::{QueryConfiguration, QueryParseError, QueryParser},
     ast::{
         self, Expression, MatchClause, ParentExpression, ProjectionClause, QueryPart,
         UnaryExpression,
@@ -405,8 +405,8 @@ peg::parser! {
         rule match_with_where() -> (Vec<MatchClause>, Vec<Expression>)
             = ms:(match_clause() ++ (__+)) __*
             w:where_clause()? { (ms.into_iter().flatten().collect(), w.into_iter().collect()) }
-        
-        rule part(config: &dyn GQLConfiguration) -> Vec<QueryPart>
+
+        rule part(config: &dyn QueryConfiguration) -> Vec<QueryPart>
               = __*
                 match_and_where:(match_with_where() ** (__+))
                 statement_clauses:( __* s:statement_clause() __* { s } )*
@@ -418,10 +418,8 @@ peg::parser! {
                       QueryParseError::MissingGroupByKey => "Non-grouped RETURN expressions must appear in GROUP BY clause",
                       QueryParseError::ParserError(_) => "Parser error",
                   }) }
-          
-          
 
-        pub rule query(config: &dyn GQLConfiguration) -> Query
+        pub rule query(config: &dyn QueryConfiguration) -> Query
             = __*
                 parts:(w:( part(config)+ ) { w.into_iter().flatten().collect() } )
                 __* {
@@ -433,7 +431,7 @@ peg::parser! {
 
 }
 
-pub enum StatementClause {
+enum StatementClause {
     Let(Vec<(Arc<str>, Expression)>),
     Yield(Vec<(Expression, Option<Arc<str>>)>),
     Filter(Expression),
@@ -441,7 +439,7 @@ pub enum StatementClause {
 
 pub fn parse(
     input: &str,
-    config: &dyn GQLConfiguration,
+    config: &dyn QueryConfiguration,
 ) -> Result<ast::Query, ParseError<LineCol>> {
     gql::query(input, config)
 }
@@ -450,16 +448,12 @@ pub fn parse_expression(input: &str) -> Result<ast::Expression, ParseError<LineC
     gql::expression(input)
 }
 
-pub trait GQLConfiguration: Send + Sync {
-    fn get_aggregating_function_names(&self) -> HashSet<String>;
-}
-
 fn build_query_parts(
     match_and_where: Vec<(Vec<MatchClause>, Vec<Expression>)>,
     statement_clauses: Vec<StatementClause>,
     final_return_expressions: Vec<Expression>,
     group_by_expressions: Option<Vec<Expression>>,
-    config: &dyn GQLConfiguration,
+    config: &dyn QueryConfiguration,
 ) -> Result<Vec<QueryPart>, QueryParseError> {
     let mut match_clauses = Vec::new();
     let mut where_clauses = Vec::new();
@@ -505,7 +499,7 @@ fn build_parts_for_statements(
     mut where_clauses: Vec<Expression>,
     statements: Vec<StatementClause>,
     mut scope: Vec<Expression>,
-    config: &dyn GQLConfiguration,
+    config: &dyn QueryConfiguration,
 ) -> Vec<QueryPart> {
     let mut parts = Vec::new();
 
@@ -592,13 +586,12 @@ fn get_starting_scope(match_clauses: &[MatchClause]) -> Vec<Expression> {
     expressions
 }
 
-
 fn handle_explicit_group_by(
     match_clauses: Vec<MatchClause>,
     where_clauses: Vec<Expression>,
     return_expressions: Vec<Expression>,
     group_by_keys: Vec<Expression>,
-    config: &dyn GQLConfiguration,
+    config: &dyn QueryConfiguration,
 ) -> Result<Vec<QueryPart>, QueryParseError> {
     let mut return_non_aggs = Vec::new();
     let mut return_aggs = Vec::new();
@@ -716,11 +709,11 @@ fn expression_to_alias_ident(expr: &Expression) -> Expression {
 }
 
 pub trait IntoProjectionClause {
-    fn into_projection_clause(self, config: &dyn GQLConfiguration) -> ProjectionClause;
+    fn into_projection_clause(self, config: &dyn QueryConfiguration) -> ProjectionClause;
 }
 
 impl IntoProjectionClause for Vec<Expression> {
-    fn into_projection_clause(self, config: &dyn GQLConfiguration) -> ProjectionClause {
+    fn into_projection_clause(self, config: &dyn QueryConfiguration) -> ProjectionClause {
         let mut keys = Vec::new();
         let mut aggs = Vec::new();
 
@@ -745,7 +738,7 @@ impl IntoProjectionClause for Vec<Expression> {
 
 pub fn contains_aggregating_function(
     expression: &Expression,
-    config: &dyn GQLConfiguration,
+    config: &dyn QueryConfiguration,
 ) -> bool {
     let stack = &mut vec![expression];
     let aggr_funcs = config.get_aggregating_function_names();
@@ -766,11 +759,11 @@ pub fn contains_aggregating_function(
 }
 
 pub struct GQLParser {
-    config: Arc<dyn GQLConfiguration>,
+    config: Arc<dyn QueryConfiguration>,
 }
 
 impl GQLParser {
-    pub fn new(config: Arc<dyn GQLConfiguration>) -> Self {
+    pub fn new(config: Arc<dyn QueryConfiguration>) -> Self {
         GQLParser { config }
     }
 }

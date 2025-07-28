@@ -13,6 +13,10 @@
 // limitations under the License.
 
 use crate::evaluation::context::QueryVariables;
+use crate::evaluation::functions::FunctionRegistry;
+use crate::evaluation::functions::{
+    Between, Date, DateTime, DurationFunc, Function, InDays, InMonths, InSeconds,
+};
 use crate::evaluation::variable_value::duration::Duration;
 use crate::evaluation::variable_value::zoned_time::ZonedTime;
 use crate::evaluation::variable_value::VariableValue;
@@ -21,14 +25,31 @@ use crate::in_memory_index::in_memory_result_index::InMemoryResultIndex;
 use chrono::{Duration as ChronoDuration, FixedOffset, NaiveDate, NaiveTime};
 use std::sync::Arc;
 
-use crate::evaluation::functions::FunctionRegistry;
+fn create_duration_expression_test_function_registry() -> Arc<FunctionRegistry> {
+    let registry = Arc::new(FunctionRegistry::new());
+
+    registry.register_function("duration", Function::Scalar(Arc::new(DurationFunc {})));
+    registry.register_function("duration.between", Function::Scalar(Arc::new(Between {})));
+    registry.register_function("duration.inDays", Function::Scalar(Arc::new(InDays {})));
+    registry.register_function("duration.inMonths", Function::Scalar(Arc::new(InMonths {})));
+    registry.register_function(
+        "duration.inSeconds",
+        Function::Scalar(Arc::new(InSeconds {})),
+    );
+
+    // Also need date/datetime functions for some tests
+    registry.register_function("date", Function::Scalar(Arc::new(Date {})));
+    registry.register_function("datetime", Function::Scalar(Arc::new(DateTime {})));
+
+    registry
+}
 
 #[tokio::test]
 async fn test_duration_standard() {
     let expr = "duration('P1Y2M3DT4H5M6S')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_duration_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -58,7 +79,7 @@ async fn test_duration_frac_seconds() {
     let expr = "duration('P1Y2M7DT4H25M11.4S')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_duration_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -89,7 +110,7 @@ async fn test_duration_frac_days() {
     let expr = "duration('P1Y2M3.5DT4H5M6S')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_duration_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -120,7 +141,7 @@ async fn test_duration_property_year() {
     let expr = "$param1.years";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_duration_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -153,7 +174,7 @@ async fn test_duration_property_months() {
     let expr = "$param1.months";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_duration_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -186,7 +207,7 @@ async fn test_duration_property_weeks() {
     let expr = "$param1.weeks";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_duration_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -219,7 +240,7 @@ async fn test_duration_property_days() {
     let expr = "$param1.days";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_duration_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -252,7 +273,7 @@ async fn test_duration_property_hours() {
     let expr = "$param1.hours";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_duration_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -285,7 +306,7 @@ async fn test_duration_property_quarters() {
     let expr = "$param1.quarters";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_duration_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -318,7 +339,7 @@ async fn test_duration_property_seconds() {
     let expr = "$param1.seconds";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_duration_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -351,7 +372,7 @@ async fn test_duration_property_microseconds() {
     let expr = "$param1.microseconds";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_duration_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -380,7 +401,7 @@ async fn test_duration_property_microseconds() {
 async fn test_duration_property_months_of_year() {
     let expr = "$param1.monthsOfYear";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_duration_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -409,7 +430,7 @@ async fn test_duration_property_months_of_year() {
 async fn test_duration_property_months_of_quarter() {
     let expr = "$param1.monthsOfQuarter";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_duration_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -437,7 +458,7 @@ async fn test_duration_property_months_of_quarter() {
 async fn test_duration_property_days_of_week() {
     let expr = "$param1.daysOfWeek";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_duration_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -464,7 +485,7 @@ async fn test_duration_property_days_of_week() {
 async fn test_duration_property_minutes_of_hour() {
     let expr = "$param1.minutesOfHour";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_duration_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
@@ -491,7 +512,7 @@ async fn test_evaluate_duration_between() {
     let expr = "duration.between($param1, $param2)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_duration_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -546,7 +567,7 @@ async fn test_evaluate_duration_inmonths() {
     let expr = "duration.inMonths($param1, $param2)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_duration_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -575,7 +596,7 @@ async fn test_evaluate_duration_indays() {
     let expr = "duration.inDays($param1, $param2)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_duration_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -614,7 +635,7 @@ async fn test_evaluate_duration_in_seconds() {
     let expr = "duration.inSeconds($param1, $param2)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_duration_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -656,7 +677,7 @@ async fn test_duration_creation_from_component() {
     let expr = "duration({years:1, minutes: 1.5, seconds: 1, milliseconds: 123, microseconds: 456, nanoseconds: 789})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_duration_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -699,7 +720,7 @@ async fn test_duration_in_days_date_and_epoch() {
     let expr = "duration.inDays(date('2023-12-01'), datetime({epochSeconds: 1697661665}))";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_duration_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -724,7 +745,7 @@ async fn test_accesing_components_from_functions() {
     let expr = "duration.inDays(date('2023-12-01'), datetime({epochSeconds: 1697661665})).days";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_duration_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -748,7 +769,7 @@ async fn test_duration_addition() {
     let expr =
         "duration('P1Y2M3DT4H5M6S') + duration({minutes: 1.5, seconds: 1, milliseconds: 123})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_duration_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -778,7 +799,7 @@ async fn test_duration_addition() {
 async fn test_duration_subtraction() {
     let expr = "duration('P1Y2M3DT4H5M6S') - duration({days: 1, minutes: 1.5, seconds: 1, milliseconds: 123})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_duration_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -808,7 +829,7 @@ async fn test_duration_subtraction() {
 async fn test_duration_comparison_less_than() {
     let expr = "duration('P1Y2M3DT4H5M6S') < duration('P1Y2M3DT4H5M7S')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_duration_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -832,7 +853,7 @@ async fn test_duration_comparison_less_than() {
 async fn test_duration_comparison_greater_than() {
     let expr = "duration('P1Y2M3DT4H5M6S') > duration('P1Y2M3DT4H5M5S')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_duration_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 

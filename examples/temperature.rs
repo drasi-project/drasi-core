@@ -18,11 +18,15 @@ use std::sync::Arc;
 
 use drasi_core::{
     evaluation::context::QueryPartEvaluationContext,
+    evaluation::functions::FunctionRegistry,
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{ContinuousQuery, QueryBuilder},
 };
 use rand::Rng;
 use serde_json::json;
+
+use drasi_functions_cypher::CypherFunctionSet;
+use drasi_query_cypher::CypherParser;
 
 #[allow(clippy::print_stdout, clippy::unwrap_used)]
 #[tokio::main]
@@ -36,7 +40,10 @@ async fn main() {
         c.temperature AS component_temperature, 
         l.max_temperature AS limit_temperature";
 
-    let query_builder = QueryBuilder::new(query_str);
+    let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+    let parser = Arc::new(CypherParser::new(function_registry.clone()));
+    let query_builder =
+        QueryBuilder::new(query_str, parser).with_function_registry(function_registry);
     let query = query_builder.build().await;
 
     println!("Loading initial data...");

@@ -19,11 +19,14 @@ use serde_json::json;
 use drasi_core::{
     evaluation::{
         context::QueryPartEvaluationContext,
+        functions::FunctionRegistry,
         variable_value::{float::Float, VariableValue},
     },
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::QueryBuilder,
 };
+use drasi_functions_cypher::CypherFunctionSet;
+use drasi_query_cypher::CypherParser;
 
 use crate::QueryTestConfig;
 
@@ -40,7 +43,10 @@ macro_rules! variablemap {
 #[allow(clippy::print_stdout, clippy::unwrap_used)]
 pub async fn linear_gradient(config: &(impl QueryTestConfig + Send)) {
     let lg_query = {
-        let mut builder = QueryBuilder::new(queries::gradient_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::gradient_query(), parser)
+            .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder.build().await
     };

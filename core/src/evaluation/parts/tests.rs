@@ -71,6 +71,15 @@ async fn process_solution<'a>(
 }
 
 fn build_query(query: &str) -> Query {
-    let parser = CypherParser::new(Arc::new(FunctionRegistry::new()));
+    let function_registry = Arc::new(FunctionRegistry::new());
+
+    use crate::evaluation::functions::{Avg, Count, Function, Max, Min, Sum};
+    function_registry.register_function("sum", Function::Aggregating(Arc::new(Sum {})));
+    function_registry.register_function("min", Function::Aggregating(Arc::new(Min {})));
+    function_registry.register_function("max", Function::Aggregating(Arc::new(Max {})));
+    function_registry.register_function("avg", Function::Aggregating(Arc::new(Avg {})));
+    function_registry.register_function("count", Function::Aggregating(Arc::new(Count {})));
+
+    let parser = Arc::new(CypherParser::new(function_registry.clone()));
     parser.parse(query).unwrap()
 }

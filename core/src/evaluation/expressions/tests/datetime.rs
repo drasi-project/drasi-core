@@ -17,19 +17,84 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::evaluation::context::QueryVariables;
+use crate::evaluation::functions::FunctionRegistry;
+use crate::evaluation::functions::{
+    Clock, ClockFunction, ClockResult, DateTime, DurationFunc, Function, LocalDateTime, Truncate,
+};
 use crate::evaluation::variable_value::zoned_datetime::ZonedDateTime;
 use crate::evaluation::variable_value::VariableValue;
 use crate::evaluation::{ExpressionEvaluationContext, ExpressionEvaluator, InstantQueryClock};
 
-use crate::evaluation::functions::FunctionRegistry;
 use crate::in_memory_index::in_memory_result_index::InMemoryResultIndex;
+
+fn create_datetime_expression_test_function_registry() -> Arc<FunctionRegistry> {
+    let registry = Arc::new(FunctionRegistry::new());
+
+    registry.register_function("datetime", Function::Scalar(Arc::new(DateTime {})));
+    registry.register_function(
+        "localdatetime",
+        Function::Scalar(Arc::new(LocalDateTime {})),
+    );
+    registry.register_function("datetime.truncate", Function::Scalar(Arc::new(Truncate {})));
+    registry.register_function(
+        "localdatetime.truncate",
+        Function::Scalar(Arc::new(Truncate {})),
+    );
+    registry.register_function("duration", Function::Scalar(Arc::new(DurationFunc {})));
+
+    // Clock functions
+    registry.register_function(
+        "datetime.realtime",
+        Function::Scalar(Arc::new(ClockFunction::new(
+            Clock::RealTime,
+            ClockResult::ZonedDateTime,
+        ))),
+    );
+    registry.register_function(
+        "datetime.statement",
+        Function::Scalar(Arc::new(ClockFunction::new(
+            Clock::Statement,
+            ClockResult::ZonedDateTime,
+        ))),
+    );
+    registry.register_function(
+        "datetime.transaction",
+        Function::Scalar(Arc::new(ClockFunction::new(
+            Clock::Transaction,
+            ClockResult::ZonedDateTime,
+        ))),
+    );
+    registry.register_function(
+        "localdatetime.realtime",
+        Function::Scalar(Arc::new(ClockFunction::new(
+            Clock::RealTime,
+            ClockResult::LocalDateTime,
+        ))),
+    );
+    registry.register_function(
+        "localdatetime.statement",
+        Function::Scalar(Arc::new(ClockFunction::new(
+            Clock::Statement,
+            ClockResult::LocalDateTime,
+        ))),
+    );
+    registry.register_function(
+        "localdatetime.transaction",
+        Function::Scalar(Arc::new(ClockFunction::new(
+            Clock::Transaction,
+            ClockResult::LocalDateTime,
+        ))),
+    );
+
+    registry
+}
 
 #[tokio::test]
 async fn evaluate_local_date_time_yy_mm_dd() {
     let expr = "localdatetime('2020-11-04T19:32:24')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -53,7 +118,7 @@ async fn evaluate_local_date_time_yy_mm_dd() {
     let expr = "localdatetime('20201104T193224')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -80,7 +145,7 @@ async fn evaluate_local_date_time_yy_mm_dd_with_fraction() {
     let expr = "localdatetime('2020-11-04T19:32:24.1234')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -107,7 +172,7 @@ async fn evaluate_local_date_time_yy_mm_dd_hour_only() {
     let expr = "localdatetime('2020-11-04T19')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -134,7 +199,7 @@ async fn evaluate_local_date_time_yy_ww_dd() {
     let expr = "localdatetime('2015-W30-2T214032')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -161,7 +226,7 @@ async fn evaluate_local_date_time_yy_ddd() {
     let expr = "localdatetime('2015-202T21:40:32')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -188,7 +253,7 @@ async fn evaluate_zoned_date_time_yy_mm_dd_utc() {
     let expr = "datetime('2015-W30-2T19:32:24Z')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -219,7 +284,7 @@ async fn evaluate_zoned_date_time_yy_mm_dd_offset() {
     let expr = "datetime('2015-11-30T19:32:24+03:00')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -247,7 +312,7 @@ async fn evaluate_zoned_date_time_yy_mm_dd_offset() {
     let expr = "datetime('2015-11-30T19:32:24-03:00')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -278,7 +343,7 @@ async fn evaluate_zoned_date_time_yy_ww_dd_offset() {
     let expr = "datetime('2015-W30-2T19:32:24+03:00')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -309,7 +374,7 @@ async fn evaluate_zoned_date_time_yy_ww_dd_utc() {
     let expr = "datetime('2020-11-04T19:32:24Z')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -340,7 +405,7 @@ async fn evaluate_zoned_date_time_yy_mm_dd_timezone() {
     let expr = "datetime('2020-11-04T19:32:24[America/New_York]')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -371,7 +436,7 @@ async fn evaluate_zoned_date_time_yy_ww_dd_timezone() {
     let expr = "datetime('2015-W30-2T19:32:24[Europe/London]')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -404,7 +469,7 @@ async fn evaluate_local_date_time_creation_with_quarter() {
         hour: 12, minute: 31, second: 14, nanosecond: 645876123
     })";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
@@ -430,7 +495,7 @@ async fn evaluate_zoned_date_time_yy_ww_dd_timezone_with_frac() {
     let expr = "datetime('2015-W30-2T19:32:24.1234[Europe/London]')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -461,7 +526,7 @@ async fn test_local_date_time_year() {
     let expr = "$param1.year";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari);
@@ -496,7 +561,7 @@ async fn test_local_date_time_month() {
     let expr = "$param1.month";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari);
@@ -531,7 +596,7 @@ async fn test_local_date_time_week() {
     let expr = "$param1.week";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari);
@@ -566,7 +631,7 @@ async fn test_local_date_time_second() {
     let expr = "$param1.second";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari);
@@ -601,7 +666,7 @@ async fn test_local_date_time_microsecond() {
     let expr = "$param1.microsecond";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari);
@@ -636,7 +701,7 @@ async fn test_datetime_quarter() {
     let expr = "$param1.quarter";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari);
@@ -674,7 +739,7 @@ async fn test_datetime_epoch_millis() {
     let expr = "$param1.epochMillis";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari);
@@ -712,7 +777,7 @@ async fn test_datetime_epoch_seconds() {
     let expr = "$param1.epochSeconds";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari);
@@ -749,7 +814,7 @@ async fn test_datetime_epoch_seconds() {
 async fn test_local_datetime_creation_from_component() {
     let expr = "localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, millisecond: 123, microsecond: 456, nanosecond: 789})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -775,7 +840,7 @@ async fn test_local_datetime_creation_from_component() {
 async fn test_zoned_datetime_creation_from_component() {
     let expr = "datetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -809,7 +874,7 @@ async fn test_zoned_datetime_creation_from_component_iana() {
     let expr = "datetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, timezone: 'Europe/Stockholm'})";
 
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -845,7 +910,7 @@ async fn test_zoned_datetime_creation_from_component_iana() {
 async fn test_zoned_datetime_creation_epoch_seconds() {
     let expr = "datetime({epochSeconds: 1448901144, nanosecond:123})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -876,7 +941,7 @@ async fn test_zoned_datetime_creation_epoch_seconds() {
 async fn test_zoned_datetime_creation_epoch_millis() {
     let expr = "datetime({epochMillis: 424797300000})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -907,7 +972,7 @@ async fn test_zoned_datetime_creation_epoch_millis() {
 async fn test_local_datetime_duration_addition() {
     let expr = "localdatetime('2020-11-04T19:32:24') + duration('P37DT4H5M6S')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -935,7 +1000,7 @@ async fn test_local_datetime_duration_addition() {
 async fn test_zoned_datetime_duration_addition() {
     let expr = "datetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) + duration('P37DT4H5M6S')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -969,7 +1034,7 @@ async fn test_zoned_datetime_duration_addition() {
 async fn test_local_datetime_duration_subtraction() {
     let expr = "localdatetime('2020-11-04T19:32:24') - duration('P37DT4H5M6S')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -997,7 +1062,7 @@ async fn test_local_datetime_duration_subtraction() {
 async fn test_zoned_datetime_duration_subtraction() {
     let expr = "datetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) - duration('P37DT4H5M6S')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -1031,7 +1096,7 @@ async fn test_zoned_datetime_duration_subtraction() {
 async fn test_local_datetime_ne() {
     let expr = "localdatetime('2020-11-04T19:32:24') != localdatetime('2020-01-04T19:32:24')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -1055,7 +1120,7 @@ async fn test_local_datetime_ne() {
 async fn test_local_datetime_lt() {
     let expr = "localdatetime('2020-11-04T19:32:24') < localdatetime('2021-01-01T00:00:00')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -1079,7 +1144,7 @@ async fn test_local_datetime_lt() {
 async fn test_local_datetime_le() {
     let expr = "localdatetime('2020-11-04T19:32:24') <= localdatetime('2020-11-04T20:32:24')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -1103,7 +1168,7 @@ async fn test_local_datetime_le() {
 async fn test_local_datetime_gt() {
     let expr = "localdatetime('2020-11-04T19:32:24') > localdatetime('2020-01-01T00:00:00')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -1127,7 +1192,7 @@ async fn test_local_datetime_gt() {
 async fn test_local_datetime_ge() {
     let expr = "localdatetime('2020-11-04T19:32:24') >= localdatetime('2020-11-04T19:32:24')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -1151,7 +1216,7 @@ async fn test_local_datetime_ge() {
 async fn test_zoned_datetime_lt() {
     let expr = "datetime('2020-11-04T19:32:24+00:00') < datetime('2020-11-04T20:32:24+00:00')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -1175,7 +1240,7 @@ async fn test_zoned_datetime_lt() {
 async fn test_zoned_datetime_le() {
     let expr = "datetime('2020-11-04T19:32:24+00:00') <= datetime('2020-11-04T20:32:24+00:00')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -1199,7 +1264,7 @@ async fn test_zoned_datetime_le() {
 async fn test_zoned_datetime_gt() {
     let expr = "datetime('2020-11-04T19:32:24+00:00') > datetime('2020-01-01T00:00:00+00:00')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -1223,7 +1288,7 @@ async fn test_zoned_datetime_gt() {
 async fn test_zoned_datetime_ge() {
     let expr = "datetime('2020-11-04T19:32:24+00:00') >= datetime('2020-11-04T19:32:24+00:00')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
 
     let ari = Arc::new(InMemoryResultIndex::new());
 
@@ -1247,7 +1312,7 @@ async fn test_zoned_datetime_ge() {
 async fn test_local_date_time_get_current() {
     let expr = "localdatetime()";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let variables = QueryVariables::new();
@@ -1270,7 +1335,7 @@ async fn test_local_date_time_get_current() {
 async fn test_local_date_time_with_timezone() {
     let expr = "localdatetime({timezone: 'Asia/Shanghai'})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let variables = QueryVariables::new();
@@ -1301,7 +1366,7 @@ async fn test_local_date_time_with_timezone() {
 async fn test_local_date_time_transaction() {
     let expr = "localdatetime.transaction()";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let variables = QueryVariables::new();
@@ -1329,7 +1394,7 @@ async fn test_local_date_time_transaction() {
 async fn test_local_date_time_statement() {
     let expr = "localdatetime.statement()";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let variables = QueryVariables::new();
@@ -1357,7 +1422,7 @@ async fn test_local_date_time_statement() {
 async fn test_local_date_time_realtime() {
     let expr = "localdatetime.realtime()";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let variables = QueryVariables::new();
@@ -1389,7 +1454,7 @@ async fn test_local_date_time_truncate() {
         .unwrap();
     let local_datetime = VariableValue::LocalDateTime(naive_datetime);
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let mut variables = QueryVariables::new();
@@ -1482,7 +1547,7 @@ async fn test_local_date_time_truncate() {
 async fn test_zoned_datetime_get_current() {
     let expr = "datetime()";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let variables = QueryVariables::new();
@@ -1511,7 +1576,7 @@ async fn test_zoned_datetime_get_current() {
 async fn test_zoned_datetime_get_current_time_in_shanghai() {
     let expr = "datetime({timezone: 'Asia/Shanghai'})";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let variables = QueryVariables::new();
@@ -1539,7 +1604,7 @@ async fn test_zoned_datetime_get_current_time_in_shanghai() {
 async fn test_zoned_datetime_transaction() {
     let expr = "datetime.transaction()";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let variables = QueryVariables::new();
@@ -1568,7 +1633,7 @@ async fn test_zoned_datetime_transaction() {
 async fn test_zoned_datetime_statement() {
     let expr = "datetime.statement()";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let variables = QueryVariables::new();
@@ -1597,7 +1662,7 @@ async fn test_zoned_datetime_statement() {
 async fn test_zoned_datetime_realtime() {
     let expr = "datetime.realtime()";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let variables = QueryVariables::new();
@@ -1636,7 +1701,7 @@ async fn test_zoned_datetime_truncate() {
     let zoned_datetime =
         VariableValue::ZonedDateTime(ZonedDateTime::new(datetime, Some("+03:00".to_string())));
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_datetime_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
     let mut variables = QueryVariables::new();

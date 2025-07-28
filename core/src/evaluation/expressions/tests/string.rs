@@ -14,20 +14,43 @@
 
 use std::sync::Arc;
 
+use crate::evaluation::functions::{
+    Function, LTrim, Left, RTrim, Replace, Reverse, Right, Split, Substring, ToLower, ToString,
+    ToUpper, Trim,
+};
 use crate::evaluation::variable_value::VariableValue;
 
 use crate::evaluation::context::QueryVariables;
+use crate::evaluation::functions::FunctionRegistry;
 use crate::evaluation::{ExpressionEvaluationContext, ExpressionEvaluator, InstantQueryClock};
 
-use crate::evaluation::functions::FunctionRegistry;
 use crate::in_memory_index::in_memory_result_index::InMemoryResultIndex;
+
+fn create_string_expression_test_function_registry() -> Arc<FunctionRegistry> {
+    let registry = Arc::new(FunctionRegistry::new());
+
+    registry.register_function("left", Function::Scalar(Arc::new(Left {})));
+    registry.register_function("ltrim", Function::Scalar(Arc::new(LTrim {})));
+    registry.register_function("replace", Function::Scalar(Arc::new(Replace {})));
+    registry.register_function("reverse", Function::Scalar(Arc::new(Reverse {})));
+    registry.register_function("right", Function::Scalar(Arc::new(Right {})));
+    registry.register_function("rtrim", Function::Scalar(Arc::new(RTrim {})));
+    registry.register_function("split", Function::Scalar(Arc::new(Split {})));
+    registry.register_function("substring", Function::Scalar(Arc::new(Substring {})));
+    registry.register_function("toLower", Function::Scalar(Arc::new(ToLower {})));
+    registry.register_function("toString", Function::Scalar(Arc::new(ToString {})));
+    registry.register_function("toUpper", Function::Scalar(Arc::new(ToUpper {})));
+    registry.register_function("trim", Function::Scalar(Arc::new(Trim {})));
+
+    registry
+}
 
 #[tokio::test]
 async fn evaluate_left() {
     let expr = "left('drasi', 3)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_string_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -64,7 +87,7 @@ async fn evaluate_ltrim() {
     let expr = "ltrim('   drasi   ')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_string_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -101,7 +124,7 @@ async fn evaluate_replace() {
     let expr = "replace('hello', 'l', 'x')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_string_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -167,7 +190,7 @@ async fn evaluate_reverse() {
     let expr = "reverse('drasi')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_string_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -204,7 +227,7 @@ async fn evaluate_right() {
     let expr = "right('drasi', 3)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_string_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -241,7 +264,7 @@ async fn evaluate_rtrim() {
     let expr = "rtrim('   drasi   ')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_string_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -278,7 +301,7 @@ async fn evaluate_split() {
     let expr = "split('hello,world', ',')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_string_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -372,7 +395,7 @@ async fn evaluate_substring() {
     let expr = "substring('drasi', 2, 3)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_string_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -423,7 +446,7 @@ async fn evaluate_to_lower() {
     let expr = "toLower('Drasi')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_string_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -460,7 +483,7 @@ async fn test_to_upper() {
     let expr = "toUpper('Drasi')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_string_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -497,7 +520,7 @@ async fn test_to_string() {
     let expr = "toString(123)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_string_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -548,7 +571,7 @@ async fn test_trim() {
     let expr = "trim('   drasi   ')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_string_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
