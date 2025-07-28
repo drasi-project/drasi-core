@@ -405,7 +405,7 @@ peg::parser! {
         rule match_with_where() -> (Vec<MatchClause>, Vec<Expression>)
             = ms:(match_clause() ++ (__+)) __*
             w:where_clause()? { (ms.into_iter().flatten().collect(), w.into_iter().collect()) }
-        
+
         rule part(config: &dyn GQLConfiguration) -> Vec<QueryPart>
               = __*
                 match_and_where:(match_with_where() ** (__+))
@@ -418,8 +418,8 @@ peg::parser! {
                       QueryParseError::MissingGroupByKey => "Non-grouped RETURN expressions must appear in GROUP BY clause",
                       QueryParseError::ParserError(_) => "Parser error",
                   }) }
-          
-          
+
+
 
         pub rule query(config: &dyn GQLConfiguration) -> Query
             = __*
@@ -433,7 +433,7 @@ peg::parser! {
 
 }
 
-pub enum StatementClause {
+enum StatementClause {
     Let(Vec<(Arc<str>, Expression)>),
     Yield(Vec<(Expression, Option<Arc<str>>)>),
     Filter(Expression),
@@ -591,7 +591,6 @@ fn get_starting_scope(match_clauses: &[MatchClause]) -> Vec<Expression> {
 
     expressions
 }
-
 
 fn handle_explicit_group_by(
     match_clauses: Vec<MatchClause>,
