@@ -18,10 +18,12 @@ use std::sync::Arc;
 use crate::QueryTestConfig;
 
 use drasi_core::{
-    evaluation::context::QueryPartEvaluationContext,
+    evaluation::{context::QueryPartEvaluationContext, functions::FunctionRegistry},
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::QueryBuilder,
 };
+use drasi_functions_cypher::CypherFunctionSet;
+use drasi_query_cypher::CypherParser;
 use serde_json::json;
 
 macro_rules! variablemap {
@@ -46,7 +48,10 @@ pub fn test_query() -> &'static str {
 
 pub async fn get_version_by_timestamp(config: &(impl QueryTestConfig + Send)) {
     let query = {
-        let mut builder = QueryBuilder::new(test_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder =
+            QueryBuilder::new(test_query(), parser).with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder.build().await
     };

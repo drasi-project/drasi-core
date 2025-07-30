@@ -12,24 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
-use thiserror::Error;
+mod temporal_instant;
+#[cfg(test)]
+mod tests;
 
-use crate::ast;
-
-pub trait QueryParser: Send + Sync {
-    fn parse(&self, input: &str) -> Result<ast::Query, QueryParseError>;
-}
-
-pub trait QueryConfiguration: Send + Sync {
-    fn get_aggregating_function_names(&self) -> HashSet<String>;
-}
-
-#[derive(Error, Debug)]
-pub enum QueryParseError {
-    #[error("parser error: {0}")]
-    ParserError(Box<dyn std::error::Error + Send + Sync>),
-
-    #[error("Non-grouped RETURN expressions must appear in GROUP BY clause")]
-    MissingGroupByKey,
-}
+pub use temporal_instant::Clock;
+pub use temporal_instant::ClockFunction;
+pub use temporal_instant::ClockResult;
+pub use temporal_instant::Date;
+pub use temporal_instant::DateTime;
+pub use temporal_instant::LocalDateTime;
+pub use temporal_instant::LocalTime;
+pub use temporal_instant::Time;
+pub use temporal_instant::Truncate;

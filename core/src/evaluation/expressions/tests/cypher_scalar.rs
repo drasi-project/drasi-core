@@ -14,6 +14,10 @@
 
 use crate::evaluation::context::QueryVariables;
 use crate::evaluation::functions::FunctionRegistry;
+use crate::evaluation::functions::{
+    CharLength, Coalesce, CypherLast, Function, Head, Size, Timestamp, ToBoolean, ToFloat,
+    ToInteger,
+};
 use crate::evaluation::variable_value::integer::Integer;
 use crate::evaluation::variable_value::VariableValue;
 use crate::evaluation::{ExpressionEvaluationContext, ExpressionEvaluator, InstantQueryClock};
@@ -21,12 +25,32 @@ use crate::in_memory_index::in_memory_result_index::InMemoryResultIndex;
 
 use std::sync::Arc;
 
+fn create_cypher_scalar_expression_test_function_registry() -> Arc<FunctionRegistry> {
+    let registry = Arc::new(FunctionRegistry::new());
+
+    registry.register_function("char_length", Function::Scalar(Arc::new(CharLength {})));
+    registry.register_function(
+        "character_length",
+        Function::Scalar(Arc::new(CharLength {})),
+    );
+    registry.register_function("size", Function::Scalar(Arc::new(Size {})));
+    registry.register_function("coalesce", Function::Scalar(Arc::new(Coalesce {})));
+    registry.register_function("head", Function::Scalar(Arc::new(Head {})));
+    registry.register_function("last", Function::Scalar(Arc::new(CypherLast {})));
+    registry.register_function("timestamp", Function::Scalar(Arc::new(Timestamp {})));
+    registry.register_function("toBoolean", Function::Scalar(Arc::new(ToBoolean {})));
+    registry.register_function("toFloat", Function::Scalar(Arc::new(ToFloat {})));
+    registry.register_function("toInteger", Function::Scalar(Arc::new(ToInteger {})));
+
+    registry
+}
+
 #[tokio::test]
 async fn evaluate_char_length_with_string() {
     let expr = "char_length('drasi')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_cypher_scalar_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -48,7 +72,7 @@ async fn evaluate_character_length_with_string() {
     let expr = "char_length('ReactiveGraph1')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_cypher_scalar_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -70,7 +94,7 @@ async fn evaluate_size_of_string() {
     let expr = "size('drasi')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_cypher_scalar_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -92,7 +116,7 @@ async fn evaluate_size_of_list() {
     let expr = "size([1,null,3,4,5])";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_cypher_scalar_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -114,7 +138,7 @@ async fn evaluate_size_null() {
     let expr = "size(null)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_cypher_scalar_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -136,7 +160,7 @@ async fn test_coalesce() {
     let expr = "coalesce(null, 'a', null, 'b', null)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_cypher_scalar_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -157,7 +181,7 @@ async fn test_head() {
     let expr = "head([1,2,3,null,5])";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_cypher_scalar_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -178,7 +202,7 @@ async fn test_head_null() {
     let expr = "head(null)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_cypher_scalar_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -199,7 +223,7 @@ async fn test_last() {
     let expr = "last([1,2,3,null,5])";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_cypher_scalar_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -230,7 +254,7 @@ async fn evaluate_timestamp() {
     let expr = "timestamp()";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_cypher_scalar_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -257,7 +281,7 @@ async fn evaluate_timestamp_too_many_args() {
     let expr = "timestamp(12)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_cypher_scalar_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -274,7 +298,7 @@ async fn evalaute_to_boolean_string() {
     let expr = "toBoolean('true')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_cypher_scalar_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -311,7 +335,7 @@ async fn evaluate_to_boolean_bool() {
     let expr = "toBoolean(true)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_cypher_scalar_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -340,7 +364,7 @@ async fn evaluate_to_boolean_null() {
     let expr = "toBoolean(null)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_cypher_scalar_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -360,7 +384,7 @@ async fn evaluate_to_float_string() {
     let expr = "toFloat('12.34')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_cypher_scalar_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -398,7 +422,7 @@ async fn evaluate_to_float_numeric() {
     let expr = "toFloat(12)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_cypher_scalar_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -427,7 +451,7 @@ async fn evluate_to_float_null() {
     let expr = "toFloat(null)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_cypher_scalar_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -447,7 +471,7 @@ async fn evaluate_to_integer_string() {
     let expr = "toInteger('12')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_cypher_scalar_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -485,7 +509,7 @@ async fn evaluate_to_integer_numeric() {
     let expr = "toInteger(12)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_cypher_scalar_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -514,7 +538,7 @@ async fn test_to_integer_null() {
     let expr = "toInteger(null)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_cypher_scalar_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 

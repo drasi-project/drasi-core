@@ -20,6 +20,7 @@ use serde_json::json;
 use drasi_core::{
     evaluation::{
         context::QueryPartEvaluationContext,
+        functions::FunctionRegistry,
         variable_value::{float::Float, integer::Integer, VariableValue},
     },
     middleware::MiddlewareTypeRegistry,
@@ -28,6 +29,8 @@ use drasi_core::{
     },
     query::QueryBuilder,
 };
+use drasi_functions_cypher::CypherFunctionSet;
+use drasi_query_cypher::CypherParser;
 
 use crate::QueryTestConfig;
 
@@ -108,7 +111,10 @@ async fn setup_query(
     on_error: Option<&str>,
 ) -> drasi_core::query::ContinuousQuery {
     let registry = create_middleware_registry();
-    let mut builder = QueryBuilder::new(queries::promote_observer_query());
+    let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+    let parser = Arc::new(CypherParser::new(function_registry.clone()));
+    let mut builder = QueryBuilder::new(queries::promote_observer_query(), parser)
+        .with_function_registry(function_registry);
     builder = config.config_query(builder).await;
     builder = builder.with_middleware_registry(registry);
 

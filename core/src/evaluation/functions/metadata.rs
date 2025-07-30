@@ -12,29 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use crate::evaluation::variable_value::{zoned_datetime::ZonedDateTime, VariableValue};
 use async_trait::async_trait;
 use drasi_query_ast::ast;
 
 use crate::evaluation::{ExpressionEvaluationContext, FunctionError, FunctionEvaluationError};
 
-use super::{Function, FunctionRegistry, ScalarFunction};
-
-pub trait RegisterMetadataFunctions {
-    fn register_metadata_functions(&self);
-}
-
-impl RegisterMetadataFunctions for FunctionRegistry {
-    fn register_metadata_functions(&self) {
-        self.register_function("elementId", Function::Scalar(Arc::new(ElementId {})));
-        self.register_function(
-            "drasi.changeDateTime",
-            Function::Scalar(Arc::new(ChangeDateTime {})),
-        );
-    }
-}
+use super::ScalarFunction;
 
 #[derive(Debug)]
 pub struct ElementId {}

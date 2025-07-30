@@ -20,10 +20,10 @@ use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::{ExpressionEvaluationContext, FunctionError, FunctionEvaluationError};
 
 #[derive(Debug)]
-pub struct Last {}
+pub struct CypherLast {}
 
 #[async_trait]
-impl ScalarFunction for Last {
+impl ScalarFunction for CypherLast {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,

@@ -28,10 +28,10 @@ use crate::evaluation::{variable_value::VariableValue, ExpressionEvaluationConte
 
 use super::{super::AggregatingFunction, Accumulator, ValueAccumulator};
 
-pub struct Last {}
+pub struct AggregatingLast {}
 
 #[async_trait]
-impl AggregatingFunction for Last {
+impl AggregatingFunction for AggregatingLast {
     fn initialize_accumulator(
         &self,
         _context: &ExpressionEvaluationContext,
@@ -129,8 +129,8 @@ impl AggregatingFunction for Last {
     }
 }
 
-impl Debug for Last {
+impl Debug for AggregatingLast {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Last")
+        write!(f, "AggregatingLast")
     }
 }

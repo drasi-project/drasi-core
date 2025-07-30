@@ -18,14 +18,17 @@ use std::{env, sync::Arc};
 use uuid::Uuid;
 
 use drasi_core::{
+    evaluation::functions::FunctionRegistry,
     interface::{AccumulatorIndex, ElementIndex},
     query::QueryBuilder,
 };
+use drasi_functions_cypher::CypherFunctionSet;
 use drasi_index_garnet::{element_index::GarnetElementIndex, result_index::GarnetResultIndex};
 use drasi_index_rocksdb::{
     element_index::{RocksDbElementIndex, RocksIndexOptions},
     result_index::RocksDbResultIndex,
 };
+use drasi_query_cypher::CypherParser;
 
 use test_run::{IndexType, TestRunArgs, TestRunConfig, TestRunResult};
 
@@ -74,7 +77,10 @@ async fn main() {
 
         let query_id = format!("test-{}", Uuid::new_v4());
 
-        let mut builder = QueryBuilder::new(&scenario_config.query);
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(&scenario_config.query, parser)
+            .with_function_registry(function_registry);
 
         // Configure the correct element index
         builder = match test_run_config.element_index_type {

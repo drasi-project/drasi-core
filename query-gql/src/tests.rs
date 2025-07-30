@@ -19,7 +19,7 @@ use ast::*;
 
 struct TestConfig {}
 
-impl GQLConfiguration for TestConfig {
+impl QueryConfiguration for TestConfig {
     fn get_aggregating_function_names(&self) -> HashSet<String> {
         let mut set = HashSet::new();
         set.insert("count".into());

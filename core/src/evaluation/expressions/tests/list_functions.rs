@@ -14,6 +14,7 @@
 
 use crate::evaluation::context::QueryVariables;
 use crate::evaluation::functions::FunctionRegistry;
+use crate::evaluation::functions::{Function, Range, Reverse, Tail};
 use crate::evaluation::variable_value::float::Float;
 use crate::evaluation::variable_value::integer::Integer;
 use crate::evaluation::variable_value::VariableValue;
@@ -25,12 +26,22 @@ use crate::in_memory_index::in_memory_result_index::InMemoryResultIndex;
 
 use std::sync::Arc;
 
+fn create_list_expression_test_function_registry() -> Arc<FunctionRegistry> {
+    let registry = Arc::new(FunctionRegistry::new());
+
+    registry.register_function("tail", Function::Scalar(Arc::new(Tail {})));
+    registry.register_function("reverse", Function::Scalar(Arc::new(Reverse {})));
+    registry.register_function("range", Function::Scalar(Arc::new(Range {})));
+
+    registry
+}
+
 #[tokio::test]
 async fn test_list_tail() {
     let expr = "tail(['one','two','three'])";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_list_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -55,7 +66,7 @@ async fn test_list_tail_multiple_arguments() {
     let expr = "tail(['one','two','three'], 3, ['four','five','six'])";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_list_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -81,7 +92,7 @@ async fn test_list_tail_null() {
     let expr = "tail(null)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_list_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -102,7 +113,7 @@ async fn test_list_reverse() {
     let expr = "reverse(['one','two',null, 'null', 123, 4.23])";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_list_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -130,7 +141,7 @@ async fn test_list_reverse_null() {
     let expr = "reverse(null)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_list_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -151,7 +162,7 @@ async fn test_list_reverse_multiple_arguments() {
     let expr = "reverse(['one','two','three'], 3, ['four','five','six'])";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_list_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -177,7 +188,7 @@ async fn test_list_range() {
     let expr = "range(0,10)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_list_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -210,7 +221,7 @@ async fn test_list_range_step() {
     let expr = "range(2,18,3)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_list_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -238,7 +249,7 @@ async fn test_list_range_invalid_arg_count() {
     let expr = "range(2,18,3,4)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_list_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 

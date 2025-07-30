@@ -12,24 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
-use thiserror::Error;
+mod char_length;
+mod coalesce;
+mod head;
+mod last;
+mod size;
+mod timestamp;
+mod to_boolean;
+mod to_float;
+mod to_integer;
 
-use crate::ast;
+#[cfg(test)]
+mod tests;
 
-pub trait QueryParser: Send + Sync {
-    fn parse(&self, input: &str) -> Result<ast::Query, QueryParseError>;
-}
-
-pub trait QueryConfiguration: Send + Sync {
-    fn get_aggregating_function_names(&self) -> HashSet<String>;
-}
-
-#[derive(Error, Debug)]
-pub enum QueryParseError {
-    #[error("parser error: {0}")]
-    ParserError(Box<dyn std::error::Error + Send + Sync>),
-
-    #[error("Non-grouped RETURN expressions must appear in GROUP BY clause")]
-    MissingGroupByKey,
-}
+pub use char_length::CharLength;
+pub use coalesce::Coalesce;
+pub use head::Head;
+pub use last::CypherLast;
+pub use size::Size;
+pub use timestamp::Timestamp;
+pub use to_boolean::{ToBoolean, ToBooleanOrNull};
+pub use to_float::{ToFloat, ToFloatOrNull};
+pub use to_integer::{ToInteger, ToIntegerOrNull};

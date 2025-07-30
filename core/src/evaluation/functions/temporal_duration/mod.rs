@@ -12,24 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
-use thiserror::Error;
+mod temporal_duration;
 
-use crate::ast;
+#[cfg(test)]
+mod tests;
 
-pub trait QueryParser: Send + Sync {
-    fn parse(&self, input: &str) -> Result<ast::Query, QueryParseError>;
-}
-
-pub trait QueryConfiguration: Send + Sync {
-    fn get_aggregating_function_names(&self) -> HashSet<String>;
-}
-
-#[derive(Error, Debug)]
-pub enum QueryParseError {
-    #[error("parser error: {0}")]
-    ParserError(Box<dyn std::error::Error + Send + Sync>),
-
-    #[error("Non-grouped RETURN expressions must appear in GROUP BY clause")]
-    MissingGroupByKey,
-}
+pub use temporal_duration::Between;
+pub use temporal_duration::DurationFunc;
+pub use temporal_duration::InDays;
+pub use temporal_duration::InMonths;
+pub use temporal_duration::InSeconds;

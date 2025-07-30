@@ -18,9 +18,12 @@ use std::sync::Arc;
 use serde_json::json;
 
 use drasi_core::{
+    evaluation::functions::FunctionRegistry,
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{ContinuousQuery, QueryBuilder},
 };
+use drasi_functions_cypher::CypherFunctionSet;
+use drasi_query_cypher::CypherParser;
 
 use self::data::get_bootstrap_data;
 use crate::QueryTestConfig;
@@ -38,8 +41,12 @@ async fn bootstrap_query(query: &ContinuousQuery) {
 
 pub async fn exceeds_one_standard_deviation(config: &(impl QueryTestConfig + Send)) {
     let exceeds_one_standard_deviation_query = {
-        let mut builder = QueryBuilder::new(queries::exceeds_one_standard_deviation_query())
-            .with_joins(queries::exceeds_one_standard_deviation_metadata());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder =
+            QueryBuilder::new(queries::exceeds_one_standard_deviation_query(), parser)
+                .with_function_registry(function_registry)
+                .with_joins(queries::exceeds_one_standard_deviation_metadata());
         builder = config.config_query(builder).await;
         builder.build().await
     };

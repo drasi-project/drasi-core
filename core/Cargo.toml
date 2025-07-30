@@ -18,7 +18,6 @@ parallel_solver = []
 [dependencies]
 async-trait = "0.1.68"
 drasi-query-ast = { path = "../query-ast" }
-drasi-query-cypher = { path = "../query-cypher" }
 hashers = "1.0.1"
 ordered-float = "3.7.0"
 serde = { version = "1", features = ["derive"] }
@@ -51,3 +50,4 @@ time-macros = { version = "0.2.6", features = ["serde"] }
 
 [dev-dependencies]
 mockall = "0.13.1"
+drasi-query-cypher = { path = "../query-cypher" }

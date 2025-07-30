@@ -9,6 +9,7 @@ edition = "2021"
 drasi-query-ast = { path = "../query-ast" }
 drasi-core = { path = "../core" }
 drasi-query-cypher = { path = "../query-cypher" }
+drasi-functions-cypher = { path = "../functions-cypher" }
 drasi-index-garnet = { path = "../index-garnet" }
 drasi-index-rocksdb = { path = "../index-rocksdb" }
 serde = "1.0.163"

@@ -10,6 +10,7 @@ edition = "2021"
 drasi-query-ast = { path = "../query-ast" }
 drasi-core = { path = "../core" }
 drasi-query-cypher = { path = "../query-cypher" }
+drasi-functions-cypher = { path = "../functions-cypher" }
 drasi-middleware = { path = "../middleware" }
 serde = "1.0.163"
 serde_json = "1.0.96"

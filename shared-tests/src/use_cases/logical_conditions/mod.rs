@@ -17,10 +17,15 @@ use std::sync::Arc;
 use serde_json::json;
 
 use drasi_core::{
-    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
+    evaluation::{
+        context::QueryPartEvaluationContext, functions::FunctionRegistry,
+        variable_value::VariableValue,
+    },
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{ContinuousQuery, QueryBuilder},
 };
+use drasi_functions_cypher::CypherFunctionSet;
+use drasi_query_cypher::CypherParser;
 
 use self::data::get_bootstrap_data;
 use crate::QueryTestConfig;
@@ -47,7 +52,10 @@ async fn bootstrap_query(query: &ContinuousQuery) {
 #[allow(clippy::print_stdout, clippy::unwrap_used)]
 pub async fn logical_conditions(config: &(impl QueryTestConfig + Send)) {
     let logical_conditions_query = {
-        let mut builder = QueryBuilder::new(queries::logical_conditions_query())
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::logical_conditions_query(), parser)
+            .with_function_registry(function_registry)
             .with_joins(queries::logical_conditions_metadata());
         builder = config.config_query(builder).await;
         builder.build().await

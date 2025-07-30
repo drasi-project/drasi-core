@@ -18,14 +18,24 @@ use super::process_solution;
 
 use crate::{
     evaluation::{
-        context::QueryPartEvaluationContext, functions::FunctionRegistry,
-        parts::tests::build_query, variable_value::VariableValue, ExpressionEvaluator,
-        QueryPartEvaluator,
+        context::QueryPartEvaluationContext,
+        functions::{Avg, Count, Function, FunctionRegistry, Sum},
+        parts::tests::build_query,
+        variable_value::VariableValue,
+        ExpressionEvaluator, QueryPartEvaluator,
     },
     in_memory_index::in_memory_result_index::InMemoryResultIndex,
 };
 
 use serde_json::json;
+
+fn create_multipart_test_registry() -> Arc<FunctionRegistry> {
+    let registry = Arc::new(FunctionRegistry::new());
+    registry.register_function("sum", Function::Aggregating(Arc::new(Sum {})));
+    registry.register_function("avg", Function::Aggregating(Arc::new(Avg {})));
+    registry.register_function("count", Function::Aggregating(Arc::new(Count {})));
+    registry
+}
 
 #[tokio::test]
 async fn aggregating_part_to_scalar_part_add_solution() {
@@ -57,7 +67,7 @@ async fn aggregating_part_to_scalar_part_add_solution() {
       "Name": "bar"
     });
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_multipart_test_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let expr_evaluator = Arc::new(ExpressionEvaluator::new(
         function_registry.clone(),
@@ -172,7 +182,7 @@ async fn aggregating_part_to_scalar_part_update_solution() {
       "Name": "foo"
     });
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_multipart_test_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let expr_evaluator = Arc::new(ExpressionEvaluator::new(
         function_registry.clone(),
@@ -345,7 +355,7 @@ async fn aggregating_part_to_scalar_part_remove_solution() {
       "Name": "bar"
     });
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_multipart_test_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let expr_evaluator = Arc::new(ExpressionEvaluator::new(
         function_registry.clone(),
@@ -453,7 +463,7 @@ async fn aggregating_part_to_aggregating_part_add_solution() {
       "Category": "A"
     });
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_multipart_test_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let expr_evaluator = Arc::new(ExpressionEvaluator::new(
         function_registry.clone(),
@@ -575,7 +585,7 @@ async fn aggregating_part_to_aggregating_part_update_solution() {
       "Category": "A"
     });
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_multipart_test_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let expr_evaluator = Arc::new(ExpressionEvaluator::new(
         function_registry.clone(),
@@ -683,7 +693,7 @@ async fn aggregating_part_to_aggregating_part_group_switch() {
       "Category": "B"
     });
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_multipart_test_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let expr_evaluator = Arc::new(ExpressionEvaluator::new(
         function_registry.clone(),
@@ -794,7 +804,7 @@ async fn test_list_indexing_with_clause() {
         RETURN list[2]",
     );
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_multipart_test_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let expr_evaluator = Arc::new(ExpressionEvaluator::new(
         function_registry.clone(),
@@ -868,7 +878,7 @@ async fn aggregating_part_to_aggregating_part_group_switch_with_comments() {
       "Category": "B"
     });
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_multipart_test_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let expr_evaluator = Arc::new(ExpressionEvaluator::new(
         function_registry.clone(),
@@ -1004,7 +1014,7 @@ async fn sequential_aggregations1() {
         "Category": "B"
     });
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_multipart_test_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let expr_evaluator = Arc::new(ExpressionEvaluator::new(
         function_registry.clone(),
@@ -1160,7 +1170,7 @@ async fn sequential_aggregations2() {
         "Value1": 1
     });
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_multipart_test_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let expr_evaluator = Arc::new(ExpressionEvaluator::new(
         function_registry.clone(),
@@ -1319,7 +1329,7 @@ async fn aggregating_part_to_scalar_part_add_solution_emit_remove() {
       "Name": "foo"
     });
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_multipart_test_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let expr_evaluator = Arc::new(ExpressionEvaluator::new(
         function_registry.clone(),

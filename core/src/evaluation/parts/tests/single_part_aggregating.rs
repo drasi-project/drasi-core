@@ -19,7 +19,9 @@ use super::process_solution;
 use crate::{
     evaluation::{
         context::QueryPartEvaluationContext,
-        functions::{aggregation::ValueAccumulator, FunctionRegistry},
+        functions::{
+            aggregation::ValueAccumulator, Avg, Function, FunctionRegistry, Max, Min, Sum,
+        },
         parts::tests::build_query,
         variable_value::{duration::Duration, VariableValue},
         ExpressionEvaluator, QueryPartEvaluator,
@@ -30,6 +32,15 @@ use crate::{
 
 use chrono::{Duration as ChronoDuration, NaiveDateTime, NaiveTime};
 use serde_json::json;
+
+fn create_aggregating_test_registry() -> Arc<FunctionRegistry> {
+    let registry = Arc::new(FunctionRegistry::new());
+    registry.register_function("sum", Function::Aggregating(Arc::new(Sum {})));
+    registry.register_function("min", Function::Aggregating(Arc::new(Min {})));
+    registry.register_function("max", Function::Aggregating(Arc::new(Max {})));
+    registry.register_function("avg", Function::Aggregating(Arc::new(Avg {})));
+    registry
+}
 
 #[tokio::test]
 async fn aggregating_query_add_solution() {
@@ -53,7 +64,7 @@ async fn aggregating_query_add_solution() {
       "Name": "bar"
     });
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_aggregating_test_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let expr_evaluator = Arc::new(ExpressionEvaluator::new(
         function_registry.clone(),
@@ -189,7 +200,7 @@ async fn aggregating_query_update_solution() {
       "Name": "bar"
     });
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_aggregating_test_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let expr_evaluator = Arc::new(ExpressionEvaluator::new(
         function_registry.clone(),
@@ -355,7 +366,7 @@ async fn aggregating_query_remove_solution() {
       "Name": "bar"
     });
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_aggregating_test_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let expr_evaluator = Arc::new(ExpressionEvaluator::new(
         function_registry.clone(),
@@ -500,7 +511,7 @@ async fn group_switch() {
       "Name": "bar"
     });
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_aggregating_test_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let expr_evaluator = Arc::new(ExpressionEvaluator::new(
         function_registry.clone(),
@@ -634,7 +645,7 @@ async fn group_switch_complex_accumulator() {
       "Name": "bar"
     });
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_aggregating_test_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let expr_evaluator = Arc::new(ExpressionEvaluator::new(
         function_registry.clone(),
@@ -768,7 +779,7 @@ async fn test_aggregating_function_sum_duration() {
         )),
     );
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_aggregating_test_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let expr_evaluator = Arc::new(ExpressionEvaluator::new(
         function_registry.clone(),
@@ -864,7 +875,7 @@ async fn test_aggregating_function_max_duration() {
         )),
     );
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_aggregating_test_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let expr_evaluator = Arc::new(ExpressionEvaluator::new(
         function_registry.clone(),
@@ -1001,7 +1012,7 @@ async fn test_aggregating_function_max_temporal_instant() {
         )),
     );
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_aggregating_test_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let expr_evaluator = Arc::new(ExpressionEvaluator::new(
         function_registry.clone(),
@@ -1129,7 +1140,7 @@ async fn test_aggregating_function_min_temporal_duration() {
         )),
     );
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_aggregating_test_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let expr_evaluator = Arc::new(ExpressionEvaluator::new(
         function_registry.clone(),
@@ -1265,7 +1276,7 @@ async fn test_aggregating_function_min_temporal_instant() {
         )),
     );
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_aggregating_test_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let expr_evaluator = Arc::new(ExpressionEvaluator::new(
         function_registry.clone(),

@@ -12,24 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
-use thiserror::Error;
+mod abs;
+mod ceil;
+mod floor;
+mod numeric_round;
+mod random;
+mod sign;
 
-use crate::ast;
+#[cfg(test)]
+mod tests;
 
-pub trait QueryParser: Send + Sync {
-    fn parse(&self, input: &str) -> Result<ast::Query, QueryParseError>;
-}
-
-pub trait QueryConfiguration: Send + Sync {
-    fn get_aggregating_function_names(&self) -> HashSet<String>;
-}
-
-#[derive(Error, Debug)]
-pub enum QueryParseError {
-    #[error("parser error: {0}")]
-    ParserError(Box<dyn std::error::Error + Send + Sync>),
-
-    #[error("Non-grouped RETURN expressions must appear in GROUP BY clause")]
-    MissingGroupByKey,
-}
+pub use abs::Abs;
+pub use ceil::Ceil;
+pub use floor::Floor;
+pub use numeric_round::Round;
+pub use random::Rand;
+pub use sign::Sign;

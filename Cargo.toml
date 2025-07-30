@@ -5,6 +5,8 @@ members = [
   "query-ast",
   "query-cypher",
   "query-gql",
+  "functions-cypher",
+  "functions-gql",
   "index-rocksdb",
   "index-garnet",
   "middleware",
