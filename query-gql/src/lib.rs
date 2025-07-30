@@ -51,6 +51,9 @@ peg::parser! {
         rule kw_exists()    = ("EXISTS" / "exists")
         rule kw_group()     = ("GROUP" / "group")
         rule kw_by()        = ("BY" / "by")
+        rule kw_let()       = ("LET" / "let")
+        rule kw_yield()     = ("YIELD" / "yield")
+        rule kw_filter()    = ("FILTER" / "filter")
 
         rule _()
             = quiet!{[' ']}
@@ -200,6 +203,32 @@ peg::parser! {
 
         rule else_expression() -> Expression
             = kw_else() __+ else_:expression() __+ { else_ }
+
+        rule let_assign() -> (Arc<str>, Expression)
+            = name:ident() __* "=" __* expr:expression() { (name, expr) }
+
+        rule let_statement() -> Vec<(Arc<str>,Expression)>
+            = __* kw_let() __+
+            assigns:(let_assign() ** (__* "," __*))
+            __*
+            { assigns }
+
+        rule yield_assign() -> (Expression, Option<Arc<str>>)
+            = expr:expression() __* kw_as() __* alias:ident() { (expr, Some(alias)) }
+            / expr:expression() { (expr, None) }
+
+        rule yield_statement() -> Vec<(Expression, Option<Arc<str>>)>
+            = __* kw_yield() __+
+              assigns:(yield_assign() ** (__* "," __*))
+              __* { assigns }
+
+        rule filter_statement() -> Expression
+            = __* kw_filter() __+ expr:expression() { expr }
+
+        rule statement_clause() -> StatementClause
+            = l:let_statement()    { StatementClause::Let(l) }
+            / y:yield_statement()  { StatementClause::Yield(y) }
+            / f:filter_statement() { StatementClause::Filter(f) }
 
             #[cache_left_rec]
         pub rule expression() -> Expression
@@ -373,21 +402,24 @@ peg::parser! {
             = kw_group() __+ kw_by() __+ "(" __* ")" { Vec::new() }  // Handle GROUP BY ()
             / kw_group() __+ kw_by() __+ items:( expression() ++ (__* "," __*) ) { items }
 
-        rule with_or_return() -> Vec<Expression>
-            = r:return_clause() { r }
+        rule match_with_where() -> (Vec<MatchClause>, Vec<Expression>)
+            = ms:(match_clause() ++ (__+)) __*
+            w:where_clause()? { (ms.into_iter().flatten().collect(), w.into_iter().collect()) }
 
         rule part(config: &dyn GQLConfiguration) -> Vec<QueryPart>
-            = match_clauses:( __* m:(match_clause() ** (__+) )? { m.unwrap_or_default().into_iter().flatten().collect() } )
-              where_clauses:( __* w:(where_clause() ** (__+) )? { w.unwrap_or_default() } )
-              __*
-              return_clause:(with_or_return())
-              group_by_exprs:( __* g:group_by_clause()? { g } )
-              __*
-              // Will return full expected set in addition to the error message
-                {? build_query_parts(match_clauses, where_clauses, return_clause, group_by_exprs, config).map_err(|e| match e {
-                    QueryParseError::MissingGroupByKey => "Non-grouped RETURN expressions must appear in GROUP BY clause",
-                    QueryParseError::ParserError(_) => "Parser error",
-                }) }
+              = __*
+                match_and_where:(match_with_where() ** (__+))
+                statement_clauses:( __* s:statement_clause() __* { s } )*
+                __* final_return:return_clause()
+                __* group_by:group_by_clause()?
+                __*
+                  {? build_query_parts(match_and_where, statement_clauses, final_return, group_by, config).map_err(|e| match e {
+                    // Will return full expected set in addition to the error message
+                      QueryParseError::MissingGroupByKey => "Non-grouped RETURN expressions must appear in GROUP BY clause",
+                      QueryParseError::ParserError(_) => "Parser error",
+                  }) }
+
+
 
         pub rule query(config: &dyn GQLConfiguration) -> Query
             = __*
@@ -399,6 +431,12 @@ peg::parser! {
             }
     }
 
+}
+
+enum StatementClause {
+    Let(Vec<(Arc<str>, Expression)>),
+    Yield(Vec<(Expression, Option<Arc<str>>)>),
+    Filter(Expression),
 }
 
 pub fn parse(
@@ -416,22 +454,142 @@ pub trait GQLConfiguration: Send + Sync {
     fn get_aggregating_function_names(&self) -> HashSet<String>;
 }
 
-pub fn build_query_parts(
-    match_clauses: Vec<MatchClause>,
-    where_clauses: Vec<Expression>,
-    final_return: Vec<Expression>,
-    group_by_keys: Option<Vec<Expression>>,
+fn build_query_parts(
+    match_and_where: Vec<(Vec<MatchClause>, Vec<Expression>)>,
+    statement_clauses: Vec<StatementClause>,
+    final_return_expressions: Vec<Expression>,
+    group_by_expressions: Option<Vec<Expression>>,
     config: &dyn GQLConfiguration,
 ) -> Result<Vec<QueryPart>, QueryParseError> {
-    if let Some(keys) = group_by_keys {
-        handle_explicit_group_by(match_clauses, where_clauses, final_return, keys, config)
-    } else {
-        Ok(vec![QueryPart {
+    let mut match_clauses = Vec::new();
+    let mut where_clauses = Vec::new();
+    for (m, ws) in match_and_where {
+        match_clauses.extend(m);
+        where_clauses.extend(ws);
+    }
+    let mut query_parts = Vec::new();
+
+    if !statement_clauses.is_empty() {
+        let starting_scope = get_starting_scope(&match_clauses);
+        query_parts.extend(build_parts_for_statements(
+            std::mem::take(&mut match_clauses),
+            std::mem::take(&mut where_clauses),
+            statement_clauses,
+            starting_scope,
+            config,
+        ));
+    }
+
+    let final_projection_parts = if let Some(group_keys) = group_by_expressions {
+        handle_explicit_group_by(
             match_clauses,
             where_clauses,
-            return_clause: final_return.into_projection_clause(config),
-        }])
+            final_return_expressions,
+            group_keys,
+            config,
+        )?
+    } else {
+        vec![QueryPart {
+            match_clauses,
+            where_clauses,
+            return_clause: final_return_expressions.into_projection_clause(config),
+        }]
+    };
+
+    query_parts.extend(final_projection_parts);
+    Ok(query_parts)
+}
+
+fn build_parts_for_statements(
+    mut match_clauses: Vec<MatchClause>,
+    mut where_clauses: Vec<Expression>,
+    statements: Vec<StatementClause>,
+    mut scope: Vec<Expression>,
+    config: &dyn GQLConfiguration,
+) -> Vec<QueryPart> {
+    let mut parts = Vec::new();
+
+    for statement in statements {
+        let match_clause = std::mem::take(&mut match_clauses);
+        let where_clause = std::mem::take(&mut where_clauses);
+
+        match statement {
+            StatementClause::Let(bindings) => {
+                let mut projection = scope.clone();
+                for (alias, expr) in bindings {
+                    projection.push(UnaryExpression::alias(expr.clone(), alias.clone()));
+                    scope.push(UnaryExpression::ident(alias.as_ref()));
+                }
+                parts.push(QueryPart {
+                    match_clauses: match_clause,
+                    where_clauses: where_clause,
+                    return_clause: projection.into_projection_clause(config),
+                });
+            }
+
+            StatementClause::Yield(yields) => {
+                let mut projection = Vec::new();
+                let mut new_scope = Vec::new();
+                for (expr, alias_opt) in yields {
+                    if let Some(alias) = alias_opt {
+                        projection.push(UnaryExpression::alias(expr.clone(), alias.clone()));
+                        new_scope.push(UnaryExpression::ident(alias.as_ref()));
+                    } else {
+                        projection.push(expr.clone());
+                        if let Expression::UnaryExpression(UnaryExpression::Identifier(id)) = &expr
+                        {
+                            new_scope.push(UnaryExpression::ident(id));
+                        }
+                    }
+                }
+                scope = new_scope;
+                parts.push(QueryPart {
+                    match_clauses: match_clause,
+                    where_clauses: where_clause,
+                    return_clause: projection.into_projection_clause(config),
+                });
+            }
+
+            StatementClause::Filter(filter) => {
+                if !match_clause.is_empty() || !where_clause.is_empty() {
+                    parts.push(QueryPart {
+                        match_clauses: match_clause,
+                        where_clauses: where_clause,
+                        return_clause: scope.clone().into_projection_clause(config),
+                    });
+                }
+                parts.push(QueryPart {
+                    match_clauses: Vec::new(),
+                    where_clauses: vec![filter],
+                    return_clause: scope.clone().into_projection_clause(config),
+                });
+            }
+        }
     }
+
+    parts
+}
+
+fn get_starting_scope(match_clauses: &[MatchClause]) -> Vec<Expression> {
+    let mut expressions = Vec::new();
+    let mut seen: HashSet<Arc<str>> = HashSet::new();
+
+    for clause in match_clauses {
+        if let Some(name) = &clause.start.annotation.name {
+            if seen.insert(name.clone()) {
+                expressions.push(UnaryExpression::ident(name.as_ref()));
+            }
+        }
+        for (_rel, node) in &clause.path {
+            if let Some(name) = &node.annotation.name {
+                if seen.insert(name.clone()) {
+                    expressions.push(UnaryExpression::ident(name.as_ref()));
+                }
+            }
+        }
+    }
+
+    expressions
 }
 
 fn handle_explicit_group_by(
