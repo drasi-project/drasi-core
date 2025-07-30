@@ -264,6 +264,10 @@ peg::parser! {
                 e:(@) __+ kw_is() _+ kw_not() _+ kw_null() { UnaryExpression::is_not_null(e) }
                 kw_case() __* mtch:expression()? __* when:when_expression()+ __* else_:else_expression()? __* kw_end() { CaseExpression::case(mtch, when, else_) }
                 kw_case() __* when:when_expression()+ __* else_:else_expression()? __* kw_end() { CaseExpression::case(None, when, else_) }
+                pos: position!() ("CAST" / "cast") _* "(" __* value:expression() __+ kw_as() __+ target_type:ident() __* ")" {
+                    let params = vec![value, UnaryExpression::literal(Literal::Text(target_type))];
+                    FunctionExpression::function(Arc::from("cast"), params, pos )
+                }
                 pos: position!() func:function_name() _* "(" __* params:(expression() ** (__* "," __*))? __* ")" "." key:ident() {
                     let params = params.unwrap_or_else(Vec::new);
                     UnaryExpression::expression_property(FunctionExpression::function(func, params, pos ), key)
