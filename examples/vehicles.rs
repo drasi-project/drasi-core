@@ -33,7 +33,7 @@ async fn main() {
     MATCH 
         (v:Vehicle)-[:LOCATED_IN]->(:Zone {type:'Parking Lot'}) 
     RETURN 
-        toUpper(v.color) AS color, 
+        v.color AS color, 
         v.plate AS plate";
 
     let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
