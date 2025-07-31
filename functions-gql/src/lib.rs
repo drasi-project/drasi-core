@@ -20,6 +20,9 @@ use drasi_core::evaluation::functions::FunctionRegistry;
 #[cfg(test)]
 mod tests;
 
+mod gql_scalar;
+use gql_scalar::Cast;
+
 pub trait GQLFunctionSet {
     fn with_gql_function_set(self) -> Arc<FunctionRegistry>;
 }
@@ -70,6 +73,7 @@ fn register_gql_scalar_functions(registry: &FunctionRegistry) {
     registry.register_function("size", Function::Scalar(Arc::new(Size {})));
     registry.register_function("coalesce", Function::Scalar(Arc::new(Coalesce {})));
     registry.register_function("last", Function::Scalar(Arc::new(CypherLast {})));
+    registry.register_function("cast", Function::Scalar(Arc::new(Cast {})));
 }
 
 fn register_list_functions(registry: &FunctionRegistry) {

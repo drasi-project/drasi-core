@@ -18,10 +18,10 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use async_trait::async_trait;
+pub use async_trait::async_trait;
 
 pub use drasi_query_ast::api::QueryConfiguration;
-use drasi_query_ast::ast;
+pub use drasi_query_ast::ast;
 
 use super::{ExpressionEvaluationContext, FunctionError};
 use crate::evaluation::variable_value::VariableValue;
