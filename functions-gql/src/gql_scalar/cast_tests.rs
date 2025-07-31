@@ -84,11 +84,11 @@ async fn test_cast_to_float() {
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
     let args = vec![
-        VariableValue::String("3.14".to_string()),
+        VariableValue::String("2.5".to_string()),
         VariableValue::String("FLOAT".to_string()),
     ];
     let result = cast.call(&context, &get_func_expr(), args).await;
-    assert_eq!(result.unwrap(), VariableValue::Float(3.14.into()));
+    assert_eq!(result.unwrap(), VariableValue::Float(2.5.into()));
 }
 
 #[tokio::test]
