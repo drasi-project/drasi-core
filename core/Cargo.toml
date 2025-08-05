@@ -23,17 +23,17 @@ hashers = "1.0.1"
 ordered-float = "3.7.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rand = { version = "0.8.5", features = ["small_rng"] }
+rand = { version = "0.9.0", features = ["small_rng"] }
 tokio = { version =  "1.29.1", features = ["full"] }
 async-recursion = "1.0.4"
 futures = "0.3.28"
 tokio-stream = "0.1.14"
 async-stream = "0.3.5"
 itoa = "1.0.1"
-caches = "0.2.4"
+caches = "0.3.0"
 log = "0.4.20"
 tracing = "0.1.37"
-opentelemetry = "0.20"
+opentelemetry = "0.30"
 chrono = { version = "0.4.41", features = ["serde"] }
 dateparser = "0.2.0"
 chrono-tz = {version = "0.10.3", features = ["serde"] }
