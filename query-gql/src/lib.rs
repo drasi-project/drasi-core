@@ -54,6 +54,7 @@ peg::parser! {
         rule kw_let()       = ("LET" / "let")
         rule kw_yield()     = ("YIELD" / "yield")
         rule kw_filter()    = ("FILTER" / "filter")
+        rule kw_next()      = ("NEXT" / "next")
 
         rule _()
             = quiet!{[' ']}
@@ -417,20 +418,53 @@ peg::parser! {
                 __* final_return:return_clause()
                 __* group_by:group_by_clause()?
                 __*
-                  {? build_query_parts(match_and_where, statement_clauses, final_return, group_by, config).map_err(|e| match e {
-                    // Will return full expected set in addition to the error message
-                      QueryParseError::MissingGroupByKey => "Non-grouped RETURN expressions must appear in GROUP BY clause",
-                      QueryParseError::ParserError(_) => "Parser error",
-                  }) }
+                  {?
+                    build_query_parts(
+                        match_and_where,
+                        statement_clauses,
+                        final_return,
+                        group_by,
+                        None,
+                        config
+                    ).map_err(map_query_parse_error)
+                  }
 
         pub rule query(config: &dyn QueryConfiguration) -> Query
             = __*
-                parts:(w:( part(config)+ ) { w.into_iter().flatten().collect() } )
-                __* {
-                Query {
-                    parts,
+                first_parts:part(config)
+                next_segments:(
+                    __* kw_next() __*
+                    s:statement_clause()* __*
+                    r:return_clause() __*
+                    g:group_by_clause()?
+                    { (s, r, g) }
+                )*
+                __* {?
+                    let mut all_parts = first_parts;
+
+                    for (statements, return_expr, group_by) in next_segments {
+                        let previous_projection = all_parts.last().map(|p| &p.return_clause);
+                        let previous_scope = match previous_projection {
+                            Some(projection) => {
+                                Some(get_scope_from_projection(projection).map_err(map_query_parse_error)?)
+                            }
+                            None => None,
+                        };
+
+                        let next_parts = build_query_parts(
+                            Vec::new(),
+                            statements,
+                            return_expr,
+                            group_by,
+                            previous_scope,
+                            config
+                        ).map_err(map_query_parse_error)?;
+
+                        all_parts.extend(next_parts);
+                    }
+
+                    Ok(Query { parts: all_parts })
                 }
-            }
     }
 
 }
@@ -452,11 +486,63 @@ pub fn parse_expression(input: &str) -> Result<ast::Expression, ParseError<LineC
     gql::expression(input)
 }
 
+fn map_query_parse_error(e: QueryParseError) -> &'static str {
+    match e {
+        QueryParseError::MissingGroupByKey => {
+            "Non-grouped RETURN expressions must appear in GROUP BY clause"
+        }
+        QueryParseError::ParserError(_) => "Parser error",
+        QueryParseError::UnaliasedComplexExpression => "Complex expression must have an alias",
+        QueryParseError::IdentifierNotInScope => "Identifier not found in current scope",
+    }
+}
+
+fn get_scope_from_projection(
+    projection: &ProjectionClause,
+) -> Result<Vec<Expression>, QueryParseError> {
+    match projection {
+        ProjectionClause::Item(expressions) => {
+            let mut result = Vec::new();
+            for expr in expressions {
+                match expr {
+                    Expression::UnaryExpression(UnaryExpression::Alias { alias, .. }) => {
+                        result.push(UnaryExpression::ident(alias));
+                    }
+                    Expression::UnaryExpression(UnaryExpression::Identifier(id)) => {
+                        result.push(UnaryExpression::ident(id));
+                    }
+                    _ => return Err(QueryParseError::UnaliasedComplexExpression),
+                }
+            }
+            Ok(result)
+        }
+        ProjectionClause::GroupBy {
+            grouping,
+            aggregates,
+        } => {
+            let mut result = Vec::new();
+            for expr in grouping.iter().chain(aggregates.iter()) {
+                match expr {
+                    Expression::UnaryExpression(UnaryExpression::Alias { alias, .. }) => {
+                        result.push(UnaryExpression::ident(alias));
+                    }
+                    Expression::UnaryExpression(UnaryExpression::Identifier(id)) => {
+                        result.push(UnaryExpression::ident(id));
+                    }
+                    _ => return Err(QueryParseError::UnaliasedComplexExpression),
+                }
+            }
+            Ok(result)
+        }
+    }
+}
+
 fn build_query_parts(
     match_and_where: Vec<(Vec<MatchClause>, Vec<Expression>)>,
     statement_clauses: Vec<StatementClause>,
     final_return_expressions: Vec<Expression>,
     group_by_expressions: Option<Vec<Expression>>,
+    initial_scope: Option<Vec<Expression>>,
     config: &dyn QueryConfiguration,
 ) -> Result<Vec<QueryPart>, QueryParseError> {
     let mut match_clauses = Vec::new();
@@ -468,14 +554,17 @@ fn build_query_parts(
     let mut query_parts = Vec::new();
 
     if !statement_clauses.is_empty() {
-        let starting_scope = get_starting_scope(&match_clauses);
+        let starting_scope = match initial_scope {
+            Some(scope) => scope,
+            None => get_starting_scope(&match_clauses),
+        };
         query_parts.extend(build_parts_for_statements(
             std::mem::take(&mut match_clauses),
             std::mem::take(&mut where_clauses),
             statement_clauses,
             starting_scope,
             config,
-        ));
+        )?);
     }
 
     let final_projection_parts = if let Some(group_keys) = group_by_expressions {
@@ -504,7 +593,7 @@ fn build_parts_for_statements(
     statements: Vec<StatementClause>,
     mut scope: Vec<Expression>,
     config: &dyn QueryConfiguration,
-) -> Vec<QueryPart> {
+) -> Result<Vec<QueryPart>, QueryParseError> {
     let mut parts = Vec::new();
 
     for statement in statements {
@@ -533,10 +622,16 @@ fn build_parts_for_statements(
                         projection.push(UnaryExpression::alias(expr.clone(), alias.clone()));
                         new_scope.push(UnaryExpression::ident(alias.as_ref()));
                     } else {
-                        projection.push(expr.clone());
                         if let Expression::UnaryExpression(UnaryExpression::Identifier(id)) = &expr
                         {
+                            if !scope_contains_identifier(&scope, id) {
+                                return Err(QueryParseError::IdentifierNotInScope);
+                            }
+                            projection.push(expr.clone());
                             new_scope.push(UnaryExpression::ident(id));
+                        } else {
+                            // Complex expression in YIELD is invalid: (YIELD x + 100)
+                            return Err(QueryParseError::UnaliasedComplexExpression);
                         }
                     }
                 }
@@ -565,7 +660,7 @@ fn build_parts_for_statements(
         }
     }
 
-    parts
+    Ok(parts)
 }
 
 fn get_starting_scope(match_clauses: &[MatchClause]) -> Vec<Expression> {
@@ -710,6 +805,16 @@ fn expression_to_alias_ident(expr: &Expression) -> Expression {
     } else {
         expr.clone()
     }
+}
+
+fn scope_contains_identifier(scope: &[Expression], target_id: &str) -> bool {
+    scope.iter().any(|scope_expr| {
+        if let Expression::UnaryExpression(UnaryExpression::Identifier(scope_id)) = scope_expr {
+            scope_id.as_ref() == target_id
+        } else {
+            false
+        }
+    })
 }
 
 pub trait IntoProjectionClause {

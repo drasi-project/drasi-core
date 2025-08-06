@@ -32,4 +32,10 @@ pub enum QueryParseError {
 
     #[error("Non-grouped RETURN expressions must appear in GROUP BY clause")]
     MissingGroupByKey,
+
+    #[error("Complex expression must have an alias")]
+    UnaliasedComplexExpression,
+
+    #[error("Identifier not found in current scope")]
+    IdentifierNotInScope,
 }
