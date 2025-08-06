@@ -621,18 +621,17 @@ fn build_parts_for_statements(
                     if let Some(alias) = alias_opt {
                         projection.push(UnaryExpression::alias(expr.clone(), alias.clone()));
                         new_scope.push(UnaryExpression::ident(alias.as_ref()));
-                    } else {
-                        if let Expression::UnaryExpression(UnaryExpression::Identifier(id)) = &expr
-                        {
-                            if !scope_contains_identifier(&scope, id) {
-                                return Err(QueryParseError::IdentifierNotInScope);
-                            }
-                            projection.push(expr.clone());
-                            new_scope.push(UnaryExpression::ident(id));
-                        } else {
-                            // Complex expression in YIELD is invalid: (YIELD x + 100)
-                            return Err(QueryParseError::UnaliasedComplexExpression);
+                    } else if let Expression::UnaryExpression(UnaryExpression::Identifier(id)) =
+                        &expr
+                    {
+                        if !scope_contains_identifier(&scope, id) {
+                            return Err(QueryParseError::IdentifierNotInScope);
                         }
+                        projection.push(expr.clone());
+                        new_scope.push(UnaryExpression::ident(id));
+                    } else {
+                        // Complex expression in YIELD is invalid: (YIELD x + 100)
+                        return Err(QueryParseError::UnaliasedComplexExpression);
                     }
                 }
                 scope = new_scope;
