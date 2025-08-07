@@ -4065,3 +4065,46 @@ fn match_with_where_inside_match() {
         "GQL AST should match expected structure for MATCH with inline WHEREs"
     );
 }
+
+// CAST function test
+#[test]
+fn test_cast_function_parsing() {
+    let gql_query = "MATCH (p:Person) RETURN CAST(p.age AS STRING) AS age_str";
+    let gql_ast = gql::query(gql_query, &TEST_CONFIG).unwrap();
+
+    let expected_ast = Query {
+        parts: vec![QueryPart {
+            match_clauses: vec![MatchClause {
+                start: NodeMatch {
+                    annotation: Annotation {
+                        name: Some("p".into()),
+                    },
+                    labels: vec!["Person".into()],
+                    property_predicates: vec![],
+                },
+                path: vec![],
+                optional: false,
+            }],
+            where_clauses: vec![],
+            return_clause: ProjectionClause::Item(vec![UnaryExpression::alias(
+                FunctionExpression::function(
+                    Arc::from("cast"),
+                    vec![
+                        UnaryExpression::expression_property(
+                            UnaryExpression::ident("p"),
+                            "age".into(),
+                        ),
+                        UnaryExpression::literal(Literal::Text("STRING".into())),
+                    ],
+                    24,
+                ),
+                "age_str".into(),
+            )]),
+        }],
+    };
+
+    assert_eq!(
+        gql_ast, expected_ast,
+        "GQL AST should match expected structure for CAST function"
+    );
+}
