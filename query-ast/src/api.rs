@@ -17,6 +17,11 @@ use thiserror::Error;
 
 use crate::ast;
 
+const ERR_PARSE: &str = "parser error";
+const ERR_MISSING_GROUP_BY: &str = "Non-grouped RETURN expressions must appear in GROUP BY clause";
+const ERR_UNALIASED_COMPLEX: &str = "Complex expression must have an alias";
+const ERR_ID_NOT_IN_SCOPE: &str = "Identifier not found in current scope";
+
 pub trait QueryParser: Send + Sync {
     fn parse(&self, input: &str) -> Result<ast::Query, QueryParseError>;
 }
@@ -27,15 +32,29 @@ pub trait QueryConfiguration: Send + Sync {
 
 #[derive(Error, Debug)]
 pub enum QueryParseError {
-    #[error("parser error: {0}")]
+    #[error("{ERR_PARSE}: {0}")]
     ParserError(Box<dyn std::error::Error + Send + Sync>),
 
-    #[error("Non-grouped RETURN expressions must appear in GROUP BY clause")]
+    #[error("{ERR_MISSING_GROUP_BY}")]
     MissingGroupByKey,
 
-    #[error("Complex expression must have an alias")]
-    UnaliasedComplexExpression,
+    #[error("{ERR_UNALIASED_COMPLEX}: {0}")]
+    UnaliasedComplexExpression(String),
 
-    #[error("Identifier not found in current scope")]
+    #[error("{ERR_ID_NOT_IN_SCOPE}")]
     IdentifierNotInScope,
+}
+
+// This is used to map the error to a static string for the PEG parser.
+// The PEG parser requires &'static str, so we must define const strings. This is a PEG limitation.
+// TODO: Should improve this later to provide a more detailed error message.
+impl QueryParseError {
+    pub fn as_peg_error(&self) -> &'static str {
+        match self {
+            QueryParseError::ParserError(_) => ERR_PARSE,
+            QueryParseError::MissingGroupByKey => ERR_MISSING_GROUP_BY,
+            QueryParseError::UnaliasedComplexExpression(_) => ERR_UNALIASED_COMPLEX,
+            QueryParseError::IdentifierNotInScope => ERR_ID_NOT_IN_SCOPE,
+        }
+    }
 }

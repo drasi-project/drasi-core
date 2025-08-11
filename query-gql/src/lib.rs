@@ -426,7 +426,7 @@ peg::parser! {
                         group_by,
                         None,
                         config
-                    ).map_err(map_query_parse_error)
+                    ).map_err(|e| e.as_peg_error())
                   }
 
         pub rule query(config: &dyn QueryConfiguration) -> Query
@@ -446,7 +446,7 @@ peg::parser! {
                         let previous_projection = all_parts.last().map(|p| &p.return_clause);
                         let previous_scope = match previous_projection {
                             Some(projection) => {
-                                Some(get_scope_from_projection(projection).map_err(map_query_parse_error)?)
+                                Some(get_scope_from_projection(projection).map_err(|e| e.as_peg_error())?)
                             }
                             None => None,
                         };
@@ -458,7 +458,7 @@ peg::parser! {
                             group_by,
                             previous_scope,
                             config
-                        ).map_err(map_query_parse_error)?;
+                        ).map_err(|e| e.as_peg_error())?;
 
                         all_parts.extend(next_parts);
                     }
@@ -486,17 +486,6 @@ pub fn parse_expression(input: &str) -> Result<ast::Expression, ParseError<LineC
     gql::expression(input)
 }
 
-fn map_query_parse_error(e: QueryParseError) -> &'static str {
-    match e {
-        QueryParseError::MissingGroupByKey => {
-            "Non-grouped RETURN expressions must appear in GROUP BY clause"
-        }
-        QueryParseError::ParserError(_) => "Parser error",
-        QueryParseError::UnaliasedComplexExpression => "Complex expression must have an alias",
-        QueryParseError::IdentifierNotInScope => "Identifier not found in current scope",
-    }
-}
-
 fn get_scope_from_projection(
     projection: &ProjectionClause,
 ) -> Result<Vec<Expression>, QueryParseError> {
@@ -511,7 +500,12 @@ fn get_scope_from_projection(
                     Expression::UnaryExpression(UnaryExpression::Identifier(id)) => {
                         result.push(UnaryExpression::ident(id));
                     }
-                    _ => return Err(QueryParseError::UnaliasedComplexExpression),
+                    _ => {
+                        return Err(QueryParseError::UnaliasedComplexExpression(format!(
+                            "{:?}",
+                            expr
+                        )))
+                    }
                 }
             }
             Ok(result)
@@ -529,7 +523,12 @@ fn get_scope_from_projection(
                     Expression::UnaryExpression(UnaryExpression::Identifier(id)) => {
                         result.push(UnaryExpression::ident(id));
                     }
-                    _ => return Err(QueryParseError::UnaliasedComplexExpression),
+                    _ => {
+                        return Err(QueryParseError::UnaliasedComplexExpression(format!(
+                            "{:?}",
+                            expr
+                        )))
+                    }
                 }
             }
             Ok(result)
@@ -631,7 +630,10 @@ fn build_parts_for_statements(
                         new_scope.push(UnaryExpression::ident(id));
                     } else {
                         // Complex expression in YIELD is invalid: (YIELD x + 100)
-                        return Err(QueryParseError::UnaliasedComplexExpression);
+                        return Err(QueryParseError::UnaliasedComplexExpression(format!(
+                            "{:?}",
+                            expr
+                        )));
                     }
                 }
                 scope = new_scope;
