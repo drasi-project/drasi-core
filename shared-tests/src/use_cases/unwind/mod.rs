@@ -287,12 +287,23 @@ pub async fn unwind_invalid_config_fails(config: &(impl QueryTestConfig + Send))
     };
 
     // Expect an error during build due to invalid middleware configuration
-    assert!(result.is_err(), "expected invalid middleware config to fail build");
+    assert!(
+        result.is_err(),
+        "expected invalid middleware config to fail build"
+    );
     let err = result.err().unwrap();
     let err_str = err.to_string();
     // Surface should indicate Middleware setup/Invalid configuration
-    assert!(err_str.contains("Middleware setup error"), "unexpected error: {}", err_str);
-    assert!(err_str.contains("Invalid configuration"), "unexpected error: {}", err_str);
+    assert!(
+        err_str.contains("Middleware setup error"),
+        "unexpected error: {}",
+        err_str
+    );
+    assert!(
+        err_str.contains("Invalid configuration"),
+        "unexpected error: {}",
+        err_str
+    );
 }
 
 #[allow(clippy::unwrap_used)]
@@ -314,9 +325,20 @@ pub async fn unwind_incorrect_structure_fails(config: &(impl QueryTestConfig + S
     };
 
     // Expect an error during build due to incorrect JSON structure
-    assert!(result.is_err(), "expected incorrect middleware JSON structure to fail build");
+    assert!(
+        result.is_err(),
+        "expected incorrect middleware JSON structure to fail build"
+    );
     let err = result.err().unwrap();
     let err_str = err.to_string();
-    assert!(err_str.contains("Middleware setup error"), "unexpected error: {}", err_str);
-    assert!(err_str.contains("Invalid configuration"), "unexpected error: {}", err_str);
+    assert!(
+        err_str.contains("Middleware setup error"),
+        "unexpected error: {}",
+        err_str
+    );
+    assert!(
+        err_str.contains("Invalid configuration"),
+        "unexpected error: {}",
+        err_str
+    );
 }
