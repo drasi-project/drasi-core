@@ -120,6 +120,18 @@ mod remap {
         let test_config = InMemoryQueryConfig::new();
         remap::remap(&test_config).await;
     }
+
+    #[tokio::test]
+    pub async fn remap_invalid_middleware_config() {
+        let test_config = InMemoryQueryConfig::new();
+        remap::remap_invalid_config_fails(&test_config).await;
+    }
+
+    #[tokio::test]
+    pub async fn remap_incorrect_middleware_structure() {
+        let test_config = InMemoryQueryConfig::new();
+        remap::remap_incorrect_structure_fails(&test_config).await;
+    }
 }
 
 mod overdue_invoice {
@@ -363,6 +375,18 @@ mod unwind {
     async fn unwind() {
         let test_config = InMemoryQueryConfig::new();
         unwind::unwind(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn unwind_invalid_middleware_config() {
+        let test_config = InMemoryQueryConfig::new();
+        unwind::unwind_invalid_config_fails(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn unwind_incorrect_middleware_structure() {
+        let test_config = InMemoryQueryConfig::new();
+        unwind::unwind_incorrect_structure_fails(&test_config).await;
     }
 }
 

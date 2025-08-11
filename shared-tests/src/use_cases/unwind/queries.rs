@@ -50,3 +50,43 @@ pub fn middlewares() -> Vec<Arc<SourceMiddlewareConfig>> {
 pub fn source_pipeline() -> Vec<String> {
     vec!["unwind".to_string()]
 }
+
+// Returns an intentionally invalid middleware configuration (bad selector)
+pub fn invalid_middlewares() -> Vec<Arc<SourceMiddlewareConfig>> {
+    let cfg: serde_json::Map<String, serde_json::Value> = json!({
+        "Pod": [{
+            // Invalid JsonPath expression (leading 'z') to trigger config error
+            "selector": "z$.status.containerStatuses[*]",
+            "label": "Container",
+            "key": "$.containerID",
+            "relation": "OWNS"
+        }]
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+
+    vec![Arc::new(SourceMiddlewareConfig::new(
+        "unwind", "unwind", cfg,
+    ))]
+}
+
+// Returns an incorrectly structured middleware configuration (expects array, provides object)
+pub fn incorrect_structure_middlewares() -> Vec<Arc<SourceMiddlewareConfig>> {
+    let cfg: serde_json::Map<String, serde_json::Value> = json!({
+        // Unwind expects an array of mappings per label, but here we provide a single object
+        "Pod": {
+            "selector": "$.status.containerStatuses[*]",
+            "label": "Container",
+            "key": "$.containerID",
+            "relation": "OWNS"
+        }
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+
+    vec![Arc::new(SourceMiddlewareConfig::new(
+        "unwind", "unwind", cfg,
+    ))]
+}

@@ -206,3 +206,53 @@ pub async fn remap(config: &(impl QueryTestConfig + Send)) {
         }));
     }
 }
+
+#[allow(clippy::unwrap_used)]
+pub async fn remap_invalid_config_fails(config: &(impl QueryTestConfig + Send)) {
+    // Register MapFactory and attempt to build with an invalid selector
+    let mut middleware_registry = MiddlewareTypeRegistry::new();
+    middleware_registry.register(Arc::new(MapFactory::new()));
+    let middleware_registry = Arc::new(middleware_registry);
+
+    let result = {
+        let mut builder = QueryBuilder::new(queries::remap_query());
+        builder = config.config_query(builder).await;
+        builder = builder.with_middleware_registry(middleware_registry);
+        for mw in queries::invalid_middlewares() {
+            builder = builder.with_source_middleware(mw);
+        }
+        builder = builder.with_source_pipeline("test", &queries::source_pipeline());
+        builder.try_build().await
+    };
+
+    assert!(result.is_err(), "expected invalid map middleware config to fail build");
+    let err = result.err().unwrap();
+    let err_str = err.to_string();
+    assert!(err_str.contains("Middleware setup error"), "unexpected error: {}", err_str);
+    assert!(err_str.contains("Invalid configuration"), "unexpected error: {}", err_str);
+}
+
+#[allow(clippy::unwrap_used)]
+pub async fn remap_incorrect_structure_fails(config: &(impl QueryTestConfig + Send)) {
+    // Register MapFactory and attempt to build with incorrect JSON structure
+    let mut middleware_registry = MiddlewareTypeRegistry::new();
+    middleware_registry.register(Arc::new(MapFactory::new()));
+    let middleware_registry = Arc::new(middleware_registry);
+
+    let result = {
+        let mut builder = QueryBuilder::new(queries::remap_query());
+        builder = config.config_query(builder).await;
+        builder = builder.with_middleware_registry(middleware_registry);
+        for mw in queries::incorrect_structure_middlewares() {
+            builder = builder.with_source_middleware(mw);
+        }
+        builder = builder.with_source_pipeline("test", &queries::source_pipeline());
+        builder.try_build().await
+    };
+
+    assert!(result.is_err(), "expected incorrect map middleware JSON structure to fail build");
+    let err = result.err().unwrap();
+    let err_str = err.to_string();
+    assert!(err_str.contains("Middleware setup error"), "unexpected error: {}", err_str);
+    assert!(err_str.contains("Invalid configuration"), "unexpected error: {}", err_str);
+}
