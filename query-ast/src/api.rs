@@ -41,8 +41,8 @@ pub enum QueryParseError {
     #[error("{ERR_UNALIASED_COMPLEX}: {0}")]
     UnaliasedComplexExpression(String),
 
-    #[error("{ERR_ID_NOT_IN_SCOPE}")]
-    IdentifierNotInScope,
+    #[error("{ERR_ID_NOT_IN_SCOPE}: {0}")]
+    IdentifierNotInScope(String),
 }
 
 // This is used to map the error to a static string for the PEG parser.
@@ -54,7 +54,7 @@ impl QueryParseError {
             QueryParseError::ParserError(_) => ERR_PARSE,
             QueryParseError::MissingGroupByKey => ERR_MISSING_GROUP_BY,
             QueryParseError::UnaliasedComplexExpression(_) => ERR_UNALIASED_COMPLEX,
-            QueryParseError::IdentifierNotInScope => ERR_ID_NOT_IN_SCOPE,
+            QueryParseError::IdentifierNotInScope(_) => ERR_ID_NOT_IN_SCOPE,
         }
     }
 }

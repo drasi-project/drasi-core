@@ -624,7 +624,7 @@ fn build_parts_for_statements(
                         &expr
                     {
                         if !scope_contains_identifier(&scope, id) {
-                            return Err(QueryParseError::IdentifierNotInScope);
+                            return Err(QueryParseError::IdentifierNotInScope(id.to_string()));
                         }
                         projection.push(expr.clone());
                         new_scope.push(UnaryExpression::ident(id));
