@@ -18,11 +18,16 @@ use drasi_middleware::map::MapFactory;
 use serde_json::json;
 
 use drasi_core::{
-    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
+    evaluation::{
+        context::QueryPartEvaluationContext, functions::FunctionRegistry,
+        variable_value::VariableValue,
+    },
     middleware::MiddlewareTypeRegistry,
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::QueryBuilder,
 };
+use drasi_functions_cypher::CypherFunctionSet;
+use drasi_query_cypher::CypherParser;
 
 use crate::QueryTestConfig;
 
@@ -43,7 +48,10 @@ pub async fn remap(config: &(impl QueryTestConfig + Send)) {
     let middleware_registry = Arc::new(middleware_registry);
 
     let rm_query = {
-        let mut builder = QueryBuilder::new(queries::remap_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::remap_query(), parser)
+            .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder = builder.with_middleware_registry(middleware_registry);
         for mw in queries::middlewares() {

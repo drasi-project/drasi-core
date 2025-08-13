@@ -16,11 +16,15 @@ use std::sync::Arc;
 
 use drasi_core::{
     evaluation::context::QueryPartEvaluationContext,
+    evaluation::functions::FunctionRegistry,
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{ContinuousQuery, QueryBuilder},
 };
 use serde_json::json;
 use sysinfo::System;
+
+use drasi_functions_cypher::CypherFunctionSet;
+use drasi_query_cypher::CypherParser;
 
 #[tokio::main]
 async fn main() {
@@ -34,7 +38,10 @@ async fn main() {
         p.cpu_usage AS process_cpu_usage
     ";
 
-    let query_builder = QueryBuilder::new(query_str);
+    let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+    let parser = Arc::new(CypherParser::new(function_registry.clone()));
+    let query_builder =
+        QueryBuilder::new(query_str, parser).with_function_registry(function_registry);
     let query = query_builder.build().await;
 
     let mut sys = System::new_all();

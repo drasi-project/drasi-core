@@ -1,0 +1,10 @@
+[package]
+name = "drasi-functions-gql"
+version.workspace = true
+edition = "2021"
+
+[dependencies]
+drasi-core = { path = "../core" }
+
+[dev-dependencies]
+tokio = { version = "1.29.1", features = ["full"] }

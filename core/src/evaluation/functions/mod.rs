@@ -13,33 +13,19 @@
 // limitations under the License.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt::Debug,
     sync::{Arc, RwLock},
 };
 
-use async_trait::async_trait;
+pub use async_trait::async_trait;
 
-use drasi_query_ast::ast;
-use drasi_query_cypher::CypherConfiguration;
-
-use crate::evaluation::variable_value::VariableValue;
-use crate::interface::ResultIndex;
-
-use self::{
-    aggregation::{Accumulator, RegisterAggregationFunctions},
-    context_mutators::RegisterContextMutatorFunctions,
-    cypher_scalar::RegisterCypherScalarFunctions,
-    drasi::RegisterDrasiFunctions,
-    list::RegisterListFunctions,
-    metadata::RegisterMetadataFunctions,
-    numeric::RegisterNumericFunctions,
-    temporal_duration::RegisterTemporalDurationFunctions,
-    temporal_instant::RegisterTemporalInstantFunctions,
-    text::RegisterTextFunctions,
-};
+pub use drasi_query_ast::api::QueryConfiguration;
+pub use drasi_query_ast::ast;
 
 use super::{ExpressionEvaluationContext, FunctionError};
+use crate::evaluation::variable_value::VariableValue;
+use crate::interface::ResultIndex;
 
 pub mod aggregation;
 pub mod context_mutators;
@@ -53,6 +39,12 @@ pub mod past;
 pub mod temporal_duration;
 pub mod temporal_instant;
 pub mod text;
+
+pub use self::{
+    aggregation::*, context_mutators::*, cypher_scalar::*, drasi::*, list::*, metadata::*,
+    numeric::*, temporal_duration::*, temporal_instant::*, text::text::*,
+};
+pub use aggregation::Accumulator;
 
 pub enum Function {
     Scalar(Arc<dyn ScalarFunction>),
@@ -132,22 +124,9 @@ impl Default for FunctionRegistry {
 
 impl FunctionRegistry {
     pub fn new() -> FunctionRegistry {
-        let result = FunctionRegistry {
+        FunctionRegistry {
             functions: Arc::new(RwLock::new(HashMap::new())),
-        };
-
-        result.register_text_functions();
-        result.register_metadata_functions();
-        result.register_numeric_functions();
-        result.register_aggregation_functions();
-        result.register_temporal_instant_functions();
-        result.register_temporal_duration_functions();
-        result.register_list_functions();
-        result.register_drasi_functions();
-        result.register_scalar_functions();
-        result.register_context_mutators();
-
-        result
+        }
     }
 
     #[allow(clippy::unwrap_used)]
@@ -161,11 +140,9 @@ impl FunctionRegistry {
         let lock = self.functions.read().unwrap();
         lock.get(name).cloned()
     }
-}
 
-impl CypherConfiguration for FunctionRegistry {
     #[allow(clippy::unwrap_used)]
-    fn get_aggregating_function_names(&self) -> std::collections::HashSet<String> {
+    pub fn get_aggregating_function_names(&self) -> HashSet<String> {
         let lock = self.functions.read().unwrap();
         lock.iter()
             .filter_map(|(name, function)| match function.as_ref() {
@@ -173,5 +150,11 @@ impl CypherConfiguration for FunctionRegistry {
                 _ => None,
             })
             .collect()
+    }
+}
+
+impl QueryConfiguration for FunctionRegistry {
+    fn get_aggregating_function_names(&self) -> HashSet<String> {
+        self.get_aggregating_function_names()
     }
 }

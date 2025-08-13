@@ -21,10 +21,15 @@ use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime};
 use serde_json::json;
 
 use drasi_core::{
-    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
+    evaluation::{
+        context::QueryPartEvaluationContext, functions::FunctionRegistry,
+        variable_value::VariableValue,
+    },
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{AutoFutureQueueConsumer, QueryBuilder},
 };
+use drasi_functions_cypher::CypherFunctionSet;
+use drasi_query_cypher::CypherParser;
 
 use crate::QueryTestConfig;
 
@@ -41,7 +46,10 @@ macro_rules! variablemap {
 #[allow(clippy::print_stdout, clippy::unwrap_used)]
 pub async fn overdue_invoice(config: &(impl QueryTestConfig + Send)) {
     let cq = {
-        let mut builder = QueryBuilder::new(queries::list_overdue_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::list_overdue_query(), parser)
+            .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         Arc::new(builder.build().await)
     };
@@ -124,7 +132,10 @@ pub async fn overdue_invoice(config: &(impl QueryTestConfig + Send)) {
 #[allow(clippy::print_stdout, clippy::unwrap_used)]
 pub async fn overdue_count_persistent(config: &(impl QueryTestConfig + Send)) {
     let cq = {
-        let mut builder = QueryBuilder::new(queries::count_overdue_greater_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::count_overdue_greater_query(), parser)
+            .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         Arc::new(builder.build().await)
     };

@@ -39,7 +39,10 @@ let query_str = "
         v.color AS color, 
         v.plate AS plate";
 
-let query_builder = QueryBuilder::new(query_str);
+let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+let parser = Arc::new(CypherParser::new(function_registry.clone()));
+let query_builder = QueryBuilder::new(query_str, parser)
+    .with_function_registry(function_registry);
 let query = query_builder.build().await;
 ```
 

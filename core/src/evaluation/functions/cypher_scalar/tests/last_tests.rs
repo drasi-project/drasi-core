@@ -17,7 +17,7 @@ use std::sync::Arc;
 use drasi_query_ast::ast;
 
 use crate::evaluation::context::QueryVariables;
-use crate::evaluation::functions::cypher_scalar::last::Last;
+use crate::evaluation::functions::cypher_scalar::last::CypherLast;
 use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::variable_value::VariableValue;
 use crate::evaluation::{
@@ -34,7 +34,7 @@ fn get_func_expr() -> ast::FunctionExpression {
 
 #[tokio::test]
 async fn test_last() {
-    let last = Last {};
+    let last = CypherLast {};
 
     let binding = QueryVariables::new();
     let context =
@@ -51,7 +51,7 @@ async fn test_last() {
 
 #[tokio::test]
 async fn test_last_multiple_args() {
-    let last = Last {};
+    let last = CypherLast {};
 
     let binding = QueryVariables::new();
     let context =

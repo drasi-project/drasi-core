@@ -14,6 +14,7 @@
 
 use crate::evaluation::context::QueryVariables;
 use crate::evaluation::functions::FunctionRegistry;
+use crate::evaluation::functions::{Function, Reduce};
 use crate::evaluation::variable_value::integer::Integer;
 use crate::evaluation::variable_value::VariableValue;
 use crate::evaluation::{ExpressionEvaluationContext, ExpressionEvaluator, InstantQueryClock};
@@ -21,13 +22,21 @@ use crate::in_memory_index::in_memory_result_index::InMemoryResultIndex;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+fn create_reduce_expression_test_function_registry() -> Arc<FunctionRegistry> {
+    let registry = Arc::new(FunctionRegistry::new());
+
+    registry.register_function("reduce", Function::LazyScalar(Arc::new(Reduce::new())));
+
+    registry
+}
+
 #[tokio::test]
 async fn evaluate_reduce_func() {
     let expr = "reduce(acc = 0, x IN [1,2,3] | acc + x)";
 
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_reduce_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -52,7 +61,7 @@ async fn evaluate_reduce_func_min_temp() {
 
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_reduce_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -75,7 +84,7 @@ async fn evaluate_reduce_func_sensor_value() {
 
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_reduce_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -145,7 +154,7 @@ async fn evaluate_reduce_func_sensor_value_count() {
 
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_reduce_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -215,7 +224,7 @@ async fn evaluate_reduce_func_with_filter() {
 
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_reduce_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 
@@ -285,7 +294,7 @@ async fn evaluate_reduce_func_with_filter_no_results() {
 
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
-    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_registry = create_reduce_expression_test_function_registry();
     let ari = Arc::new(InMemoryResultIndex::new());
     let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
 

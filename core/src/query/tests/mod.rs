@@ -15,8 +15,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use drasi_query_cypher::CypherParser;
 
 use crate::{
+    evaluation::functions::FunctionRegistry,
     in_memory_index::{
         in_memory_element_index::InMemoryElementIndex, in_memory_future_queue::InMemoryFutureQueue,
         in_memory_result_index::InMemoryResultIndex,
@@ -28,7 +30,9 @@ use crate::{
 #[tokio::test]
 async fn dependency_leaks() {
     let query_str = "MATCH (n:Person) RETURN n";
-    let mut builder = QueryBuilder::new(query_str);
+    let function_registry = Arc::new(FunctionRegistry::new());
+    let parser = Arc::new(CypherParser::new(function_registry.clone()));
+    let mut builder = QueryBuilder::new(query_str, parser);
 
     let element_index = Arc::new(InMemoryElementIndex::new());
     let result_index = Arc::new(InMemoryResultIndex::new());

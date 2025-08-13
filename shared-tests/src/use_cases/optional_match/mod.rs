@@ -18,10 +18,15 @@ use std::sync::Arc;
 use serde_json::json;
 
 use drasi_core::{
-    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
+    evaluation::{
+        context::QueryPartEvaluationContext, functions::FunctionRegistry,
+        variable_value::VariableValue,
+    },
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::QueryBuilder,
 };
+use drasi_functions_cypher::CypherFunctionSet;
+use drasi_query_cypher::CypherParser;
 
 use crate::QueryTestConfig;
 
@@ -37,7 +42,10 @@ macro_rules! variablemap {
 
 pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
     let opt_query = {
-        let mut builder = QueryBuilder::new(queries::optional_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::optional_query(), parser)
+            .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder.build().await
     };
@@ -257,7 +265,10 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
 
 pub async fn optional_match_aggregating(config: &(impl QueryTestConfig + Send)) {
     let opt_query = {
-        let mut builder = QueryBuilder::new(queries::optional_query_aggregating());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::optional_query_aggregating(), parser)
+            .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder.build().await
     };
@@ -436,7 +447,10 @@ pub async fn optional_match_aggregating(config: &(impl QueryTestConfig + Send)) 
 
 pub async fn multi_optional_match(config: &(impl QueryTestConfig + Send)) {
     let opt_query = {
-        let mut builder = QueryBuilder::new(queries::multi_optional_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::multi_optional_query(), parser)
+            .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder.build().await
     };

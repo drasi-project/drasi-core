@@ -21,6 +21,7 @@ on:
   pull_request:
     branches:
       - main
+      - feature/*
 
 env:
   CARGO_TERM_COLOR: always

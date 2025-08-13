@@ -18,10 +18,15 @@ use std::sync::Arc;
 use serde_json::json;
 
 use drasi_core::{
-    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
+    evaluation::{
+        context::QueryPartEvaluationContext, functions::FunctionRegistry,
+        variable_value::VariableValue,
+    },
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{ContinuousQuery, QueryBuilder},
 };
+use drasi_functions_cypher::CypherFunctionSet;
+use drasi_query_cypher::CypherParser;
 
 use self::data::get_bootstrap_data;
 use crate::QueryTestConfig;
@@ -48,7 +53,10 @@ async fn bootstrap_query(query: &ContinuousQuery) {
 // Query identifies a products daily revenue has decreased by $10,000.
 pub async fn decrease_by_ten(config: &(impl QueryTestConfig + Send)) {
     let decrease_by_ten_query = {
-        let mut builder = QueryBuilder::new(queries::decrease_by_ten_query())
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::decrease_by_ten_query(), parser)
+            .with_function_registry(function_registry)
             .with_joins(queries::decrease_by_ten_metadata());
         builder = config.config_query(builder).await;
         builder.build().await
@@ -243,7 +251,8 @@ pub async fn decrease_by_ten(config: &(impl QueryTestConfig + Send)) {
 
 pub async fn decrease_by_ten_percent(config: &(impl QueryTestConfig + Send)) {
     let decrease_by_ten_query = {
-        let mut builder = QueryBuilder::new(queries::decrease_by_ten_percent_query())
+        let parser = Arc::new(CypherParser::new(Arc::new(FunctionRegistry::new())));
+        let mut builder = QueryBuilder::new(queries::decrease_by_ten_percent_query(), parser)
             .with_joins(queries::decrease_by_ten_metadata());
         builder = config.config_query(builder).await;
         builder.build().await

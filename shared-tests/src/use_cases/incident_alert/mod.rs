@@ -17,10 +17,15 @@ use std::{sync::Arc, time::SystemTime};
 use serde_json::json;
 
 use drasi_core::{
-    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
+    evaluation::{
+        context::QueryPartEvaluationContext, functions::FunctionRegistry,
+        variable_value::VariableValue,
+    },
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{ContinuousQuery, QueryBuilder},
 };
+use drasi_functions_cypher::CypherFunctionSet;
+use drasi_query_cypher::CypherParser;
 
 use self::data::get_bootstrap_data;
 
@@ -48,19 +53,28 @@ async fn bootstrap_query(query: &ContinuousQuery) {
 #[allow(clippy::print_stdout, clippy::unwrap_used)]
 pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
     let manager_incident_alert_query = {
-        let mut builder = QueryBuilder::new(queries::manager_incident_alert_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::manager_incident_alert_query(), parser)
+            .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder.build().await
     };
 
     let employee_incident_alert_query = {
-        let mut builder = QueryBuilder::new(queries::employee_incident_alert_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::employee_incident_alert_query(), parser)
+            .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder.build().await
     };
 
     let employees_at_risk_count_query = {
-        let mut builder = QueryBuilder::new(queries::employees_at_risk_count_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::employees_at_risk_count_query(), parser)
+            .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder.build().await
     };

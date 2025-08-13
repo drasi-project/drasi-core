@@ -14,11 +14,11 @@ This document describes the GitHub Actions workflows in the `.github/workflows` 
 ### [ci-lint.yml](ci-lint.yml)
 - **Purpose**: Runs linting checks to ensure code quality and adherence to coding standards.
 - **Trigger**: 
-  - Automatically triggered on pull requests to the `main` branch and any pushes.
+  - Automatically triggered on pull requests to the `main`, `feature/*`, or `release/*` branches and any pushes.
 
 ### [coverage.yaml](coverage.yaml)
 - **Purpose**: Generates and uploads code coverage reports to Codecov.
-- **Trigger**: Automatically triggered on pull requests to the `main` branch and pushes to the `codecov-test` branch.
+- **Trigger**: Automatically triggered on pull requests to the `main`, `feature/*`, or `release/*` branches and pushes to the `codecov-test` branch.
 
 ### [devskim.yml](devskim.yml)
 - **Purpose**: Performs security analysis using DevSkim to detect potential vulnerabilities.
@@ -35,7 +35,7 @@ This document describes the GitHub Actions workflows in the `.github/workflows` 
 
 ### [test.yml](test.yml)
 - **Purpose**: Executes `cargo test` to run unit tests.
-- **Trigger**: Automatically triggered on pull requests and pushes to the `main` branch.
+- **Trigger**: Automatically triggered on pull requests to the `main`, `feature/*`, or `release/*` branches and pushes to the `main` branch.
 
 
 ## Viewing Workflow Status

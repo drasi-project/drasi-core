@@ -18,10 +18,15 @@ use std::sync::Arc;
 use serde_json::json;
 
 use drasi_core::{
-    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
+    evaluation::{
+        context::QueryPartEvaluationContext, functions::FunctionRegistry,
+        variable_value::VariableValue,
+    },
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{ContinuousQuery, QueryBuilder},
 };
+use drasi_functions_cypher::CypherFunctionSet;
+use drasi_query_cypher::CypherParser;
 
 use self::data::get_bootstrap_data;
 
@@ -49,49 +54,63 @@ async fn bootstrap_query(query: &ContinuousQuery) {
 pub async fn building_comfort_use_case(config: &(impl QueryTestConfig + Send)) {
     let rclq = queries::room_comfort_level_calc_query();
     let room_comfort_level_calc_query = {
-        let mut builder = QueryBuilder::new(rclq);
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(rclq, parser).with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder.build().await
     };
 
     let fclq = queries::floor_comfort_level_calc_query();
     let floor_comfort_level_calc_query = {
-        let mut builder = QueryBuilder::new(fclq);
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(fclq, parser).with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder.build().await
     };
 
     let bclq = queries::building_comfort_level_calc_query();
     let building_comfort_level_calc_query = {
-        let mut builder = QueryBuilder::new(bclq);
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(bclq, parser).with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder.build().await
     };
 
     let rcaq = queries::room_comfort_level_alert_query();
     let room_comfort_level_alert_query = {
-        let mut builder = QueryBuilder::new(rcaq);
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(rcaq, parser).with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder.build().await
     };
 
     let fcaq = queries::floor_comfort_level_alert_query();
     let floor_comfort_level_alert_query = {
-        let mut builder = QueryBuilder::new(fcaq);
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(fcaq, parser).with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder.build().await
     };
 
     let bcaq = queries::building_comfort_level_alert_query();
     let building_comfort_level_alert_query = {
-        let mut builder = QueryBuilder::new(bcaq);
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(bcaq, parser).with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder.build().await
     };
 
     let uiq = queries::ui_query();
     let ui_query = {
-        let mut builder = QueryBuilder::new(uiq);
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(uiq, parser).with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder.build().await
     };

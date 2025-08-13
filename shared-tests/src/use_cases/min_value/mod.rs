@@ -18,10 +18,15 @@ use std::sync::Arc;
 use serde_json::json;
 
 use drasi_core::{
-    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
+    evaluation::{
+        context::QueryPartEvaluationContext, functions::FunctionRegistry,
+        variable_value::VariableValue,
+    },
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::QueryBuilder,
 };
+use drasi_functions_cypher::CypherFunctionSet;
+use drasi_query_cypher::CypherParser;
 
 use crate::QueryTestConfig;
 
@@ -37,7 +42,10 @@ macro_rules! variablemap {
 
 pub async fn min_value(config: &(impl QueryTestConfig + Send)) {
     let min_query = {
-        let mut builder = QueryBuilder::new(queries::min_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::min_query(), parser)
+            .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder.build().await
     };
