@@ -41,6 +41,7 @@ pub fn register_default_gql_functions(registry: &FunctionRegistry) {
     register_list_functions(registry);
     register_metadata_functions(registry);
     register_drasi_functions(registry);
+    register_context_mutators(registry);
     register_aggregation_functions(registry);
     register_temporal_instant_functions(registry);
     register_temporal_duration_functions(registry);
@@ -91,6 +92,13 @@ fn register_drasi_functions(registry: &FunctionRegistry) {
     registry.register_function("drasi.listMax", Function::Scalar(Arc::new(DrasiMax {})));
     registry.register_function("drasi.listMin", Function::Scalar(Arc::new(DrasiMin {})));
     registry.register_function("drasi.stdevp", Function::Scalar(Arc::new(DrasiStdevP {})));
+}
+
+fn register_context_mutators(registry: &FunctionRegistry) {
+    registry.register_function(
+        "retainHistory",
+        Function::ContextMutator(Arc::new(RetainHistory {})),
+    );
 }
 
 fn register_aggregation_functions(registry: &FunctionRegistry) {
