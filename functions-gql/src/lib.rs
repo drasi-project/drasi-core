@@ -41,7 +41,6 @@ pub fn register_default_gql_functions(registry: &FunctionRegistry) {
     register_list_functions(registry);
     register_metadata_functions(registry);
     register_drasi_functions(registry);
-    register_context_mutators(registry);
     register_aggregation_functions(registry);
     register_temporal_instant_functions(registry);
     register_temporal_duration_functions(registry);
@@ -94,13 +93,6 @@ fn register_drasi_functions(registry: &FunctionRegistry) {
     registry.register_function("drasi.stdevp", Function::Scalar(Arc::new(DrasiStdevP {})));
 }
 
-fn register_context_mutators(registry: &FunctionRegistry) {
-    registry.register_function(
-        "retainHistory",
-        Function::ContextMutator(Arc::new(RetainHistory {})),
-    );
-}
-
 fn register_aggregation_functions(registry: &FunctionRegistry) {
     registry.register_function("sum", Function::Aggregating(Arc::new(Sum {})));
     registry.register_function("avg", Function::Aggregating(Arc::new(Avg {})));
@@ -118,7 +110,15 @@ fn register_aggregation_functions(registry: &FunctionRegistry) {
 }
 
 fn register_temporal_instant_functions(registry: &FunctionRegistry) {
-    registry.register_function("duration.between", Function::Scalar(Arc::new(Between {})));
+    registry.register_function("date", Function::Scalar(Arc::new(Date {})));
+    registry.register_function("zoned_time", Function::Scalar(Arc::new(Time {})));
+    registry.register_function("local_time", Function::Scalar(Arc::new(LocalTime {})));
+    registry.register_function("zoned_datetime", Function::Scalar(Arc::new(DateTime {})));
+    registry.register_function("local_datetime", Function::Scalar(Arc::new(LocalDateTime {})));
+}
+
+fn register_temporal_duration_functions(registry: &FunctionRegistry) {
+    registry.register_function("duration_between", Function::Scalar(Arc::new(Between {})));
     registry.register_function("duration.inMonths", Function::Scalar(Arc::new(InMonths {})));
     registry.register_function("duration.inDays", Function::Scalar(Arc::new(InDays {})));
     registry.register_function(
@@ -126,8 +126,4 @@ fn register_temporal_instant_functions(registry: &FunctionRegistry) {
         Function::Scalar(Arc::new(InSeconds {})),
     );
     registry.register_function("duration", Function::Scalar(Arc::new(DurationFunc {})));
-}
-
-fn register_temporal_duration_functions(registry: &FunctionRegistry) {
-    registry.register_function("dateDiff", Function::Scalar(Arc::new(Between {})));
 }
