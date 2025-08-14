@@ -114,7 +114,10 @@ fn register_temporal_instant_functions(registry: &FunctionRegistry) {
     registry.register_function("zoned_time", Function::Scalar(Arc::new(Time {})));
     registry.register_function("local_time", Function::Scalar(Arc::new(LocalTime {})));
     registry.register_function("zoned_datetime", Function::Scalar(Arc::new(DateTime {})));
-    registry.register_function("local_datetime", Function::Scalar(Arc::new(LocalDateTime {})));
+    registry.register_function(
+        "local_datetime",
+        Function::Scalar(Arc::new(LocalDateTime {})),
+    );
 }
 
 fn register_temporal_duration_functions(registry: &FunctionRegistry) {
