@@ -52,3 +52,51 @@ pub fn middlewares() -> Vec<Arc<SourceMiddlewareConfig>> {
 pub fn source_pipeline() -> Vec<String> {
     vec!["map".to_string()]
 }
+
+// Returns an intentionally invalid middleware configuration (bad selector)
+pub fn invalid_middlewares() -> Vec<Arc<SourceMiddlewareConfig>> {
+    let cfg: serde_json::Map<String, serde_json::Value> = json!({
+        "Telemetry": {
+            "insert": [{
+                // Invalid JsonPath (leading 'z') to trigger config error
+                "selector": "z$[?(@.additionalProperties.Source == 'telemetry')]",
+                "op": "Update",
+                "label": "Vehicle",
+                "id": "$.vehicleId",
+                "properties": {
+                    "id": "$.vehicleId",
+                    "currentSpeed": "$.signals[?(@.name == 'Vehicle.Speed')].value"
+                }
+            }]
+        }
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+
+    vec![Arc::new(SourceMiddlewareConfig::new("map", "map", cfg))]
+}
+
+// Returns an incorrectly structured config (insert should be an array, but we pass an object)
+pub fn incorrect_structure_middlewares() -> Vec<Arc<SourceMiddlewareConfig>> {
+    let cfg: serde_json::Map<String, serde_json::Value> = json!({
+        "Telemetry": {
+            // incorrect type here: should be an array of mappings
+            "insert": {
+                "selector": "$[?(@.additionalProperties.Source == 'telemetry')]",
+                "op": "Update",
+                "label": "Vehicle",
+                "id": "$.vehicleId",
+                "properties": {
+                    "id": "$.vehicleId",
+                    "currentSpeed": "$.signals[?(@.name == 'Vehicle.Speed')].value"
+                }
+            }
+        }
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+
+    vec![Arc::new(SourceMiddlewareConfig::new("map", "map", cfg))]
+}
