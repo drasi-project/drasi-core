@@ -276,7 +276,9 @@ pub async fn unwind_invalid_config_fails(config: &(impl QueryTestConfig + Send))
     let middleware_registry = Arc::new(middleware_registry);
 
     let result = {
-        let mut builder = QueryBuilder::new(queries::unwind_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::unwind_query(), parser);
         builder = config.config_query(builder).await;
         builder = builder.with_middleware_registry(middleware_registry);
         for mw in queries::invalid_middlewares() {
@@ -314,7 +316,9 @@ pub async fn unwind_incorrect_structure_fails(config: &(impl QueryTestConfig + S
     let middleware_registry = Arc::new(middleware_registry);
 
     let result = {
-        let mut builder = QueryBuilder::new(queries::unwind_query());
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::unwind_query(), parser);
         builder = config.config_query(builder).await;
         builder = builder.with_middleware_registry(middleware_registry);
         for mw in queries::incorrect_structure_middlewares() {
