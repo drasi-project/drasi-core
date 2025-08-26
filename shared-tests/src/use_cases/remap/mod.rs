@@ -244,6 +244,8 @@ pub async fn remap_invalid_config_fails(config: &(impl QueryTestConfig + Send)) 
         err_str
     );
 }
+
+#[allow(clippy::unwrap_used)]
 pub async fn remap_incorrect_structure_fails(config: &(impl QueryTestConfig + Send)) {
     // Register MapFactory and attempt to build with incorrect JSON structure
     let mut middleware_registry = MiddlewareTypeRegistry::new();
