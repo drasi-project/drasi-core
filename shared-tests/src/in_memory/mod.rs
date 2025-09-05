@@ -422,6 +422,17 @@ mod promote {
     }
 }
 
+mod relabel {
+    use super::InMemoryQueryConfig;
+    use crate::use_cases::*;
+
+    #[tokio::test]
+    async fn relabel() {
+        let test_config = InMemoryQueryConfig::new();
+        relabel::relabel(&test_config).await;
+    }
+}
+
 mod dapr_state_store {
     use super::InMemoryQueryConfig;
     use crate::use_cases::*;
