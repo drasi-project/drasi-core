@@ -33,11 +33,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install specific Rust version
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: 1.83.0 # Pin to a specific Rust version
-          override: true
-          components: clippy, rustfmt
+        run: |
+          rustup update 1.83.0 && rustup default 1.83.0
+
+      - name: Install Clippy
+        run: rustup component add clippy
 
       - name: Run Cargo Clippy
         run: cargo clippy --all-targets --all-features
@@ -49,11 +49,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
-      - name: Install latest nightly
-        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1.0.7
-        with:
-            toolchain: nightly
-            override: true
+      - name: Install specific Rust version
+        run: |
+          rustup update nightly-1.83.0 && rustup default nightly-1.83.0
 
       - name: Run Cargo fmt
         run: |
