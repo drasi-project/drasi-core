@@ -37,9 +37,8 @@ jobs:
         with:
           toolchain: 1.83.0 # Pin to a specific Rust version
           override: true
+          components: clippy, rustfmt
 
-      - name: Install Clippy
-        run: rustup component add clippy rustfmt
       - name: Run Cargo Clippy
         run: cargo clippy --all-targets --all-features
 
