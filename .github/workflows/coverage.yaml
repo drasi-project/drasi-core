@@ -82,6 +82,7 @@ jobs:
           echo "Code coverage report generated"
 
       - name: Upload Code Coverage Report to Codecov
+        if: "!contains(github.event.head_commit.message, 'clippy fix')"
         uses: codecov/codecov-action@v5
         with:
           files: drasi-core-tarpaulin-report.xml
