@@ -128,7 +128,7 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
         json!({ "id": "node:1", "target_prop": r#"{"key": "value", "num": 123}"# }),
     );
     let result1 = query1.process_source_change(insert1).await.unwrap();
-    println!("Result 1 (Insert): {:?}", result1);
+    println!("Result 1 (Insert): {result1:?}");
     assert_eq!(result1.len(), 1);
     let expected_vv_map1 = variablemap!(
         "key" => VariableValue::String("value".to_string()),
@@ -171,7 +171,7 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
         json!({ "id": "node:2", "target_prop": r#"[1, "two", true, null, 1.234]"# }),
     );
     let result2 = query2.process_source_change(insert2).await.unwrap();
-    println!("Result 2 (Insert): {:?}", result2);
+    println!("Result 2 (Insert): {result2:?}");
     assert_eq!(result2.len(), 1);
     let expected_vv_list2 = vec![
         VariableValue::Integer(Integer::from(1)),
@@ -201,7 +201,7 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
         }),
     );
     let result3 = query2.process_source_change(insert3).await.unwrap();
-    println!("Result 3 (Insert - Collision): {:?}", result3);
+    println!("Result 3 (Insert - Collision): {result3:?}");
     assert_eq!(result3.len(), 1);
     let expected_vv_map3 = variablemap!(
         "new" => VariableValue::Bool(true)
@@ -242,7 +242,7 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
         json!({ "id": "node:4", "target_prop": r#"{"status": "updated"}"# }),
     );
     let result4_update = query1.process_source_change(update4).await.unwrap();
-    println!("Result 4 (Update): {:?}", result4_update);
+    println!("Result 4 (Update): {result4_update:?}");
     assert_eq!(result4_update.len(), 1);
     let updated_vv_map4 = variablemap!(
         "status" => VariableValue::String("updated".to_string())
@@ -269,7 +269,7 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
     // Use query1 setup
     let delete5 = create_node_delete_change("node:4"); // Delete the node from previous step
     let result5_delete = query1.process_source_change(delete5).await.unwrap();
-    println!("Result 5 (Delete): {:?}", result5_delete);
+    println!("Result 5 (Delete): {result5_delete:?}");
     assert_eq!(result5_delete.len(), 1);
     let deleted_vv_map5 = updated_vv_map4;
     assert!(
@@ -310,7 +310,7 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
         json!({ "id": "node:6", "target_prop": r#"{"key": "value""# }),
     );
     let result6 = query6.process_source_change(insert6).await.unwrap();
-    println!("Result 6 (Skip Invalid): {:?}", result6);
+    println!("Result 6 (Skip Invalid): {result6:?}");
     assert_eq!(result6.len(), 1);
     assert!(result6.contains(&QueryPartEvaluationContext::Adding {
         after: variablemap!(
@@ -348,7 +348,7 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
         json!({ "id": "node:7", "target_prop": r#"{"key": "value""# }),
     );
     let result7 = query7.process_source_change(insert7).await;
-    println!("Result 7 (Fail Invalid): {:?}", result7);
+    println!("Result 7 (Fail Invalid): {result7:?}");
     assert!(result7.is_err());
     assert!(result7.unwrap_err().to_string().contains("ParseError"));
 
@@ -360,7 +360,7 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
         json!({ "id": "node:8", "other_prop": "some_value" }),
     );
     let result8 = query6.process_source_change(insert8).await.unwrap();
-    println!("Result 8 (Skip Missing): {:?}", result8);
+    println!("Result 8 (Skip Missing): {result8:?}");
     assert_eq!(result8.len(), 1);
     assert!(result8.contains(&QueryPartEvaluationContext::Adding {
         after: variablemap!(
@@ -379,7 +379,7 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
         json!({ "id": "node:9", "other_prop": "another_value" }),
     );
     let result9 = query7.process_source_change(insert9).await;
-    println!("Result 9 (Fail Missing): {:?}", result9);
+    println!("Result 9 (Fail Missing): {result9:?}");
     assert!(result9.is_err());
     assert!(result9.unwrap_err().to_string().contains("MissingProperty"));
 
@@ -411,7 +411,7 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
         json!({ "id": "node:10", "target_prop": large_json_str }),
     );
     let result10 = query10.process_source_change(insert10).await.unwrap();
-    println!("Result 10 (Skip Size): {:?}", result10);
+    println!("Result 10 (Skip Size): {result10:?}");
     assert_eq!(result10.len(), 1);
     assert!(result10.contains(&QueryPartEvaluationContext::Adding {
         after: variablemap!(
@@ -449,7 +449,7 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
         json!({ "id": "node:11", "target_prop": large_json_str }),
     );
     let result11 = query11.process_source_change(insert11).await;
-    println!("Result 11 (Fail Size): {:?}", result11);
+    println!("Result 11 (Fail Size): {result11:?}");
     assert!(result11.is_err());
     assert!(result11.unwrap_err().to_string().contains("SizeExceeded"));
 
@@ -481,7 +481,7 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
         json!({ "id": "node:12", "target_prop": deep_json_str }),
     );
     let result12 = query12.process_source_change(insert12).await.unwrap();
-    println!("Result 12 (Skip Depth): {:?}", result12);
+    println!("Result 12 (Skip Depth): {result12:?}");
     assert_eq!(result12.len(), 1);
     assert!(result12.contains(&QueryPartEvaluationContext::Adding {
         after: variablemap!(
@@ -519,7 +519,7 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
         json!({ "id": "node:13", "target_prop": deep_json_str }),
     );
     let result13 = query13.process_source_change(insert13).await;
-    println!("Result 13 (Fail Depth): {:?}", result13);
+    println!("Result 13 (Fail Depth): {result13:?}");
     assert!(result13.is_err());
     assert!(result13.unwrap_err().to_string().contains("DeepNesting"));
 }

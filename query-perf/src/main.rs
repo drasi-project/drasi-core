@@ -59,7 +59,7 @@ async fn main() {
     println!("--------------------------------");
     println!("Drasi Query Component Perf Tests");
     println!("--------------------------------");
-    println!("Test Run Config: \n{:?}\n", test_run_config);
+    println!("Test Run Config: \n{test_run_config:?}\n");
 
     for scenario in scenarios {
         let mut result: TestRunResult = TestRunResult::new(
@@ -72,7 +72,7 @@ async fn main() {
         println!("--------------------------------");
         println!("Scenario - {}", scenario_config.name);
         println!("--------------------------------");
-        println!(" - Scenario Config: \n{:?}\n", scenario_config);
+        println!(" - Scenario Config: \n{scenario_config:?}\n");
         println!(" - Initializing Scenario...");
 
         let query_id = format!("test-{}", Uuid::new_v4());
@@ -165,6 +165,6 @@ async fn main() {
             // println!("change_result: {:#?}", _change_result);
         }
         result.end_run();
-        println!(" - Result: {:#?}", result);
+        println!(" - Result: {result:#?}");
     }
 }

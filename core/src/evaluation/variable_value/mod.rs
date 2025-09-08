@@ -75,7 +75,7 @@ impl From<VariableValue> for Value {
             VariableValue::LocalDateTime(t) => Value::String(t.to_string()),
             VariableValue::ZonedDateTime(t) => Value::String(t.to_string()),
             VariableValue::Duration(d) => Value::String(d.to_string()),
-            VariableValue::Expression(e) => Value::String(format!("{:?}", e)),
+            VariableValue::Expression(e) => Value::String(format!("{e:?}")),
             VariableValue::ListRange(r) => Value::String(r.to_string()),
             VariableValue::Element(e) => e.as_ref().into(),
             VariableValue::ElementMetadata(m) => Value::String(m.to_string()),
@@ -106,7 +106,7 @@ pub enum RangeBound {
 impl Display for RangeBound {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            RangeBound::Index(i) => write!(f, "{}", i),
+            RangeBound::Index(i) => write!(f, "{i}"),
             RangeBound::Unbounded => write!(f, "..."),
         }
     }
@@ -384,10 +384,10 @@ impl Debug for VariableValue {
     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         match self {
             VariableValue::Null => formatter.write_str("Null"),
-            VariableValue::Bool(boolean) => write!(formatter, "Bool({})", boolean),
-            VariableValue::Integer(integer) => write!(formatter, "Integer({})", integer),
-            VariableValue::Float(float) => write!(formatter, "Float({})", float),
-            VariableValue::String(string) => write!(formatter, "String({:?})", string),
+            VariableValue::Bool(boolean) => write!(formatter, "Bool({boolean})"),
+            VariableValue::Integer(integer) => write!(formatter, "Integer({integer})"),
+            VariableValue::Float(float) => write!(formatter, "Float({float})"),
+            VariableValue::String(string) => write!(formatter, "String({string:?})"),
             VariableValue::List(vec) => {
                 let _ = formatter.write_str("List ");
                 Debug::fmt(vec, formatter)
@@ -396,22 +396,22 @@ impl Debug for VariableValue {
                 let _ = formatter.write_str("Object ");
                 Debug::fmt(map, formatter)
             }
-            VariableValue::Date(date) => write!(formatter, "Date({})", date),
-            VariableValue::LocalTime(time) => write!(formatter, "LocalTime({})", time),
-            VariableValue::ZonedTime(time) => write!(formatter, "Time({})", time),
-            VariableValue::LocalDateTime(time) => write!(formatter, "LocalDateTime({})", time),
-            VariableValue::ZonedDateTime(time) => write!(formatter, "ZonedDateTime({})", time),
-            VariableValue::Duration(duration) => write!(formatter, "Duration({})", duration),
+            VariableValue::Date(date) => write!(formatter, "Date({date})"),
+            VariableValue::LocalTime(time) => write!(formatter, "LocalTime({time})"),
+            VariableValue::ZonedTime(time) => write!(formatter, "Time({time})"),
+            VariableValue::LocalDateTime(time) => write!(formatter, "LocalDateTime({time})"),
+            VariableValue::ZonedDateTime(time) => write!(formatter, "ZonedDateTime({time})"),
+            VariableValue::Duration(duration) => write!(formatter, "Duration({duration})"),
             VariableValue::Expression(expression) => {
-                write!(formatter, "Expression({:?})", expression)
+                write!(formatter, "Expression({expression:?})")
             }
-            VariableValue::ListRange(range) => write!(formatter, "ListRange({:?})", range),
-            VariableValue::Element(element) => write!(formatter, "Element({:?})", element),
+            VariableValue::ListRange(range) => write!(formatter, "ListRange({range:?})"),
+            VariableValue::Element(element) => write!(formatter, "Element({element:?})"),
             VariableValue::ElementMetadata(metadata) => {
-                write!(formatter, "ElementMetadata({:?})", metadata)
+                write!(formatter, "ElementMetadata({metadata:?})")
             }
             VariableValue::ElementReference(reference) => {
-                write!(formatter, "ElementReference({:?})", reference)
+                write!(formatter, "ElementReference({reference:?})")
             }
             VariableValue::Awaiting => write!(formatter, "Awaiting"),
         }
@@ -422,10 +422,10 @@ impl Display for VariableValue {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self {
             VariableValue::Null => write!(f, "null"),
-            VariableValue::Bool(b) => write!(f, "{}", b),
-            VariableValue::Integer(i) => write!(f, "{}", i),
-            VariableValue::Float(fl) => write!(f, "{}", fl),
-            VariableValue::String(s) => write!(f, "{}", s),
+            VariableValue::Bool(b) => write!(f, "{b}"),
+            VariableValue::Integer(i) => write!(f, "{i}"),
+            VariableValue::Float(fl) => write!(f, "{fl}"),
+            VariableValue::String(s) => write!(f, "{s}"),
             VariableValue::List(l) => {
                 let mut first = true;
                 write!(f, "[")?;
@@ -435,7 +435,7 @@ impl Display for VariableValue {
                     } else {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{}", item)?;
+                    write!(f, "{item}")?;
                 }
                 write!(f, "]")
             }
@@ -448,21 +448,21 @@ impl Display for VariableValue {
                     } else {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{}: {}", key, value)?;
+                    write!(f, "{key}: {value}")?;
                 }
                 write!(f, "}}")
             }
-            VariableValue::Date(d) => write!(f, "{}", d),
-            VariableValue::LocalTime(t) => write!(f, "{}", t),
-            VariableValue::ZonedTime(t) => write!(f, "{}", t),
-            VariableValue::LocalDateTime(t) => write!(f, "{}", t),
-            VariableValue::ZonedDateTime(t) => write!(f, "{}", t),
-            VariableValue::Duration(d) => write!(f, "{}", d),
-            VariableValue::Expression(e) => write!(f, "{:?}", e),
-            VariableValue::ListRange(r) => write!(f, "{}", r),
-            VariableValue::Element(e) => write!(f, "{:?}", e),
-            VariableValue::ElementMetadata(m) => write!(f, "{}", m),
-            VariableValue::ElementReference(r) => write!(f, "{}", r),
+            VariableValue::Date(d) => write!(f, "{d}"),
+            VariableValue::LocalTime(t) => write!(f, "{t}"),
+            VariableValue::ZonedTime(t) => write!(f, "{t}"),
+            VariableValue::LocalDateTime(t) => write!(f, "{t}"),
+            VariableValue::ZonedDateTime(t) => write!(f, "{t}"),
+            VariableValue::Duration(d) => write!(f, "{d}"),
+            VariableValue::Expression(e) => write!(f, "{e:?}"),
+            VariableValue::ListRange(r) => write!(f, "{r}"),
+            VariableValue::Element(e) => write!(f, "{e:?}"),
+            VariableValue::ElementMetadata(m) => write!(f, "{m}"),
+            VariableValue::ElementReference(r) => write!(f, "{r}"),
             VariableValue::Awaiting => write!(f, "Awaiting"),
         }
     }

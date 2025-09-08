@@ -83,7 +83,7 @@ pub async fn relabel(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        println!("Node Result - Add Person (should be User): {:?}", result);
+        println!("Node Result - Add Person (should be User): {result:?}");
         assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
                 "userName" => VariableValue::from(json!("John Doe")),
@@ -116,10 +116,7 @@ pub async fn relabel(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 0);
-        println!(
-            "Node Result - Add Employee (should be Staff, no match): {:?}",
-            result
-        );
+        println!("Node Result - Add Employee (should be Staff, no match): {result:?}");
     }
 
     // Update the Person node
@@ -144,7 +141,7 @@ pub async fn relabel(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        println!("Node Result - Update Person: {:?}", result);
+        println!("Node Result - Update Person: {result:?}");
         assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
                 "userName" => VariableValue::from(json!("John Doe")),
@@ -182,10 +179,7 @@ pub async fn relabel(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        println!(
-            "Node Result - Add Person+Employee (becomes User+Staff): {:?}",
-            result
-        );
+        println!("Node Result - Add Person+Employee (becomes User+Staff): {result:?}");
         assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
                 "userName" => VariableValue::from(json!("Alice Johnson")),
@@ -218,10 +212,7 @@ pub async fn relabel(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 0);
-        println!(
-            "Node Result - Add Company (should be Organization, no match): {:?}",
-            result
-        );
+        println!("Node Result - Add Company (should be Organization, no match): {result:?}");
     }
 
     // Delete the Person node
@@ -239,7 +230,7 @@ pub async fn relabel(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        println!("Node Result - Delete Person: {:?}", result);
+        println!("Node Result - Delete Person: {result:?}");
         assert!(result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!(
                 "userName" => VariableValue::from(json!("John Doe")),
@@ -272,9 +263,6 @@ pub async fn relabel(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 0);
-        println!(
-            "Node Result - Add UnmappedLabel (no change, no match): {:?}",
-            result
-        );
+        println!("Node Result - Add UnmappedLabel (no change, no match): {result:?}");
     }
 }

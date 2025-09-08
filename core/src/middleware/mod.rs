@@ -93,8 +93,7 @@ impl SourceMiddlewarePipeline {
                 container
                     .get(name)
                     .ok_or(MiddlewareSetupError::InvalidConfiguration(format!(
-                        "Unknown middleware: {}",
-                        name
+                        "Unknown middleware: {name}"
                     )))
             })
             .collect::<Result<Vec<Arc<dyn SourceMiddleware>>, MiddlewareSetupError>>()?;

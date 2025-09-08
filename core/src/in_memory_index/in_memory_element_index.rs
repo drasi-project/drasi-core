@@ -628,7 +628,7 @@ impl ElementArchive {
             .data
             .range((Bound::Included(&0), Bound::Included(&time)))
             .map(|x| *x.0)
-            .last()
+            .next_back()
         {
             None => Some(0),
             Some(v) => Some(v),

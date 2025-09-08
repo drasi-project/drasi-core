@@ -138,7 +138,7 @@ pub async fn linear_gradient(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
 
         assert_eq!(result.len(), 1);
-        println!("Node Result - Add p6: {:?}", result);
+        println!("Node Result - Add p6: {result:?}");
         assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
@@ -166,7 +166,7 @@ pub async fn linear_gradient(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
 
         assert_eq!(result.len(), 1);
-        println!("Node Result - Remove p2: {:?}", result);
+        println!("Node Result - Remove p2: {result:?}");
         assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: false,
@@ -194,7 +194,7 @@ pub async fn linear_gradient(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
 
         assert_eq!(result.len(), 1);
-        println!("Node Result - Remove p6: {:?}", result);
+        println!("Node Result - Remove p6: {result:?}");
         assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: false,
@@ -220,7 +220,7 @@ pub async fn linear_gradient(config: &(impl QueryTestConfig + Send)) {
             })
             .await
             .unwrap();
-        println!("Node Result - Remove p1: {:?}", result);
+        println!("Node Result - Remove p1: {result:?}");
 
         let result = lg_query
             .process_source_change(SourceChange::Delete {
@@ -232,7 +232,7 @@ pub async fn linear_gradient(config: &(impl QueryTestConfig + Send)) {
             })
             .await
             .unwrap();
-        println!("Node Result - Remove p3: {:?}", result);
+        println!("Node Result - Remove p3: {result:?}");
 
         let result = lg_query
             .process_source_change(SourceChange::Delete {
@@ -244,7 +244,7 @@ pub async fn linear_gradient(config: &(impl QueryTestConfig + Send)) {
             })
             .await
             .unwrap();
-        println!("Node Result - Remove p4: {:?}", result);
+        println!("Node Result - Remove p4: {result:?}");
 
         let result = lg_query
             .process_source_change(SourceChange::Delete {
@@ -256,7 +256,7 @@ pub async fn linear_gradient(config: &(impl QueryTestConfig + Send)) {
             })
             .await
             .unwrap();
-        println!("Node Result - Remove p5: {:?}", result);
+        println!("Node Result - Remove p5: {result:?}");
     }
 
     //re-add initial values
@@ -346,7 +346,7 @@ pub async fn linear_gradient(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
 
         assert_eq!(result.len(), 1);
-        println!("Node Result - Add p6: {:?}", result);
+        println!("Node Result - Add p6: {result:?}");
         assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,

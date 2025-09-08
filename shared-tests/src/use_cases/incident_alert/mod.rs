@@ -355,7 +355,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        println!("getting result {:?}", result);
+        println!("getting result {result:?}");
         assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
             default_before: true,
             default_after: false,
@@ -557,7 +557,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 2);
-        println!("getting result {:?}", result);
+        println!("getting result {result:?}");
         assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
             default_before: false,
             default_after: false,

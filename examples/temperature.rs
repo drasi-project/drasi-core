@@ -62,7 +62,7 @@ async fn main() {
                 let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
 
                 let new_temp: usize = rng.gen_range(0..31);
-                println!("Component1 - temperature: {}", new_temp);
+                println!("Component1 - temperature: {new_temp}");
                 process_change(&query, SourceChange::Update {
                     element: Element::Node {
                         metadata: ElementMetadata {
@@ -77,7 +77,7 @@ async fn main() {
                 }).await;
 
                 let new_temp: usize = rng.gen_range(0..31);
-                println!("Component2 - temperature: {}", new_temp);
+                println!("Component2 - temperature: {new_temp}");
                 process_change(&query, SourceChange::Update {
                     element: Element::Node {
                         metadata: ElementMetadata {
@@ -103,13 +103,13 @@ async fn process_change(query: &ContinuousQuery, change: SourceChange) {
     for context in result {
         match context {
             QueryPartEvaluationContext::Adding { after } => {
-                println!("Adding: {:?}", after);
+                println!("Adding: {after:?}");
             }
             QueryPartEvaluationContext::Removing { before } => {
-                println!("Removing: {:?}", before);
+                println!("Removing: {before:?}");
             }
             QueryPartEvaluationContext::Updating { before, after } => {
-                println!("Updating: {:?} -> {:?}", before, after);
+                println!("Updating: {before:?} -> {after:?}");
             }
             _ => {}
         }

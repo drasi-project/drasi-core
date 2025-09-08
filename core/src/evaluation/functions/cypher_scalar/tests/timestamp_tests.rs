@@ -43,7 +43,7 @@ async fn test_timestamp() {
         .await
     {
         Ok(result) => result,
-        Err(e) => panic!("Error: {:?}", e),
+        Err(e) => panic!("Error: {e:?}"),
     };
 
     let time_since_epoch = std::time::SystemTime::now()

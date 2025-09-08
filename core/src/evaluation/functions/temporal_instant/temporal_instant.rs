@@ -1506,7 +1506,7 @@ async fn truncate_date(
         }),
         "weekyear" => {
             // First day of the first week of the year
-            let date_string = format!("{}-1-1", year);
+            let date_string = format!("{year}-1-1");
             let date = match NaiveDate::parse_from_str(&date_string, "%Y-%W-%u") {
                 Ok(date) => date,
                 Err(_) => {
@@ -1666,7 +1666,7 @@ async fn truncate_date_with_map(
         }
         "weekyear" => {
             // First day of the first week of the year
-            let date_string = format!("{}-1-1", year);
+            let date_string = format!("{year}-1-1");
             let date = match NaiveDate::parse_from_str(&date_string, "%Y-%W-%u") {
                 Ok(date) => date,
                 Err(_) => {
@@ -2030,7 +2030,7 @@ async fn date_str_formatter(input: &str) -> Result<String, FunctionEvaluationErr
     // NaiveDate parser does not support date in the format of YYYYMM
     // Changing this to YYYYMM01 (as suggested by Neo4j)
     if date_str.len() == 6 && !date_str.contains('Q') && !date_str.contains('W') {
-        return Ok(format!("{}01", date_str));
+        return Ok(format!("{date_str}01"));
     }
 
     // YYYYWwwD, YYYYWww
@@ -2068,7 +2068,7 @@ async fn date_str_formatter(input: &str) -> Result<String, FunctionEvaluationErr
 
     // YYYY
     if date_str.len() == 4 {
-        let formatted_input = format!("{}0101", date_str);
+        let formatted_input = format!("{date_str}0101");
         return Ok(formatted_input);
     }
 
@@ -2213,7 +2213,7 @@ async fn parse_local_date_time_input(
         }
     };
 
-    let time_string = match input_string.split('T').last() {
+    let time_string = match input_string.split('T').next_back() {
         Some(time) => time,
         None => {
             return Err(FunctionEvaluationError::InvalidFormat {

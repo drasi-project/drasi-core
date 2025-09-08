@@ -1134,8 +1134,7 @@ mod factory {
             let mw_config = create_mw_config(config);
             assert!(
                 subject.create(&mw_config).is_ok(),
-                "Failed for encoding_type: {}",
-                enc_type
+                "Failed for encoding_type: {enc_type}"
             );
         }
     }
@@ -1153,8 +1152,7 @@ mod factory {
             let mw_config = create_mw_config(config);
             assert!(
                 subject.create(&mw_config).is_ok(),
-                "Failed for on_error: {}",
-                val
+                "Failed for on_error: {val}"
             );
         }
         // Test default (fail) by omitting the field

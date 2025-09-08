@@ -264,7 +264,7 @@ async fn evaluate_timestamp() {
 
     let result = match evaluator.evaluate_expression(&context, &expr).await {
         Ok(result) => result,
-        Err(e) => panic!("Error: {:?}", e),
+        Err(e) => panic!("Error: {e:?}"),
     };
 
     let time_since_epoch = std::time::SystemTime::now()

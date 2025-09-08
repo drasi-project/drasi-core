@@ -250,10 +250,10 @@ impl Decoder {
     pub fn decode_base64(&self, encoded: &str) -> Result<String, String> {
         base64::engine::general_purpose::STANDARD
             .decode(encoded.as_bytes())
-            .map_err(|e| format!("Invalid base64 encoding: {}", e))
+            .map_err(|e| format!("Invalid base64 encoding: {e}"))
             .and_then(|bytes| {
                 String::from_utf8(bytes)
-                    .map_err(|e| format!("Decoded bytes are not valid UTF-8: {}", e))
+                    .map_err(|e| format!("Decoded bytes are not valid UTF-8: {e}"))
             })
     }
 
@@ -261,20 +261,20 @@ impl Decoder {
     pub fn decode_base64url(&self, encoded: &str) -> Result<String, String> {
         base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(encoded.as_bytes())
-            .map_err(|e| format!("Invalid base64url encoding: {}", e))
+            .map_err(|e| format!("Invalid base64url encoding: {e}"))
             .and_then(|bytes| {
                 String::from_utf8(bytes)
-                    .map_err(|e| format!("Decoded bytes are not valid UTF-8: {}", e))
+                    .map_err(|e| format!("Decoded bytes are not valid UTF-8: {e}"))
             })
     }
 
     /// Decodes a hex encoded string.
     pub fn decode_hex(&self, encoded: &str) -> Result<String, String> {
         hex::decode(encoded)
-            .map_err(|e| format!("Invalid hex encoding: {}", e))
+            .map_err(|e| format!("Invalid hex encoding: {e}"))
             .and_then(|bytes| {
                 String::from_utf8(bytes)
-                    .map_err(|e| format!("Decoded bytes are not valid UTF-8: {}", e))
+                    .map_err(|e| format!("Decoded bytes are not valid UTF-8: {e}"))
             })
     }
 
@@ -282,14 +282,14 @@ impl Decoder {
     pub fn decode_url(&self, encoded: &str) -> Result<String, String> {
         urlencoding::decode(encoded)
             .map(|cow| cow.into_owned())
-            .map_err(|e| format!("Invalid URL encoding: {}", e))
+            .map_err(|e| format!("Invalid URL encoding: {e}"))
     }
 
     /// Decodes a JSON escaped string.
     pub fn decode_json_escape(&self, encoded: &str) -> Result<String, String> {
-        let json_value_str = format!("\"{}\"", encoded);
+        let json_value_str = format!("\"{encoded}\"");
         serde_json::from_str::<String>(&json_value_str)
-            .map_err(|e| format!("Invalid JSON escape sequence: {}", e))
+            .map_err(|e| format!("Invalid JSON escape sequence: {e}"))
     }
 }
 

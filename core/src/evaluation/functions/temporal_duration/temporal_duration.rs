@@ -999,7 +999,7 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, FunctionEr
     let date_duration = duration.split('T').next();
     let mut time_duration = None;
     if duration.contains('T') {
-        time_duration = duration.split('T').last();
+        time_duration = duration.split('T').next_back();
     }
 
     let mut duration_years = 0;
@@ -1096,7 +1096,7 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, FunctionEr
     }
 
     if let Some(time_duration) = time_duration {
-        let time_duration_string = format!("PT{}", time_duration);
+        let time_duration_string = format!("PT{time_duration}");
 
         let iso_duration = match time_duration_string.parse::<IsoDuration>() {
             Ok(iso_duration) => iso_duration,
@@ -1122,7 +1122,7 @@ async fn parse_duration_input(duration_str: &str) -> Result<Duration, FunctionEr
         };
 
         if time_duration_string.contains('.') {
-            let mut fract_string = match time_duration_string.split('.').last() {
+            let mut fract_string = match time_duration_string.split('.').next_back() {
                 Some(fract_string) => fract_string,
                 None => {
                     return Err(FunctionError {

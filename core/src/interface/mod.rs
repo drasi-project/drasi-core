@@ -79,7 +79,7 @@ impl PartialEq for IndexError {
 
 impl Display for IndexError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        format!("{:?}", self).fmt(f)
+        format!("{self:?}").fmt(f)
     }
 }
 

@@ -111,17 +111,17 @@ impl PartialEq for FunctionEvaluationError {
 impl fmt::Display for FunctionEvaluationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            FunctionEvaluationError::InvalidArgument(arg) => write!(f, "Invalid argument: {}", arg),
+            FunctionEvaluationError::InvalidArgument(arg) => write!(f, "Invalid argument: {arg}"),
             FunctionEvaluationError::InvalidArgumentCount => write!(f, "Invalid argument count"),
-            FunctionEvaluationError::IndexError(err) => write!(f, "Index error: {}", err),
+            FunctionEvaluationError::IndexError(err) => write!(f, "Index error: {err}"),
             FunctionEvaluationError::OverflowError => write!(f, "Overflow error"),
             FunctionEvaluationError::OutofRange => write!(f, "Out of range"),
             FunctionEvaluationError::InvalidFormat { expected } => {
-                write!(f, "Invalid format, expected: {}", expected)
+                write!(f, "Invalid format, expected: {expected}")
             }
             FunctionEvaluationError::CorruptData => write!(f, "Invalid accumulator"),
             FunctionEvaluationError::InvalidType { expected } => {
-                write!(f, "Invalid type, expected: {}", expected)
+                write!(f, "Invalid type, expected: {expected}")
             }
         }
     }
@@ -161,7 +161,7 @@ impl From<MiddlewareError> for EvaluationError {
 impl Display for EvaluationError {
     // Match the variant and handle the display differently for each variant
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        format!("{:?}", self).fmt(f)
+        format!("{self:?}").fmt(f)
     }
 }
 

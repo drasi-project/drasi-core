@@ -95,19 +95,17 @@ impl AggregatingFunction for Max {
                         })
                     }
                 };
-                accumulator.insert(value * -1.0).await;
+                accumulator.insert(-value).await;
                 match accumulator.get_head().await {
-                    Ok(Some(head)) => {
-                        Ok(VariableValue::Float(match Float::from_f64(head * -1.0) {
-                            Some(f) => f,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: "Max".to_string(),
-                                    error: FunctionEvaluationError::CorruptData,
-                                })
-                            }
-                        }))
-                    }
+                    Ok(Some(head)) => Ok(VariableValue::Float(match Float::from_f64(-head) {
+                        Some(f) => f,
+                        None => {
+                            return Err(FunctionError {
+                                function_name: "Max".to_string(),
+                                error: FunctionEvaluationError::CorruptData,
+                            })
+                        }
+                    })),
                     Ok(None) => Ok(VariableValue::Null),
                     Err(e) => Err(FunctionError {
                         function_name: "Max".to_string(),
@@ -125,19 +123,17 @@ impl AggregatingFunction for Max {
                         })
                     }
                 };
-                accumulator.insert((value as f64) * -1.0).await;
+                accumulator.insert(-(value as f64)).await;
                 match accumulator.get_head().await {
-                    Ok(Some(head)) => {
-                        Ok(VariableValue::Float(match Float::from_f64(head * -1.0) {
-                            Some(f) => f,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: "Max".to_string(),
-                                    error: FunctionEvaluationError::CorruptData,
-                                })
-                            }
-                        }))
-                    }
+                    Ok(Some(head)) => Ok(VariableValue::Float(match Float::from_f64(-head) {
+                        Some(f) => f,
+                        None => {
+                            return Err(FunctionError {
+                                function_name: "Max".to_string(),
+                                error: FunctionEvaluationError::CorruptData,
+                            })
+                        }
+                    })),
                     Ok(None) => Ok(VariableValue::Null),
                     Err(e) => Err(FunctionError {
                         function_name: "Max".to_string(),
@@ -147,10 +143,10 @@ impl AggregatingFunction for Max {
             }
             VariableValue::ZonedDateTime(zdt) => {
                 let value = zdt.datetime().timestamp_millis() as f64;
-                accumulator.insert(value * -1.0).await;
+                accumulator.insert(-value).await;
                 match accumulator.get_head().await {
                     Ok(Some(head)) => Ok(VariableValue::ZonedDateTime(
-                        ZonedDateTime::from_epoch_millis((head * -1.0) as i64),
+                        ZonedDateTime::from_epoch_millis(-head as i64),
                     )),
                     Ok(None) => Ok(VariableValue::Null),
                     Err(e) => Err(FunctionError {
@@ -161,10 +157,10 @@ impl AggregatingFunction for Max {
             }
             VariableValue::Duration(d) => {
                 let value = d.duration().num_milliseconds() as f64;
-                accumulator.insert(value * -1.0).await;
+                accumulator.insert(-value).await;
                 match accumulator.get_head().await {
                     Ok(Some(head)) => Ok(VariableValue::Duration(Duration::new(
-                        ChronoDuration::milliseconds((head * -1.0) as i64),
+                        ChronoDuration::milliseconds(-head as i64),
                         0,
                         0,
                     ))),
@@ -179,10 +175,10 @@ impl AggregatingFunction for Max {
                 // For date (Chrono::NaiveDate), we can store the number of days since the epoch
                 let reference_date = *temporal_constants::EPOCH_NAIVE_DATE;
                 let days_since_epoch = d.signed_duration_since(reference_date).num_days() as f64;
-                accumulator.insert(days_since_epoch * -1.0).await;
+                accumulator.insert(-days_since_epoch).await;
                 match accumulator.get_head().await {
                     Ok(Some(head)) => Ok(VariableValue::Date(
-                        reference_date + ChronoDuration::days((head * -1.0) as i64),
+                        reference_date + ChronoDuration::days(-head as i64),
                     )),
                     Ok(None) => Ok(VariableValue::Null),
                     Err(e) => Err(FunctionError {
@@ -195,11 +191,11 @@ impl AggregatingFunction for Max {
                 let reference_time = *temporal_constants::MIDNIGHT_NAIVE_TIME;
                 let duration_since_midnight =
                     t.signed_duration_since(reference_time).num_milliseconds() as f64;
-                accumulator.insert(duration_since_midnight * -1.0).await;
+                accumulator.insert(-duration_since_midnight).await;
 
                 match accumulator.get_head().await {
                     Ok(Some(head)) => Ok(VariableValue::LocalTime(
-                        reference_time + ChronoDuration::milliseconds((head * -1.0) as i64),
+                        reference_time + ChronoDuration::milliseconds(-head as i64),
                     )),
                     Ok(None) => Ok(VariableValue::Null),
                     Err(e) => Err(FunctionError {
@@ -210,7 +206,7 @@ impl AggregatingFunction for Max {
             }
             VariableValue::LocalDateTime(dt) => {
                 let duration_since_epoch = dt.and_utc().timestamp_millis() as f64;
-                accumulator.insert(duration_since_epoch * -1.0).await;
+                accumulator.insert(-duration_since_epoch).await;
                 match accumulator.get_head().await {
                     Ok(Some(head)) => Ok(VariableValue::LocalDateTime(
                         DateTime::from_timestamp_millis(head as i64 * -1.0 as i64)
@@ -242,11 +238,10 @@ impl AggregatingFunction for Max {
                     }
                 };
                 let duration_since_epoch = epoch_datetime.timestamp_millis() as f64;
-                accumulator.insert(duration_since_epoch * -1.0).await;
+                accumulator.insert(-duration_since_epoch).await;
                 match accumulator.get_head().await {
                     Ok(Some(head)) => Ok(VariableValue::ZonedTime(ZonedTime::new(
-                        (epoch_datetime + ChronoDuration::milliseconds((head * -1.0) as i64))
-                            .time(),
+                        (epoch_datetime + ChronoDuration::milliseconds(-head as i64)).time(),
                         *temporal_constants::UTC_FIXED_OFFSET,
                     ))),
                     Ok(None) => Ok(VariableValue::Null),
@@ -297,19 +292,17 @@ impl AggregatingFunction for Max {
                         })
                     }
                 };
-                accumulator.remove(value * -1.0).await;
+                accumulator.remove(-value).await;
                 match accumulator.get_head().await {
-                    Ok(Some(head)) => {
-                        Ok(VariableValue::Float(match Float::from_f64(head * -1.0) {
-                            Some(f) => f,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: "Max".to_string(),
-                                    error: FunctionEvaluationError::CorruptData,
-                                })
-                            }
-                        }))
-                    }
+                    Ok(Some(head)) => Ok(VariableValue::Float(match Float::from_f64(-head) {
+                        Some(f) => f,
+                        None => {
+                            return Err(FunctionError {
+                                function_name: "Max".to_string(),
+                                error: FunctionEvaluationError::CorruptData,
+                            })
+                        }
+                    })),
                     Ok(None) => Ok(VariableValue::Null),
                     Err(e) => Err(FunctionError {
                         function_name: "Max".to_string(),
@@ -327,19 +320,17 @@ impl AggregatingFunction for Max {
                         })
                     }
                 };
-                accumulator.remove((value as f64) * -1.0).await;
+                accumulator.remove(-(value as f64)).await;
                 match accumulator.get_head().await {
-                    Ok(Some(head)) => {
-                        Ok(VariableValue::Float(match Float::from_f64(head * -1.0) {
-                            Some(f) => f,
-                            None => {
-                                return Err(FunctionError {
-                                    function_name: "Max".to_string(),
-                                    error: FunctionEvaluationError::CorruptData,
-                                })
-                            }
-                        }))
-                    }
+                    Ok(Some(head)) => Ok(VariableValue::Float(match Float::from_f64(-head) {
+                        Some(f) => f,
+                        None => {
+                            return Err(FunctionError {
+                                function_name: "Max".to_string(),
+                                error: FunctionEvaluationError::CorruptData,
+                            })
+                        }
+                    })),
                     Ok(None) => Ok(VariableValue::Null),
                     Err(e) => Err(FunctionError {
                         function_name: "Max".to_string(),
@@ -349,10 +340,10 @@ impl AggregatingFunction for Max {
             }
             VariableValue::ZonedDateTime(zdt) => {
                 let value = zdt.datetime().timestamp_millis() as f64;
-                accumulator.remove(value * -1.0).await;
+                accumulator.remove(-value).await;
                 match accumulator.get_head().await {
                     Ok(Some(head)) => Ok(VariableValue::ZonedDateTime(
-                        ZonedDateTime::from_epoch_millis((head * -1.0) as i64),
+                        ZonedDateTime::from_epoch_millis(-head as i64),
                     )),
                     Ok(None) => Ok(VariableValue::Null),
                     Err(e) => Err(FunctionError {
@@ -363,10 +354,10 @@ impl AggregatingFunction for Max {
             }
             VariableValue::Duration(d) => {
                 let value = d.duration().num_milliseconds() as f64;
-                accumulator.remove(value * -1.0).await;
+                accumulator.remove(-value).await;
                 match accumulator.get_head().await {
                     Ok(Some(head)) => Ok(VariableValue::Duration(Duration::new(
-                        ChronoDuration::milliseconds((head * -1.0) as i64),
+                        ChronoDuration::milliseconds(-head as i64),
                         0,
                         0,
                     ))),
@@ -381,10 +372,10 @@ impl AggregatingFunction for Max {
                 // For date (Chrono::NaiveDate), we can store the number of days since the epoch
                 let reference_date = *temporal_constants::EPOCH_NAIVE_DATE;
                 let days_since_epoch = d.signed_duration_since(reference_date).num_days() as f64;
-                accumulator.remove(days_since_epoch * -1.0).await;
+                accumulator.remove(-days_since_epoch).await;
                 match accumulator.get_head().await {
                     Ok(Some(head)) => Ok(VariableValue::Date(
-                        reference_date + ChronoDuration::days((head * -1.0) as i64),
+                        reference_date + ChronoDuration::days(-head as i64),
                     )),
                     Ok(None) => Ok(VariableValue::Null),
                     Err(e) => Err(FunctionError {
@@ -397,11 +388,11 @@ impl AggregatingFunction for Max {
                 let reference_time = *temporal_constants::MIDNIGHT_NAIVE_TIME;
                 let duration_since_midnight =
                     t.signed_duration_since(reference_time).num_milliseconds() as f64;
-                accumulator.remove(duration_since_midnight * -1.0).await;
+                accumulator.remove(-duration_since_midnight).await;
 
                 match accumulator.get_head().await {
                     Ok(Some(head)) => Ok(VariableValue::LocalTime(
-                        reference_time + ChronoDuration::milliseconds((head * -1.0) as i64),
+                        reference_time + ChronoDuration::milliseconds(-head as i64),
                     )),
                     Ok(None) => Ok(VariableValue::Null),
                     Err(e) => Err(FunctionError {
@@ -412,7 +403,7 @@ impl AggregatingFunction for Max {
             }
             VariableValue::LocalDateTime(dt) => {
                 let duration_since_epoch = dt.and_utc().timestamp_millis() as f64;
-                accumulator.remove(duration_since_epoch * -1.0).await;
+                accumulator.remove(-duration_since_epoch).await;
                 match accumulator.get_head().await {
                     Ok(Some(head)) => Ok(VariableValue::LocalDateTime(
                         DateTime::from_timestamp_millis(head as i64 * -1.0 as i64)
@@ -444,11 +435,10 @@ impl AggregatingFunction for Max {
                     }
                 };
                 let duration_since_epoch = epoch_datetime.timestamp_millis() as f64;
-                accumulator.remove(duration_since_epoch * -1.0).await;
+                accumulator.remove(-duration_since_epoch).await;
                 match accumulator.get_head().await {
                     Ok(Some(head)) => Ok(VariableValue::ZonedTime(ZonedTime::new(
-                        (epoch_datetime + ChronoDuration::milliseconds((head * -1.0) as i64))
-                            .time(),
+                        (epoch_datetime + ChronoDuration::milliseconds(-head as i64)).time(),
                         *temporal_constants::UTC_FIXED_OFFSET,
                     ))),
                     Ok(None) => Ok(VariableValue::Null),
@@ -490,7 +480,7 @@ impl AggregatingFunction for Max {
         };
 
         let value = match accumulator.get_head().await {
-            Ok(Some(head)) => head * -1.0,
+            Ok(Some(head)) => -head,
             Ok(None) => return Ok(VariableValue::Null),
             Err(e) => {
                 return Err(FunctionError {

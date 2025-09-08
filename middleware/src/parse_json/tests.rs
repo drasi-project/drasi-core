@@ -94,8 +94,7 @@ fn assert_property(props: &ElementPropertyMap, property: &str, expected: &Elemen
     assert_eq!(
         props.get(property),
         Some(expected),
-        "Property '{}' doesn't match expected value",
-        property
+        "Property '{property}' doesn't match expected value"
     );
 }
 
@@ -503,7 +502,7 @@ mod process {
         }));
         let middleware = factory.create(&config).unwrap();
         let index = InMemoryElementIndex::new();
-        let deep_json = (0..25).fold("null".to_string(), |acc, _| format!(r#"{{"k":{}}}"#, acc));
+        let deep_json = (0..25).fold("null".to_string(), |acc, _| format!(r#"{{"k":{acc}}}"#));
         let input_change = create_node_insert_change(json!({ "deep_json": deep_json }));
         let original_change_clone = input_change.clone();
 
@@ -605,7 +604,7 @@ mod process {
         }));
         let middleware = factory.create(&config).unwrap();
         let index = InMemoryElementIndex::new();
-        let deep_json = (0..25).fold("null".to_string(), |acc, _| format!(r#"{{"k":{}}}"#, acc));
+        let deep_json = (0..25).fold("null".to_string(), |acc, _| format!(r#"{{"k":{acc}}}"#));
         let input_change = create_node_insert_change(json!({ "deep_json": deep_json }));
 
         let result = middleware.process(input_change, &index).await;

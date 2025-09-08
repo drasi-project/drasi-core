@@ -39,7 +39,7 @@ fn create_mw_config(config_json: Value) -> SourceMiddlewareConfig {
 }
 
 fn create_node_insert_change(labels: Vec<&str>, props: Value) -> SourceChange {
-    let labels: Vec<Arc<str>> = labels.into_iter().map(|s| Arc::from(s)).collect();
+    let labels: Vec<Arc<str>> = labels.into_iter().map(Arc::from).collect();
     SourceChange::Insert {
         element: Element::Node {
             metadata: ElementMetadata {
@@ -53,7 +53,7 @@ fn create_node_insert_change(labels: Vec<&str>, props: Value) -> SourceChange {
 }
 
 fn create_node_update_change(labels: Vec<&str>, props: Value) -> SourceChange {
-    let labels: Vec<Arc<str>> = labels.into_iter().map(|s| Arc::from(s)).collect();
+    let labels: Vec<Arc<str>> = labels.into_iter().map(Arc::from).collect();
     SourceChange::Update {
         element: Element::Node {
             metadata: ElementMetadata {
@@ -67,7 +67,7 @@ fn create_node_update_change(labels: Vec<&str>, props: Value) -> SourceChange {
 }
 
 fn create_relation_insert_change(labels: Vec<&str>, props: Value) -> SourceChange {
-    let labels: Vec<Arc<str>> = labels.into_iter().map(|s| Arc::from(s)).collect();
+    let labels: Vec<Arc<str>> = labels.into_iter().map(Arc::from).collect();
     SourceChange::Insert {
         element: Element::Relation {
             metadata: ElementMetadata {
@@ -83,7 +83,7 @@ fn create_relation_insert_change(labels: Vec<&str>, props: Value) -> SourceChang
 }
 
 fn create_delete_change(labels: Vec<&str>) -> SourceChange {
-    let labels: Vec<Arc<str>> = labels.into_iter().map(|s| Arc::from(s)).collect();
+    let labels: Vec<Arc<str>> = labels.into_iter().map(Arc::from).collect();
     SourceChange::Delete {
         metadata: ElementMetadata {
             reference: ElementReference::new("test_source", "node1"),
@@ -518,7 +518,7 @@ mod factory {
         let factory = RelabelMiddlewareFactory::new();
         let mut mappings = serde_json::Map::new();
         for i in 1..=100 {
-            mappings.insert(format!("Label{}", i), json!(format!("NewLabel{}", i)));
+            mappings.insert(format!("Label{i}"), json!(format!("NewLabel{}", i)));
         }
         let config = json!({
             "labelMappings": mappings

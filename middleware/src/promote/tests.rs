@@ -930,7 +930,7 @@ mod factory {
         match result {
             Err(MiddlewareSetupError::InvalidConfiguration(msg)) => {
                 // Check for the specific error message from the custom deserializer
-                assert!(msg.contains("Empty JSONPath"), "Error message was: {}", msg);
+                assert!(msg.contains("Empty JSONPath"), "Error message was: {msg}");
             }
             _ => panic!("Expected InvalidConfiguration error"),
         }
@@ -956,8 +956,7 @@ mod factory {
                 // Check for a message indicating a parse failure
                 assert!(
                     msg.contains("Failed to parse rule"),
-                    "Error message was: {}",
-                    msg
+                    "Error message was: {msg}"
                 );
             }
             _ => panic!("Expected InvalidConfiguration error for invalid JSONPath syntax"),
@@ -1152,8 +1151,7 @@ mod factory {
             let mw_config = create_mw_config(config);
             assert!(
                 subject.create(&mw_config).is_ok(),
-                "Failed for on_conflict: {}",
-                strategy
+                "Failed for on_conflict: {strategy}"
             );
         }
     }
@@ -1176,8 +1174,7 @@ mod factory {
             let mw_config = create_mw_config(config);
             assert!(
                 subject.create(&mw_config).is_ok(),
-                "Failed for on_error: {}",
-                value
+                "Failed for on_error: {value}"
             );
         }
     }

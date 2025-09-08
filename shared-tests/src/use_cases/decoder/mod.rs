@@ -93,7 +93,7 @@ pub async fn decoder(config: &(impl QueryTestConfig + Send)) {
         },
     };
     let result1 = query1.process_source_change(insert1).await.unwrap();
-    println!("Result 1 (Insert): {:?}", result1);
+    println!("Result 1 (Insert): {result1:?}");
     assert_eq!(result1.len(), 1);
     assert!(result1.contains(&QueryPartEvaluationContext::Adding {
         after: variablemap!(
@@ -146,7 +146,7 @@ pub async fn decoder(config: &(impl QueryTestConfig + Send)) {
         },
     };
     let result2 = query2.process_source_change(insert2).await.unwrap();
-    println!("Result 2 (Insert): {:?}", result2);
+    println!("Result 2 (Insert): {result2:?}");
     assert_eq!(result2.len(), 1);
     assert!(result2.contains(&QueryPartEvaluationContext::Adding {
         after: variablemap!(
@@ -199,7 +199,7 @@ pub async fn decoder(config: &(impl QueryTestConfig + Send)) {
         },
     };
     let result3 = query3.process_source_change(insert3).await.unwrap();
-    println!("Result 3 (Insert - Invalid URL, Skip): {:?}", result3);
+    println!("Result 3 (Insert - Invalid URL, Skip): {result3:?}");
     // Middleware should not modify the element
     assert_eq!(result3.len(), 1);
     assert!(result3.contains(&QueryPartEvaluationContext::Adding {
@@ -252,7 +252,7 @@ pub async fn decoder(config: &(impl QueryTestConfig + Send)) {
         },
     };
     let result4 = query4.process_source_change(insert4).await.unwrap();
-    println!("Result 4 (Insert - JSON Escape): {:?}", result4);
+    println!("Result 4 (Insert - JSON Escape): {result4:?}");
     assert_eq!(result4.len(), 1);
     assert!(result4.contains(&QueryPartEvaluationContext::Adding {
         after: variablemap!(
@@ -304,7 +304,7 @@ pub async fn decoder(config: &(impl QueryTestConfig + Send)) {
         },
     };
     let result5 = query5.process_source_change(insert5).await;
-    println!("Result 5 (Insert - Missing Prop, Fail): {:?}", result5);
+    println!("Result 5 (Insert - Missing Prop, Fail): {result5:?}");
     // Expect an error because on_error is fail
     assert!(result5.is_err());
     assert!(result5
@@ -352,7 +352,7 @@ pub async fn decoder(config: &(impl QueryTestConfig + Send)) {
         },
     };
     let result6 = query6.process_source_change(insert6).await.unwrap();
-    println!("Result 6 (Insert - Wrong Type, Skip): {:?}", result6);
+    println!("Result 6 (Insert - Wrong Type, Skip): {result6:?}");
     // Because on_error is skip, the element is added but not modified by middleware
     assert_eq!(result6.len(), 1);
     assert!(result6.contains(&QueryPartEvaluationContext::Adding {
@@ -404,7 +404,7 @@ pub async fn decoder(config: &(impl QueryTestConfig + Send)) {
         },
     };
     let result7 = query7.process_source_change(insert7).await;
-    println!("Result 7 (Insert - Size Limit, Fail): {:?}", result7);
+    println!("Result 7 (Insert - Size Limit, Fail): {result7:?}");
     // Expect an error because on_error is fail and size limit exceeded
     assert!(result7.is_err());
     assert!(result7
@@ -458,7 +458,7 @@ pub async fn decoder(config: &(impl QueryTestConfig + Send)) {
         },
     };
     let result8_update = query1.process_source_change(update8).await.unwrap();
-    println!("Result 8 (Update): {:?}", result8_update);
+    println!("Result 8 (Update): {result8_update:?}");
     assert_eq!(result8_update.len(), 1);
     assert!(
         result8_update.contains(&QueryPartEvaluationContext::Updating {
@@ -489,7 +489,7 @@ pub async fn decoder(config: &(impl QueryTestConfig + Send)) {
         },
     };
     let result9_delete = query1.process_source_change(delete9).await.unwrap();
-    println!("Result 9 (Delete): {:?}", result9_delete);
+    println!("Result 9 (Delete): {result9_delete:?}");
     assert_eq!(result9_delete.len(), 1);
     assert!(
         result9_delete.contains(&QueryPartEvaluationContext::Removing {

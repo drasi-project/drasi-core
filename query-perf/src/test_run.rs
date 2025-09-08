@@ -61,7 +61,7 @@ impl FromStr for IndexType {
             "memory" => Ok(IndexType::Memory),
             "redis" => Ok(IndexType::Redis),
             "rocksdb" => Ok(IndexType::RocksDB),
-            _ => Err(format!("Unknown index type: {}", s)),
+            _ => Err(format!("Unknown index type: {s}")),
         }
     }
 }

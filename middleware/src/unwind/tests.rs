@@ -232,7 +232,7 @@ mod process {
         assert!(result.is_ok());
         let result = result.unwrap();
 
-        println!("Result: {:#?}", result);
+        println!("Result: {result:#?}");
 
         assert!(result.contains(&SourceChange::Delete {
             metadata: ElementMetadata {

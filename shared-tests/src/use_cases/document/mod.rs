@@ -145,7 +145,7 @@ pub async fn document(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        println!("Node Result - Add t1: {:?}", result);
+        println!("Node Result - Add t1: {result:?}");
         assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
                 "name" => VariableValue::from(json!("pod-1")),

@@ -72,7 +72,7 @@ impl FromStr for JsonPathExpression {
                 expression: s.to_string(),
                 path,
             }),
-            Err(e) => Err(format!("Failed to parse rule: {}", e)),
+            Err(e) => Err(format!("Failed to parse rule: {e}")),
         }
     }
 }

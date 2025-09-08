@@ -173,12 +173,12 @@ impl PartialEq for Location {
 impl fmt::Display for Location {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Location::Building(building_idx) => write!(f, "b_{}", building_idx),
+            Location::Building(building_idx) => write!(f, "b_{building_idx}"),
             Location::Floor(building_idx, floor_idx) => {
-                write!(f, "f_{}_{}", building_idx, floor_idx)
+                write!(f, "f_{building_idx}_{floor_idx}")
             }
             Location::Room(building_idx, floor_idx, room_idx) => {
-                write!(f, "r_{}_{}_{}", building_idx, floor_idx, room_idx)
+                write!(f, "r_{building_idx}_{floor_idx}_{room_idx}")
             }
         }
     }
@@ -563,8 +563,7 @@ impl BuildingComfortModel {
             node_result = graph.add_node(floor.to_domain_graph_node());
             if node_result.is_err() {
                 panic!(
-                    "Error returned from DomainModelGraph::add_node() adding floor_idx: {}.",
-                    floor_idx
+                    "Error returned from DomainModelGraph::add_node() adding floor_idx: {floor_idx}."
                 );
             }
 
@@ -592,8 +591,7 @@ impl BuildingComfortModel {
                 node_result = graph.add_node(room.to_domain_graph_node());
                 if node_result.is_err() {
                     panic!(
-                        "Error returned from DomainModelGraph::add_node() adding room_idx: {}.",
-                        room_idx
+                        "Error returned from DomainModelGraph::add_node() adding room_idx: {room_idx}."
                     );
                 }
 

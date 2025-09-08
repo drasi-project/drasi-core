@@ -163,7 +163,7 @@ async fn create_solution_stream(
                     break;
                 },
                 SolutionStreamCommand::Panic(e) => {
-                    panic!("Error in solution task: {:?}", e);
+                    panic!("Error in solution task: {e:?}");
                 },
                 SolutionStreamCommand::Unsolvable => {
                     inflight -= 1;

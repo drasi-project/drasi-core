@@ -120,7 +120,7 @@ impl Display for Integer {
 
 impl Debug for Integer {
     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        write!(formatter, "Integer({})", self)
+        write!(formatter, "Integer({self})")
     }
 }
 
