@@ -533,7 +533,7 @@ impl ElementIndex for GarnetElementIndex {
 
         let mut pipeline = redis::pipe();
         pipeline.atomic();
-        log::debug!("deleting element: {:?}", stored_element_ref);
+        log::debug!("Deleting element: {:?}", stored_element_ref);
         self.delete_element_internal(&mut pipeline, &stored_element_ref)
             .await?;
 
