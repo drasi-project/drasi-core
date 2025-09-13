@@ -267,3 +267,82 @@ pub async fn unwind(config: &(impl QueryTestConfig + Send)) {
         }));
     }
 }
+
+#[allow(clippy::unwrap_used)]
+pub async fn unwind_invalid_config_fails(config: &(impl QueryTestConfig + Send)) {
+    // Prepare registry with UnwindFactory and build a query using an invalid selector
+    let mut middleware_registry = MiddlewareTypeRegistry::new();
+    middleware_registry.register(Arc::new(UnwindFactory::new()));
+    let middleware_registry = Arc::new(middleware_registry);
+
+    let result = {
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::unwind_query(), parser);
+        builder = config.config_query(builder).await;
+        builder = builder.with_middleware_registry(middleware_registry);
+        for mw in queries::invalid_middlewares() {
+            builder = builder.with_source_middleware(mw);
+        }
+        builder = builder.with_source_pipeline("test", &queries::source_pipeline());
+        builder.try_build().await
+    };
+
+    // Expect an error during build due to invalid middleware configuration
+    assert!(
+        result.is_err(),
+        "expected invalid middleware config to fail build"
+    );
+    let err = result.err().unwrap();
+    let err_str = err.to_string();
+    // Surface should indicate Middleware setup/Invalid configuration
+    assert!(
+        err_str.contains("Middleware setup error"),
+        "unexpected error: {}",
+        err_str
+    );
+    assert!(
+        err_str.contains("Invalid configuration"),
+        "unexpected error: {}",
+        err_str
+    );
+}
+
+#[allow(clippy::unwrap_used)]
+pub async fn unwind_incorrect_structure_fails(config: &(impl QueryTestConfig + Send)) {
+    // Prepare registry with UnwindFactory and build a query using incorrect JSON structure
+    let mut middleware_registry = MiddlewareTypeRegistry::new();
+    middleware_registry.register(Arc::new(UnwindFactory::new()));
+    let middleware_registry = Arc::new(middleware_registry);
+
+    let result = {
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::unwind_query(), parser);
+        builder = config.config_query(builder).await;
+        builder = builder.with_middleware_registry(middleware_registry);
+        for mw in queries::incorrect_structure_middlewares() {
+            builder = builder.with_source_middleware(mw);
+        }
+        builder = builder.with_source_pipeline("test", &queries::source_pipeline());
+        builder.try_build().await
+    };
+
+    // Expect an error during build due to incorrect JSON structure
+    assert!(
+        result.is_err(),
+        "expected incorrect middleware JSON structure to fail build"
+    );
+    let err = result.err().unwrap();
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("Middleware setup error"),
+        "unexpected error: {}",
+        err_str
+    );
+    assert!(
+        err_str.contains("Invalid configuration"),
+        "unexpected error: {}",
+        err_str
+    );
+}
