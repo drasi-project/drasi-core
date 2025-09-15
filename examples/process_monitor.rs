@@ -65,13 +65,13 @@ async fn process_change(query: &ContinuousQuery, change: SourceChange) {
     for context in result {
         match context {
             QueryPartEvaluationContext::Adding { after } => {
-                println!("Adding: {:?}", after);
+                println!("Adding: {after:?}");
             }
             QueryPartEvaluationContext::Removing { before } => {
-                println!("Removing: {:?}", before);
+                println!("Removing: {before:?}");
             }
             QueryPartEvaluationContext::Updating { before, after } => {
-                println!("Updating: {:?} -> {:?}", before, after);
+                println!("Updating: {before:?} -> {after:?}");
             }
             _ => {}
         }

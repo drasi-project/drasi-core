@@ -73,7 +73,7 @@ fn create_middleware_registry() -> Arc<MiddlewareTypeRegistry> {
 fn create_dapr_value(data: &JsonValue) -> ElementValue {
     let json_string = data.to_string();
     let base64_encoded = base64_engine.encode(json_string.as_bytes());
-    let quoted_base64 = format!("\"{}\"", base64_encoded);
+    let quoted_base64 = format!("\"{base64_encoded}\"");
     ElementValue::String(Arc::from(quoted_base64.as_str()))
 }
 
@@ -141,9 +141,9 @@ async fn setup_query(
     builder = builder.with_middleware_registry(registry);
 
     // Create unique names for middleware instances per test
-    let decoder_mw_name = format!("{}_decoder", test_name);
-    let parser_mw_name = format!("{}_parser", test_name);
-    let promoter_mw_name = format!("{}_promoter", test_name);
+    let decoder_mw_name = format!("{test_name}_decoder");
+    let parser_mw_name = format!("{test_name}_parser");
+    let promoter_mw_name = format!("{test_name}_promoter");
 
     // Add middleware configs using helpers from queries.rs
     builder = builder.with_source_middleware(queries::create_decoder_config(
@@ -218,8 +218,7 @@ async fn test_insert_basic_flow(config: &(impl QueryTestConfig + Send)) {
         result.contains(&QueryPartEvaluationContext::Adding {
             after: expected_vars
         }),
-        "Result did not contain expected Adding context. Got: {:?}",
-        result
+        "Result did not contain expected Adding context. Got: {result:?}"
     );
 }
 
@@ -287,8 +286,7 @@ async fn test_update_basic_flow(config: &(impl QueryTestConfig + Send)) {
             before: expected_vars_before,
             after: expected_vars_after
         }),
-        "Result did not contain expected Updating context. Got: {:?}",
-        update_result
+        "Result did not contain expected Updating context. Got: {update_result:?}"
     );
 }
 
@@ -343,8 +341,7 @@ async fn test_delete_passthrough(config: &(impl QueryTestConfig + Send)) {
         delete_result.contains(&QueryPartEvaluationContext::Removing {
             before: expected_vars_before_delete
         }),
-        "Result did not contain expected Removing context. Got: {:?}",
-        delete_result
+        "Result did not contain expected Removing context. Got: {delete_result:?}"
     );
 }
 

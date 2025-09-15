@@ -306,11 +306,11 @@ impl SourceMiddleware for Unwind {
 }
 
 fn format_item_id(expression: &str, parent_id: &str, item_id: &str) -> String {
-    format!("$unwind-{}-{}-{}", expression, parent_id, item_id)
+    format!("$unwind-{expression}-{parent_id}-{item_id}")
 }
 
 fn format_relation_id(child_id: &str) -> String {
-    format!("{}$rel", child_id)
+    format!("{child_id}$rel")
 }
 
 pub struct UnwindFactory {}
@@ -341,8 +341,7 @@ impl SourceMiddlewareFactory for UnwindFactory {
             Ok(mappings) => mappings,
             Err(e) => {
                 return Err(MiddlewareSetupError::InvalidConfiguration(format!(
-                    "Invalid configuration: {}",
-                    e
+                    "Invalid configuration: {e}"
                 )))
             }
         };

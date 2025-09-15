@@ -50,10 +50,7 @@ impl Index for usize {
             VariableValue::List(list) => {
                 let len = list.len();
                 list.get_mut(*self).unwrap_or_else(|| {
-                    panic!(
-                        "cannot access index {} of JSON array of length {}",
-                        self, len
-                    )
+                    panic!("cannot access index {self} of JSON array of length {len}")
                 })
             }
             _ => panic!("cannot access index {} of JSON {}", self, Type(value)),

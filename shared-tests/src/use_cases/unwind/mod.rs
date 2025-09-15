@@ -100,7 +100,7 @@ pub async fn unwind(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 2);
-        println!("Node Result - Add p1: {:?}", result);
+        println!("Node Result - Add p1: {result:?}");
         assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
                 "pod" => VariableValue::from(json!("pod-1")),
@@ -160,7 +160,7 @@ pub async fn unwind(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        println!("Node Result - Update p1: {:?}", result);
+        println!("Node Result - Update p1: {result:?}");
         assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
                 "pod" => VariableValue::from(json!("pod-1")),
@@ -208,7 +208,7 @@ pub async fn unwind(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        println!("Node Result - Update p1: {:?}", result);
+        println!("Node Result - Update p1: {result:?}");
         assert_eq!(result.len(), 2);
 
         assert!(result.contains(&QueryPartEvaluationContext::Removing {
@@ -247,7 +247,7 @@ pub async fn unwind(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        println!("Node Result - Delete p1: {:?}", result);
+        println!("Node Result - Delete p1: {result:?}");
         assert_eq!(result.len(), 2);
 
         assert!(result.contains(&QueryPartEvaluationContext::Removing {

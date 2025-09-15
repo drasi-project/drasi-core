@@ -86,10 +86,7 @@ pub async fn steps_happen_in_any_order(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        println!(
-            "Node Result - Add Completed Step X ({}): {:?}",
-            timestamp, result
-        );
+        println!("Node Result - Add Completed Step X ({timestamp}): {result:?}");
         assert_eq!(result.len(), 0);
 
         // Add 10 days to timestamp
@@ -115,10 +112,7 @@ pub async fn steps_happen_in_any_order(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        println!(
-            "Node Result - Add Completed Step Y ({}): {:?}",
-            timestamp, result
-        );
+        println!("Node Result - Add Completed Step Y ({timestamp}): {result:?}");
         assert_eq!(result.len(), 0);
 
         // Add 50 days to timestamp
@@ -144,10 +138,7 @@ pub async fn steps_happen_in_any_order(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        println!(
-            "Node Result - Add Completed Step Z ({}): {:?}",
-            timestamp, result
-        );
+        println!("Node Result - Add Completed Step Z ({timestamp}): {result:?}");
         assert_eq!(result.len(), 0);
 
         // Add 10 days to timestamp
@@ -174,10 +165,7 @@ pub async fn steps_happen_in_any_order(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        println!(
-            "Node Result - Add Completed Step ({}): {:?}",
-            timestamp, result
-        );
+        println!("Node Result - Add Completed Step ({timestamp}): {result:?}");
         assert_eq!(result.len(), 0);
 
         // Add 5 days to timestamp
@@ -203,10 +191,7 @@ pub async fn steps_happen_in_any_order(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        println!(
-            "Node Result - Add Completed Step ({}): {:?}",
-            timestamp, result
-        );
+        println!("Node Result - Add Completed Step ({timestamp}): {result:?}");
         assert_eq!(result.len(), 0);
 
         // Add 5 days to timestamp
@@ -232,10 +217,7 @@ pub async fn steps_happen_in_any_order(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        println!(
-            "Node Result - Add Completed Step ({}): {:?}",
-            timestamp, result
-        );
+        println!("Node Result - Add Completed Step ({timestamp}): {result:?}");
         assert_eq!(result.len(), 1);
 
         assert!(result.contains(&QueryPartEvaluationContext::Adding {

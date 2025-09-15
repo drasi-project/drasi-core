@@ -502,8 +502,7 @@ fn get_scope_from_projection(
                     }
                     _ => {
                         return Err(QueryParseError::UnaliasedComplexExpression(format!(
-                            "{:?}",
-                            expr
+                            "{expr:?}"
                         )))
                     }
                 }
@@ -525,8 +524,7 @@ fn get_scope_from_projection(
                     }
                     _ => {
                         return Err(QueryParseError::UnaliasedComplexExpression(format!(
-                            "{:?}",
-                            expr
+                            "{expr:?}"
                         )))
                     }
                 }
@@ -631,8 +629,7 @@ fn build_parts_for_statements(
                     } else {
                         // Complex expression in YIELD is invalid: (YIELD x + 100)
                         return Err(QueryParseError::UnaliasedComplexExpression(format!(
-                            "{:?}",
-                            expr
+                            "{expr:?}"
                         )));
                     }
                 }

@@ -1404,7 +1404,7 @@ async fn aggregating_part_to_scalar_part_add_solution_emit_remove() {
     )
     .await;
 
-    println!("{:?}", result);
+    println!("{result:?}");
 
     assert_eq!(
         result,

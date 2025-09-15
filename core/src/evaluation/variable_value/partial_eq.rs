@@ -19,42 +19,42 @@ use chrono::{NaiveDate, NaiveTime};
 
 fn eq_i64(value: &VariableValue, other: i64) -> bool {
     match value {
-        VariableValue::Integer(n) => n.as_i64().map_or(false, |n| n == other),
-        VariableValue::Float(n) => n.as_f64().map_or(false, |n| n == other as f64),
+        VariableValue::Integer(n) => n.as_i64() == Some(other),
+        VariableValue::Float(n) => n.as_f64() == Some(other as f64),
         _ => false,
     }
 }
 
 fn eq_u64(value: &VariableValue, other: u64) -> bool {
     match value {
-        VariableValue::Integer(n) => n.as_u64().map_or(false, |n| n == other),
-        VariableValue::Float(n) => n.as_f64().map_or(false, |n| n == other as f64),
+        VariableValue::Integer(n) => n.as_u64() == Some(other),
+        VariableValue::Float(n) => n.as_f64() == Some(other as f64),
         _ => false,
     }
 }
 
 fn eq_f32(value: &VariableValue, other: f32) -> bool {
     match value {
-        VariableValue::Float(n) => n.as_f32().map_or(false, |n| n == other),
-        VariableValue::Integer(n) => n.as_i64().map_or(false, |n| n as f64 == other as f64),
+        VariableValue::Float(n) => n.as_f32() == Some(other),
+        VariableValue::Integer(n) => n.as_i64().is_some_and(|n| n as f64 == other as f64),
         _ => false,
     }
 }
 
 fn eq_f64(value: &VariableValue, other: f64) -> bool {
     match value {
-        VariableValue::Float(n) => n.as_f64().map_or(false, |n| n == other),
-        VariableValue::Integer(n) => n.as_i64().map_or(false, |n| n as f64 == other),
+        VariableValue::Float(n) => n.as_f64() == Some(other),
+        VariableValue::Integer(n) => n.as_i64().is_some_and(|n| n as f64 == other),
         _ => false,
     }
 }
 
 fn eq_bool(value: &VariableValue, other: bool) -> bool {
-    value.as_bool().map_or(false, |n| n == other)
+    value.as_bool() == Some(other)
 }
 
 fn eq_str(value: &VariableValue, other: &str) -> bool {
-    value.as_str().map_or(false, |n| n == other)
+    value.as_str() == Some(other)
 }
 
 impl PartialEq<str> for VariableValue {
@@ -137,14 +137,14 @@ impl PartialEq<VariableValue> for VariableValue {
         match (self, other) {
             (VariableValue::Integer(n), VariableValue::Integer(m)) => n == m,
             (VariableValue::Float(n), VariableValue::Float(m)) => n == m,
-            (VariableValue::Integer(n), VariableValue::Float(m)) => n.as_i64().map_or(false, |n| {
+            (VariableValue::Integer(n), VariableValue::Float(m)) => n.as_i64().is_some_and(|n| {
                 n as f64
                     == match m.as_f64() {
                         Some(m) => m,
                         None => unreachable!(),
                     }
             }),
-            (VariableValue::Float(n), VariableValue::Integer(m)) => m.as_i64().map_or(false, |m| {
+            (VariableValue::Float(n), VariableValue::Integer(m)) => m.as_i64().is_some_and(|m| {
                 m as f64
                     == match n.as_f64() {
                         Some(n) => n,

@@ -325,8 +325,7 @@ impl SourceMiddlewareFactory for MapFactory {
             Ok(mappings) => mappings,
             Err(e) => {
                 return Err(MiddlewareSetupError::InvalidConfiguration(format!(
-                    "Invalid configuration: {}",
-                    e
+                    "Invalid configuration: {e}"
                 )))
             }
         };

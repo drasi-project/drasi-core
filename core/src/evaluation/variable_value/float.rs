@@ -111,7 +111,7 @@ impl From<Float> for Number {
 
 impl Debug for Float {
     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        write!(formatter, "Float({})", self)
+        write!(formatter, "Float({self})")
     }
 }
 

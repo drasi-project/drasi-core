@@ -220,7 +220,7 @@ pub async fn overdue_count_persistent(config: &(impl QueryTestConfig + Send)) {
         let result = result.unwrap();
 
         assert_eq!(result.len(), 1);
-        println!("later: {:?}", result);
+        println!("later: {result:?}");
         assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
                 "count" => VariableValue::Integer(3.into())

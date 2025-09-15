@@ -29,6 +29,7 @@ pub mod optional_match;
 pub mod overdue_invoice;
 pub mod parse_json;
 pub mod promote;
+pub mod relabel;
 pub mod remap;
 pub mod sensor_heartbeat;
 pub mod unwind;

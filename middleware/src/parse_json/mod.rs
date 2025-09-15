@@ -193,8 +193,7 @@ impl ParseJson {
                 return self.handle_error(
                     ParseJsonErrorType::InvalidType,
                     format!(
-                        "Target property '{}' is not a String (Type: {}). Cannot parse JSON.",
-                        target_prop_name, type_name
+                        "Target property '{target_prop_name}' is not a String (Type: {type_name}). Cannot parse JSON."
                     ),
                 );
             }
@@ -202,8 +201,7 @@ impl ParseJson {
                 return self.handle_error(
                     ParseJsonErrorType::MissingProperty,
                     format!(
-                        "Target property '{}' not found in element. Cannot parse JSON.",
-                        target_prop_name
+                        "Target property '{target_prop_name}' not found in element. Cannot parse JSON."
                     ),
                 );
             }
@@ -265,10 +263,7 @@ impl ParseJson {
             }
             Err(e) => self.handle_error(
                 ParseJsonErrorType::ParseError,
-                format!(
-                    "Failed to parse JSON string in property '{}': {}",
-                    target_prop_name, e
-                ),
+                format!("Failed to parse JSON string in property '{target_prop_name}': {e}"),
             ),
         }
     }

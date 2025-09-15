@@ -103,10 +103,7 @@ pub async fn rolling_average_decrease_by_ten(config: &(impl QueryTestConfig + Se
             .await
             .unwrap();
 
-        println!(
-            "Node Result - Update sensor value in loop ({}): {:?}",
-            timestamp, result
-        );
+        println!("Node Result - Update sensor value in loop ({timestamp}): {result:?}");
 
         timestamp += 60 * 60;
     }
@@ -131,10 +128,7 @@ pub async fn rolling_average_decrease_by_ten(config: &(impl QueryTestConfig + Se
                 .process_source_change(node_change.clone())
                 .await
                 .unwrap();
-            println!(
-                "Node Result - Update sensor value in loop ({}): {:?}",
-                timestamp, node_result
-            );
+            println!("Node Result - Update sensor value in loop ({timestamp}): {node_result:?}");
             assert_eq!(node_result.len(), 0);
 
             timestamp += 60 * 60;
@@ -194,10 +188,7 @@ pub async fn rolling_average_decrease_by_ten(config: &(impl QueryTestConfig + Se
             .process_source_change(node_change.clone())
             .await
             .unwrap();
-        println!(
-            "Node Result - Update sensor value in loop ({}): {:?}",
-            timestamp, node_result
-        );
+        println!("Node Result - Update sensor value in loop ({timestamp}): {node_result:?}");
         assert_eq!(node_result.len(), 0);
     }
 }

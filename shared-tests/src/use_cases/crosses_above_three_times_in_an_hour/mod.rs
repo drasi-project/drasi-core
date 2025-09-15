@@ -246,10 +246,7 @@ pub async fn crosses_above_three_times_in_an_hour(config: &(impl QueryTestConfig
             .process_source_change(change.clone())
             .await
             .unwrap();
-        println!(
-            "Node Result - Update sensor value ({}): {:?}",
-            timestamp, result
-        );
+        println!("Node Result - Update sensor value ({timestamp}): {result:?}");
         assert_eq!(result.len(), 1);
 
         assert!(result.contains(&QueryPartEvaluationContext::Updating {

@@ -99,7 +99,7 @@ pub async fn remap(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        println!("Node Result - Add t1: {:?}", result);
+        println!("Node Result - Add t1: {result:?}");
         assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
                 "id" => VariableValue::from(json!("v1")),
@@ -146,7 +146,7 @@ pub async fn remap(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        println!("Node Result - Add t2: {:?}", result);
+        println!("Node Result - Add t2: {result:?}");
         assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
                 "id" => VariableValue::from(json!("v1")),
@@ -197,7 +197,7 @@ pub async fn remap(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        println!("Node Result - Add t3: {:?}", result);
+        println!("Node Result - Add t3: {result:?}");
         assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
                 "id" => VariableValue::from(json!("v2")),

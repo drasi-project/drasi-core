@@ -85,10 +85,7 @@ pub async fn logical_conditions(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        println!(
-            "Node Result - Update sensor value ({}): {:?}",
-            timestamp, result
-        );
+        println!("Node Result - Update sensor value ({timestamp}): {result:?}");
         assert_eq!(result.len(), 0);
 
         timestamp += 60;
@@ -113,10 +110,7 @@ pub async fn logical_conditions(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        println!(
-            "Node Result - Update sensor value ({}): {:?}",
-            timestamp, result
-        );
+        println!("Node Result - Update sensor value ({timestamp}): {result:?}");
         assert_eq!(result.len(), 0);
 
         timestamp += 60;
@@ -141,10 +135,7 @@ pub async fn logical_conditions(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        println!(
-            "Node Result - Update sensor value ({}): {:?}",
-            timestamp, result
-        );
+        println!("Node Result - Update sensor value ({timestamp}): {result:?}");
         assert_eq!(result.len(), 0);
 
         timestamp += 60;
@@ -169,10 +160,7 @@ pub async fn logical_conditions(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        println!(
-            "Node Result - Update sensor value ({}): {:?}",
-            timestamp, result
-        );
+        println!("Node Result - Update sensor value ({timestamp}): {result:?}");
         assert_eq!(result.len(), 1);
 
         assert!(result.contains(&QueryPartEvaluationContext::Adding {
@@ -203,10 +191,7 @@ pub async fn logical_conditions(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        println!(
-            "Node Result - Update sensor value ({}): {:?}",
-            timestamp, result
-        );
+        println!("Node Result - Update sensor value ({timestamp}): {result:?}");
         assert_eq!(result.len(), 1);
 
         assert!(result.contains(&QueryPartEvaluationContext::Removing {
@@ -237,10 +222,7 @@ pub async fn logical_conditions(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        println!(
-            "Node Result - Update sensor value ({}): {:?}",
-            timestamp, result
-        );
+        println!("Node Result - Update sensor value ({timestamp}): {result:?}");
         assert_eq!(result.len(), 0);
     }
 }

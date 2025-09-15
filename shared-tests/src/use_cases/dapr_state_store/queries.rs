@@ -22,18 +22,17 @@ use super::{ELEMENT_LABEL, PARSED_DATA_PROP, RAW_DATA_PROP};
 pub fn observer_query() -> String {
     format!(
         "
-        MATCH (n:{})
+        MATCH (n:{ELEMENT_LABEL})
         RETURN
-            n.`{}` as rawData,        // Original (overwritten by decoder)
-            n.`{}` as parsedData,    // Parsed structure from parse_json
+            n.`{RAW_DATA_PROP}` as rawData,        // Original (overwritten by decoder)
+            n.`{PARSED_DATA_PROP}` as parsedData,    // Parsed structure from parse_json
             // --- Promoted fields from various tests ---
             n.userId as userId,
             n.orderTotal as orderTotal,
             n.orderStatus as orderStatus,
             n.promotedValue as promotedValue,
             n.promotedTag as promotedTag
-        ",
-        ELEMENT_LABEL, RAW_DATA_PROP, PARSED_DATA_PROP
+        "
     )
 }
 
