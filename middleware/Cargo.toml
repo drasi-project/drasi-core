@@ -20,6 +20,5 @@ base64 = "0.22.0"
 ordered-float = "3.7.0"
 hex = "0.4.3"
 urlencoding = "2.1.2"
-
-[dev-dependencies]
+jq-rs ="0.4.1"
 tokio = { version = "1.29.1", features = ["full"] }

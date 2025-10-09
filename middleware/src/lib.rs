@@ -19,3 +19,4 @@ pub mod parse_json;
 pub mod promote;
 pub mod relabel;
 pub mod unwind;
+pub mod jq;
