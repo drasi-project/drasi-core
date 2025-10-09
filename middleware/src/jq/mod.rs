@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{
-    cell::RefCell, collections::HashMap, sync::Arc
-};
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 use jq_rs::{self, JqProgram};
 
@@ -76,9 +74,8 @@ pub struct SourceMappedOperations {
     delete: Vec<SourceMappedOutput>,
 }
 
-
 thread_local! {
-    static JQ_CACHE: RefCell<HashMap<String, JqProgram>> = RefCell::new(HashMap::new());
+    static JQ_CACHE: RefCell<HashMap<String, RefCell<JqProgram>>> = RefCell::new(HashMap::new());
 }
 
 pub struct JQ {
@@ -149,7 +146,7 @@ impl SourceMiddleware for JQ {
                     },
                 };
 
-                let source_obj: Value = element.into();                
+                let source_obj: Value = element.into();
 
                 let source_obj_str = match serde_json::to_string(&source_obj) {
                     Ok(s) => s,
@@ -164,61 +161,61 @@ impl SourceMiddleware for JQ {
                     }
                 };
 
-                let query_output : Vec<Value> = match jq_rs::run(mapping.query.as_str(), &source_obj_str) {
+                let output = match run_jq(mapping.query.as_str(), &source_obj_str) {
                     Ok(output) => {
                         log::info!("JQ output: {}", output);
-                        if output.is_empty() {
-                            continue;
-                        }
-                        match serde_json::from_str::<Value>(&output) {
-                            Ok(v) => {                                
-                                if v.is_array() {
-                                    v.as_array().unwrap().to_vec()
-                                } else {
-                                    vec![v]
-                                }
-                            }
-                            Err(e) => {
-                                log::error!("Failed to parse JQ output as JSON: {e}");
-                                if mapping.halt_on_error {
-                                    return Err(MiddlewareError::SourceChangeError(format!(
-                                        "Failed to parse JQ output as JSON: {e}"
-                                    )));
-                                }
-                                continue;
-                            }
-                        }
+                        output
                     }
                     Err(e) => {
-                        log::error!("JQ execution error: {e}");
+                        log::error!("{e}");
                         if mapping.halt_on_error {
-                            return Err(MiddlewareError::SourceChangeError(format!(
-                                "JQ execution error: {e}"
-                            )));
+                            return Err(e);
                         }
                         continue;
                     }
                 };
-                
 
-                for item in query_output{
+                let query_output: Vec<Value> = if output.is_empty() {
+                    continue;
+                } else {
+                    match serde_json::from_str::<Value>(&output) {
+                        Ok(v) => {
+                            if v.is_array() {
+                                v.as_array().unwrap().to_vec()
+                            } else {
+                                vec![v]
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("Failed to parse JQ output as JSON: {e}");
+                            if mapping.halt_on_error {
+                                return Err(MiddlewareError::SourceChangeError(format!(
+                                    "Failed to parse JQ output as JSON: {e}"
+                                )));
+                            }
+                            continue;
+                        }
+                    }
+                };
 
+                for item in query_output {
                     let mut new_metadata = metadata.clone();
-                    let item_str = item.to_string();                    
+                    let item_str = item.to_string();
 
                     if let Some(id) = &mapping.id {
-                        new_metadata.reference.element_id = match jq_get_string(id.as_str(), &item_str) {
-                            Ok(id) => Arc::from(id),
-                            Err(e) => {
-                                log::error!("Failed to get id from JQ expression: {e}");
-                                if mapping.halt_on_error {
-                                    return Err(MiddlewareError::SourceChangeError(format!(
-                                        "Failed to get id from JQ expression: {e}"
-                                    )));
+                        new_metadata.reference.element_id =
+                            match jq_get_string(id.as_str(), &item_str) {
+                                Ok(id) => Arc::from(id),
+                                Err(e) => {
+                                    log::error!("Failed to get id from JQ expression: {e}");
+                                    if mapping.halt_on_error {
+                                        return Err(MiddlewareError::SourceChangeError(format!(
+                                            "Failed to get id from JQ expression: {e}"
+                                        )));
+                                    }
+                                    continue;
                                 }
-                                continue;
-                            }
-                        };
+                            };
                     };
 
                     if let Some(label) = &mapping.label {
@@ -262,7 +259,9 @@ impl SourceMiddleware for JQ {
                             let out_node_id = match jq_get_string(&out_node_id, &item_str) {
                                 Ok(id) => Arc::from(id),
                                 Err(e) => {
-                                    log::error!("Failed to get out_node_id from JQ expression: {e}");
+                                    log::error!(
+                                        "Failed to get out_node_id from JQ expression: {e}"
+                                    );
                                     if mapping.halt_on_error {
                                         return Err(MiddlewareError::SourceChangeError(format!(
                                             "Failed to get out_node_id from JQ expression: {e}"
@@ -312,7 +311,6 @@ impl SourceMiddleware for JQ {
                             metadata: new_element.get_metadata().clone(),
                         }),
                     }
-
                 }
             }
         }
@@ -363,17 +361,28 @@ impl SourceMiddlewareFactory for JQFactory {
     }
 }
 
+fn run_jq(query: &str, input: &str) -> Result<String, MiddlewareError> {
+    JQ_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+
+        if !cache.contains_key(query) {
+            let program = jq_rs::compile(query).map_err(|e| {
+                MiddlewareError::SourceChangeError(format!("JQ compilation error: {e}"))
+            })?;
+            cache.insert(query.to_string(), RefCell::new(program));
+        }
+
+        let program_cell = cache.get(query).unwrap();
+        let mut program = program_cell.borrow_mut();
+        program
+            .run(input)
+            .map_err(|e| MiddlewareError::SourceChangeError(format!("JQ execution error: {e}")))
+    })
+}
 
 fn jq_get_string(query: &str, input: &str) -> Result<String, MiddlewareError> {
-    let output = match jq_rs::run(query, input) {
-        Ok(output) => output,
-        Err(e) => {
-            return Err(MiddlewareError::SourceChangeError(format!(
-                "JQ execution error: {e}"
-            )))
-        }
-    };    
-    
+    let output = run_jq(query, input)?;
+
     serde_json::from_str::<Value>(&output)
         .map_err(|e| {
             MiddlewareError::SourceChangeError(format!("Failed to parse JQ output as JSON: {e}"))
