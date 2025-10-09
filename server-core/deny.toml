@@ -1,0 +1,84 @@
+# cargo-deny configuration for Drasi Server Core
+# Ensures dependency security and license compliance
+
+[graph]
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "x86_64-pc-windows-msvc" }
+]
+
+[licenses]
+# Allow common open source licenses compatible with Apache-2.0
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "Unlicense",
+    "MPL-2.0",
+    "0BSD",
+]
+
+# Confidence threshold for license detection
+confidence-threshold = 0.8
+
+# License file exceptions for local dependencies
+exceptions = [
+    { allow = [""], name = "drasi-functions-cypher" },
+    { allow = [""], name = "drasi-functions-gql" },
+    { allow = [""], name = "drasi-core" },
+    { allow = [""], name = "drasi-query-ast" },
+    { allow = [""], name = "drasi-query-cypher" },
+    { allow = [""], name = "drasi-query-gql" },
+]
+
+[bans]
+# Deny multiple versions of the same crate to reduce binary size
+multiple-versions = "deny"
+wildcards = "allow"
+highlight = "all"
+
+# Allow certain crates to have multiple versions due to ecosystem constraints
+skip = [
+    { name = "bitflags" },       # Common in async ecosystem
+    { name = "syn" },            # Proc macro ecosystem
+    { name = "quote" },          # Proc macro ecosystem
+    { name = "proc-macro2" },    # Proc macro ecosystem
+    { name = "windows-sys" },    # Windows platform crates
+    { name = "windows_x86_64_msvc" },
+    { name = "windows_aarch64_msvc" },
+    { name = "futures-util" },   # Async ecosystem
+    { name = "futures-core" },   # Async ecosystem
+    { name = "h2" },             # HTTP/2 ecosystem
+    { name = "hyper" },          # HTTP ecosystem
+    { name = "tower" },          # Tower middleware
+    { name = "slab" },           # Common dependency
+]
+
+# Skip tree entries for version analysis
+skip-tree = []
+
+[advisories]
+# Security vulnerability database
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+
+# Ignore specific advisories (use sparingly)
+ignore = []
+
+[sources]
+# Only allow crates from crates.io and git repositories
+unknown-registry = "warn"
+unknown-git = "warn"
+
+# Allowed git sources for dependencies
+allow-git = [
+    "https://github.com/drasi-project/",
+]

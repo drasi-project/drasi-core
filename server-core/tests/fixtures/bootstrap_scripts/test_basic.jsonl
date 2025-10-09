@@ -1,0 +1,5 @@
+{"kind":"Header","start_time":"2024-01-01T00:00:00+00:00","description":"Basic test script"}
+{"kind":"Node","id":"n1","labels":["Person"],"properties":{"name":"Alice","age":30}}
+{"kind":"Node","id":"n2","labels":["Person"],"properties":{"name":"Bob","age":25}}
+{"kind":"Relation","id":"r1","labels":["KNOWS"],"start_id":"n1","start_label":"Person","end_id":"n2","end_label":"Person","properties":{"since":2020}}
+{"kind":"Finish","description":"End of basic test"}

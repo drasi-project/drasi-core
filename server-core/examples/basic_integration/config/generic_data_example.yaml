@@ -1,0 +1,39 @@
+# Generic Data Example - Using Generic Mock Data Type
+# Shows the generic data type and property selection queries
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  log_level: "debug"           # More verbose logging
+  max_connections: 100
+  shutdown_timeout_seconds: 5
+
+sources:
+  - id: "generic-source"
+    source_type: "mock"
+    auto_start: true
+    properties:
+      data_type: "generic"     # Generates generic data with random properties
+      interval_ms: 2500        # Every 2.5 seconds
+
+queries:
+  # Example 1: Return all properties
+  - id: "all-data"
+    query: "MATCH (n:Generic) RETURN n"
+    sources: ["generic-source"]
+    auto_start: true
+
+  # Example 2: Select specific properties only
+  - id: "selected-properties"
+    query: "MATCH (n:Generic) RETURN n.id, n.timestamp"
+    sources: ["generic-source"]
+    auto_start: true
+
+reactions:
+  # Log all data with debug level for detailed inspection
+  - id: "debug-logger"
+    reaction_type: "log"
+    queries: ["all-data", "selected-properties"]
+    auto_start: true
+    properties:
+      log_level: "debug"

@@ -1,0 +1,107 @@
+# Multi-Source Pipeline Configuration
+# This example demonstrates a complex pipeline with multiple sources,
+# different bootstrap providers, and multiple queries and reactions.
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  log_level: "info"
+  max_connections: 2000
+  shutdown_timeout_seconds: 60
+  disable_persistence: false
+
+sources:
+  # Mock sensor data with script file bootstrap
+  - id: "sensor-stream"
+    source_type: "mock"
+    auto_start: true
+    properties:
+      data_type: "sensor"
+      interval_ms: 1000
+      initial_count: 0
+    bootstrap_provider:
+      type: script_file
+      file_paths:
+        - "examples/data/sensor_data.jsonl"
+
+  # User data from script file
+  - id: "user-data"
+    source_type: "mock"
+    auto_start: true
+    properties:
+      data_type: "person"
+      interval_ms: 10000
+      initial_count: 0
+    bootstrap_provider:
+      type: script_file
+      file_paths:
+        - "/data/users.jsonl"
+
+  # Event stream without bootstrap
+  - id: "event-stream"
+    source_type: "mock"
+    auto_start: true
+    properties:
+      data_type: "event"
+      interval_ms: 2000
+      initial_count: 10
+
+queries:
+  # Monitor high temperature sensors
+  - id: "high-temp-alert"
+    query: "MATCH (s:SensorReading) WHERE s.temperature > 80 RETURN s"
+    query_language: "cypher"
+    sources: ["sensor-stream"]
+    auto_start: true
+    properties:
+      description: "Alert on high temperature readings"
+      threshold: 80
+
+  # Monitor user activity patterns
+  - id: "user-activity"
+    query: "MATCH (u:Person)-[:TRIGGERED]->(e:Event) RETURN u, e"
+    query_language: "cypher"
+    sources: ["user-data", "event-stream"]
+    auto_start: true
+    properties:
+      description: "Track user activity patterns"
+
+  # Aggregate sensor data
+  - id: "sensor-summary"
+    query: "MATCH (s:SensorReading) RETURN s.location, avg(s.temperature) as avg_temp"
+    query_language: "cypher"
+    sources: ["sensor-stream"]
+    auto_start: true
+    properties:
+      description: "Aggregate sensor readings by location"
+
+reactions:
+  # Critical alerts to webhook
+  - id: "critical-alert-webhook"
+    reaction_type: "log"
+    queries: ["high-temp-alert"]
+    auto_start: true
+    properties:
+      log_level: "warn"
+      format: "json"
+      include_metadata: true
+
+  # User activity to analytics
+  - id: "activity-analytics"
+    reaction_type: "log"
+    queries: ["user-activity"]
+    auto_start: true
+    properties:
+      log_level: "info"
+      format: "json"
+      batch_size: 100
+
+  # Sensor summary to dashboard
+  - id: "dashboard-feed"
+    reaction_type: "log"
+    queries: ["sensor-summary"]
+    auto_start: true
+    properties:
+      log_level: "debug"
+      format: "json"
+      update_interval: 5000

@@ -1,0 +1,59 @@
+# Example configuration for script_file bootstrap provider
+#
+# The script_file provider reads bootstrap data from JSONL (JSON Lines) script files.
+# Each line in a script file must be a valid JSON object representing one record.
+#
+# Supported record types:
+# - Header (required first): {"kind":"Header","start_time":"2024-01-01T00:00:00+00:00","description":"..."}
+# - Node: {"kind":"Node","id":"n1","labels":["Person"],"properties":{"name":"Alice","age":30}}
+# - Relation: {"kind":"Relation","id":"r1","labels":["KNOWS"],"start_id":"n1","start_label":"Person","end_id":"n2","end_label":"Person","properties":{"since":2020}}
+# - Comment (filtered): {"kind":"Comment","comment":"This is ignored"}
+# - Label (checkpoint): {"kind":"Label","offset_ns":1000,"label":"checkpoint_1","description":"..."}
+# - Finish (optional end): {"kind":"Finish","description":"End of script"}
+#
+# Multi-file support: When multiple files are provided, they are read sequentially in the order specified.
+# Only the first file needs a Header record.
+
+sources:
+  # Example 1: Single script file
+  - id: example_single_file
+    source_type: mock  # Or any other source type
+    bootstrap_provider:
+      type: scriptfile
+      file_paths:
+        - "/path/to/bootstrap_data.jsonl"
+    properties:
+      # Source-specific properties here
+      # ...
+
+  # Example 2: Multiple script files (read in order)
+  - id: example_multi_file
+    source_type: mock
+    bootstrap_provider:
+      type: scriptfile
+      file_paths:
+        - "/path/to/initial_data.jsonl"
+        - "/path/to/additional_data.jsonl"
+        - "/path/to/final_data.jsonl"
+    properties:
+      # Source-specific properties here
+      # ...
+
+  # Example 3: With queries that filter by labels
+  - id: example_with_queries
+    source_type: mock
+    bootstrap_provider:
+      type: scriptfile
+      file_paths:
+        - "/path/to/mixed_data.jsonl"
+    properties:
+      # Source-specific properties here
+      # ...
+
+queries:
+  # This query will only receive Person nodes and KNOWS relations from the bootstrap
+  - id: person_query
+    query: "MATCH (p:Person)-[k:KNOWS]->(p2:Person) RETURN p, k, p2"
+    # The bootstrap provider will filter records to only send:
+    # - Nodes with label "Person"
+    # - Relations with label "KNOWS"

@@ -1,0 +1,21 @@
+# rustfmt configuration for Drasi Server Core
+# Ensures consistent code formatting across the project using stable features only
+
+# General formatting rules
+edition = "2021"
+max_width = 100
+hard_tabs = false
+tab_spaces = 4
+newline_style = "Unix"
+
+# Array and struct formatting
+array_width = 80
+
+# Miscellaneous
+remove_nested_parens = true
+use_small_heuristics = "Default"
+merge_derives = true
+use_try_shorthand = true
+use_field_init_shorthand = true
+force_explicit_abi = true
+fn_params_layout = "Tall"

@@ -1,0 +1,38 @@
+# Basic Drasi Server Core Integration Example Configuration
+# This demonstrates the simplest possible integration with a mock source,
+# filtering query, and log reaction
+
+# Server configuration - basic setup
+server:
+  host: "0.0.0.0"        # Listen on all interfaces
+  port: 8080             # Default HTTP port
+  log_level: "info"      # Show informational messages
+  max_connections: 100   # Sufficient for demo
+  shutdown_timeout_seconds: 5  # Quick shutdown for demo
+
+# Data sources - using mock for simplicity
+sources:
+  - id: "counter-source"       # Unique identifier for this source
+    source_type: "mock"  # Built-in mock data generator
+    auto_start: true           # Start immediately when core starts
+    properties:
+      data_type: "counter"     # Generate incrementing counter data
+      interval_ms: 2000        # Generate new data every 2 seconds
+
+# Continuous queries - simple filtering example
+queries:
+  - id: "filter-query"         # Unique identifier for this query
+    # Simple Cypher query to filter counter values > 5
+    query: "MATCH (n:Counter) WHERE n.value > 5 RETURN n"
+    sources: ["counter-source"] # Connect to our mock source
+    auto_start: true           # Start processing immediately
+    # queryLanguage defaults to "Cypher" (backward compatible)
+
+# Reactions - log output for easy viewing
+reactions:
+  - id: "log-reaction"         # Unique identifier for this reaction
+    reaction_type: "log"  # Built-in logging reaction
+    queries: ["filter-query"]   # Connect to our filtering query
+    auto_start: true           # Start immediately
+    properties:
+      log_level: "info"        # Log at info level for visibility

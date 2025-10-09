@@ -1,0 +1,43 @@
+# Script File Bootstrap Source Configuration
+# This example demonstrates how to configure a source with
+# script_file bootstrap provider for initial data loading from JSONL files.
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  log_level: "info"
+  max_connections: 1000
+  shutdown_timeout_seconds: 30
+  disable_persistence: false
+
+sources:
+  - id: "user-data-source"
+    source_type: "mock"
+    auto_start: true
+    properties:
+      data_type: "person"
+      interval_ms: 5000
+      initial_count: 0
+    bootstrap_provider:
+      type: script_file
+      file_paths:
+        - "/data/users.jsonl"
+
+queries:
+  - id: "user-monitor"
+    query: "MATCH (n:Person) WHERE n.age > 25 RETURN n"
+    query_language: "cypher"
+    sources: ["user-data-source"]
+    auto_start: true
+    properties:
+      description: "Monitor users over 25 years old"
+
+reactions:
+  - id: "user-webhook"
+    reaction_type: "log"
+    queries: ["user-monitor"]
+    auto_start: true
+    properties:
+      log_level: "info"
+      format: "json"
+      include_metadata: true

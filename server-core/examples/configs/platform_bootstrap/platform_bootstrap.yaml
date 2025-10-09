@@ -1,0 +1,79 @@
+# Example configuration for platform bootstrap provider
+#
+# The platform provider bootstraps data from a Query API service running in a remote Drasi environment.
+# It connects to the Query API via HTTP and streams bootstrap data in JSON-NL format.
+#
+# Configuration options:
+# - query_api_url: URL of the Query API service (required)
+# - timeout_seconds: HTTP request timeout in seconds (optional, default: 300)
+#
+# The provider automatically filters bootstrap elements based on query label requirements
+# and transforms platform SDK element format to drasi-core format.
+
+sources:
+  # Example 1: Platform source with inline query_api_url in bootstrap config
+  - id: remote_platform_source
+    source_type: platform
+    bootstrap_provider:
+      type: platform
+      query_api_url: "http://my-source-query-api:8080"
+      timeout_seconds: 300  # Optional, defaults to 300
+    properties:
+      # Platform source streaming properties
+      redis_url: "redis://localhost:6379"
+      stream_key: "external-source:changes"
+      consumer_group: "drasi-core"
+      consumer_name: "consumer-1"
+      batch_size: 10
+      block_ms: 5000
+
+  # Example 2: Platform source with query_api_url in source properties (fallback)
+  - id: remote_platform_source_alt
+    source_type: platform
+    bootstrap_provider:
+      type: platform
+      # query_api_url will be read from properties below
+      timeout_seconds: 600  # Longer timeout for large datasets
+    properties:
+      redis_url: "redis://localhost:6379"
+      stream_key: "sensor-data:changes"
+      consumer_group: "drasi-core"
+      consumer_name: "consumer-1"
+      query_api_url: "http://sensor-query-api:8080"
+
+  # Example 3: Development/testing with short timeout
+  - id: dev_platform_source
+    source_type: platform
+    bootstrap_provider:
+      type: platform
+      query_api_url: "http://localhost:8080"
+      timeout_seconds: 30  # Short timeout for development
+    properties:
+      redis_url: "redis://localhost:6379"
+      stream_key: "test-source:changes"
+      consumer_group: "dev-core"
+      consumer_name: "dev-consumer"
+
+queries:
+  # This query will only receive Person nodes and KNOWS relations from bootstrap
+  - id: person_query
+    query: "MATCH (p:Person)-[k:KNOWS]->(p2:Person) RETURN p, k, p2"
+    # The bootstrap provider will automatically request only:
+    # - Nodes with label "Person"
+    # - Relations with label "KNOWS"
+
+  # This query receives all nodes and relations (no label filtering)
+  - id: all_data_query
+    query: "MATCH (n)-[r]->(m) RETURN n, r, m"
+    # The bootstrap provider will request all available data
+
+# Network and connectivity considerations:
+# - Ensure the Query API service is accessible from the drasi-core network
+# - Use appropriate timeout values based on expected bootstrap data size
+# - Consider using HTTPS URLs for production deployments
+# - The Query API service must support the /subscription endpoint
+
+# Error handling:
+# - Connection failures will be logged and the bootstrap will fail
+# - Malformed JSON lines in the stream are logged and skipped
+# - HTTP errors from the Query API are propagated as bootstrap failures

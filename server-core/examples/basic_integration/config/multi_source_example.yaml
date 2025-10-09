@@ -1,0 +1,48 @@
+# Multi-Source Example - Multiple Data Sources
+# Shows how to configure multiple sources and join their data
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  log_level: "info"
+  max_connections: 100
+  shutdown_timeout_seconds: 5
+
+sources:
+  # Fast counter source
+  - id: "fast-counter"
+    source_type: "mock"
+    auto_start: true
+    properties:
+      data_type: "counter"
+      interval_ms: 1000        # Every 1 second
+
+  # Slow sensor source  
+  - id: "slow-sensor"
+    source_type: "mock"
+    auto_start: true
+    properties:
+      data_type: "sensor"
+      interval_ms: 3000        # Every 3 seconds
+
+queries:
+  # Query data from fast counter
+  - id: "counter-query"
+    query: "MATCH (n:Counter) WHERE n.value < 10 RETURN n"
+    sources: ["fast-counter"]
+    auto_start: true
+
+  # Query data from slow sensor
+  - id: "sensor-query"
+    query: "MATCH (n:Sensor) WHERE n.temperature < 30 RETURN n"
+    sources: ["slow-sensor"]
+    auto_start: true
+
+reactions:
+  # Single reaction consuming from multiple queries
+  - id: "combined-logger"
+    reaction_type: "log"
+    queries: ["counter-query", "sensor-query"]
+    auto_start: true
+    properties:
+      log_level: "info"

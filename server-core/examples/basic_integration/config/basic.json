@@ -1,0 +1,49 @@
+{
+  "_comment": "Basic Drasi Server Core Integration Example Configuration",
+  "_comment2": "This demonstrates the simplest possible integration with a mock source, filtering query, and log reaction",
+  
+  "server": {
+    "_comment": "Server configuration - basic setup",
+    "host": "0.0.0.0",
+    "port": 8080,
+    "log_level": "info",
+    "max_connections": 100,
+    "shutdown_timeout_seconds": 5
+  },
+  
+  "sources": [
+    {
+      "_comment": "Data sources - using mock for simplicity",
+      "id": "counter-source",
+      "source_type": "mock",
+      "auto_start": true,
+      "properties": {
+        "data_type": "counter",
+        "interval_ms": 2000
+      }
+    }
+  ],
+  
+  "queries": [
+    {
+      "_comment": "Continuous queries - simple filtering example",
+      "id": "filter-query",
+      "query": "MATCH (n:Counter) WHERE n.value > 5 RETURN n",
+      "sources": ["counter-source"],
+      "auto_start": true
+    }
+  ],
+  
+  "reactions": [
+    {
+      "_comment": "Reactions - log output for easy viewing",
+      "id": "log-reaction",
+      "reaction_type": "log",
+      "queries": ["filter-query"],
+      "auto_start": true,
+      "properties": {
+        "log_level": "info"
+      }
+    }
+  ]
+}

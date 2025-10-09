@@ -10,6 +10,7 @@ members = [
   "index-rocksdb",
   "index-garnet",
   "middleware",
+  "server-core",
   
   # Internal
   "shared-tests",
