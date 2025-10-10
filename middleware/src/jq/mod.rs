@@ -181,7 +181,7 @@ impl SourceMiddleware for JQ {
                     match serde_json::from_str::<Value>(&output) {
                         Ok(v) => {
                             if v.is_array() {
-                                v.as_array().unwrap().to_vec()
+                                v.as_array().unwrap_or(&vec![]).to_vec()
                             } else {
                                 vec![v]
                             }
@@ -243,7 +243,7 @@ impl SourceMiddleware for JQ {
                             in_node_id,
                             out_node_id,
                         }) => {
-                            let in_node_id = match jq_get_string(&in_node_id, &item_str) {
+                            let in_node_id = match jq_get_string(in_node_id, &item_str) {
                                 Ok(id) => Arc::from(id),
                                 Err(e) => {
                                     log::error!("Failed to get in_node_id from JQ expression: {e}");
@@ -256,7 +256,7 @@ impl SourceMiddleware for JQ {
                                 }
                             };
 
-                            let out_node_id = match jq_get_string(&out_node_id, &item_str) {
+                            let out_node_id = match jq_get_string(out_node_id, &item_str) {
                                 Ok(id) => Arc::from(id),
                                 Err(e) => {
                                     log::error!(
@@ -372,7 +372,9 @@ fn run_jq(query: &str, input: &str) -> Result<String, MiddlewareError> {
             cache.insert(query.to_string(), RefCell::new(program));
         }
 
-        let program_cell = cache.get(query).unwrap();
+        let program_cell = cache.get(query).ok_or_else(|| {
+            MiddlewareError::SourceChangeError("JQ program not found in cache".to_string())
+        })?;
         let mut program = program_cell.borrow_mut();
         program
             .run(input)
@@ -380,6 +382,7 @@ fn run_jq(query: &str, input: &str) -> Result<String, MiddlewareError> {
     })
 }
 
+#[allow(clippy::bind_instead_of_map)]
 fn jq_get_string(query: &str, input: &str) -> Result<String, MiddlewareError> {
     let output = run_jq(query, input)?;
 
@@ -389,7 +392,7 @@ fn jq_get_string(query: &str, input: &str) -> Result<String, MiddlewareError> {
         })
         .and_then(|v| {
             if v.is_string() {
-                Ok(v.as_str().unwrap().to_string())
+                Ok(v.as_str().unwrap_or_default().to_string())
             } else {
                 Ok(v.to_string())
             }
