@@ -21,29 +21,25 @@ The **relabel** middleware processes `SourceChange` events (`Insert`, `Update`, 
 4. **Update Element Metadata**  
    Create a new element with the transformed labels while preserving all other element properties, metadata, and relationships.
 
-5. **Error Handling**  
-   Configuration and processing errors are handled according to the `on_error` setting.
+5. **Error Handling**
+   Invalid configurations (empty `labelMappings` or malformed JSON) will cause middleware creation to fail.
 
 ## Configuration Options
 
 | Field          | Type                          | Required | Default  | Description                                                                                      |
 |----------------|-------------------------------|----------|----------|--------------------------------------------------------------------------------------------------|
 | `labelMappings`| **Object** (String → String) | **Yes**  | –        | Key-value pairs mapping source labels to target labels. Must contain at least one mapping.     |
-| `on_error`     | `"skip" \| "fail"`            | No       | `"fail"` | Behavior when an error occurs (invalid configuration, processing failure): `"skip"` logs a warning and passes the change through unchanged; `"fail"` stops processing and returns an error. |
 
 ## Example Configuration
 
 ```json
 {
-  "name": "normalize_user_labels", 
+  "name": "normalize_user_labels",
   "kind": "relabel",
-  "config": {
-    "labelMappings": {
-      "Person": "User",
-      "Employee": "Staff", 
-      "Company": "Organization"
-    },
-    "on_error": "skip"
+  "labelMappings": {
+    "Person": "User",
+    "Employee": "Staff",
+    "Company": "Organization"
   }
 }
 ```
@@ -54,12 +50,10 @@ When using the middleware as part of the query spec, we can use the middleware l
 # spec.sources.middleware
 - name: normalize_user_labels
   kind: relabel
-  config:
-    labelMappings:
-      Person: User
-      Employee: Staff
-      Company: Organization
-    on_error: skip   # skip elements that cause errors
+  labelMappings:
+    Person: User
+    Employee: Staff
+    Company: Organization
 ```
 
 ## Transformation Examples
