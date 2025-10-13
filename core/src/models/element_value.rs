@@ -236,3 +236,12 @@ impl From<serde_json::Value> for ElementPropertyMap {
         }
     }
 }
+
+impl From<&serde_json::Value> for ElementPropertyMap {
+    fn from(value: &serde_json::Value) -> Self {
+        match value {
+            serde_json::Value::Object(o) => o.into(),
+            _ => ElementPropertyMap::new(),
+        }
+    }
+}
