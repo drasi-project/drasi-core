@@ -98,10 +98,11 @@ impl PlatformBootstrapProvider {
     async fn make_subscription_request(
         &self,
         request: &BootstrapRequest,
+        context: &BootstrapContext,
     ) -> Result<reqwest::Response> {
         let subscription_req = SubscriptionRequest {
             query_id: request.query_id.clone(),
-            query_node_id: request.query_id.clone(), // Use query_id as query_node_id
+            query_node_id: context.source_id.clone(),
             node_labels: request.node_labels.clone(),
             rel_labels: request.relation_labels.clone(),
         };
@@ -230,7 +231,7 @@ impl BootstrapProvider for PlatformBootstrapProvider {
 
         // Make HTTP request to Query API service
         let response = self
-            .make_subscription_request(&request)
+            .make_subscription_request(&request, context)
             .await
             .context("Failed to make subscription request to Query API")?;
 

@@ -36,6 +36,8 @@ pub mod script_types;
 /// and channels needed for bootstrap operations
 #[derive(Clone)]
 pub struct BootstrapContext {
+    /// Unique server ID for logging and tracing
+    pub server_id: String,
     /// The parent source configuration
     pub source_config: Arc<SourceConfig>,
     /// Channel for sending bootstrap data as source changes
@@ -46,11 +48,13 @@ pub struct BootstrapContext {
 
 impl BootstrapContext {
     pub fn new(
+        server_id: String,
         source_config: Arc<SourceConfig>,
         source_change_tx: SourceChangeSender,
         source_id: String,
     ) -> Self {
         Self {
+            server_id,
             source_config,
             source_change_tx,
             source_id,

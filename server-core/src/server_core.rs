@@ -323,6 +323,7 @@ impl DrasiServerCore {
         if let Err(e) = self
             .bootstrap_router
             .register_provider(
+                self.config.server.id.clone(),
                 source_config_arc,
                 bootstrap_provider_config,
                 source_change_tx,

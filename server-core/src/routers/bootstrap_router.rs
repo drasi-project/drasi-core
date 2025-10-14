@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use hyper::server;
 use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -63,6 +64,7 @@ impl BootstrapRouter {
     /// Register a bootstrap provider for a source
     pub async fn register_provider(
         &self,
+        server_id: String,
         source_config: Arc<SourceConfig>,
         provider_config: Option<BootstrapProviderConfig>,
         source_change_tx: SourceChangeSender,
@@ -71,7 +73,7 @@ impl BootstrapRouter {
 
         // Create the bootstrap context
         let context =
-            BootstrapContext::new(source_config.clone(), source_change_tx, source_id.clone());
+            BootstrapContext::new(server_id, source_config.clone(), source_change_tx, source_id.clone());
 
         // Create the provider (or use no-op if no config provided)
         let provider = match provider_config {
