@@ -21,41 +21,11 @@ mod schema_tests {
     #[test]
     fn test_server_settings_defaults() {
         let settings: DrasiServerCoreSettings = serde_json::from_value(json!({
-            "id": "default-server",
-            "log_level": "info"
+            "id": "default-server"
         }))
         .unwrap();
 
         assert_eq!(settings.id, "default-server"); // default
-        assert_eq!(settings.log_level, "info");
-        assert_eq!(settings.max_connections, 1000); // default
-        assert_eq!(settings.shutdown_timeout_seconds, 30); // default
-        assert_eq!(settings.disable_persistence, false); // default
-    }
-
-    #[test]
-    fn test_server_settings_disable_persistence() {
-        // Test with disable_persistence explicitly set to true
-        let settings: DrasiServerCoreSettings = serde_json::from_value(json!({
-            "host": "localhost",
-            "port": 8080,
-            "log_level": "info",
-            "disable_persistence": true
-        }))
-        .unwrap();
-
-        assert_eq!(settings.disable_persistence, true);
-
-        // Test with disable_persistence explicitly set to false
-        let settings: DrasiServerCoreSettings = serde_json::from_value(json!({
-            "host": "localhost",
-            "port": 8080,
-            "log_level": "info",
-            "disable_persistence": false
-        }))
-        .unwrap();
-
-        assert_eq!(settings.disable_persistence, false);
     }
 
     #[test]
@@ -258,7 +228,6 @@ reactions: []
         let config: DrasiServerCoreConfig = serde_yaml::from_str(&yaml_str).unwrap();
 
         assert_eq!(config.server.id, "test-server");
-        assert_eq!(config.server.log_level, "info");
         assert_eq!(config.sources.len(), 1);
         assert_eq!(config.sources[0].id, "test-source");
     }
@@ -299,7 +268,6 @@ reactions: []
         let loaded_config: DrasiServerCoreConfig = serde_yaml::from_str(&loaded_yaml).unwrap();
 
         assert_eq!(loaded_config.server.id, config.server.id);
-        assert_eq!(loaded_config.server.log_level, config.server.log_level);
         assert_eq!(loaded_config.sources.len(), config.sources.len());
         assert_eq!(loaded_config.queries.len(), config.queries.len());
         assert_eq!(loaded_config.reactions.len(), config.reactions.len());        

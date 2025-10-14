@@ -44,14 +44,6 @@ pub struct DrasiServerCoreConfig {
 pub struct DrasiServerCoreSettings {
     #[serde(default = "default_id")]
     pub id: String,
-    #[serde(default = "default_log_level")]
-    pub log_level: String,
-    #[serde(default = "default_max_connections")]
-    pub max_connections: u32,
-    #[serde(default = "default_shutdown_timeout")]
-    pub shutdown_timeout_seconds: u64,
-    #[serde(default = "default_disable_persistence")]
-    pub disable_persistence: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,10 +211,6 @@ impl Default for DrasiServerCoreSettings {
         Self {
             // Default server ID to a random UUID
             id: uuid::Uuid::new_v4().to_string(),
-            log_level: "info".to_string(),
-            max_connections: 1000,
-            shutdown_timeout_seconds: 30,
-            disable_persistence: false,
         }
     }
 }
@@ -231,24 +219,8 @@ fn default_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-fn default_log_level() -> String {
-    "info".to_string()
-}
-
-fn default_max_connections() -> u32 {
-    1000
-}
-
-fn default_shutdown_timeout() -> u64 {
-    30
-}
-
 fn default_auto_start() -> bool {
     true
-}
-
-fn default_disable_persistence() -> bool {
-    false
 }
 
 /// Helper to deserialize null as empty HashMap

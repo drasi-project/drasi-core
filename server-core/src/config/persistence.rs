@@ -151,10 +151,6 @@ mod tests {
         // Create test server settings
         let server_settings = crate::config::DrasiServerCoreSettings {
             id: "test-server".to_string(),
-            log_level: "info".to_string(),
-            max_connections: 1000,
-            shutdown_timeout_seconds: 30,
-            disable_persistence: false,
         };
 
         // Create managers (we'll use mock implementations for testing)
@@ -204,7 +200,6 @@ mod tests {
 
         // Verify the configuration was saved correctly
         assert_eq!(loaded_config.server.id, "test-server");
-        assert_eq!(loaded_config.server.log_level, "info");
         assert_eq!(loaded_config.sources.len(), 1);
         assert_eq!(loaded_config.sources[0].id, "test-source");
         assert_eq!(loaded_config.queries.len(), 0);

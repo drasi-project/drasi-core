@@ -30,10 +30,6 @@ fn create_minimal_config() -> RuntimeConfig {
     RuntimeConfig {
         server: DrasiServerCoreSettings {
             id: "test-server".to_string(),
-            log_level: "error".to_string(),
-            max_connections: 100,
-            shutdown_timeout_seconds: 30,
-            disable_persistence: false,
         },
         sources: vec![],
         queries: vec![],
