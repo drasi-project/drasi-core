@@ -122,16 +122,35 @@ impl Publisher for ChannelPublisher {
 pub struct SourceManager {
     sources: Arc<RwLock<HashMap<String, Arc<dyn Source>>>>,
     source_change_tx: SourceChangeSender,
+    source_event_tx: Option<SourceEventSender>,
     event_tx: ComponentEventSender,
     config_persistence: Arc<RwLock<Option<Arc<crate::config::ConfigPersistence>>>>,
     application_handles: Arc<RwLock<HashMap<String, ApplicationSourceHandle>>>,
 }
 
 impl SourceManager {
+    /// Create a new SourceManager (legacy - uses only SourceChangeSender)
     pub fn new(source_change_tx: SourceChangeSender, event_tx: ComponentEventSender) -> Self {
         Self {
             sources: Arc::new(RwLock::new(HashMap::new())),
             source_change_tx,
+            source_event_tx: None,
+            event_tx,
+            config_persistence: Arc::new(RwLock::new(None)),
+            application_handles: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Create a new SourceManager with unified event sender
+    pub fn new_with_unified_events(
+        source_change_tx: SourceChangeSender,
+        source_event_tx: SourceEventSender,
+        event_tx: ComponentEventSender,
+    ) -> Self {
+        Self {
+            sources: Arc::new(RwLock::new(HashMap::new())),
+            source_change_tx,
+            source_event_tx: Some(source_event_tx),
             event_tx,
             config_persistence: Arc::new(RwLock::new(None)),
             application_handles: Arc::new(RwLock::new(HashMap::new())),
@@ -220,11 +239,23 @@ impl SourceManager {
                 self.source_change_tx.clone(),
                 self.event_tx.clone(),
             )),
-            "platform" => Arc::new(PlatformSource::new(
-                config.clone(),
-                self.source_change_tx.clone(),
-                self.event_tx.clone(),
-            )),
+            "platform" => {
+                // Use unified events if available
+                if let Some(source_event_tx) = self.source_event_tx.clone() {
+                    Arc::new(PlatformSource::new_with_unified_events(
+                        config.clone(),
+                        self.source_change_tx.clone(),
+                        source_event_tx,
+                        self.event_tx.clone(),
+                    ))
+                } else {
+                    Arc::new(PlatformSource::new(
+                        config.clone(),
+                        self.source_change_tx.clone(),
+                        self.event_tx.clone(),
+                    ))
+                }
+            }
             "application" => {
                 let (app_source, handle) = ApplicationSource::new(
                     config.clone(),

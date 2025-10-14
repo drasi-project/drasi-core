@@ -24,6 +24,7 @@ use tokio::task::JoinHandle;
 
 use crate::channels::{
     ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, SourceChangeSender,
+    SourceControl, ControlOperation, SourceEventSender, SourceEvent, SourceEventWrapper,
 };
 use crate::config::SourceConfig;
 use crate::sources::manager::convert_json_to_element_properties;
@@ -55,6 +56,30 @@ impl Publisher for ChannelPublisher {
 
         self.source_change_tx
             .send(event)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    }
+}
+
+/// Publisher for sending unified source events to internal channels
+struct EventPublisher {
+    source_event_tx: SourceEventSender,
+    source_id: String,
+}
+
+impl EventPublisher {
+    async fn publish_event(
+        &self,
+        event: SourceEvent,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let wrapper = SourceEventWrapper {
+            source_id: self.source_id.clone(),
+            event,
+            timestamp: chrono::Utc::now(),
+        };
+
+        self.source_event_tx
+            .send(wrapper)
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     }
@@ -104,12 +129,13 @@ pub struct PlatformSource {
     config: SourceConfig,
     status: Arc<RwLock<ComponentStatus>>,
     source_change_tx: SourceChangeSender,
+    source_event_tx: Option<SourceEventSender>,
     event_tx: ComponentEventSender,
     task_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
 }
 
 impl PlatformSource {
-    /// Create a new platform source
+    /// Create a new platform source (legacy - uses SourceChangeSender)
     pub fn new(
         config: SourceConfig,
         source_change_tx: SourceChangeSender,
@@ -119,6 +145,24 @@ impl PlatformSource {
             config,
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
             source_change_tx,
+            source_event_tx: None,
+            event_tx,
+            task_handle: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Create a new platform source with unified event sender
+    pub fn new_with_unified_events(
+        config: SourceConfig,
+        source_change_tx: SourceChangeSender,
+        source_event_tx: SourceEventSender,
+        event_tx: ComponentEventSender,
+    ) -> Self {
+        Self {
+            config,
+            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
+            source_change_tx,
+            source_event_tx: Some(source_event_tx),
             event_tx,
             task_handle: Arc::new(RwLock::new(None)),
         }
@@ -273,6 +317,7 @@ impl PlatformSource {
         source_id: String,
         platform_config: PlatformConfig,
         source_change_tx: SourceChangeSender,
+        source_event_tx: Option<SourceEventSender>,
         event_tx: ComponentEventSender,
         status: Arc<RwLock<ComponentStatus>>,
     ) -> JoinHandle<()> {
@@ -329,10 +374,17 @@ impl PlatformSource {
                 return;
             }
 
-            // Create publisher
-            let publisher = Arc::new(ChannelPublisher {
+            // Create publishers
+            let legacy_publisher = Arc::new(ChannelPublisher {
                 source_change_tx,
                 source_id: source_id.clone(),
+            });
+
+            let unified_publisher = source_event_tx.map(|tx| {
+                Arc::new(EventPublisher {
+                    source_event_tx: tx,
+                    source_id: source_id.clone(),
+                })
             });
 
             // Main consumer loop
@@ -367,48 +419,109 @@ impl PlatformSource {
                                         // Parse JSON
                                         match serde_json::from_str::<Value>(&event_json) {
                                             Ok(cloud_event) => {
-                                                // Transform to SourceChange(s)
-                                                match transform_platform_event(
-                                                    cloud_event,
-                                                    &source_id,
-                                                ) {
-                                                    Ok(source_changes) => {
-                                                        // Publish each source change
-                                                        for source_change in source_changes {
-                                                            if let Err(e) = publisher
-                                                                .publish(source_change)
-                                                                .await
-                                                            {
-                                                                error!(
-                                                                    "Failed to publish source change: {}",
-                                                                    e
-                                                                );
-                                                            } else {
-                                                                debug!(
-                                                                    "Published source change for event {}",
-                                                                    stream_id.id
+                                                // Detect message type
+                                                let message_type = detect_message_type(&cloud_event);
+
+                                                match message_type {
+                                                    MessageType::Control(control_type) => {
+                                                        // Handle control message
+                                                        debug!("Detected control message of type: {}", control_type);
+
+                                                        match transform_control_event(cloud_event, &control_type) {
+                                                            Ok(control_events) => {
+                                                                // Publish to unified channel if available
+                                                                if let Some(ref publisher) = unified_publisher {
+                                                                    for control_event in control_events {
+                                                                        let event = SourceEvent::Control(control_event);
+                                                                        if let Err(e) = publisher.publish_event(event).await {
+                                                                            error!(
+                                                                                "Failed to publish control event: {}",
+                                                                                e
+                                                                            );
+                                                                        } else {
+                                                                            debug!(
+                                                                                "Published control event for stream {}",
+                                                                                stream_id.id
+                                                                            );
+                                                                        }
+                                                                    }
+                                                                } else {
+                                                                    warn!(
+                                                                        "Received control event but unified event channel not available"
+                                                                    );
+                                                                }
+                                                            }
+                                                            Err(e) => {
+                                                                warn!(
+                                                                    "Failed to transform control event {}: {}",
+                                                                    stream_id.id, e
                                                                 );
                                                             }
                                                         }
                                                     }
-                                                    Err(e) => {
-                                                        warn!(
-                                                            "Failed to transform event {}: {}",
-                                                            stream_id.id, e
-                                                        );
-                                                        let _ = event_tx
-                                                            .send(ComponentEvent {
-                                                                component_id: source_id.clone(),
-                                                                component_type:
-                                                                    ComponentType::Source,
-                                                                status: ComponentStatus::Running,
-                                                                timestamp: chrono::Utc::now(),
-                                                                message: Some(format!(
-                                                                    "Transformation error: {}",
-                                                                    e
-                                                                )),
-                                                            })
-                                                            .await;
+                                                    MessageType::Data => {
+                                                        // Handle data message
+                                                        match transform_platform_event(
+                                                            cloud_event,
+                                                            &source_id,
+                                                        ) {
+                                                            Ok(source_changes) => {
+                                                                // Publish to unified channel if available, else legacy
+                                                                if let Some(ref publisher) = unified_publisher {
+                                                                    for source_change in source_changes {
+                                                                        let event = SourceEvent::Change(source_change);
+                                                                        if let Err(e) = publisher.publish_event(event).await {
+                                                                            error!(
+                                                                                "Failed to publish source change: {}",
+                                                                                e
+                                                                            );
+                                                                        } else {
+                                                                            debug!(
+                                                                                "Published source change for event {}",
+                                                                                stream_id.id
+                                                                            );
+                                                                        }
+                                                                    }
+                                                                } else {
+                                                                    // Fall back to legacy publisher
+                                                                    for source_change in source_changes {
+                                                                        if let Err(e) = legacy_publisher
+                                                                            .publish(source_change)
+                                                                            .await
+                                                                        {
+                                                                            error!(
+                                                                                "Failed to publish source change: {}",
+                                                                                e
+                                                                            );
+                                                                        } else {
+                                                                            debug!(
+                                                                                "Published source change for event {}",
+                                                                                stream_id.id
+                                                                            );
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                            Err(e) => {
+                                                                warn!(
+                                                                    "Failed to transform event {}: {}",
+                                                                    stream_id.id, e
+                                                                );
+                                                                let _ = event_tx
+                                                                    .send(ComponentEvent {
+                                                                        component_id: source_id.clone(),
+                                                                        component_type:
+                                                                            ComponentType::Source,
+                                                                        status: ComponentStatus::Running,
+                                                                        timestamp: chrono::Utc::now(),
+                                                                        message: Some(format!(
+                                                                            "Transformation error: {}",
+                                                                            e
+                                                                        )),
+                                                                    })
+                                                                    .await;
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             }
@@ -497,6 +610,7 @@ impl Source for PlatformSource {
             self.config.id.clone(),
             platform_config,
             self.source_change_tx.clone(),
+            self.source_event_tx.clone(),
             self.event_tx.clone(),
             self.status.clone(),
         )
@@ -552,6 +666,45 @@ fn is_connection_error(e: &redis::RedisError) -> bool {
         || e.is_io_error()
         || e.to_string().contains("connection")
         || e.to_string().contains("EOF")
+}
+
+/// Message type discriminator
+#[derive(Debug, Clone, PartialEq)]
+enum MessageType {
+    /// Control message with control type from source.table
+    Control(String),
+    /// Data message (node/relation change)
+    Data,
+}
+
+/// Detect message type based on payload.source.db field
+///
+/// Returns MessageType::Control with table name if source.db = "Drasi" (case-insensitive)
+/// Returns MessageType::Data for all other cases
+fn detect_message_type(cloud_event: &Value) -> MessageType {
+    // Extract data array and get first event to check message type
+    let data_array = match cloud_event["data"].as_array() {
+        Some(arr) if !arr.is_empty() => arr,
+        _ => return MessageType::Data, // Default to data if no data array
+    };
+
+    // Check the first event's source.db field
+    let first_event = &data_array[0];
+    let source_db = first_event["payload"]["source"]["db"]
+        .as_str()
+        .unwrap_or("");
+
+    // Case-insensitive comparison with "Drasi"
+    if source_db.eq_ignore_ascii_case("drasi") {
+        // Extract source.table to determine control type
+        let control_type = first_event["payload"]["source"]["table"]
+            .as_str()
+            .unwrap_or("Unknown")
+            .to_string();
+        MessageType::Control(control_type)
+    } else {
+        MessageType::Data
+    }
 }
 
 /// Transform CloudEvent-wrapped platform event to drasi-core SourceChange(s)
@@ -679,4 +832,116 @@ fn transform_platform_event(cloud_event: Value, source_id: &str) -> Result<Vec<S
     }
 
     Ok(source_changes)
+}
+
+/// Transform CloudEvent-wrapped control event to SourceControl(s)
+///
+/// Handles control messages from Query API service with source.db = "Drasi"
+/// Currently supports "SourceSubscription" control type
+fn transform_control_event(cloud_event: Value, control_type: &str) -> Result<Vec<SourceControl>> {
+    let mut control_events = Vec::new();
+
+    // Extract the data array from CloudEvent wrapper
+    let data_array = cloud_event["data"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'data' array in CloudEvent"))?;
+
+    // Check if control type is supported
+    if control_type != "SourceSubscription" {
+        info!(
+            "Skipping unknown control type '{}' (only 'SourceSubscription' is supported)",
+            control_type
+        );
+        return Ok(control_events); // Return empty vec for unknown types
+    }
+
+    // Process each event in the data array
+    for event in data_array {
+        // Extract operation type (op field: "i", "u", "d")
+        let op = event["op"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'op' field in control event"))?;
+
+        // Extract payload
+        let payload = &event["payload"];
+        if payload.is_null() {
+            warn!("Missing 'payload' field in control event, skipping");
+            continue;
+        }
+
+        // Get data based on operation
+        let control_data = match op {
+            "i" | "u" => &payload["after"],
+            "d" => &payload["before"],
+            _ => {
+                warn!("Unknown operation type in control event: {}, skipping", op);
+                continue;
+            }
+        };
+
+        if control_data.is_null() {
+            warn!(
+                "Missing control data (after/before) for operation {}, skipping",
+                op
+            );
+            continue;
+        }
+
+        // Extract required fields for SourceSubscription
+        let query_id = match control_data["queryId"].as_str() {
+            Some(id) => id.to_string(),
+            None => {
+                warn!("Missing required 'queryId' field in control event, skipping");
+                continue;
+            }
+        };
+
+        let query_node_id = match control_data["queryNodeId"].as_str() {
+            Some(id) => id.to_string(),
+            None => {
+                warn!("Missing required 'queryNodeId' field in control event, skipping");
+                continue;
+            }
+        };
+
+        // Extract optional label arrays (default to empty if missing)
+        let node_labels = control_data["nodeLabels"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let rel_labels = control_data["relLabels"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Map operation to ControlOperation
+        let operation = match op {
+            "i" => ControlOperation::Insert,
+            "u" => ControlOperation::Update,
+            "d" => ControlOperation::Delete,
+            _ => unreachable!(), // Already filtered above
+        };
+
+        // Build SourceControl::Subscription
+        let control_event = SourceControl::Subscription {
+            query_id,
+            query_node_id,
+            node_labels,
+            rel_labels,
+            operation,
+        };
+
+        control_events.push(control_event);
+    }
+
+    Ok(control_events)
 }

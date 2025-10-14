@@ -780,3 +780,378 @@ fn test_transform_multiple_events_in_data_array() {
         _ => panic!("Expected Insert variant"),
     }
 }
+
+// ============================================================================
+// Tests for Message Type Detection and Control Events
+// ============================================================================
+
+#[test]
+fn test_detect_message_type_data() {
+    let cloud_event = json!({
+        "data": [{
+            "op": "i",
+            "payload": {
+                "after": {
+                    "id": "node1",
+                    "labels": ["Person"],
+                    "properties": { "name": "Alice" }
+                },
+                "source": {
+                    "db": "mydb",  // Not "Drasi"
+                    "table": "node",
+                    "ts_ns": 1000000000_u64
+                }
+            }
+        }]
+    });
+
+    let msg_type = detect_message_type(&cloud_event);
+    assert_eq!(msg_type, MessageType::Data);
+}
+
+#[test]
+fn test_detect_message_type_control_lowercase() {
+    let cloud_event = json!({
+        "data": [{
+            "op": "i",
+            "payload": {
+                "after": {
+                    "queryId": "query1",
+                    "queryNodeId": "default"
+                },
+                "source": {
+                    "db": "drasi",  // Lowercase
+                    "table": "SourceSubscription",
+                    "ts_ns": 1000000000_u64
+                }
+            }
+        }]
+    });
+
+    let msg_type = detect_message_type(&cloud_event);
+    assert_eq!(msg_type, MessageType::Control("SourceSubscription".to_string()));
+}
+
+#[test]
+fn test_detect_message_type_control_uppercase() {
+    let cloud_event = json!({
+        "data": [{
+            "op": "i",
+            "payload": {
+                "after": {
+                    "queryId": "query1",
+                    "queryNodeId": "default"
+                },
+                "source": {
+                    "db": "DRASI",  // Uppercase
+                    "table": "SourceSubscription",
+                    "ts_ns": 1000000000_u64
+                }
+            }
+        }]
+    });
+
+    let msg_type = detect_message_type(&cloud_event);
+    assert_eq!(msg_type, MessageType::Control("SourceSubscription".to_string()));
+}
+
+#[test]
+fn test_detect_message_type_control_mixedcase() {
+    let cloud_event = json!({
+        "data": [{
+            "op": "i",
+            "payload": {
+                "after": {
+                    "queryId": "query1",
+                    "queryNodeId": "default"
+                },
+                "source": {
+                    "db": "DrAsI",  // Mixed case
+                    "table": "SourceSubscription",
+                    "ts_ns": 1000000000_u64
+                }
+            }
+        }]
+    });
+
+    let msg_type = detect_message_type(&cloud_event);
+    assert_eq!(msg_type, MessageType::Control("SourceSubscription".to_string()));
+}
+
+#[test]
+fn test_detect_message_type_empty_data_array() {
+    let cloud_event = json!({
+        "data": []
+    });
+
+    let msg_type = detect_message_type(&cloud_event);
+    assert_eq!(msg_type, MessageType::Data);
+}
+
+#[test]
+fn test_detect_message_type_missing_data_field() {
+    let cloud_event = json!({
+        "id": "test-123",
+        "source": "test-source"
+    });
+
+    let msg_type = detect_message_type(&cloud_event);
+    assert_eq!(msg_type, MessageType::Data);
+}
+
+#[test]
+fn test_transform_control_event_source_subscription_insert() {
+    let cloud_event = json!({
+        "data": [{
+            "op": "i",
+            "payload": {
+                "after": {
+                    "queryId": "query1",
+                    "queryNodeId": "default",
+                    "nodeLabels": ["Person", "Employee"],
+                    "relLabels": ["KNOWS", "WORKS_FOR"]
+                },
+                "source": {
+                    "db": "Drasi",
+                    "table": "SourceSubscription",
+                    "ts_ns": 1000000000_u64
+                }
+            }
+        }]
+    });
+
+    let results = transform_control_event(cloud_event, "SourceSubscription").unwrap();
+    assert_eq!(results.len(), 1);
+
+    match &results[0] {
+        SourceControl::Subscription {
+            query_id,
+            query_node_id,
+            node_labels,
+            rel_labels,
+            operation,
+        } => {
+            assert_eq!(query_id, "query1");
+            assert_eq!(query_node_id, "default");
+            assert_eq!(node_labels.len(), 2);
+            assert!(node_labels.contains(&"Person".to_string()));
+            assert!(node_labels.contains(&"Employee".to_string()));
+            assert_eq!(rel_labels.len(), 2);
+            assert!(rel_labels.contains(&"KNOWS".to_string()));
+            assert!(rel_labels.contains(&"WORKS_FOR".to_string()));
+            assert_eq!(*operation, ControlOperation::Insert);
+        }
+    }
+}
+
+#[test]
+fn test_transform_control_event_source_subscription_update() {
+    let cloud_event = json!({
+        "data": [{
+            "op": "u",
+            "payload": {
+                "after": {
+                    "queryId": "query1",
+                    "queryNodeId": "default",
+                    "nodeLabels": ["Person"],
+                    "relLabels": []
+                },
+                "source": {
+                    "db": "Drasi",
+                    "table": "SourceSubscription",
+                    "ts_ns": 1000000000_u64
+                }
+            }
+        }]
+    });
+
+    let results = transform_control_event(cloud_event, "SourceSubscription").unwrap();
+    assert_eq!(results.len(), 1);
+
+    match &results[0] {
+        SourceControl::Subscription { operation, .. } => {
+            assert_eq!(*operation, ControlOperation::Update);
+        }
+    }
+}
+
+#[test]
+fn test_transform_control_event_source_subscription_delete() {
+    let cloud_event = json!({
+        "data": [{
+            "op": "d",
+            "payload": {
+                "before": {
+                    "queryId": "query1",
+                    "queryNodeId": "default",
+                    "nodeLabels": [],
+                    "relLabels": []
+                },
+                "source": {
+                    "db": "Drasi",
+                    "table": "SourceSubscription",
+                    "ts_ns": 1000000000_u64
+                }
+            }
+        }]
+    });
+
+    let results = transform_control_event(cloud_event, "SourceSubscription").unwrap();
+    assert_eq!(results.len(), 1);
+
+    match &results[0] {
+        SourceControl::Subscription { operation, .. } => {
+            assert_eq!(*operation, ControlOperation::Delete);
+        }
+    }
+}
+
+#[test]
+fn test_transform_control_event_empty_labels() {
+    let cloud_event = json!({
+        "data": [{
+            "op": "i",
+            "payload": {
+                "after": {
+                    "queryId": "query1",
+                    "queryNodeId": "default",
+                    "nodeLabels": [],
+                    "relLabels": []
+                },
+                "source": {
+                    "db": "Drasi",
+                    "table": "SourceSubscription",
+                    "ts_ns": 1000000000_u64
+                }
+            }
+        }]
+    });
+
+    let results = transform_control_event(cloud_event, "SourceSubscription").unwrap();
+    assert_eq!(results.len(), 1);
+
+    match &results[0] {
+        SourceControl::Subscription {
+            node_labels,
+            rel_labels,
+            ..
+        } => {
+            assert!(node_labels.is_empty());
+            assert!(rel_labels.is_empty());
+        }
+    }
+}
+
+#[test]
+fn test_transform_control_event_missing_labels() {
+    // Labels fields are optional, should default to empty
+    let cloud_event = json!({
+        "data": [{
+            "op": "i",
+            "payload": {
+                "after": {
+                    "queryId": "query1",
+                    "queryNodeId": "default"
+                },
+                "source": {
+                    "db": "Drasi",
+                    "table": "SourceSubscription",
+                    "ts_ns": 1000000000_u64
+                }
+            }
+        }]
+    });
+
+    let results = transform_control_event(cloud_event, "SourceSubscription").unwrap();
+    assert_eq!(results.len(), 1);
+
+    match &results[0] {
+        SourceControl::Subscription {
+            node_labels,
+            rel_labels,
+            ..
+        } => {
+            assert!(node_labels.is_empty());
+            assert!(rel_labels.is_empty());
+        }
+    }
+}
+
+#[test]
+fn test_transform_control_event_unknown_type() {
+    // Unknown control types should return empty vector
+    let cloud_event = json!({
+        "data": [{
+            "op": "i",
+            "payload": {
+                "after": {
+                    "queryId": "query1",
+                    "queryNodeId": "default"
+                },
+                "source": {
+                    "db": "Drasi",
+                    "table": "UnknownControlType",
+                    "ts_ns": 1000000000_u64
+                }
+            }
+        }]
+    });
+
+    let results = transform_control_event(cloud_event, "UnknownControlType").unwrap();
+    assert_eq!(results.len(), 0);
+}
+
+#[test]
+fn test_transform_control_event_multiple_events() {
+    let cloud_event = json!({
+        "data": [
+            {
+                "op": "i",
+                "payload": {
+                    "after": {
+                        "queryId": "query1",
+                        "queryNodeId": "default",
+                        "nodeLabels": ["Person"],
+                        "relLabels": []
+                    },
+                    "source": {
+                        "db": "Drasi",
+                        "table": "SourceSubscription",
+                        "ts_ns": 1000000000_u64
+                    }
+                }
+            },
+            {
+                "op": "i",
+                "payload": {
+                    "after": {
+                        "queryId": "query2",
+                        "queryNodeId": "default",
+                        "nodeLabels": ["Product"],
+                        "relLabels": []
+                    },
+                    "source": {
+                        "db": "Drasi",
+                        "table": "SourceSubscription",
+                        "ts_ns": 2000000000_u64
+                    }
+                }
+            }
+        ]
+    });
+
+    let results = transform_control_event(cloud_event, "SourceSubscription").unwrap();
+    assert_eq!(results.len(), 2);
+
+    match &results[0] {
+        SourceControl::Subscription { query_id, .. } => {
+            assert_eq!(query_id, "query1");
+        }
+    }
+
+    match &results[1] {
+        SourceControl::Subscription { query_id, .. } => {
+            assert_eq!(query_id, "query2");
+        }
+    }
+}

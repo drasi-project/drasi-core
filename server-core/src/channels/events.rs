@@ -40,6 +40,44 @@ pub struct SourceChangeEvent {
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
+/// Control events from sources for query coordination
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum SourceControl {
+    /// Query subscription control event
+    Subscription {
+        query_id: String,
+        query_node_id: String,
+        node_labels: Vec<String>,
+        rel_labels: Vec<String>,
+        operation: ControlOperation,
+    },
+}
+
+/// Control operation types
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ControlOperation {
+    Insert,
+    Update,
+    Delete,
+}
+
+/// Unified event envelope carrying both data changes and control messages
+#[derive(Debug, Clone)]
+pub enum SourceEvent {
+    /// Data change event from source
+    Change(SourceChange),
+    /// Control event for query coordination
+    Control(SourceControl),
+}
+
+/// Wrapper for source events with metadata
+#[derive(Debug, Clone)]
+pub struct SourceEventWrapper {
+    pub source_id: String,
+    pub event: SourceEvent,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResult {
     pub query_id: String,
@@ -67,6 +105,8 @@ pub enum ControlMessage {
 
 pub type SourceChangeReceiver = mpsc::Receiver<SourceChangeEvent>;
 pub type SourceChangeSender = mpsc::Sender<SourceChangeEvent>;
+pub type SourceEventReceiver = mpsc::Receiver<SourceEventWrapper>;
+pub type SourceEventSender = mpsc::Sender<SourceEventWrapper>;
 pub type QueryResultReceiver = mpsc::Receiver<QueryResult>;
 pub type QueryResultSender = mpsc::Sender<QueryResult>;
 pub type ComponentEventReceiver = mpsc::Receiver<ComponentEvent>;
@@ -104,6 +144,7 @@ pub type BootstrapResponseSender = mpsc::Sender<BootstrapResponse>;
 
 pub struct EventChannels {
     pub source_change_tx: SourceChangeSender,
+    pub source_event_tx: SourceEventSender,
     pub query_result_tx: QueryResultSender,
     pub component_event_tx: ComponentEventSender,
     pub _control_tx: ControlMessageSender,
@@ -114,6 +155,7 @@ pub struct EventChannels {
 
 pub struct EventReceivers {
     pub source_change_rx: SourceChangeReceiver,
+    pub source_event_rx: SourceEventReceiver,
     pub query_result_rx: QueryResultReceiver,
     pub component_event_rx: ComponentEventReceiver,
     pub _control_rx: ControlMessageReceiver,
@@ -125,6 +167,7 @@ pub struct EventReceivers {
 impl EventChannels {
     pub fn new() -> (Self, EventReceivers) {
         let (source_change_tx, source_change_rx) = mpsc::channel(1000);
+        let (source_event_tx, source_event_rx) = mpsc::channel(1000);
         let (query_result_tx, query_result_rx) = mpsc::channel(1000);
         let (component_event_tx, component_event_rx) = mpsc::channel(1000);
         let (control_tx, control_rx) = mpsc::channel(100);
@@ -133,6 +176,7 @@ impl EventChannels {
 
         let channels = Self {
             source_change_tx,
+            source_event_tx,
             query_result_tx,
             component_event_tx,
             _control_tx: control_tx,
@@ -142,6 +186,7 @@ impl EventChannels {
 
         let receivers = EventReceivers {
             source_change_rx,
+            source_event_rx,
             query_result_rx,
             component_event_rx,
             _control_rx: control_rx,
