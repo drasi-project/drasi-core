@@ -102,7 +102,7 @@ impl PlatformBootstrapProvider {
     ) -> Result<reqwest::Response> {
         let subscription_req = SubscriptionRequest {
             query_id: request.query_id.clone(),
-            query_node_id: context.source_id.clone(),
+            query_node_id: context.server_id.clone(),
             node_labels: request.node_labels.clone(),
             rel_labels: request.relation_labels.clone(),
         };
