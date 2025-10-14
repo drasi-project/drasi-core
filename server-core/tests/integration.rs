@@ -29,8 +29,7 @@ use tokio::time::{sleep, Duration};
 fn create_minimal_config() -> RuntimeConfig {
     RuntimeConfig {
         server: DrasiServerCoreSettings {
-            host: "127.0.0.1".to_string(),
-            port: 8080,
+            id: "test-server".to_string(),
             log_level: "error".to_string(),
             max_connections: 100,
             shutdown_timeout_seconds: 30,

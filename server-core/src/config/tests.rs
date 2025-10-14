@@ -21,14 +21,12 @@ mod schema_tests {
     #[test]
     fn test_server_settings_defaults() {
         let settings: DrasiServerCoreSettings = serde_json::from_value(json!({
-            "host": "localhost",
-            "port": 8080,
+            "id": "default-server",
             "log_level": "info"
         }))
         .unwrap();
 
-        assert_eq!(settings.host, "localhost");
-        assert_eq!(settings.port, 8080);
+        assert_eq!(settings.id, "default-server"); // default
         assert_eq!(settings.log_level, "info");
         assert_eq!(settings.max_connections, 1000); // default
         assert_eq!(settings.shutdown_timeout_seconds, 30); // default
@@ -240,6 +238,7 @@ mod persistence_tests {
 
         let yaml_content = r#"
 server:
+  id: "test-server"
   host: "127.0.0.1"
   port: 8080
   log_level: "info"
@@ -258,7 +257,8 @@ reactions: []
         let yaml_str = fs::read_to_string(&config_path).unwrap();
         let config: DrasiServerCoreConfig = serde_yaml::from_str(&yaml_str).unwrap();
 
-        assert_eq!(config.server.host, "127.0.0.1");
+        assert_eq!(config.server.id, "test-server");
+        assert_eq!(config.server.log_level, "info");
         assert_eq!(config.sources.len(), 1);
         assert_eq!(config.sources[0].id, "test-source");
     }
@@ -298,8 +298,11 @@ reactions: []
         let loaded_yaml = fs::read_to_string(&config_path).unwrap();
         let loaded_config: DrasiServerCoreConfig = serde_yaml::from_str(&loaded_yaml).unwrap();
 
-        assert_eq!(loaded_config.server.host, config.server.host);
-        assert_eq!(loaded_config.server.port, config.server.port);
+        assert_eq!(loaded_config.server.id, config.server.id);
+        assert_eq!(loaded_config.server.log_level, config.server.log_level);
+        assert_eq!(loaded_config.sources.len(), config.sources.len());
+        assert_eq!(loaded_config.queries.len(), config.queries.len());
+        assert_eq!(loaded_config.reactions.len(), config.reactions.len());        
     }
 
     #[test]

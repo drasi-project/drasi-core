@@ -42,8 +42,9 @@ pub struct DrasiServerCoreConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DrasiServerCoreSettings {
-    pub host: String,
-    pub port: u16,
+    #[serde(default = "default_id")]
+    pub id: String,
+    #[serde(default = "default_log_level")]
     pub log_level: String,
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
@@ -216,14 +217,22 @@ impl DrasiServerCoreConfig {
 impl Default for DrasiServerCoreSettings {
     fn default() -> Self {
         Self {
-            host: "0.0.0.0".to_string(),
-            port: 8080,
+            // Default server ID to a random UUID
+            id: uuid::Uuid::new_v4().to_string(),
             log_level: "info".to_string(),
             max_connections: 1000,
             shutdown_timeout_seconds: 30,
             disable_persistence: false,
         }
     }
+}
+
+fn default_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
 }
 
 fn default_max_connections() -> u32 {

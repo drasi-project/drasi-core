@@ -150,8 +150,7 @@ mod tests {
 
         // Create test server settings
         let server_settings = crate::config::DrasiServerCoreSettings {
-            host: "127.0.0.1".to_string(),
-            port: 8080,
+            id: "test-server".to_string(),
             log_level: "info".to_string(),
             max_connections: 1000,
             shutdown_timeout_seconds: 30,
@@ -204,8 +203,8 @@ mod tests {
             crate::config::DrasiServerCoreConfig::load_from_file(&config_path).unwrap();
 
         // Verify the configuration was saved correctly
-        assert_eq!(loaded_config.server.host, "127.0.0.1");
-        assert_eq!(loaded_config.server.port, 8080);
+        assert_eq!(loaded_config.server.id, "test-server");
+        assert_eq!(loaded_config.server.log_level, "info");
         assert_eq!(loaded_config.sources.len(), 1);
         assert_eq!(loaded_config.sources[0].id, "test-source");
         assert_eq!(loaded_config.queries.len(), 0);
