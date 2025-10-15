@@ -102,6 +102,10 @@ struct PlatformConfig {
     block_ms: u64,
     /// Stream position to start from (">" for new, "0" for all)
     start_id: String,
+    /// Always recreate consumer group on startup (default: false)
+    /// If true, deletes and recreates the consumer group using start_id
+    /// If false, uses existing group position (ignores start_id if group exists)
+    always_create_consumer_group: bool,
     /// Maximum connection retry attempts
     max_retries: usize,
     /// Delay between retries in milliseconds
@@ -118,6 +122,7 @@ impl Default for PlatformConfig {
             batch_size: 10,
             block_ms: 5000,
             start_id: ">".to_string(),
+            always_create_consumer_group: false,
             max_retries: 3,
             retry_delay_ms: 1000,
         }
@@ -210,6 +215,10 @@ impl PlatformSource {
             config.start_id = start_id.to_string();
         }
 
+        if let Some(always_create) = properties.get("always_create_consumer_group").and_then(|v| v.as_bool()) {
+            config.always_create_consumer_group = always_create;
+        }
+
         if let Some(max_retries) = properties.get("max_retries").and_then(|v| v.as_u64()) {
             config.max_retries = max_retries as usize;
         }
@@ -273,18 +282,49 @@ impl PlatformSource {
         unreachable!()
     }
 
-    /// Create consumer group if it doesn't exist
+    /// Create or recreate consumer group based on configuration
     async fn create_consumer_group(
         conn: &mut redis::aio::MultiplexedConnection,
         stream_key: &str,
         consumer_group: &str,
+        start_id: &str,
+        always_create: bool,
     ) -> Result<()> {
+        // Determine the initial position for the consumer group
+        let group_start_id = if start_id == ">" {
+            "$"  // ">" means only new messages, so create group at end
+        } else {
+            start_id  // "0" or specific ID
+        };
+
+        // If always_create is true, delete the existing group first
+        if always_create {
+            info!(
+                "always_create_consumer_group=true, deleting consumer group '{}' if it exists",
+                consumer_group
+            );
+
+            let destroy_result: Result<i64, redis::RedisError> = redis::cmd("XGROUP")
+                .arg("DESTROY")
+                .arg(stream_key)
+                .arg(consumer_group)
+                .query_async(conn)
+                .await;
+
+            match destroy_result {
+                Ok(1) => info!("Successfully deleted consumer group '{}'", consumer_group),
+                Ok(0) => debug!("Consumer group '{}' did not exist", consumer_group),
+                Ok(n) => warn!("Unexpected result from XGROUP DESTROY: {}", n),
+                Err(e) => warn!("Error deleting consumer group (will continue): {}", e),
+            }
+        }
+
         // Try to create the consumer group
         let result: Result<String, redis::RedisError> = redis::cmd("XGROUP")
             .arg("CREATE")
             .arg(stream_key)
             .arg(consumer_group)
-            .arg("0")
+            .arg(group_start_id)
             .arg("MKSTREAM")
             .query_async(conn)
             .await;
@@ -292,16 +332,16 @@ impl PlatformSource {
         match result {
             Ok(_) => {
                 info!(
-                    "Created consumer group '{}' for stream '{}'",
-                    consumer_group, stream_key
+                    "Created consumer group '{}' for stream '{}' at position '{}'",
+                    consumer_group, stream_key, group_start_id
                 );
                 Ok(())
             }
             Err(e) => {
-                // BUSYGROUP error means the group already exists, which is fine
+                // BUSYGROUP error means the group already exists
                 if e.to_string().contains("BUSYGROUP") {
-                    debug!(
-                        "Consumer group '{}' already exists for stream '{}'",
+                    info!(
+                        "Consumer group '{}' already exists for stream '{}', will resume from last position",
                         consumer_group, stream_key
                     );
                     Ok(())
@@ -357,6 +397,8 @@ impl PlatformSource {
                 &mut conn,
                 &platform_config.stream_key,
                 &platform_config.consumer_group,
+                &platform_config.start_id,
+                platform_config.always_create_consumer_group,
             )
             .await
             {
@@ -388,9 +430,8 @@ impl PlatformSource {
             });
 
             // Main consumer loop
-            let current_id = platform_config.start_id.clone();
             loop {
-                // Read from stream
+                // Read from stream using ">" to get next undelivered messages for this consumer group
                 let read_result: Result<StreamReadReply, redis::RedisError> =
                     redis::cmd("XREADGROUP")
                         .arg("GROUP")
@@ -402,7 +443,7 @@ impl PlatformSource {
                         .arg(platform_config.block_ms)
                         .arg("STREAMS")
                         .arg(&platform_config.stream_key)
-                        .arg(&current_id)
+                        .arg(">")  // Always use ">" for consumer group reads
                         .query_async(&mut conn)
                         .await;
 
