@@ -85,7 +85,7 @@ impl ContinuousQuery {
         }
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all, err, level = "debug")]
     pub async fn process_source_change(
         &self,
         change: SourceChange,
@@ -161,7 +161,7 @@ impl ContinuousQuery {
         Ok(result)
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all, err, level = "debug")]
     async fn build_solution_changes(
         &self,
         base_variables: &QueryVariables,
@@ -449,7 +449,7 @@ impl ContinuousQuery {
         Ok(true)
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all, err, level = "debug")]
     async fn project_solution(
         &self,
         part_context: QueryPartEvaluationContext,
@@ -490,7 +490,7 @@ impl ContinuousQuery {
         Ok(result.into_iter().map(|(ctx, _)| ctx).collect())
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all, err, level = "debug")]
     async fn execute_source_middleware(
         &self,
         change: SourceChange,
