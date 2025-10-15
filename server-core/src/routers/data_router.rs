@@ -17,13 +17,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
-use crate::channels::{SourceChangeReceiver, SourceChangeSender, SourceEventReceiver, SourceEventSender, SourceEvent};
+use crate::channels::{SourceEventReceiver, SourceEventSender, SourceEvent};
 
 /// Routes data changes from sources to subscribed queries
 pub struct DataRouter {
-    /// Map of query id to its sender channel (legacy)
-    query_senders: Arc<RwLock<HashMap<String, SourceChangeSender>>>,
-    /// Map of query id to its unified event sender channel
+    /// Map of query id to its event sender channel
     query_event_senders: Arc<RwLock<HashMap<String, SourceEventSender>>>,
     /// Map of source id to list of query ids that subscribe to it
     source_subscriptions: Arc<RwLock<HashMap<String, Vec<String>>>>,
@@ -32,7 +30,6 @@ pub struct DataRouter {
 impl Default for DataRouter {
     fn default() -> Self {
         Self {
-            query_senders: Arc::new(RwLock::new(HashMap::new())),
             query_event_senders: Arc::new(RwLock::new(HashMap::new())),
             source_subscriptions: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -49,7 +46,7 @@ impl DataRouter {
         &self,
         query_id: String,
         source_ids: Vec<String>,
-    ) -> SourceChangeReceiver {
+    ) -> SourceEventReceiver {
         let start_time = std::time::Instant::now();
         info!(
             "Starting to add subscription for query '{}' to sources: {:?}",
@@ -57,7 +54,7 @@ impl DataRouter {
         );
 
         // Check if query already has a subscription
-        let existing_sender = self.query_senders.read().await.contains_key(&query_id);
+        let existing_sender = self.query_event_senders.read().await.contains_key(&query_id);
         if existing_sender {
             warn!("Query '{}' already has a subscription. Creating new subscription will disconnect the old one.", query_id);
         }
@@ -65,7 +62,7 @@ impl DataRouter {
         let (tx, rx) = mpsc::channel(1000);
 
         // Store the sender for this query (overwrites existing if any)
-        self.query_senders
+        self.query_event_senders
             .write()
             .await
             .insert(query_id.clone(), tx);
@@ -107,7 +104,7 @@ impl DataRouter {
     /// Remove a query subscription
     pub async fn remove_query_subscription(&self, query_id: &str) {
         // Remove the sender
-        self.query_senders.write().await.remove(query_id);
+        self.query_event_senders.write().await.remove(query_id);
 
         // Remove from all source subscriptions
         let mut subscriptions = self.source_subscriptions.write().await;
@@ -118,115 +115,9 @@ impl DataRouter {
         info!("Removed subscription for query '{}'", query_id);
     }
 
-    /// Add a query subscription to specific sources (unified events)
-    pub async fn add_query_event_subscription(
-        &self,
-        query_id: String,
-        source_ids: Vec<String>,
-    ) -> SourceEventReceiver {
-        let start_time = std::time::Instant::now();
-        info!(
-            "Starting to add unified event subscription for query '{}' to sources: {:?}",
-            query_id, source_ids
-        );
-
-        // Check if query already has a subscription
-        let existing_sender = self.query_event_senders.read().await.contains_key(&query_id);
-        if existing_sender {
-            warn!("Query '{}' already has a unified event subscription. Creating new subscription will disconnect the old one.", query_id);
-        }
-
-        let (tx, rx) = mpsc::channel(1000);
-
-        // Store the sender for this query (overwrites existing if any)
-        self.query_event_senders
-            .write()
-            .await
-            .insert(query_id.clone(), tx);
-        info!("Unified event channel created and sender stored for query '{}'", query_id);
-
-        // Update source subscriptions
-        let mut subscriptions = self.source_subscriptions.write().await;
-        for source_id in &source_ids {
-            let query_list = subscriptions
-                .entry(source_id.clone())
-                .or_insert_with(Vec::new);
-
-            // Only add if not already subscribed
-            if !query_list.contains(&query_id) {
-                query_list.push(query_id.clone());
-                info!(
-                    "Query '{}' successfully subscribed to source '{}' (unified events)",
-                    query_id, source_id
-                );
-            } else {
-                debug!(
-                    "Query '{}' already subscribed to source '{}'",
-                    query_id, source_id
-                );
-            }
-        }
-
-        let elapsed = start_time.elapsed();
-        info!(
-            "Completed unified event subscription for query '{}' to {} sources in {:?}",
-            query_id,
-            source_ids.len(),
-            elapsed
-        );
-
-        rx
-    }
-
-    /// Start the router that receives source changes and forwards them to subscribed queries
-    pub async fn start(&self, mut source_change_rx: SourceChangeReceiver) {
+    /// Start the router that receives source events and forwards them to subscribed queries
+    pub async fn start(&self, mut source_event_rx: SourceEventReceiver) {
         info!("Starting data router");
-
-        while let Some(source_event) = source_change_rx.recv().await {
-            let source_id = &source_event.source_id;
-            debug!("Data router received change from source '{}'", source_id);
-
-            // Get list of queries subscribed to this source
-            let subscriptions = self.source_subscriptions.read().await;
-            if let Some(query_ids) = subscriptions.get(source_id) {
-                debug!(
-                    "[DATA-FLOW] Source '{}' has {} subscribed queries",
-                    source_id,
-                    query_ids.len()
-                );
-                let senders = self.query_senders.read().await;
-
-                for query_id in query_ids {
-                    if let Some(sender) = senders.get(query_id) {
-                        debug!(
-                            "[DATA-FLOW] Sending change from source '{}' to query '{}'",
-                            source_id, query_id
-                        );
-                        // Clone the source event for each query
-                        match sender.send(source_event.clone()).await {
-                            Ok(_) => {
-                                debug!(
-                                    "Routed change from source '{}' to query '{}'",
-                                    source_id, query_id
-                                );
-                            }
-                            Err(e) => {
-                                error!("Failed to send change to query '{}': {}", query_id, e);
-                            }
-                        }
-                    }
-                }
-            } else {
-                debug!("No queries subscribed to source '{}'", source_id);
-            }
-        }
-
-        info!("Data router stopped");
-    }
-
-    /// Start the router for unified events (SourceEvent)
-    pub async fn start_unified(&self, mut source_event_rx: SourceEventReceiver) {
-        info!("Starting data router (unified events)");
 
         while let Some(source_event_wrapper) = source_event_rx.recv().await {
             let source_id = &source_event_wrapper.source_id;
@@ -276,7 +167,7 @@ impl DataRouter {
             }
         }
 
-        info!("Data router stopped (unified events)");
+        info!("Data router stopped");
     }
 }
 
@@ -289,7 +180,7 @@ mod tests {
         let router = DataRouter::new();
 
         // Verify initial state
-        let senders = router.query_senders.read().await;
+        let senders = router.query_event_senders.read().await;
         let subscriptions = router.source_subscriptions.read().await;
 
         assert!(senders.is_empty());
@@ -305,7 +196,7 @@ mod tests {
             .await;
 
         // Verify query sender is stored
-        let senders = router.query_senders.read().await;
+        let senders = router.query_event_senders.read().await;
         assert!(senders.contains_key("query1"));
 
         // Verify source subscription is recorded
@@ -348,13 +239,13 @@ mod tests {
             .await;
 
         // Verify subscription exists
-        assert!(router.query_senders.read().await.contains_key("query1"));
+        assert!(router.query_event_senders.read().await.contains_key("query1"));
 
         // Remove subscription
         router.remove_query_subscription("query1").await;
 
         // Verify removal
-        let senders = router.query_senders.read().await;
+        let senders = router.query_event_senders.read().await;
         assert!(!senders.contains_key("query1"));
     }
 }

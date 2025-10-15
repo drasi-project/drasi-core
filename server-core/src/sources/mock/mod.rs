@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::sources::Publisher;
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_core::models::{
@@ -25,14 +24,14 @@ use tokio::sync::RwLock;
 
 use crate::channels::*;
 use crate::config::SourceConfig;
-use crate::sources::{ChannelPublisher, Source};
+use crate::sources::Source;
 use crate::utils::*;
 
 /// Mock source that runs as an internal tokio task
 pub struct MockSource {
     config: SourceConfig,
     status: Arc<RwLock<ComponentStatus>>,
-    source_change_tx: SourceChangeSender,
+    source_event_tx: SourceEventSender,
     event_tx: ComponentEventSender,
     task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 }
@@ -40,13 +39,13 @@ pub struct MockSource {
 impl MockSource {
     pub fn new(
         config: SourceConfig,
-        source_change_tx: SourceChangeSender,
+        source_event_tx: SourceEventSender,
         event_tx: ComponentEventSender,
     ) -> Self {
         Self {
             config,
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            source_change_tx,
+            source_event_tx,
             event_tx,
             task_handle: Arc::new(RwLock::new(None)),
         }
@@ -72,11 +71,9 @@ impl Source for MockSource {
             error!("Failed to send component event: {}", e);
         }
 
-        // Create publisher
-        let publisher = Arc::new(ChannelPublisher {
-            source_change_tx: self.source_change_tx.clone(),
-            source_id: self.config.id.clone(),
-        });
+        // Get source_event_tx for publishing
+        let source_event_tx = self.source_event_tx.clone();
+        let source_id = self.config.id.clone();
 
         // Get configuration
         let data_type = self
@@ -250,7 +247,13 @@ impl Source for MockSource {
                     }
                 };
 
-                if let Err(e) = publisher.publish(source_change).await {
+                let wrapper = SourceEventWrapper {
+                    source_id: source_id.clone(),
+                    event: SourceEvent::Change(source_change),
+                    timestamp: chrono::Utc::now(),
+                };
+
+                if let Err(e) = source_event_tx.send(wrapper).await {
                     error!("Failed to publish change: {}", e);
                     break;
                 }

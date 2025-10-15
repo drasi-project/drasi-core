@@ -27,7 +27,8 @@ use super::protocol::BackendMessage;
 use super::types::{StandbyStatusUpdate, WalMessage};
 use super::PostgresReplicationConfig;
 use crate::channels::{
-    ComponentEventSender, ComponentStatus, SourceChangeEvent, SourceChangeSender,
+    ComponentEventSender, ComponentStatus, SourceEvent, SourceEventSender,
+    SourceEventWrapper,
 };
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 
@@ -36,7 +37,7 @@ pub struct ReplicationStream {
     source_id: String,
     connection: Option<ReplicationConnection>,
     decoder: PgOutputDecoder,
-    source_change_tx: SourceChangeSender,
+    source_event_tx: SourceEventSender,
     #[allow(dead_code)]
     event_tx: ComponentEventSender,
     status: Arc<RwLock<ComponentStatus>>,
@@ -59,7 +60,7 @@ impl ReplicationStream {
     pub fn new(
         config: PostgresReplicationConfig,
         source_id: String,
-        source_change_tx: SourceChangeSender,
+        source_event_tx: SourceEventSender,
         event_tx: ComponentEventSender,
         status: Arc<RwLock<ComponentStatus>>,
     ) -> Self {
@@ -68,7 +69,7 @@ impl ReplicationStream {
             source_id,
             connection: None,
             decoder: PgOutputDecoder::new(),
-            source_change_tx,
+            source_event_tx,
             event_tx,
             status,
             current_lsn: 0,
@@ -352,13 +353,12 @@ impl ReplicationStream {
                 if let Some(changes) = self.pending_transaction.take() {
                     // Send all changes in the transaction
                     for change in changes {
-                        self.source_change_tx
-                            .send(SourceChangeEvent {
-                                source_id: self.source_id.clone(),
-                                change,
-                                timestamp: chrono::Utc::now(),
-                            })
-                            .await?;
+                        let wrapper = SourceEventWrapper {
+                            source_id: self.source_id.clone(),
+                            event: SourceEvent::Change(change),
+                            timestamp: chrono::Utc::now(),
+                        };
+                        self.source_event_tx.send(wrapper).await?;
                     }
                     debug!(
                         "Committed transaction {} with LSN {:x}",
@@ -388,13 +388,12 @@ impl ReplicationStream {
                         tx.push(change);
                     } else {
                         // No transaction context, send immediately
-                        self.source_change_tx
-                            .send(SourceChangeEvent {
-                                source_id: self.source_id.clone(),
-                                change,
-                                timestamp: chrono::Utc::now(),
-                            })
-                            .await?;
+                        let wrapper = SourceEventWrapper {
+                            source_id: self.source_id.clone(),
+                            event: SourceEvent::Change(change),
+                            timestamp: chrono::Utc::now(),
+                        };
+                        self.source_event_tx.send(wrapper).await?;
                     }
                 }
             }
@@ -410,13 +409,12 @@ impl ReplicationStream {
                     if let Some(tx) = &mut self.pending_transaction {
                         tx.push(change);
                     } else {
-                        self.source_change_tx
-                            .send(SourceChangeEvent {
-                                source_id: self.source_id.clone(),
-                                change,
-                                timestamp: chrono::Utc::now(),
-                            })
-                            .await?;
+                        let wrapper = SourceEventWrapper {
+                            source_id: self.source_id.clone(),
+                            event: SourceEvent::Change(change),
+                            timestamp: chrono::Utc::now(),
+                        };
+                        self.source_event_tx.send(wrapper).await?;
                     }
                 }
             }
@@ -428,13 +426,12 @@ impl ReplicationStream {
                     if let Some(tx) = &mut self.pending_transaction {
                         tx.push(change);
                     } else {
-                        self.source_change_tx
-                            .send(SourceChangeEvent {
-                                source_id: self.source_id.clone(),
-                                change,
-                                timestamp: chrono::Utc::now(),
-                            })
-                            .await?;
+                        let wrapper = SourceEventWrapper {
+                            source_id: self.source_id.clone(),
+                            event: SourceEvent::Change(change),
+                            timestamp: chrono::Utc::now(),
+                        };
+                        self.source_event_tx.send(wrapper).await?;
                     }
                 }
             }

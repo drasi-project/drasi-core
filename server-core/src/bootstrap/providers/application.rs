@@ -22,7 +22,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::bootstrap::{BootstrapContext, BootstrapProvider};
-use crate::channels::{BootstrapRequest, SourceChangeEvent};
+use crate::channels::{BootstrapRequest, SourceEvent, SourceEventWrapper};
 
 /// Bootstrap provider for application sources that replays stored insert events
 pub struct ApplicationBootstrapProvider {
@@ -125,13 +125,13 @@ impl BootstrapProvider for ApplicationBootstrapProvider {
         for change in bootstrap_data.iter() {
             // Filter by requested labels
             if self.matches_labels(change, &request) {
-                let event = SourceChangeEvent {
+                let wrapper = SourceEventWrapper {
                     source_id: context.source_id.clone(),
-                    change: change.clone(),
+                    event: SourceEvent::Change(change.clone()),
                     timestamp: chrono::Utc::now(),
                 };
 
-                if let Err(e) = context.source_change_tx.send(event).await {
+                if let Err(e) = context.source_event_tx.send(wrapper).await {
                     error!("Failed to send bootstrap event: {}", e);
                     break;
                 }

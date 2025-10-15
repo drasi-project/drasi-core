@@ -66,7 +66,7 @@ fn default_ssl_mode() -> String {
 pub struct PostgresReplicationSource {
     config: SourceConfig,
     status: Arc<RwLock<ComponentStatus>>,
-    source_change_tx: SourceChangeSender,
+    source_event_tx: SourceEventSender,
     event_tx: ComponentEventSender,
     task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     table_primary_keys: Arc<RwLock<HashMap<String, Vec<String>>>>,
@@ -75,13 +75,13 @@ pub struct PostgresReplicationSource {
 impl PostgresReplicationSource {
     pub fn new(
         config: SourceConfig,
-        source_change_tx: SourceChangeSender,
+        source_event_tx: SourceEventSender,
         event_tx: ComponentEventSender,
     ) -> Self {
         Self {
             config,
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            source_change_tx,
+            source_event_tx,
             event_tx,
             task_handle: Arc::new(RwLock::new(None)),
             table_primary_keys: Arc::new(RwLock::new(HashMap::new())),
@@ -175,7 +175,7 @@ impl Source for PostgresReplicationSource {
 
         let config = self.parse_config()?;
         let source_id = self.config.id.clone();
-        let source_change_tx = self.source_change_tx.clone();
+        let source_event_tx = self.source_event_tx.clone();
         let event_tx = self.event_tx.clone();
         let status_clone = self.status.clone();
         let primary_keys = self.table_primary_keys.clone();
@@ -184,7 +184,7 @@ impl Source for PostgresReplicationSource {
             if let Err(e) = run_replication(
                 source_id.clone(),
                 config,
-                source_change_tx,
+                source_event_tx,
                 event_tx.clone(),
                 status_clone.clone(),
                 primary_keys,
@@ -264,7 +264,7 @@ impl Source for PostgresReplicationSource {
 async fn run_replication(
     source_id: String,
     config: PostgresReplicationConfig,
-    source_change_tx: SourceChangeSender,
+    source_event_tx: SourceEventSender,
     event_tx: ComponentEventSender,
     status: Arc<RwLock<ComponentStatus>>,
     table_primary_keys: Arc<RwLock<HashMap<String, Vec<String>>>>,
@@ -272,7 +272,7 @@ async fn run_replication(
     info!("Starting replication for source {}", source_id);
 
     let mut stream =
-        stream::ReplicationStream::new(config, source_id, source_change_tx, event_tx, status);
+        stream::ReplicationStream::new(config, source_id, source_event_tx, event_tx, status);
 
     // Set the primary keys from bootstrap
     stream.set_primary_keys(table_primary_keys);

@@ -23,67 +23,17 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
 use crate::channels::{
-    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, SourceChangeSender,
-    SourceControl, ControlOperation, SourceEventSender, SourceEvent, SourceEventWrapper,
+    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, ControlOperation,
+    SourceControl, SourceEvent, SourceEventSender, SourceEventWrapper,
 };
 use crate::config::SourceConfig;
 use crate::sources::manager::convert_json_to_element_properties;
-use crate::sources::{Publisher, Source};
+use crate::sources::Source;
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 
 #[cfg(test)]
 mod tests;
 
-/// Publisher for sending source changes to internal channels
-struct ChannelPublisher {
-    source_change_tx: SourceChangeSender,
-    source_id: String,
-}
-
-#[async_trait::async_trait]
-impl Publisher for ChannelPublisher {
-    async fn publish(
-        &self,
-        change: SourceChange,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        use crate::channels::SourceChangeEvent;
-
-        let event = SourceChangeEvent {
-            source_id: self.source_id.clone(),
-            change,
-            timestamp: chrono::Utc::now(),
-        };
-
-        self.source_change_tx
-            .send(event)
-            .await
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
-    }
-}
-
-/// Publisher for sending unified source events to internal channels
-struct EventPublisher {
-    source_event_tx: SourceEventSender,
-    source_id: String,
-}
-
-impl EventPublisher {
-    async fn publish_event(
-        &self,
-        event: SourceEvent,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let wrapper = SourceEventWrapper {
-            source_id: self.source_id.clone(),
-            event,
-            timestamp: chrono::Utc::now(),
-        };
-
-        self.source_event_tx
-            .send(wrapper)
-            .await
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
-    }
-}
 
 /// Configuration for the platform source
 #[derive(Debug, Clone)]
@@ -133,41 +83,22 @@ impl Default for PlatformConfig {
 pub struct PlatformSource {
     config: SourceConfig,
     status: Arc<RwLock<ComponentStatus>>,
-    source_change_tx: SourceChangeSender,
-    source_event_tx: Option<SourceEventSender>,
+    source_event_tx: SourceEventSender,
     event_tx: ComponentEventSender,
     task_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
 }
 
 impl PlatformSource {
-    /// Create a new platform source (legacy - uses SourceChangeSender)
+    /// Create a new platform source
     pub fn new(
         config: SourceConfig,
-        source_change_tx: SourceChangeSender,
-        event_tx: ComponentEventSender,
-    ) -> Self {
-        Self {
-            config,
-            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            source_change_tx,
-            source_event_tx: None,
-            event_tx,
-            task_handle: Arc::new(RwLock::new(None)),
-        }
-    }
-
-    /// Create a new platform source with unified event sender
-    pub fn new_with_unified_events(
-        config: SourceConfig,
-        source_change_tx: SourceChangeSender,
         source_event_tx: SourceEventSender,
         event_tx: ComponentEventSender,
     ) -> Self {
         Self {
             config,
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            source_change_tx,
-            source_event_tx: Some(source_event_tx),
+            source_event_tx,
             event_tx,
             task_handle: Arc::new(RwLock::new(None)),
         }
@@ -356,8 +287,7 @@ impl PlatformSource {
     async fn start_consumer_task(
         source_id: String,
         platform_config: PlatformConfig,
-        source_change_tx: SourceChangeSender,
-        source_event_tx: Option<SourceEventSender>,
+        source_event_tx: SourceEventSender,
         event_tx: ComponentEventSender,
         status: Arc<RwLock<ComponentStatus>>,
     ) -> JoinHandle<()> {
@@ -416,18 +346,7 @@ impl PlatformSource {
                 return;
             }
 
-            // Create publishers
-            let legacy_publisher = Arc::new(ChannelPublisher {
-                source_change_tx,
-                source_id: source_id.clone(),
-            });
-
-            let unified_publisher = source_event_tx.map(|tx| {
-                Arc::new(EventPublisher {
-                    source_event_tx: tx,
-                    source_id: source_id.clone(),
-                })
-            });
+            // No need for separate publishers - use source_event_tx directly
 
             // Main consumer loop
             loop {
@@ -470,26 +389,24 @@ impl PlatformSource {
 
                                                         match transform_control_event(cloud_event, &control_type) {
                                                             Ok(control_events) => {
-                                                                // Publish to unified channel if available
-                                                                if let Some(ref publisher) = unified_publisher {
-                                                                    for control_event in control_events {
-                                                                        let event = SourceEvent::Control(control_event);
-                                                                        if let Err(e) = publisher.publish_event(event).await {
-                                                                            error!(
-                                                                                "Failed to publish control event: {}",
-                                                                                e
-                                                                            );
-                                                                        } else {
-                                                                            debug!(
-                                                                                "Published control event for stream {}",
-                                                                                stream_id.id
-                                                                            );
-                                                                        }
+                                                                // Publish control events
+                                                                for control_event in control_events {
+                                                                    let wrapper = SourceEventWrapper {
+                                                                        source_id: source_id.clone(),
+                                                                        event: SourceEvent::Control(control_event),
+                                                                        timestamp: chrono::Utc::now(),
+                                                                    };
+                                                                    if let Err(e) = source_event_tx.send(wrapper).await {
+                                                                        error!(
+                                                                            "Failed to publish control event: {}",
+                                                                            e
+                                                                        );
+                                                                    } else {
+                                                                        debug!(
+                                                                            "Published control event for stream {}",
+                                                                            stream_id.id
+                                                                        );
                                                                     }
-                                                                } else {
-                                                                    warn!(
-                                                                        "Received control event but unified event channel not available"
-                                                                    );
                                                                 }
                                                             }
                                                             Err(e) => {
@@ -507,39 +424,23 @@ impl PlatformSource {
                                                             &source_id,
                                                         ) {
                                                             Ok(source_changes) => {
-                                                                // Publish to unified channel if available, else legacy
-                                                                if let Some(ref publisher) = unified_publisher {
-                                                                    for source_change in source_changes {
-                                                                        let event = SourceEvent::Change(source_change);
-                                                                        if let Err(e) = publisher.publish_event(event).await {
-                                                                            error!(
-                                                                                "Failed to publish source change: {}",
-                                                                                e
-                                                                            );
-                                                                        } else {
-                                                                            debug!(
-                                                                                "Published source change for event {}",
-                                                                                stream_id.id
-                                                                            );
-                                                                        }
-                                                                    }
-                                                                } else {
-                                                                    // Fall back to legacy publisher
-                                                                    for source_change in source_changes {
-                                                                        if let Err(e) = legacy_publisher
-                                                                            .publish(source_change)
-                                                                            .await
-                                                                        {
-                                                                            error!(
-                                                                                "Failed to publish source change: {}",
-                                                                                e
-                                                                            );
-                                                                        } else {
-                                                                            debug!(
-                                                                                "Published source change for event {}",
-                                                                                stream_id.id
-                                                                            );
-                                                                        }
+                                                                // Publish source changes
+                                                                for source_change in source_changes {
+                                                                    let wrapper = SourceEventWrapper {
+                                                                        source_id: source_id.clone(),
+                                                                        event: SourceEvent::Change(source_change),
+                                                                        timestamp: chrono::Utc::now(),
+                                                                    };
+                                                                    if let Err(e) = source_event_tx.send(wrapper).await {
+                                                                        error!(
+                                                                            "Failed to publish source change: {}",
+                                                                            e
+                                                                        );
+                                                                    } else {
+                                                                        debug!(
+                                                                            "Published source change for event {}",
+                                                                            stream_id.id
+                                                                        );
                                                                     }
                                                                 }
                                                             }
@@ -650,7 +551,6 @@ impl Source for PlatformSource {
         let task = Self::start_consumer_task(
             self.config.id.clone(),
             platform_config,
-            self.source_change_tx.clone(),
             self.source_event_tx.clone(),
             self.event_tx.clone(),
             self.status.clone(),

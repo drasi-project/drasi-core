@@ -23,7 +23,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
 
-use crate::channels::{ComponentStatus, ComponentType, SourceChangeEvent, *};
+use crate::channels::{ComponentStatus, ComponentType, *};
 use crate::config::SourceConfig;
 use crate::sources::Source;
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
@@ -157,7 +157,7 @@ impl ApplicationSourceHandle {
 pub struct ApplicationSource {
     config: SourceConfig,
     status: Arc<RwLock<ComponentStatus>>,
-    change_tx: SourceChangeSender,
+    source_event_tx: SourceEventSender,
     event_tx: ComponentEventSender,
     app_rx: Arc<RwLock<Option<mpsc::Receiver<SourceChange>>>>,
     task_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
@@ -167,7 +167,7 @@ pub struct ApplicationSource {
 impl ApplicationSource {
     pub fn new(
         config: SourceConfig,
-        change_tx: SourceChangeSender,
+        source_event_tx: SourceEventSender,
         event_tx: ComponentEventSender,
     ) -> (Self, ApplicationSourceHandle) {
         let (app_tx, app_rx) = mpsc::channel(1000);
@@ -180,7 +180,7 @@ impl ApplicationSource {
         let source = Self {
             config,
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            change_tx,
+            source_event_tx,
             event_tx,
             app_rx: Arc::new(RwLock::new(Some(app_rx))),
             task_handle: Arc::new(RwLock::new(None)),
@@ -199,7 +199,7 @@ impl ApplicationSource {
             .ok_or_else(|| anyhow::anyhow!("Receiver already taken"))?;
 
         let source_name = self.config.id.clone();
-        let change_tx = self.change_tx.clone();
+        let source_event_tx = self.source_event_tx.clone();
         let event_tx = self.event_tx.clone();
         let status = self.status.clone();
         let bootstrap_data = self.bootstrap_data.clone();
@@ -234,13 +234,13 @@ impl ApplicationSource {
                     bootstrap_data.write().await.push(change.clone());
                 }
 
-                let event = SourceChangeEvent {
+                let wrapper = SourceEventWrapper {
                     source_id: source_name.clone(),
-                    change,
+                    event: SourceEvent::Change(change),
                     timestamp: chrono::Utc::now(),
                 };
 
-                if let Err(e) = change_tx.send(event).await {
+                if let Err(e) = source_event_tx.send(wrapper).await {
                     error!("Failed to send change event: {}", e);
                     break;
                 }

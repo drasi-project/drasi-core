@@ -22,7 +22,7 @@ mod manager_tests {
 
     async fn create_test_manager() -> (
         Arc<SourceManager>,
-        mpsc::Receiver<SourceChangeEvent>,
+        mpsc::Receiver<SourceEventWrapper>,
         mpsc::Receiver<ComponentEvent>,
     ) {
         let (source_tx, source_rx) = mpsc::channel(100);

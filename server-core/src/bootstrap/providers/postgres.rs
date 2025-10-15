@@ -26,7 +26,7 @@ use std::sync::Arc;
 use tokio_postgres::{Client, NoTls, Row, Transaction};
 
 use crate::bootstrap::{BootstrapContext, BootstrapProvider};
-use crate::channels::{BootstrapRequest, SourceChangeEvent};
+use crate::channels::{BootstrapRequest, SourceChangeEvent, SourceEvent, SourceEventWrapper};
 
 /// Bootstrap provider for PostgreSQL sources
 pub struct PostgresBootstrapProvider;
@@ -625,9 +625,14 @@ impl PostgresBootstrapHandler {
         context: &BootstrapContext,
     ) -> Result<()> {
         for event in batch.drain(..) {
+            let wrapper = SourceEventWrapper {
+                source_id: event.source_id,
+                event: SourceEvent::Change(event.change),
+                timestamp: event.timestamp,
+            };
             context
-                .source_change_tx
-                .send(event)
+                .source_event_tx
+                .send(wrapper)
                 .await
                 .map_err(|e| anyhow!("Failed to send bootstrap event: {}", e))?;
         }

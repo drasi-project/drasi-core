@@ -19,7 +19,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_postgres::{Client, NoTls, Row, Transaction};
 
-use crate::channels::{BootstrapRequest, SourceChangeEvent, SourceChangeSender};
+use crate::channels::{
+    BootstrapRequest, SourceChangeEvent, SourceEvent, SourceEventSender, SourceEventWrapper,
+};
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
@@ -30,7 +32,7 @@ use super::PostgresReplicationConfig;
 pub struct BootstrapHandler {
     config: PostgresReplicationConfig,
     source_id: String,
-    source_change_tx: SourceChangeSender,
+    source_event_tx: SourceEventSender,
     /// Stores the LSN at bootstrap time for replication coordination
     pub snapshot_lsn: Arc<RwLock<Option<String>>>,
     /// Stores primary key information for each table
@@ -41,12 +43,12 @@ impl BootstrapHandler {
     pub fn new(
         config: PostgresReplicationConfig,
         source_id: String,
-        source_change_tx: SourceChangeSender,
+        source_event_tx: SourceEventSender,
     ) -> Self {
         Self {
             config,
             source_id,
-            source_change_tx,
+            source_event_tx,
             snapshot_lsn: Arc::new(RwLock::new(None)),
             table_primary_keys: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -534,8 +536,13 @@ impl BootstrapHandler {
     /// Send a batch of changes through the channel
     async fn send_batch(&self, batch: &mut Vec<SourceChangeEvent>) -> Result<()> {
         for event in batch.drain(..) {
-            self.source_change_tx
-                .send(event)
+            let wrapper = SourceEventWrapper {
+                source_id: event.source_id,
+                event: SourceEvent::Change(event.change),
+                timestamp: event.timestamp,
+            };
+            self.source_event_tx
+                .send(wrapper)
                 .await
                 .map_err(|e| anyhow!("Failed to send bootstrap event: {}", e))?;
         }

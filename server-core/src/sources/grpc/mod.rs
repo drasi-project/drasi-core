@@ -40,7 +40,7 @@ use proto::{
 pub struct GrpcSource {
     config: SourceConfig,
     status: Arc<RwLock<ComponentStatus>>,
-    source_change_tx: SourceChangeSender,
+    source_event_tx: SourceEventSender,
     event_tx: ComponentEventSender,
     task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     shutdown_tx: Arc<RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
@@ -49,13 +49,13 @@ pub struct GrpcSource {
 impl GrpcSource {
     pub fn new(
         config: SourceConfig,
-        source_change_tx: SourceChangeSender,
+        source_event_tx: SourceEventSender,
         event_tx: ComponentEventSender,
     ) -> Self {
         Self {
             config,
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            source_change_tx,
+            source_event_tx,
             event_tx,
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
@@ -108,7 +108,7 @@ impl Source for GrpcSource {
         // Create gRPC service
         let service = GrpcSourceService {
             source_id: self.config.id.clone(),
-            source_change_tx: self.source_change_tx.clone(),
+            source_event_tx: self.source_event_tx.clone(),
         };
 
         let svc = SourceServiceServer::new(service);
@@ -210,7 +210,7 @@ impl Source for GrpcSource {
 /// gRPC service implementation
 struct GrpcSourceService {
     source_id: String,
-    source_change_tx: SourceChangeSender,
+    source_event_tx: SourceEventSender,
 }
 
 #[tonic::async_trait]
@@ -224,17 +224,17 @@ impl SourceService for GrpcSourceService {
         if let Some(proto_change) = event_request.event {
             match convert_proto_to_source_change(&proto_change, &self.source_id) {
                 Ok(source_change) => {
-                    let event = SourceChangeEvent {
+                    let wrapper = SourceEventWrapper {
                         source_id: self.source_id.clone(),
-                        change: source_change,
+                        event: SourceEvent::Change(source_change),
                         timestamp: chrono::Utc::now(),
                     };
 
-                    debug!("[{}] Processing gRPC event: {:?}", self.source_id, &event);
+                    debug!("[{}] Processing gRPC event: {:?}", self.source_id, &wrapper);
 
                     // Send to channel
-                    if let Err(e) = self.source_change_tx.send(event).await {
-                        error!("[{}] Failed to send source change: {}", self.source_id, e);
+                    if let Err(e) = self.source_event_tx.send(wrapper).await {
+                        error!("[{}] Failed to send source event: {}", self.source_id, e);
                         return Ok(Response::new(SubmitEventResponse {
                             success: false,
                             message: "Failed to process event".to_string(),
@@ -280,7 +280,7 @@ impl SourceService for GrpcSourceService {
     ) -> Result<Response<Self::StreamEventsStream>, Status> {
         let mut stream = request.into_inner();
         let source_id = self.source_id.clone();
-        let source_change_tx = self.source_change_tx.clone();
+        let source_event_tx = self.source_event_tx.clone();
 
         let (tx, rx) = tokio::sync::mpsc::channel(128);
 
@@ -290,14 +290,14 @@ impl SourceService for GrpcSourceService {
             while let Ok(Some(proto_change)) = stream.message().await {
                 match convert_proto_to_source_change(&proto_change, &source_id) {
                     Ok(source_change) => {
-                        let event = SourceChangeEvent {
+                        let wrapper = SourceEventWrapper {
                             source_id: source_id.clone(),
-                            change: source_change,
+                            event: SourceEvent::Change(source_change),
                             timestamp: chrono::Utc::now(),
                         };
 
-                        if let Err(e) = source_change_tx.send(event).await {
-                            error!("[{}] Failed to send source change: {}", source_id, e);
+                        if let Err(e) = source_event_tx.send(wrapper).await {
+                            error!("[{}] Failed to send source event: {}", source_id, e);
                             let _ = tx
                                 .send(Ok(StreamEventResponse {
                                     success: false,

@@ -20,8 +20,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 // Import real Drasi Source SDK
-use crate::sources::Publisher;
-use drasi_core::models::{ElementPropertyMap, ElementValue, SourceChange};
+use drasi_core::models::{ElementPropertyMap, ElementValue};
 use ordered_float::OrderedFloat;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -82,73 +81,22 @@ pub fn convert_json_to_element_properties(
     Ok(property_map)
 }
 
-// Publisher implementation to bridge Drasi SDK to our internal channels
-pub struct ChannelPublisher {
-    pub source_change_tx: SourceChangeSender,
-    pub source_id: String,
-}
-
-impl ChannelPublisher {
-    pub fn new(source_change_tx: SourceChangeSender, source_id: String) -> Self {
-        Self {
-            source_change_tx,
-            source_id,
-        }
-    }
-}
-
-#[async_trait]
-impl Publisher for ChannelPublisher {
-    async fn publish(
-        &self,
-        change: SourceChange,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Wrap in SourceChangeEvent
-        let event = SourceChangeEvent {
-            source_id: self.source_id.clone(),
-            change,
-            timestamp: chrono::Utc::now(),
-        };
-
-        self.source_change_tx.send(event).await.map_err(|e| {
-            Box::new(std::io::Error::new(std::io::ErrorKind::Other, e))
-                as Box<dyn std::error::Error + Send + Sync>
-        })?;
-
-        Ok(())
-    }
-}
-
 pub struct SourceManager {
     sources: Arc<RwLock<HashMap<String, Arc<dyn Source>>>>,
-    source_change_tx: SourceChangeSender,
-    source_event_tx: Option<SourceEventSender>,
+    source_event_tx: SourceEventSender,
     event_tx: ComponentEventSender,
     application_handles: Arc<RwLock<HashMap<String, ApplicationSourceHandle>>>,
 }
 
 impl SourceManager {
-    /// Create a new SourceManager (legacy - uses only SourceChangeSender)
-    pub fn new(source_change_tx: SourceChangeSender, event_tx: ComponentEventSender) -> Self {
-        Self {
-            sources: Arc::new(RwLock::new(HashMap::new())),
-            source_change_tx,
-            source_event_tx: None,
-            event_tx,
-            application_handles: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-
     /// Create a new SourceManager with unified event sender
-    pub fn new_with_unified_events(
-        source_change_tx: SourceChangeSender,
+    pub fn new(
         source_event_tx: SourceEventSender,
         event_tx: ComponentEventSender,
     ) -> Self {
         Self {
             sources: Arc::new(RwLock::new(HashMap::new())),
-            source_change_tx,
-            source_event_tx: Some(source_event_tx),
+            source_event_tx,
             event_tx,
             application_handles: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -162,9 +110,9 @@ impl SourceManager {
         self.application_handles.read().await.get(id).cloned()
     }
 
-    /// Get the source change sender for bootstrap provider registration
-    pub fn get_source_change_sender(&self) -> SourceChangeSender {
-        self.source_change_tx.clone()
+    /// Get the source event sender for bootstrap provider registration
+    pub fn get_source_event_sender(&self) -> SourceEventSender {
+        self.source_event_tx.clone()
     }
 
     pub async fn add_source(&self, config: SourceConfig) -> Result<()> {
@@ -206,45 +154,33 @@ impl SourceManager {
             // Internal Rust sources running as tokio tasks
             "mock" => Arc::new(MockSource::new(
                 config.clone(),
-                self.source_change_tx.clone(),
+                self.source_event_tx.clone(),
                 self.event_tx.clone(),
             )),
             "postgres" => Arc::new(super::PostgresReplicationSource::new(
                 config.clone(),
-                self.source_change_tx.clone(),
+                self.source_event_tx.clone(),
                 self.event_tx.clone(),
             )),
             "http" => Arc::new(HttpSource::new(
                 config.clone(),
-                self.source_change_tx.clone(),
+                self.source_event_tx.clone(),
                 self.event_tx.clone(),
             )),
             "grpc" => Arc::new(GrpcSource::new(
                 config.clone(),
-                self.source_change_tx.clone(),
+                self.source_event_tx.clone(),
                 self.event_tx.clone(),
             )),
-            "platform" => {
-                // Use unified events if available
-                if let Some(source_event_tx) = self.source_event_tx.clone() {
-                    Arc::new(PlatformSource::new_with_unified_events(
-                        config.clone(),
-                        self.source_change_tx.clone(),
-                        source_event_tx,
-                        self.event_tx.clone(),
-                    ))
-                } else {
-                    Arc::new(PlatformSource::new(
-                        config.clone(),
-                        self.source_change_tx.clone(),
-                        self.event_tx.clone(),
-                    ))
-                }
-            }
+            "platform" => Arc::new(PlatformSource::new(
+                config.clone(),
+                self.source_event_tx.clone(),
+                self.event_tx.clone(),
+            )),
             "application" => {
                 let (app_source, handle) = ApplicationSource::new(
                     config.clone(),
-                    self.source_change_tx.clone(),
+                    self.source_event_tx.clone(),
                     self.event_tx.clone(),
                 );
                 // Store the handle for the application to use

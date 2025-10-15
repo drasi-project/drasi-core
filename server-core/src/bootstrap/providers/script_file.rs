@@ -24,7 +24,7 @@ use std::sync::Arc;
 use crate::bootstrap::script_reader::BootstrapScriptReader;
 use crate::bootstrap::script_types::{BootstrapScriptRecord, NodeRecord, RelationRecord};
 use crate::bootstrap::{BootstrapContext, BootstrapProvider};
-use crate::channels::{BootstrapRequest, SourceChangeEvent};
+use crate::channels::{BootstrapRequest, SourceEvent, SourceEventWrapper};
 use crate::sources::manager::convert_json_to_element_properties;
 
 /// Bootstrap provider that reads data from JSONL script files
@@ -145,15 +145,15 @@ impl ScriptFileBootstrapProvider {
 
                         // Send as insert
                         let source_change = SourceChange::Insert { element };
-                        let event = SourceChangeEvent {
+                        let wrapper = SourceEventWrapper {
                             source_id: context.source_id.clone(),
-                            change: source_change,
+                            event: SourceEvent::Change(source_change),
                             timestamp: chrono::Utc::now(),
                         };
 
                         context
-                            .source_change_tx
-                            .send(event)
+                            .source_event_tx
+                            .send(wrapper)
                             .await
                             .map_err(|e| anyhow!("Failed to send node: {}", e))?;
 
@@ -174,15 +174,15 @@ impl ScriptFileBootstrapProvider {
 
                         // Send as insert
                         let source_change = SourceChange::Insert { element };
-                        let event = SourceChangeEvent {
+                        let wrapper = SourceEventWrapper {
                             source_id: context.source_id.clone(),
-                            change: source_change,
+                            event: SourceEvent::Change(source_change),
                             timestamp: chrono::Utc::now(),
                         };
 
                         context
-                            .source_change_tx
-                            .send(event)
+                            .source_event_tx
+                            .send(wrapper)
                             .await
                             .map_err(|e| anyhow!("Failed to send relation: {}", e))?;
 

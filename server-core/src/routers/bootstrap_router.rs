@@ -20,7 +20,7 @@ use tokio::sync::RwLock;
 use crate::bootstrap::{
     BootstrapContext, BootstrapProvider, BootstrapProviderConfig, BootstrapProviderFactory,
 };
-use crate::channels::{BootstrapRequestReceiver, BootstrapResponseSender, SourceChangeSender};
+use crate::channels::{BootstrapRequestReceiver, BootstrapResponseSender, SourceEventSender};
 use crate::config::SourceConfig;
 
 /// Routes bootstrap requests from queries to providers and manages bootstrap state
@@ -66,13 +66,13 @@ impl BootstrapRouter {
         server_id: String,
         source_config: Arc<SourceConfig>,
         provider_config: Option<BootstrapProviderConfig>,
-        source_change_tx: SourceChangeSender,
+        source_event_tx: SourceEventSender,
     ) -> anyhow::Result<()> {
         let source_id = source_config.id.clone();
 
         // Create the bootstrap context
         let context =
-            BootstrapContext::new(server_id, source_config.clone(), source_change_tx, source_id.clone());
+            BootstrapContext::new(server_id, source_config.clone(), source_event_tx, source_id.clone());
 
         // Create the provider (or use no-op if no config provided)
         let provider = match provider_config {

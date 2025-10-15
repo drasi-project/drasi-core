@@ -96,7 +96,7 @@ fn convert_variable_value_to_json(value: &VariableValue) -> serde_json::Value {
 
 #[async_trait]
 pub trait Query: Send + Sync {
-    async fn start(&self, source_change_rx: SourceChangeReceiver) -> Result<()>;
+    async fn start(&self, source_event_rx: SourceEventReceiver) -> Result<()>;
     async fn stop(&self) -> Result<()>;
     async fn status(&self) -> ComponentStatus;
     fn get_config(&self) -> &QueryConfig;
@@ -152,7 +152,7 @@ impl DrasiQuery {
 
 #[async_trait]
 impl Query for DrasiQuery {
-    async fn start(&self, mut source_change_rx: SourceChangeReceiver) -> Result<()> {
+    async fn start(&self, mut source_event_rx: SourceEventReceiver) -> Result<()> {
         log_component_start("Query", &self.config.id);
 
         *self.status.write().await = ComponentStatus::Starting;
@@ -327,24 +327,37 @@ impl Query for DrasiQuery {
         let handle = tokio::spawn(async move {
             info!("Starting Drasi continuous query processing: {}", query_str);
 
-            while let Some(source_event) = source_change_rx.recv().await {
+            while let Some(source_event_wrapper) = source_event_rx.recv().await {
                 // Filter events based on configured sources
-                if !source_filter.contains(&source_event.source_id) {
+                if !source_filter.contains(&source_event_wrapper.source_id) {
                     debug!(
                         "Query '{}' ignoring event from source '{}' (not in filter: {:?})",
-                        query_id, source_event.source_id, source_filter
+                        query_id, source_event_wrapper.source_id, source_filter
                     );
                     continue;
                 }
 
+                // Extract the SourceChange from the SourceEvent
+                // Skip control messages - queries only process data changes
+                let source_change = match &source_event_wrapper.event {
+                    SourceEvent::Change(change) => change.clone(),
+                    SourceEvent::Control(_) => {
+                        debug!(
+                            "Query '{}' ignoring control event from source '{}'",
+                            query_id, source_event_wrapper.source_id
+                        );
+                        continue;
+                    }
+                };
+
                 debug!(
                     "Query '{}' processing change from source '{}'",
-                    query_id, source_event.source_id
+                    query_id, source_event_wrapper.source_id
                 );
 
                 // Process the change through the actual Drasi continuous query
                 match continuous_query
-                    .process_source_change(source_event.change)
+                    .process_source_change(source_change)
                     .await
                 {
                     Ok(results) => {
@@ -458,7 +471,7 @@ impl Query for DrasiQuery {
                                     let mut meta = HashMap::new();
                                     meta.insert(
                                         "source_id".to_string(),
-                                        serde_json::Value::String(source_event.source_id.clone()),
+                                        serde_json::Value::String(source_event_wrapper.source_id.clone()),
                                     );
                                     meta.insert(
                                         "query".to_string(),
@@ -643,13 +656,13 @@ impl QueryManager {
     pub async fn start_query(
         &self,
         id: String,
-        source_change_rx: SourceChangeReceiver,
+        source_event_rx: SourceEventReceiver,
     ) -> Result<()> {
         let queries = self.queries.read().await;
         if let Some(query) = queries.get(&id) {
             let status = query.status().await;
             is_operation_valid(&status, &Operation::Start).map_err(|e| anyhow::anyhow!(e))?;
-            query.start(source_change_rx).await?;
+            query.start(source_event_rx).await?;
         } else {
             return Err(anyhow::anyhow!("Query not found: {}", id));
         }

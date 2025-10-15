@@ -53,8 +53,7 @@ impl DrasiServerCore {
     pub fn new(config: Arc<RuntimeConfig>) -> Self {
         let (channels, receivers) = EventChannels::new();
 
-        let source_manager = Arc::new(SourceManager::new_with_unified_events(
-            channels.source_change_tx.clone(),
+        let source_manager = Arc::new(SourceManager::new(
             channels.source_event_tx.clone(),
             channels.component_event_tx.clone(),
         ));
@@ -268,18 +267,11 @@ impl DrasiServerCore {
                 }
             });
 
-            // Start data router (legacy)
-            let source_change_rx = receivers.source_change_rx;
-            let data_router_legacy = self.data_router.clone();
-            tokio::spawn(async move {
-                data_router_legacy.start(source_change_rx).await;
-            });
-
-            // Start unified data router
+            // Start data router
             let source_event_rx = receivers.source_event_rx;
-            let data_router_unified = self.data_router.clone();
+            let data_router = self.data_router.clone();
             tokio::spawn(async move {
-                data_router_unified.start_unified(source_event_rx).await;
+                data_router.start(source_event_rx).await;
             });
 
             // Start subscription router
@@ -314,14 +306,14 @@ impl DrasiServerCore {
             .await?;
 
         // Register bootstrap provider with bootstrap router
-        let source_change_tx = self.source_manager.get_source_change_sender();
+        let source_event_tx = self.source_manager.get_source_event_sender();
         if let Err(e) = self
             .bootstrap_router
             .register_provider(
                 self.config.server.id.clone(),
                 source_config_arc,
                 bootstrap_provider_config,
-                source_change_tx,
+                source_event_tx,
             )
             .await
         {

@@ -107,7 +107,7 @@ pub mod mock_helpers {
     use tokio::sync::mpsc;
 
     /// Creates a test channel pair for source changes
-    pub fn create_test_source_change_channel() -> (SourceChangeSender, SourceChangeReceiver) {
+    pub fn create_test_source_change_channel() -> (SourceEventSender, SourceEventReceiver) {
         mpsc::channel(100)
     }
 

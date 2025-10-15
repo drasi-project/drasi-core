@@ -103,8 +103,6 @@ pub enum ControlMessage {
     Shutdown,
 }
 
-pub type SourceChangeReceiver = mpsc::Receiver<SourceChangeEvent>;
-pub type SourceChangeSender = mpsc::Sender<SourceChangeEvent>;
 pub type SourceEventReceiver = mpsc::Receiver<SourceEventWrapper>;
 pub type SourceEventSender = mpsc::Sender<SourceEventWrapper>;
 pub type QueryResultReceiver = mpsc::Receiver<QueryResult>;
@@ -143,7 +141,6 @@ pub type BootstrapResponseReceiver = mpsc::Receiver<BootstrapResponse>;
 pub type BootstrapResponseSender = mpsc::Sender<BootstrapResponse>;
 
 pub struct EventChannels {
-    pub source_change_tx: SourceChangeSender,
     pub source_event_tx: SourceEventSender,
     pub query_result_tx: QueryResultSender,
     pub component_event_tx: ComponentEventSender,
@@ -154,7 +151,6 @@ pub struct EventChannels {
 }
 
 pub struct EventReceivers {
-    pub source_change_rx: SourceChangeReceiver,
     pub source_event_rx: SourceEventReceiver,
     pub query_result_rx: QueryResultReceiver,
     pub component_event_rx: ComponentEventReceiver,
@@ -166,7 +162,6 @@ pub struct EventReceivers {
 
 impl EventChannels {
     pub fn new() -> (Self, EventReceivers) {
-        let (source_change_tx, source_change_rx) = mpsc::channel(1000);
         let (source_event_tx, source_event_rx) = mpsc::channel(1000);
         let (query_result_tx, query_result_rx) = mpsc::channel(1000);
         let (component_event_tx, component_event_rx) = mpsc::channel(1000);
@@ -175,7 +170,6 @@ impl EventChannels {
         let (bootstrap_response_tx, bootstrap_response_rx) = mpsc::channel(100);
 
         let channels = Self {
-            source_change_tx,
             source_event_tx,
             query_result_tx,
             component_event_tx,
@@ -185,7 +179,6 @@ impl EventChannels {
         };
 
         let receivers = EventReceivers {
-            source_change_rx,
             source_event_rx,
             query_result_rx,
             component_event_rx,

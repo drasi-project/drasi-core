@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::bootstrap::{BootstrapContext, BootstrapProvider};
-use crate::channels::{BootstrapRequest, SourceChangeEvent};
+use crate::channels::{BootstrapRequest, SourceEvent, SourceEventWrapper};
 use crate::sources::manager::convert_json_to_element_properties;
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 
@@ -279,15 +279,15 @@ impl BootstrapProvider for PlatformBootstrapProvider {
             let source_change = SourceChange::Insert { element };
 
             // Send via channel
-            let event = SourceChangeEvent {
+            let wrapper = SourceEventWrapper {
                 source_id: context.source_id.clone(),
-                change: source_change,
+                event: SourceEvent::Change(source_change),
                 timestamp: Utc::now(),
             };
 
             context
-                .source_change_tx
-                .send(event)
+                .source_event_tx
+                .send(wrapper)
                 .await
                 .context("Failed to send bootstrap element via channel")?;
 

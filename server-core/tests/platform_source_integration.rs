@@ -23,7 +23,7 @@ mod test_support;
 
 use anyhow::Result;
 use drasi_core::models::SourceChange;
-use drasi_server_core::channels::{ComponentEvent, SourceChangeEvent};
+use drasi_server_core::channels::{ComponentEvent, SourceEvent, SourceEventWrapper};
 use drasi_server_core::config::SourceConfig;
 use drasi_server_core::sources::platform::PlatformSource;
 use drasi_server_core::sources::Source;
@@ -40,7 +40,7 @@ fn create_test_source(
     stream_key: &str,
 ) -> (
     PlatformSource,
-    mpsc::Receiver<SourceChangeEvent>,
+    mpsc::Receiver<SourceEventWrapper>,
     mpsc::Receiver<ComponentEvent>,
 ) {
     let (source_change_tx, source_change_rx) = mpsc::channel(100);
@@ -90,18 +90,18 @@ async fn test_basic_insert_event_consumption() -> Result<()> {
     publish_platform_event(&redis_url, stream_key, event).await?;
 
     // Wait for source change
-    let change_event = timeout(Duration::from_secs(5), source_change_rx.recv())
+    let wrapper = timeout(Duration::from_secs(5), source_change_rx.recv())
         .await?
         .expect("Should receive source change");
 
     // Verify
-    assert_eq!(change_event.source_id, "test-source");
-    match change_event.change {
-        SourceChange::Insert { element } => {
+    assert_eq!(wrapper.source_id, "test-source");
+    match wrapper.event {
+        SourceEvent::Change(SourceChange::Insert { element }) => {
             assert_eq!(element.get_reference().element_id.as_ref(), "1");
             assert_eq!(element.get_metadata().labels.first(), Some(&"Person".into()));
         }
-        _ => panic!("Expected Insert variant"),
+        _ => panic!("Expected Change(Insert) variant"),
     }
 
     source.stop().await?;
@@ -128,18 +128,18 @@ async fn test_basic_update_event_consumption() -> Result<()> {
     publish_platform_event(&redis_url, stream_key, event).await?;
 
     // Wait for source change
-    let change_event = timeout(Duration::from_secs(5), source_change_rx.recv())
+    let wrapper = timeout(Duration::from_secs(5), source_change_rx.recv())
         .await?
         .expect("Should receive source change");
 
     // Verify
-    match change_event.change {
-        SourceChange::Update { element } => {
+    match wrapper.event {
+        SourceEvent::Change(SourceChange::Update { element }) => {
             assert_eq!(element.get_reference().element_id.as_ref(), "1");
             // Properties should exist
             let _props = element.get_properties();
         }
-        _ => panic!("Expected Update variant"),
+        _ => panic!("Expected Change(Update) variant"),
     }
 
     source.stop().await?;
@@ -163,17 +163,17 @@ async fn test_basic_delete_event_consumption() -> Result<()> {
     publish_platform_event(&redis_url, stream_key, event).await?;
 
     // Wait for source change
-    let change_event = timeout(Duration::from_secs(5), source_change_rx.recv())
+    let wrapper = timeout(Duration::from_secs(5), source_change_rx.recv())
         .await?
         .expect("Should receive source change");
 
     // Verify
-    match change_event.change {
-        SourceChange::Delete { metadata } => {
+    match wrapper.event {
+        SourceEvent::Change(SourceChange::Delete { metadata }) => {
             assert_eq!(metadata.reference.element_id.as_ref(), "2");
             assert_eq!(metadata.labels.first(), Some(&"Person".into()));
         }
-        _ => panic!("Expected Delete variant"),
+        _ => panic!("Expected Change(Delete) variant"),
     }
 
     source.stop().await?;
@@ -199,13 +199,13 @@ async fn test_node_element_transformation() -> Result<()> {
     publish_platform_event(&redis_url, stream_key, event).await?;
 
     // Wait for source change
-    let change_event = timeout(Duration::from_secs(5), source_change_rx.recv())
+    let wrapper = timeout(Duration::from_secs(5), source_change_rx.recv())
         .await?
         .expect("Should receive source change");
 
     // Verify node structure
-    match change_event.change {
-        SourceChange::Insert { element } => {
+    match wrapper.event {
+        SourceEvent::Change(SourceChange::Insert { element }) => {
             // Check labels
             let labels = &element.get_metadata().labels;
             assert!(labels.contains(&"Person".into()));
@@ -230,7 +230,7 @@ async fn test_node_element_transformation() -> Result<()> {
                 panic!("Expected active property");
             }
         }
-        _ => panic!("Expected Insert variant"),
+        _ => panic!("Expected Change(Insert) variant"),
     }
 
     source.stop().await?;
@@ -262,13 +262,13 @@ async fn test_relation_element_transformation() -> Result<()> {
     publish_platform_event(&redis_url, stream_key, event).await?;
 
     // Wait for source change
-    let change_event = timeout(Duration::from_secs(5), source_change_rx.recv())
+    let wrapper = timeout(Duration::from_secs(5), source_change_rx.recv())
         .await?
         .expect("Should receive source change");
 
     // Verify relation structure
-    match change_event.change {
-        SourceChange::Insert { element } => {
+    match wrapper.event {
+        SourceEvent::Change(SourceChange::Insert { element }) => {
             use drasi_core::models::{Element, ElementValue};
             if let Element::Relation { metadata, properties, out_node, in_node } = element {
                 assert_eq!(metadata.reference.element_id.as_ref(), "r1");
@@ -284,7 +284,7 @@ async fn test_relation_element_transformation() -> Result<()> {
                 panic!("Expected Relation element");
             }
         }
-        _ => panic!("Expected Insert variant"),
+        _ => panic!("Expected Change(Insert) variant"),
     }
 
     source.stop().await?;
@@ -319,11 +319,11 @@ async fn test_multiple_events_in_batch() -> Result<()> {
     // Collect all 5 events
     let mut received_ids = Vec::new();
     for _ in 0..5 {
-        let change_event = timeout(Duration::from_secs(5), source_change_rx.recv())
+        let wrapper = timeout(Duration::from_secs(5), source_change_rx.recv())
             .await?
             .expect("Should receive source change");
 
-        if let SourceChange::Insert { element } = change_event.change {
+        if let SourceEvent::Change(SourceChange::Insert { element }) = wrapper.event {
             received_ids.push(element.get_reference().element_id.as_ref().to_string());
         }
     }
@@ -439,15 +439,15 @@ async fn test_resume_from_position() -> Result<()> {
     source2.start().await?;
 
     // Should receive only the second event (resume from position)
-    let change_event = timeout(Duration::from_secs(5), source_change_rx2.recv())
+    let wrapper = timeout(Duration::from_secs(5), source_change_rx2.recv())
         .await?
         .expect("Should receive second event");
 
-    match change_event.change {
-        SourceChange::Insert { element } => {
+    match wrapper.event {
+        SourceEvent::Change(SourceChange::Insert { element }) => {
             assert_eq!(element.get_reference().element_id.as_ref(), "second");
         }
-        _ => panic!("Expected Insert"),
+        _ => panic!("Expected Change(Insert)"),
     }
 
     source2.stop().await?;
@@ -483,15 +483,15 @@ async fn test_malformed_json_event() -> Result<()> {
     publish_platform_event(&redis_url, stream_key, event).await?;
 
     // Should still receive the valid event
-    let change_event = timeout(Duration::from_secs(5), source_change_rx.recv())
+    let wrapper = timeout(Duration::from_secs(5), source_change_rx.recv())
         .await?
         .expect("Should receive valid event despite malformed one");
 
-    match change_event.change {
-        SourceChange::Insert { element } => {
+    match wrapper.event {
+        SourceEvent::Change(SourceChange::Insert { element }) => {
             assert_eq!(element.get_reference().element_id.as_ref(), "valid-1");
         }
-        _ => panic!("Expected Insert"),
+        _ => panic!("Expected Change(Insert)"),
     }
 
     source.stop().await?;
@@ -533,15 +533,15 @@ async fn test_missing_required_fields() -> Result<()> {
     publish_platform_event(&redis_url, stream_key, event).await?;
 
     // Should receive valid event
-    let change_event = timeout(Duration::from_secs(5), source_change_rx.recv())
+    let wrapper = timeout(Duration::from_secs(5), source_change_rx.recv())
         .await?
         .expect("Should receive valid event");
 
-    match change_event.change {
-        SourceChange::Insert { element } => {
+    match wrapper.event {
+        SourceEvent::Change(SourceChange::Insert { element }) => {
             assert_eq!(element.get_reference().element_id.as_ref(), "valid-2");
         }
-        _ => panic!("Expected Insert"),
+        _ => panic!("Expected Change(Insert)"),
     }
 
     source.stop().await?;
@@ -583,15 +583,15 @@ async fn test_invalid_operation_type() -> Result<()> {
     publish_platform_event(&redis_url, stream_key, event).await?;
 
     // Should receive valid event
-    let change_event = timeout(Duration::from_secs(5), source_change_rx.recv())
+    let wrapper = timeout(Duration::from_secs(5), source_change_rx.recv())
         .await?
         .expect("Should receive valid event");
 
-    match change_event.change {
-        SourceChange::Insert { element } => {
+    match wrapper.event {
+        SourceEvent::Change(SourceChange::Insert { element }) => {
             assert_eq!(element.get_reference().element_id.as_ref(), "valid-3");
         }
-        _ => panic!("Expected Insert"),
+        _ => panic!("Expected Change(Insert)"),
     }
 
     source.stop().await?;
@@ -685,11 +685,11 @@ async fn test_multiple_events_in_cloudevent_data_array() -> Result<()> {
     // Should receive all 3 events
     let mut received_ids = Vec::new();
     for _ in 0..3 {
-        let change_event = timeout(Duration::from_secs(5), source_change_rx.recv())
+        let wrapper = timeout(Duration::from_secs(5), source_change_rx.recv())
             .await?
             .expect("Should receive event");
 
-        if let SourceChange::Insert { element } = change_event.change {
+        if let SourceEvent::Change(SourceChange::Insert { element }) = wrapper.event {
             received_ids.push(element.get_reference().element_id.as_ref().to_string());
         }
     }
@@ -796,13 +796,13 @@ async fn test_restart_and_resume() -> Result<()> {
     source2.start().await?;
 
     // Should resume and get second event
-    let change = timeout(Duration::from_secs(5), rx2.recv()).await?.expect("Should receive second");
+    let wrapper = timeout(Duration::from_secs(5), rx2.recv()).await?.expect("Should receive second");
 
-    match change.change {
-        SourceChange::Insert { element } => {
+    match wrapper.event {
+        SourceEvent::Change(SourceChange::Insert { element }) => {
             assert_eq!(element.get_reference().element_id.as_ref(), "restart-2");
         }
-        _ => panic!("Expected Insert"),
+        _ => panic!("Expected Change(Insert)"),
     }
 
     source2.stop().await?;

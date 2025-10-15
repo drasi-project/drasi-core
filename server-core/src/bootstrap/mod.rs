@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::channels::{BootstrapRequest, SourceChangeSender};
+use crate::channels::{BootstrapRequest, SourceEventSender};
 use crate::config::SourceConfig;
 
 pub mod providers;
@@ -40,8 +40,8 @@ pub struct BootstrapContext {
     pub server_id: String,
     /// The parent source configuration
     pub source_config: Arc<SourceConfig>,
-    /// Channel for sending bootstrap data as source changes
-    pub source_change_tx: SourceChangeSender,
+    /// Channel for sending bootstrap data as source events
+    pub source_event_tx: SourceEventSender,
     /// Source ID for labeling bootstrap events
     pub source_id: String,
 }
@@ -50,13 +50,13 @@ impl BootstrapContext {
     pub fn new(
         server_id: String,
         source_config: Arc<SourceConfig>,
-        source_change_tx: SourceChangeSender,
+        source_event_tx: SourceEventSender,
         source_id: String,
     ) -> Self {
         Self {
             server_id,
             source_config,
-            source_change_tx,
+            source_event_tx,
             source_id,
         }
     }

@@ -27,7 +27,7 @@ mod tests {
 
     fn create_test_context() -> (
         BootstrapContext,
-        mpsc::Receiver<crate::channels::SourceChangeEvent>,
+        mpsc::Receiver<crate::channels::SourceEventWrapper>,
     ) {
         let (tx, rx) = mpsc::channel(100);
 

@@ -42,7 +42,7 @@ use super::{
 pub struct AdaptiveHttpSource {
     config: SourceConfig,
     status: Arc<RwLock<ComponentStatus>>,
-    source_change_tx: SourceChangeSender,
+    source_event_tx: SourceEventSender,
     event_tx: ComponentEventSender,
     task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     shutdown_tx: Arc<RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
@@ -67,7 +67,7 @@ struct AdaptiveAppState {
 impl AdaptiveHttpSource {
     pub fn new(
         config: SourceConfig,
-        source_change_tx: SourceChangeSender,
+        source_event_tx: SourceEventSender,
         event_tx: ComponentEventSender,
     ) -> Self {
         // Configure adaptive batching
@@ -122,7 +122,7 @@ impl AdaptiveHttpSource {
         Self {
             config,
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            source_change_tx,
+            source_event_tx,
             event_tx,
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
@@ -244,7 +244,7 @@ impl AdaptiveHttpSource {
 
     async fn run_adaptive_batcher(
         batch_rx: mpsc::Receiver<SourceChangeEvent>,
-        source_change_tx: SourceChangeSender,
+        source_event_tx: SourceEventSender,
         adaptive_config: AdaptiveBatchConfig,
         source_id: String,
     ) {
@@ -270,7 +270,12 @@ impl AdaptiveHttpSource {
 
             // Send all events in the batch
             for event in batch {
-                if let Err(e) = source_change_tx.send(event).await {
+                let wrapper = SourceEventWrapper {
+                    source_id: event.source_id.clone(),
+                    event: SourceEvent::Change(event.change),
+                    timestamp: event.timestamp,
+                };
+                if let Err(e) = source_event_tx.send(wrapper).await {
                     error!("[{}] Failed to send batched event: {}", source_id, e);
                 }
             }
@@ -329,13 +334,13 @@ impl Source for AdaptiveHttpSource {
         let (batch_tx, batch_rx) = mpsc::channel(1000);
 
         // Start adaptive batcher task
-        let source_change_tx = self.source_change_tx.clone();
+        let source_event_tx = self.source_event_tx.clone();
         let adaptive_config = self.adaptive_config.clone();
         let source_id = self.config.id.clone();
 
         tokio::spawn(Self::run_adaptive_batcher(
             batch_rx,
-            source_change_tx,
+            source_event_tx,
             adaptive_config,
             source_id.clone(),
         ));
