@@ -29,6 +29,7 @@ mod true_for;
 mod true_later;
 mod true_now_or_later;
 mod true_until;
+mod before;
 
 #[cfg(test)]
 mod tests;
@@ -82,6 +83,14 @@ impl RegisterFutureFunctions for FunctionRegistry {
             "drasi.trueNowOrLater",
             Function::Scalar(Arc::new(true_now_or_later::TrueNowOrLater::new(
                 future_queue.clone(),
+            ))),
+        );
+
+        self.register_function(
+            "drasi.before",
+            Function::Scalar(Arc::new(before::Before::new(
+                result_index.clone(),
+                expression_evaluator.clone(),
             ))),
         );
     }

@@ -44,6 +44,7 @@ pub mod greater_than_a_threshold;
 pub mod logical_conditions;
 pub mod rolling_average_decrease_by_ten;
 pub mod steps_happen_in_any_order;
+pub mod before;
 
 #[async_trait]
 pub trait QueryTestConfig {

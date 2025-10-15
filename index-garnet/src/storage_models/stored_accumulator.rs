@@ -17,7 +17,7 @@ use prost::bytes::{Bytes, BytesMut};
 
 #[derive(PartialEq, Clone, ::prost::Message)]
 pub struct StoredValueAccumulatorContainer {
-    #[prost(oneof = "StoredValueAccumulator", tags = "1, 2, 3, 4, 5, 6, 7")]
+    #[prost(oneof = "StoredValueAccumulator", tags = "1, 2, 3, 4, 5, 6, 7, 8")]
     pub value: ::core::option::Option<StoredValueAccumulator>,
 }
 
@@ -43,6 +43,9 @@ pub enum StoredValueAccumulator {
 
     #[prost(message, tag = "7")]
     Value(super::stored_value::StoredValueContainer),
+
+    #[prost(message, tag = "8")]
+    Map(super::StoredValueMap),
 }
 
 impl StoredValueAccumulator {
@@ -101,6 +104,7 @@ impl From<ValueAccumulator> for StoredValueAccumulator {
                 cov,
             }),
             ValueAccumulator::Value(value) => StoredValueAccumulator::Value((&value).into()),
+            ValueAccumulator::Map(map) => StoredValueAccumulator::Map((&map).into()),
         }
     }
 }
@@ -128,6 +132,7 @@ impl From<StoredValueAccumulator> for ValueAccumulator {
                 }
             }
             StoredValueAccumulator::Value(value) => ValueAccumulator::Value(value.into()),
+            StoredValueAccumulator::Map(map) => ValueAccumulator::Map(map.into()),
         }
     }
 }

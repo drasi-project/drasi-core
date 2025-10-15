@@ -467,3 +467,20 @@ mod dapr_state_store {
         dapr_state_store::run_tests(&test_config).await;
     }
 }
+
+mod before {
+    use super::InMemoryQueryConfig;
+    use crate::use_cases::*;
+
+    #[tokio::test]
+    async fn before_value() {
+        let test_config = InMemoryQueryConfig::new();
+        before::before_value(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn before_sum() {
+        let test_config = InMemoryQueryConfig::new();
+        before::before_sum(&test_config).await;
+    }
+}
