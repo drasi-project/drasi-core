@@ -673,7 +673,7 @@ fn update_source_joins(
         StoredElement::Node(n) => {
             let join_spec_by_label = match context.join_spec_by_label.read() {
                 Ok(joins) => joins,
-                Err(e) => return Err(IndexError::CorruptedData),
+                Err(_) => return Err(IndexError::CorruptedData),
             };
             for (label, joins) in join_spec_by_label.iter() {
                 if !n.metadata.labels.contains(label) {
@@ -838,7 +838,7 @@ fn delete_source_joins(
         StoredElement::Node(n) => {
             let join_spec_by_label = match context.join_spec_by_label.read() {
                 Ok(joins) => joins,
-                Err(e) => return Err(IndexError::CorruptedData),
+                Err(_) => return Err(IndexError::CorruptedData),
             };
             for (label, joins) in join_spec_by_label.iter() {
                 if !n.metadata.labels.contains(label) {
