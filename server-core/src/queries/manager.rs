@@ -566,7 +566,6 @@ pub struct QueryManager {
     event_tx: ComponentEventSender,
     bootstrap_request_tx: BootstrapRequestSender,
     bootstrap_response_senders: Arc<RwLock<HashMap<String, BootstrapResponseSender>>>,
-    config_persistence: Arc<RwLock<Option<Arc<crate::config::ConfigPersistence>>>>,
 }
 
 impl QueryManager {
@@ -581,34 +580,22 @@ impl QueryManager {
             event_tx,
             bootstrap_request_tx,
             bootstrap_response_senders: Arc::new(RwLock::new(HashMap::new())),
-            config_persistence: Arc::new(RwLock::new(None)),
         }
-    }
-
-    pub async fn set_config_persistence(&self, persistence: Arc<crate::config::ConfigPersistence>) {
-        *self.config_persistence.write().await = Some(persistence);
     }
 
     pub async fn get_bootstrap_response_senders(&self) -> HashMap<String, BootstrapResponseSender> {
         self.bootstrap_response_senders.read().await.clone()
     }
 
-    async fn save_config(&self) -> Result<()> {
-        if let Some(persistence) = self.config_persistence.read().await.as_ref() {
-            persistence.save().await?;
-        }
-        Ok(())
-    }
-
     pub async fn add_query(&self, config: QueryConfig) -> Result<()> {
-        self.add_query_internal(config, true).await
+        self.add_query_internal(config).await
     }
 
     pub async fn add_query_without_save(&self, config: QueryConfig) -> Result<()> {
-        self.add_query_internal(config, false).await
+        self.add_query_internal(config).await
     }
 
-    async fn add_query_internal(&self, config: QueryConfig, should_save: bool) -> Result<()> {
+    async fn add_query_internal(&self, config: QueryConfig ) -> Result<()> {
         // Check if query with this id already exists
         if self.queries.read().await.contains_key(&config.id) {
             return Err(anyhow::anyhow!(
@@ -640,13 +627,6 @@ impl QueryManager {
 
         self.queries.write().await.insert(config.id.clone(), query);
         info!("Added query: {} with bootstrap support", config.id);
-
-        // Save configuration after adding query (skip during initialization)
-        if should_save {
-            if let Err(e) = self.save_config().await {
-                warn!("Failed to save configuration after adding query: {}", e);
-            }
-        }
 
         // Note: Auto-start is handled by the caller (server.create_query)
         // which has access to the data router for subscriptions
@@ -797,11 +777,6 @@ impl QueryManager {
             // Now remove the query
             self.queries.write().await.remove(&id);
             info!("Deleted query: {}", id);
-
-            // Save configuration after deleting query
-            if let Err(e) = self.save_config().await {
-                warn!("Failed to save configuration after deleting query: {}", e);
-            }
 
             Ok(())
         } else {

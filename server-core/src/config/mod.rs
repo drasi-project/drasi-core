@@ -12,13 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod persistence;
 pub mod runtime;
 pub mod schema;
 
 #[cfg(test)]
 mod tests;
 
-pub use persistence::ConfigPersistence;
 pub use runtime::{QueryRuntime, ReactionRuntime, RuntimeConfig, SourceRuntime};
 pub use schema::*;

@@ -14,7 +14,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use log::{error, info, warn};
+use log::{error, info };
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -124,7 +124,6 @@ pub struct SourceManager {
     source_change_tx: SourceChangeSender,
     source_event_tx: Option<SourceEventSender>,
     event_tx: ComponentEventSender,
-    config_persistence: Arc<RwLock<Option<Arc<crate::config::ConfigPersistence>>>>,
     application_handles: Arc<RwLock<HashMap<String, ApplicationSourceHandle>>>,
 }
 
@@ -136,7 +135,6 @@ impl SourceManager {
             source_change_tx,
             source_event_tx: None,
             event_tx,
-            config_persistence: Arc::new(RwLock::new(None)),
             application_handles: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -152,20 +150,8 @@ impl SourceManager {
             source_change_tx,
             source_event_tx: Some(source_event_tx),
             event_tx,
-            config_persistence: Arc::new(RwLock::new(None)),
             application_handles: Arc::new(RwLock::new(HashMap::new())),
         }
-    }
-
-    pub async fn set_config_persistence(&self, persistence: Arc<crate::config::ConfigPersistence>) {
-        *self.config_persistence.write().await = Some(persistence);
-    }
-
-    async fn save_config(&self) -> Result<()> {
-        if let Some(persistence) = self.config_persistence.read().await.as_ref() {
-            persistence.save().await?;
-        }
-        Ok(())
     }
 
     pub async fn get_source_instance(&self, id: &str) -> Option<Arc<dyn Source>> {
@@ -182,7 +168,7 @@ impl SourceManager {
     }
 
     pub async fn add_source(&self, config: SourceConfig) -> Result<()> {
-        self.add_source_internal(config, true, true).await
+        self.add_source_internal(config, true ).await
     }
 
     pub async fn add_source_with_options(
@@ -190,7 +176,7 @@ impl SourceManager {
         config: SourceConfig,
         allow_auto_start: bool,
     ) -> Result<()> {
-        self.add_source_internal(config, allow_auto_start, true)
+        self.add_source_internal(config, allow_auto_start)
             .await
     }
 
@@ -199,15 +185,14 @@ impl SourceManager {
         config: SourceConfig,
         allow_auto_start: bool,
     ) -> Result<()> {
-        self.add_source_internal(config, allow_auto_start, false)
+        self.add_source_internal(config, allow_auto_start )
             .await
     }
 
     async fn add_source_internal(
         &self,
         config: SourceConfig,
-        allow_auto_start: bool,
-        should_save: bool,
+        allow_auto_start: bool
     ) -> Result<()> {
         // Check if source with this id already exists
         if self.sources.read().await.contains_key(&config.id) {
@@ -282,13 +267,6 @@ impl SourceManager {
 
         self.sources.write().await.insert(config.id.clone(), source);
         info!("Added source: {}", config.id);
-
-        // Save configuration after adding source (skip during initialization)
-        if should_save {
-            if let Err(e) = self.save_config().await {
-                warn!("Failed to save configuration after adding source: {}", e);
-            }
-        }
 
         // Auto-start the source if configured and allowed
         if should_auto_start && allow_auto_start {
@@ -403,7 +381,7 @@ impl SourceManager {
             // For now, update means remove and re-add
             self.delete_source(id.clone()).await?;
             // Add the new configuration
-            self.add_source_internal(config, false, true).await?;
+            self.add_source_internal(config, false ).await?;
 
             // If it was running, restart it
             if was_running {
@@ -450,11 +428,6 @@ impl SourceManager {
             // Now remove the source
             self.sources.write().await.remove(&id);
             info!("Deleted source: {}", id);
-
-            // Save configuration after deleting source
-            if let Err(e) = self.save_config().await {
-                warn!("Failed to save configuration after deleting source: {}", e);
-            }
 
             Ok(())
         } else {

@@ -14,7 +14,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use log::{error, info, warn};
+use log::{error, info};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -159,7 +159,6 @@ impl Reaction for MockReaction {
 pub struct ReactionManager {
     reactions: Arc<RwLock<HashMap<String, Arc<dyn Reaction>>>>,
     event_tx: ComponentEventSender,
-    config_persistence: Arc<RwLock<Option<Arc<crate::config::ConfigPersistence>>>>,
     application_handles: Arc<RwLock<HashMap<String, ApplicationReactionHandle>>>,
 }
 
@@ -168,35 +167,23 @@ impl ReactionManager {
         Self {
             reactions: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
-            config_persistence: Arc::new(RwLock::new(None)),
             application_handles: Arc::new(RwLock::new(HashMap::new())),
         }
-    }
-
-    pub async fn set_config_persistence(&self, persistence: Arc<crate::config::ConfigPersistence>) {
-        *self.config_persistence.write().await = Some(persistence);
     }
 
     pub async fn get_application_handle(&self, name: &str) -> Option<ApplicationReactionHandle> {
         self.application_handles.read().await.get(name).cloned()
     }
 
-    async fn save_config(&self) -> Result<()> {
-        if let Some(persistence) = self.config_persistence.read().await.as_ref() {
-            persistence.save().await?;
-        }
-        Ok(())
-    }
-
     pub async fn add_reaction(&self, config: ReactionConfig) -> Result<()> {
-        self.add_reaction_internal(config, true).await
+        self.add_reaction_internal(config).await
     }
 
     pub async fn add_reaction_without_save(&self, config: ReactionConfig) -> Result<()> {
-        self.add_reaction_internal(config, false).await
+        self.add_reaction_internal(config).await
     }
 
-    async fn add_reaction_internal(&self, config: ReactionConfig, should_save: bool) -> Result<()> {
+    async fn add_reaction_internal(&self, config: ReactionConfig ) -> Result<()> {
         // Check if reaction with this id already exists
         if self.reactions.read().await.contains_key(&config.id) {
             return Err(anyhow::anyhow!(
@@ -242,13 +229,6 @@ impl ReactionManager {
             .await
             .insert(config.id.clone(), reaction);
         info!("Added reaction: {}", config.id);
-
-        // Save configuration after adding reaction (skip during initialization)
-        if should_save {
-            if let Err(e) = self.save_config().await {
-                warn!("Failed to save configuration after adding reaction: {}", e);
-            }
-        }
 
         // Note: Auto-start is handled by the caller (server.create_reaction)
         // which has access to the subscription router for subscriptions
@@ -394,14 +374,6 @@ impl ReactionManager {
             // Now remove the reaction
             self.reactions.write().await.remove(&id);
             info!("Deleted reaction: {}", id);
-
-            // Save configuration after deleting reaction
-            if let Err(e) = self.save_config().await {
-                warn!(
-                    "Failed to save configuration after deleting reaction: {}",
-                    e
-                );
-            }
 
             Ok(())
         } else {

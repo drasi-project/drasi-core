@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::channels::{ComponentStatus, *};
-use crate::config::{ConfigPersistence, RuntimeConfig};
+use crate::config::RuntimeConfig;
 use crate::queries::QueryManager;
 use crate::reactions::ReactionManager;
 use crate::routers::{BootstrapRouter, DataRouter, SubscriptionRouter};
@@ -86,19 +86,6 @@ impl DrasiServerCore {
                 RwLock::new(ComponentsRunningState::default()),
             ),
         }
-    }
-
-    /// Set configuration persistence (optional)
-    pub async fn set_config_persistence(&self, persistence: Arc<ConfigPersistence>) {
-        self.source_manager
-            .set_config_persistence(persistence.clone())
-            .await;
-        self.query_manager
-            .set_config_persistence(persistence.clone())
-            .await;
-        self.reaction_manager
-            .set_config_persistence(persistence.clone())
-            .await;
     }
 
     /// Initialize the server components (one-time setup)
