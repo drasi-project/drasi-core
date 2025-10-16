@@ -70,7 +70,7 @@ pub async fn before_value(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        assert_eq!(result.len(), 0);        
+        assert_eq!(result.len(), 0);
     }
 
     //Add invoice 2
@@ -93,9 +93,9 @@ pub async fn before_value(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        assert_eq!(result.len(), 0);        
+        assert_eq!(result.len(), 0);
     }
-    
+
     //update invoice 1 with increasing amount
     {
         let change = SourceChange::Update {
@@ -182,10 +182,12 @@ pub async fn before_value(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Removing { before: variablemap!(
-          "amount" => VariableValue::from(json!(110.0)),
-          "id" => VariableValue::from(json!("i1"))
-        )}));
+        assert!(result.contains(&QueryPartEvaluationContext::Removing {
+            before: variablemap!(
+              "amount" => VariableValue::from(json!(110.0)),
+              "id" => VariableValue::from(json!("i1"))
+            )
+        }));
     }
 
     //update invoice 1 with increasing amount
@@ -210,12 +212,13 @@ pub async fn before_value(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Adding { after: variablemap!(
-          "amount" => VariableValue::from(json!(95.0)),
-          "id" => VariableValue::from(json!("i1"))
-        )}));
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
+            after: variablemap!(
+              "amount" => VariableValue::from(json!(95.0)),
+              "id" => VariableValue::from(json!("i1"))
+            )
+        }));
     }
-
 }
 
 pub async fn before_sum(config: &(impl QueryTestConfig + Send)) {
@@ -248,7 +251,7 @@ pub async fn before_sum(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        assert_eq!(result.len(), 0);        
+        assert_eq!(result.len(), 0);
     }
 
     //Add relation 1
@@ -274,7 +277,7 @@ pub async fn before_sum(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 0);
     }
-    
+
     //insert invoice line with increasing amount
     {
         let change = SourceChange::Update {
@@ -327,7 +330,7 @@ pub async fn before_sum(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 0);
     }
-    
+
     //insert invoice line with decreasing amount
     {
         let change = SourceChange::Update {

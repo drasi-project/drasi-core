@@ -35,4 +35,3 @@ RETURN
   i.id AS id
   "
 }
-

@@ -71,9 +71,9 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        assert_eq!(result.len(), 0);        
+        assert_eq!(result.len(), 0);
     }
-    
+
     //update contract 1 with active status
     {
         let change = SourceChange::Update {
@@ -95,7 +95,7 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        
+
         assert_eq!(result.len(), 1);
 
         assert!(result.contains(&QueryPartEvaluationContext::Adding {
@@ -128,10 +128,10 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        
+
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Updating { 
+        assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
               "tags" => VariableValue::from(json!("tag1")),
               "status" => VariableValue::from(json!("active")),
@@ -166,7 +166,7 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        assert_eq!(result.len(), 0);        
+        assert_eq!(result.len(), 0);
     }
 
     //update contract 1 tags
@@ -190,10 +190,10 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        
+
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Updating { 
+        assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
               "tags" => VariableValue::from(json!("tag2")),
               "status" => VariableValue::from(json!("active")),
@@ -206,7 +206,7 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
             ),
         }));
     }
-    
+
     //update contract 2 with active status
     {
         let change = SourceChange::Update {
@@ -228,7 +228,7 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        
+
         assert_eq!(result.len(), 0);
     }
 
@@ -253,8 +253,8 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        
-        assert_eq!(result.len(), 0);        
+
+        assert_eq!(result.len(), 0);
     }
 
     //update contract 2 with active status
@@ -278,7 +278,7 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        
+
         assert_eq!(result.len(), 1);
         assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
@@ -288,7 +288,6 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
             ),
         }));
     }
-
 }
 
 pub async fn prev_unique_with_match(config: &(impl QueryTestConfig + Send)) {
@@ -322,9 +321,9 @@ pub async fn prev_unique_with_match(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        assert_eq!(result.len(), 0);        
+        assert_eq!(result.len(), 0);
     }
-    
+
     //update contract 1 with active status
     {
         let change = SourceChange::Update {
@@ -346,7 +345,7 @@ pub async fn prev_unique_with_match(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        
+
         assert_eq!(result.len(), 1);
 
         assert!(result.contains(&QueryPartEvaluationContext::Adding {
@@ -379,10 +378,10 @@ pub async fn prev_unique_with_match(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        
+
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Updating { 
+        assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
               "tags" => VariableValue::from(json!("tag1")),
               "status" => VariableValue::from(json!("active")),
@@ -417,7 +416,7 @@ pub async fn prev_unique_with_match(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        assert_eq!(result.len(), 0);        
+        assert_eq!(result.len(), 0);
     }
 
     //update contract 1 tags
@@ -441,10 +440,10 @@ pub async fn prev_unique_with_match(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        
+
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Updating { 
+        assert!(result.contains(&QueryPartEvaluationContext::Updating {
             before: variablemap!(
               "tags" => VariableValue::from(json!("tag2")),
               "status" => VariableValue::from(json!("active")),
@@ -457,7 +456,7 @@ pub async fn prev_unique_with_match(config: &(impl QueryTestConfig + Send)) {
             ),
         }));
     }
-    
+
     //update contract 2 with active status
     {
         let change = SourceChange::Update {
@@ -479,7 +478,7 @@ pub async fn prev_unique_with_match(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        
+
         assert_eq!(result.len(), 0);
     }
 
@@ -504,8 +503,8 @@ pub async fn prev_unique_with_match(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        
-        assert_eq!(result.len(), 0);        
+
+        assert_eq!(result.len(), 0);
     }
 
     //update contract 2 with active status
@@ -529,7 +528,7 @@ pub async fn prev_unique_with_match(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        
+
         assert_eq!(result.len(), 1);
         assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!(
@@ -538,6 +537,5 @@ pub async fn prev_unique_with_match(config: &(impl QueryTestConfig + Send)) {
               "id" => VariableValue::from(json!("c2"))
             ),
         }));
-    }    
-
+    }
 }
