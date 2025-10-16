@@ -362,6 +362,6 @@ mod prev_unique {
     #[tokio::test]
     async fn prev_unique() {
         let test_config = GarnetQueryConfig::new(false);
-        prev_unique::prev_unique(&test_config).await;
+        prev_distinct::prev_unique(&test_config).await;
     }
 }

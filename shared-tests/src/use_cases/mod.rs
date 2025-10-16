@@ -43,7 +43,7 @@ pub mod document;
 pub mod exceeds_one_standard_deviation;
 pub mod greater_than_a_threshold;
 pub mod logical_conditions;
-pub mod prev_unique;
+pub mod prev_distinct;
 pub mod rolling_average_decrease_by_ten;
 pub mod steps_happen_in_any_order;
 

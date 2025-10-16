@@ -44,7 +44,7 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
     let opt_query = {
         let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
         let parser = Arc::new(CypherParser::new(function_registry.clone()));
-        let mut builder = QueryBuilder::new(queries::prev_unique_query(), parser)
+        let mut builder = QueryBuilder::new(queries::prev_distinct_query(), parser)
             .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder.build().await
@@ -294,7 +294,7 @@ pub async fn prev_unique_with_match(config: &(impl QueryTestConfig + Send)) {
     let opt_query = {
         let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
         let parser = Arc::new(CypherParser::new(function_registry.clone()));
-        let mut builder = QueryBuilder::new(queries::prev_unique_match_query(), parser)
+        let mut builder = QueryBuilder::new(queries::prev_distinct_match_query(), parser)
             .with_function_registry(function_registry);
         builder = config.config_query(builder).await;
         builder.build().await

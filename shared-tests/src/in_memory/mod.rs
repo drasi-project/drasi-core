@@ -492,12 +492,12 @@ mod prev_unique {
     #[tokio::test]
     async fn prev_unique() {
         let test_config = InMemoryQueryConfig::new();
-        prev_unique::prev_unique(&test_config).await;
+        prev_distinct::prev_unique(&test_config).await;
     }
 
     #[tokio::test]
     async fn prev_unique_with_match() {
         let test_config = InMemoryQueryConfig::new();
-        prev_unique::prev_unique_with_match(&test_config).await;
+        prev_distinct::prev_unique_with_match(&test_config).await;
     }
 }

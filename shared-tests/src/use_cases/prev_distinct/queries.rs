@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub fn prev_unique_query() -> &'static str {
+pub fn prev_distinct_query() -> &'static str {
     "
 MATCH 
   (c:Contract)
 WHERE c.status = 'active'
-AND drasi.previousUniqueValue(c.status) = 'pending'
+AND drasi.previousDistinctValue(c.status) = 'pending'
 RETURN
   c.id AS id,
   c.status AS status,
@@ -25,10 +25,10 @@ RETURN
   "
 }
 
-pub fn prev_unique_match_query() -> &'static str {
+pub fn prev_distinct_match_query() -> &'static str {
     "
 MATCH 
-  (c:Contract WHERE c.status = 'active' AND drasi.previousUniqueValue(c.status) = 'pending')
+  (c:Contract WHERE c.status = 'active' AND drasi.previousDistinctValue(c.status) = 'pending')
 RETURN
   c.id AS id,
   c.status AS status,

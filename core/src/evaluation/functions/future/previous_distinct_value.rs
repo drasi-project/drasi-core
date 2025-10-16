@@ -30,12 +30,12 @@ use crate::models::ElementValue;
 use async_trait::async_trait;
 use drasi_query_ast::ast;
 
-pub struct PreviousUniqueValue {
+pub struct PreviousDistinctValue {
     result_index: Arc<dyn ResultIndex>,
     expression_evaluator: Weak<ExpressionEvaluator>,
 }
 
-impl PreviousUniqueValue {
+impl PreviousDistinctValue {
     pub fn new(
         result_index: Arc<dyn ResultIndex>,
         expression_evaluator: Weak<ExpressionEvaluator>,
@@ -48,7 +48,7 @@ impl PreviousUniqueValue {
 }
 
 #[async_trait]
-impl ScalarFunction for PreviousUniqueValue {
+impl ScalarFunction for PreviousDistinctValue {
     async fn call(
         &self,
         context: &ExpressionEvaluationContext,
