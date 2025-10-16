@@ -4,11 +4,7 @@
 
 # Server configuration - basic setup
 server:
-  host: "0.0.0.0"        # Listen on all interfaces
-  port: 8080             # Default HTTP port
-  log_level: "info"      # Show informational messages
-  max_connections: 100   # Sufficient for demo
-  shutdown_timeout_seconds: 5  # Quick shutdown for demo
+  id: "basic-example"
 
 # Data sources - using mock for simplicity
 sources:

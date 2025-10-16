@@ -2,11 +2,7 @@
 # Shows the generic data type and property selection queries
 
 server:
-  host: "0.0.0.0"
-  port: 8080
-  log_level: "debug"           # More verbose logging
-  max_connections: 100
-  shutdown_timeout_seconds: 5
+  id: "generic-data-example"
 
 sources:
   - id: "generic-source"

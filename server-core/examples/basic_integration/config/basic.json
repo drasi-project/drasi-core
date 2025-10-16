@@ -4,11 +4,7 @@
   
   "server": {
     "_comment": "Server configuration - basic setup",
-    "host": "0.0.0.0",
-    "port": 8080,
-    "log_level": "info",
-    "max_connections": 100,
-    "shutdown_timeout_seconds": 5
+    "id": "basic-example"
   },
   
   "sources": [

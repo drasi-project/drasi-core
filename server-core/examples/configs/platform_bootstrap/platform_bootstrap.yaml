@@ -10,6 +10,9 @@
 # The provider automatically filters bootstrap elements based on query label requirements
 # and transforms platform SDK element format to drasi-core format.
 
+server:
+  id: "platform-bootstrap-example"
+
 sources:
   # Example 1: Platform source with inline query_api_url in bootstrap config
   - id: remote_platform_source
@@ -58,6 +61,7 @@ queries:
   # This query will only receive Person nodes and KNOWS relations from bootstrap
   - id: person_query
     query: "MATCH (p:Person)-[k:KNOWS]->(p2:Person) RETURN p, k, p2"
+    sources: ["remote_platform_source"]
     # The bootstrap provider will automatically request only:
     # - Nodes with label "Person"
     # - Relations with label "KNOWS"
@@ -65,7 +69,17 @@ queries:
   # This query receives all nodes and relations (no label filtering)
   - id: all_data_query
     query: "MATCH (n)-[r]->(m) RETURN n, r, m"
+    sources: ["remote_platform_source"]
     # The bootstrap provider will request all available data
+
+reactions:
+  - id: platform_logger
+    reaction_type: log
+    queries: ["person_query"]
+    auto_start: true
+    properties:
+      log_level: info
+      format: json
 
 # Network and connectivity considerations:
 # - Ensure the Query API service is accessible from the drasi-core network

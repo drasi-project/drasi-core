@@ -21,36 +21,15 @@ use drasi_server_core::{
     DrasiServerCore, Properties, Query, Reaction, Source,
 };
 use serde_json::json;
-use std::collections::HashMap;
-use std::sync::Arc;
 use tokio::time::{sleep, Duration};
-
-// Import old API for backward compatibility tests
-#[allow(deprecated)]
-use drasi_server_core::{QueryConfig, ReactionConfig, RuntimeConfig, SourceConfig};
-
-// Import schema types
-use drasi_server_core::config::{DrasiServerCoreSettings, QueryLanguage};
-
-/// Helper to create a minimal test configuration
-fn create_minimal_config() -> RuntimeConfig {
-    RuntimeConfig {
-        server: DrasiServerCoreSettings {
-            id: "test-server".to_string(),
-        },
-        sources: vec![],
-        queries: vec![],
-        reactions: vec![],
-    }
-}
 
 #[tokio::test]
 async fn test_library_initialization() -> Result<()> {
-    let config = Arc::new(create_minimal_config());
-    let mut core = DrasiServerCore::new(config);
-
-    // Should be able to initialize
-    core.initialize().await?;
+    // Use the new builder API
+    let core = DrasiServerCore::builder()
+        .with_id("test-server")
+        .build()
+        .await?;
 
     // Should not be running yet
     assert!(!core.is_running().await);
@@ -60,10 +39,11 @@ async fn test_library_initialization() -> Result<()> {
 
 #[tokio::test]
 async fn test_start_stop_lifecycle() -> Result<()> {
-    let config = Arc::new(create_minimal_config());
-    let mut core = DrasiServerCore::new(config);
-
-    core.initialize().await?;
+    // Use the new builder API
+    let core = DrasiServerCore::builder()
+        .with_id("test-lifecycle")
+        .build()
+        .await?;
 
     // Start the server
     core.start().await?;
@@ -78,22 +58,22 @@ async fn test_start_stop_lifecycle() -> Result<()> {
 
 #[tokio::test]
 async fn test_with_mock_source() -> Result<()> {
-    let mut config = create_minimal_config();
+    // Use the builder API
+    let core = DrasiServerCore::builder()
+        .with_id("test-mock-server")
+        .add_source(
+            Source::mock("test-mock")
+                .with_properties(
+                    Properties::new()
+                        .with_int("interval_ms", 1000)
+                        .with_string("data_type", "counter"),
+                )
+                .auto_start(true)
+                .build(),
+        )
+        .build()
+        .await?;
 
-    // Add a mock source
-    config.sources.push(SourceConfig {
-        id: "test-mock".to_string(),
-        source_type: "mock".to_string(),
-        auto_start: true,
-        properties: HashMap::from([
-            ("interval_ms".to_string(), serde_json::json!(1000)),
-            ("data_type".to_string(), serde_json::json!("counter")),
-        ]),
-        bootstrap_provider: None,
-    });
-
-    let mut core = DrasiServerCore::new(Arc::new(config));
-    core.initialize().await?;
     core.start().await?;
 
     // Let it run briefly
@@ -108,40 +88,36 @@ async fn test_with_mock_source() -> Result<()> {
 
 #[tokio::test]
 async fn test_with_query_and_reaction() -> Result<()> {
-    let mut config = create_minimal_config();
+    // Use the builder API
+    let core = DrasiServerCore::builder()
+        .with_id("test-pipeline")
+        .add_source(
+            Source::mock("source1")
+                .with_properties(
+                    Properties::new()
+                        .with_int("interval_ms", 500)
+                        .with_string("data_type", "sensor"),
+                )
+                .auto_start(true)
+                .build(),
+        )
+        .add_query(
+            Query::cypher("query1")
+                .query("MATCH (n) RETURN n")
+                .from_source("source1")
+                .auto_start(true)
+                .build(),
+        )
+        .add_reaction(
+            Reaction::log("reaction1")
+                .subscribe_to("query1")
+                .with_property("log_level", json!("error"))
+                .auto_start(true)
+                .build(),
+        )
+        .build()
+        .await?;
 
-    // Add a complete pipeline
-    config.sources.push(SourceConfig {
-        id: "source1".to_string(),
-        source_type: "mock".to_string(),
-        auto_start: true,
-        properties: HashMap::from([
-            ("interval_ms".to_string(), serde_json::json!(500)),
-            ("data_type".to_string(), serde_json::json!("sensor")),
-        ]),
-        bootstrap_provider: None,
-    });
-
-    config.queries.push(QueryConfig {
-        id: "query1".to_string(),
-        query: "MATCH (n) RETURN n".to_string(),
-        query_language: QueryLanguage::Cypher,
-        sources: vec!["source1".to_string()],
-        auto_start: true,
-        properties: HashMap::new(),
-        joins: None,
-    });
-
-    config.reactions.push(ReactionConfig {
-        id: "reaction1".to_string(),
-        reaction_type: "internal.log".to_string(),
-        queries: vec!["query1".to_string()],
-        auto_start: true,
-        properties: HashMap::from([("log_level".to_string(), serde_json::json!("error"))]),
-    });
-
-    let mut core = DrasiServerCore::new(Arc::new(config));
-    core.initialize().await?;
     core.start().await?;
 
     // Let the pipeline run
@@ -155,10 +131,11 @@ async fn test_with_query_and_reaction() -> Result<()> {
 
 #[tokio::test]
 async fn test_restart_capability() -> Result<()> {
-    let config = Arc::new(create_minimal_config());
-    let mut core = DrasiServerCore::new(config);
-
-    core.initialize().await?;
+    // Use the builder API
+    let core = DrasiServerCore::builder()
+        .with_id("test-restart")
+        .build()
+        .await?;
 
     // Start
     core.start().await?;
@@ -178,37 +155,36 @@ async fn test_restart_capability() -> Result<()> {
 
 #[tokio::test]
 async fn test_multiple_sources_and_queries() -> Result<()> {
-    let mut config = create_minimal_config();
+    // Use the builder API with multiple components
+    let mut builder = DrasiServerCore::builder()
+        .with_id("test-multiple");
 
     // Add multiple sources
     for i in 1..=3 {
-        config.sources.push(SourceConfig {
-            id: format!("source{}", i),
-            source_type: "mock".to_string(),
-            auto_start: true,
-            properties: HashMap::from([
-                ("interval_ms".to_string(), serde_json::json!(1000)),
-                ("data_type".to_string(), serde_json::json!("counter")),
-            ]),
-            bootstrap_provider: None,
-        });
+        builder = builder.add_source(
+            Source::mock(&format!("source{}", i))
+                .with_properties(
+                    Properties::new()
+                        .with_int("interval_ms", 1000)
+                        .with_string("data_type", "counter"),
+                )
+                .auto_start(true)
+                .build(),
+        );
     }
 
     // Add multiple queries
     for i in 1..=3 {
-        config.queries.push(QueryConfig {
-            id: format!("query{}", i),
-            query: "MATCH (n) RETURN n".to_string(),
-            query_language: QueryLanguage::Cypher,
-            sources: vec![format!("source{}", i)],
-            auto_start: true,
-            properties: HashMap::new(),
-            joins: None,
-        });
+        builder = builder.add_query(
+            Query::cypher(&format!("query{}", i))
+                .query("MATCH (n) RETURN n")
+                .from_source(&format!("source{}", i))
+                .auto_start(true)
+                .build(),
+        );
     }
 
-    let mut core = DrasiServerCore::new(Arc::new(config));
-    core.initialize().await?;
+    let core = builder.build().await?;
     core.start().await?;
 
     sleep(Duration::from_millis(100)).await;

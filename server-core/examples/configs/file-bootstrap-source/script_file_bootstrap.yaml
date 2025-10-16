@@ -14,6 +14,9 @@
 # Multi-file support: When multiple files are provided, they are read sequentially in the order specified.
 # Only the first file needs a Header record.
 
+server:
+  id: "script-file-bootstrap-example"
+
 sources:
   # Example 1: Single script file
   - id: example_single_file
@@ -54,6 +57,16 @@ queries:
   # This query will only receive Person nodes and KNOWS relations from the bootstrap
   - id: person_query
     query: "MATCH (p:Person)-[k:KNOWS]->(p2:Person) RETURN p, k, p2"
+    sources: ["example_with_queries"]
     # The bootstrap provider will filter records to only send:
     # - Nodes with label "Person"
     # - Relations with label "KNOWS"
+
+reactions:
+  - id: script_logger
+    reaction_type: log
+    queries: ["person_query"]
+    auto_start: true
+    properties:
+      log_level: info
+      format: json

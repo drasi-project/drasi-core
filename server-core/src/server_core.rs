@@ -54,8 +54,9 @@ struct ComponentsRunningState {
 }
 
 impl DrasiServerCore {
-    /// Create a new DrasiServerCore with the given configuration
-    pub fn new(config: Arc<RuntimeConfig>) -> Self {
+    /// Internal constructor - creates uninitialized server
+    /// Use `builder()`, `from_config_file()`, or `from_config_str()` instead
+    pub(crate) fn new(config: Arc<RuntimeConfig>) -> Self {
         let (channels, receivers) = EventChannels::new();
 
         let source_manager = Arc::new(SourceManager::new(
@@ -93,8 +94,9 @@ impl DrasiServerCore {
         }
     }
 
-    /// Initialize the server components (one-time setup)
-    pub async fn initialize(&mut self) -> Result<()> {
+    /// Internal initialization - performs one-time setup
+    /// This is called internally by builder and config loaders
+    pub(crate) async fn initialize(&mut self) -> Result<()> {
         let already_initialized = *self.initialized.read().await;
         if already_initialized {
             info!("Server already initialized, skipping initialization");
@@ -229,6 +231,184 @@ impl DrasiServerCore {
     }
 
     // ============================================================================
+    // Dynamic Runtime Configuration
+    // ============================================================================
+
+    /// Add a source to a running server
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Source};
+    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// core.add_source_runtime(
+    ///     Source::mock("new-source")
+    ///         .auto_start(true)
+    ///         .build()
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn add_source_runtime(&self, source: crate::config::SourceConfig) -> crate::api::Result<()> {
+        if !*self.initialized.read().await {
+            return Err(DrasiError::invalid_state("Cannot add source to uninitialized server"));
+        }
+
+        // Create source with auto-start enabled if requested
+        self.create_source_with_options(source, true).await
+            .map_err(|e| DrasiError::initialization(format!("Failed to add source: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Add a query to a running server
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Query};
+    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// core.add_query_runtime(
+    ///     Query::cypher("new-query")
+    ///         .query("MATCH (n) RETURN n")
+    ///         .from_source("source1")
+    ///         .auto_start(true)
+    ///         .build()
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn add_query_runtime(&self, query: crate::config::QueryConfig) -> crate::api::Result<()> {
+        if !*self.initialized.read().await {
+            return Err(DrasiError::invalid_state("Cannot add query to uninitialized server"));
+        }
+
+        // Create query with auto-start enabled if requested
+        self.create_query_with_options(query, true).await
+            .map_err(|e| DrasiError::initialization(format!("Failed to add query: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Add a reaction to a running server
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Reaction};
+    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// core.add_reaction_runtime(
+    ///     Reaction::log("new-reaction")
+    ///         .subscribe_to("query1")
+    ///         .auto_start(true)
+    ///         .build()
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn add_reaction_runtime(&self, reaction: crate::config::ReactionConfig) -> crate::api::Result<()> {
+        if !*self.initialized.read().await {
+            return Err(DrasiError::invalid_state("Cannot add reaction to uninitialized server"));
+        }
+
+        // Create reaction with auto-start enabled if requested
+        self.create_reaction_with_options(reaction, true).await
+            .map_err(|e| DrasiError::initialization(format!("Failed to add reaction: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Remove a source from a running server
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_server_core::DrasiServerCore;
+    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// core.remove_source("old-source").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn remove_source(&self, id: &str) -> crate::api::Result<()> {
+        if !*self.initialized.read().await {
+            return Err(DrasiError::invalid_state("Cannot remove source from uninitialized server"));
+        }
+
+        // Stop if running
+        let status = self.source_manager.get_source_status(id.to_string()).await
+            .map_err(|_| DrasiError::component_not_found("source", id))?;
+
+        if matches!(status, crate::channels::ComponentStatus::Running) {
+            self.source_manager.stop_source(id.to_string()).await
+                .map_err(|e| DrasiError::initialization(format!("Failed to stop source: {}", e)))?;
+        }
+
+        // Delete the source
+        self.source_manager.delete_source(id.to_string()).await
+            .map_err(|e| DrasiError::initialization(format!("Failed to delete source: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Remove a query from a running server
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_server_core::DrasiServerCore;
+    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// core.remove_query("old-query").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn remove_query(&self, id: &str) -> crate::api::Result<()> {
+        if !*self.initialized.read().await {
+            return Err(DrasiError::invalid_state("Cannot remove query from uninitialized server"));
+        }
+
+        // Stop if running
+        let status = self.query_manager.get_query_status(id.to_string()).await
+            .map_err(|_| DrasiError::component_not_found("query", id))?;
+
+        if matches!(status, crate::channels::ComponentStatus::Running) {
+            self.query_manager.stop_query(id.to_string()).await
+                .map_err(|e| DrasiError::initialization(format!("Failed to stop query: {}", e)))?;
+        }
+
+        // Delete the query
+        self.query_manager.delete_query(id.to_string()).await
+            .map_err(|e| DrasiError::initialization(format!("Failed to delete query: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Remove a reaction from a running server
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_server_core::DrasiServerCore;
+    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// core.remove_reaction("old-reaction").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn remove_reaction(&self, id: &str) -> crate::api::Result<()> {
+        if !*self.initialized.read().await {
+            return Err(DrasiError::invalid_state("Cannot remove reaction from uninitialized server"));
+        }
+
+        // Stop if running
+        let status = self.reaction_manager.get_reaction_status(id.to_string()).await
+            .map_err(|_| DrasiError::component_not_found("reaction", id))?;
+
+        if matches!(status, crate::channels::ComponentStatus::Running) {
+            self.reaction_manager.stop_reaction(id.to_string()).await
+                .map_err(|e| DrasiError::initialization(format!("Failed to stop reaction: {}", e)))?;
+        }
+
+        // Delete the reaction
+        self.reaction_manager.delete_reaction(id.to_string()).await
+            .map_err(|e| DrasiError::initialization(format!("Failed to delete reaction: {}", e)))?;
+
+        Ok(())
+    }
+
+    // ============================================================================
     // Builder and Config File Loading
     // ============================================================================
 
@@ -311,37 +491,19 @@ impl DrasiServerCore {
     }
 
     // ============================================================================
-    // Legacy API - Manager Access (will be removed)
+    // Server Status
     // ============================================================================
 
-    /// Get references to managers for programmatic access
-    pub fn source_manager(&self) -> &Arc<SourceManager> {
-        &self.source_manager
-    }
-
-    pub fn query_manager(&self) -> &Arc<QueryManager> {
-        &self.query_manager
-    }
-
-    pub fn reaction_manager(&self) -> &Arc<ReactionManager> {
-        &self.reaction_manager
-    }
-
-    pub fn data_router(&self) -> &Arc<DataRouter> {
-        &self.data_router
-    }
-
-    pub fn subscription_router(&self) -> &Arc<SubscriptionRouter> {
-        &self.subscription_router
-    }
-
-    pub fn bootstrap_router(&self) -> &Arc<BootstrapRouter> {
-        &self.bootstrap_router
-    }
-
+    /// Check if the server is currently running
     pub async fn is_running(&self) -> bool {
         *self.running.read().await
     }
+
+    // ============================================================================
+    // Internal Methods
+    // ============================================================================
+    // Note: Direct manager/router access methods were removed as they are not used
+    // internally. Managers are accessed directly via self.source_manager, etc.
 
     async fn load_configuration(&self) -> Result<()> {
         info!("Loading configuration");

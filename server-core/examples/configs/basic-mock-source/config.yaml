@@ -3,12 +3,7 @@
 # for testing and development purposes.
 
 server:
-  host: "0.0.0.0"
-  port: 8080
-  log_level: "info"
-  max_connections: 1000
-  shutdown_timeout_seconds: 30
-  disable_persistence: false
+  id: "basic-mock-source-server"
 
 sources:
   - id: "mock-sensor-data"
@@ -19,7 +14,7 @@ sources:
       interval_ms: 2000
       initial_count: 5
     bootstrap_provider:
-      type: script_file
+      type: scriptfile
       file_paths:
         - "examples/data/sensor_small.jsonl"
 

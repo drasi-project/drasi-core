@@ -1,11 +1,6 @@
 {
   "server": {
-    "host": "0.0.0.0",
-    "port": 8080,
-    "log_level": "info",
-    "max_connections": 1000,
-    "shutdown_timeout_seconds": 30,
-    "disable_persistence": false
+    "id": "file-bootstrap-source"
   },
   "sources": [
     {
@@ -18,7 +13,7 @@
         "initial_count": 0
       },
       "bootstrap_provider": {
-        "type": "script_file",
+        "type": "scriptfile",
         "file_paths": ["/data/users.jsonl"]
       }
     }
@@ -27,7 +22,7 @@
     {
       "id": "user-monitor",
       "query": "MATCH (n:Person) WHERE n.age > 25 RETURN n",
-      "queryLanguage": "cypher",
+      "queryLanguage": "Cypher",
       "sources": ["user-data-source"],
       "auto_start": true,
       "properties": {

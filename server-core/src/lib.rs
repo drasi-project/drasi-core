@@ -12,41 +12,64 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Public API module - clean interface for users
+// ============================================================================
+// Public API Module
+// ============================================================================
+
+/// Public API for configuring and running Drasi Server Core
 pub mod api;
 
-// Internal modules - public for internal use but hidden from docs
-#[doc(hidden)]
+// ============================================================================
+// Internal Modules (crate-private, but visible to integration tests)
+// ============================================================================
+
+// These modules are internal but need to be accessible to integration tests
+// that test platform-specific components
+#[cfg_attr(not(test), doc(hidden))]
 pub mod application;
-#[doc(hidden)]
+#[cfg_attr(not(test), doc(hidden))]
 pub mod bootstrap;
-#[doc(hidden)]
+#[cfg_attr(not(test), doc(hidden))]
 pub mod channels;
-#[doc(hidden)]
-pub mod config;
-#[doc(hidden)]
+#[cfg_attr(not(test), doc(hidden))]
 pub mod error;
-#[doc(hidden)]
+#[cfg_attr(not(test), doc(hidden))]
 pub mod queries;
-#[doc(hidden)]
+#[cfg_attr(not(test), doc(hidden))]
 pub mod reactions;
-#[doc(hidden)]
+#[cfg_attr(not(test), doc(hidden))]
 pub mod routers;
-#[doc(hidden)]
+#[cfg_attr(not(test), doc(hidden))]
 pub mod server_core;
-#[doc(hidden)]
+#[cfg_attr(not(test), doc(hidden))]
 pub mod sources;
-#[doc(hidden)]
+#[cfg_attr(not(test), doc(hidden))]
 pub mod utils;
+
+// Config module needs to be public for config file loading
+pub mod config;
 
 #[cfg(test)]
 mod test_support;
 
 // ============================================================================
-// New Clean Public API
+// Clean Public API - Everything Users Need
 // ============================================================================
 
 /// Main server type - use `DrasiServerCore::builder()` or `DrasiServerCore::from_config_file()`
+///
+/// # Examples
+///
+/// ```no_run
+/// use drasi_server_core::DrasiServerCore;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// // From config file
+/// let core = DrasiServerCore::from_config_file("config.yaml").await?;
+/// core.start().await?;
+/// # Ok(())
+/// # }
+/// ```
 pub use server_core::DrasiServerCore;
 
 /// Builder types for fluent API
@@ -55,35 +78,22 @@ pub use api::{
     SourceBuilder,
 };
 
-/// Error types
+/// Error types for the public API
 pub use api::{DrasiError, Result};
 
-/// Application integration handles
-pub use sources::ApplicationSourceHandle;
+/// Application integration handles for direct source/reaction access
 pub use reactions::ApplicationReactionHandle;
+pub use sources::ApplicationSourceHandle;
 
-/// Subscription options for reactions
+/// Subscription options for configuring reactions
 pub use reactions::application::SubscriptionOptions;
 
-/// Property map builder for sources
+/// Property map builder for creating source data
 pub use sources::application::PropertyMapBuilder;
 
 // ============================================================================
-// Re-exported for backward compatibility (will be deprecated)
+// Configuration Types (for file-based config)
 // ============================================================================
 
-#[doc(hidden)]
-pub use application::ApplicationHandle;
-#[doc(hidden)]
-pub use channels::{ComponentEvent, ComponentStatus, QueryResult};
-#[doc(hidden)]
+/// Configuration types for YAML/JSON config files
 pub use config::{DrasiServerCoreConfig, QueryConfig, ReactionConfig, RuntimeConfig, SourceConfig};
-
-// Manager types - these are internal and should not be used directly
-// They are temporarily exported for backward compatibility
-#[doc(hidden)]
-pub use queries::{Query as QueryTrait, QueryManager};
-#[doc(hidden)]
-pub use reactions::{Reaction as ReactionTrait, ReactionManager};
-#[doc(hidden)]
-pub use sources::{Source as SourceTrait, SourceManager};

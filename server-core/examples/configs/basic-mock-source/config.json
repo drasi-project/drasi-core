@@ -1,11 +1,6 @@
 {
   "server": {
-    "host": "0.0.0.0",
-    "port": 8080,
-    "log_level": "info",
-    "max_connections": 1000,
-    "shutdown_timeout_seconds": 30,
-    "disable_persistence": false
+    "id": "basic-mock-source-server"
   },
   "sources": [
     {
@@ -16,11 +11,6 @@
         "data_type": "sensor",
         "interval_ms": 2000,
         "initial_count": 5
-      },
-      "bootstrap_provider": {
-        "type": "mock",
-        "initial_count": 10,
-        "data_type": "sensor"
       }
     }
   ],
@@ -28,7 +18,7 @@
     {
       "id": "sensor-monitor",
       "query": "MATCH (n:SensorReading) RETURN n",
-      "queryLanguage": "cypher",
+      "queryLanguage": "Cypher",
       "sources": ["mock-sensor-data"],
       "auto_start": true,
       "properties": {
