@@ -771,21 +771,130 @@ while let Some(result) = stream.next().await {
 }
 ```
 
-## Lifecycle Management
+## Component Management API
 
-DrasiServerCore and its components follow a clear lifecycle with states and transitions.
+DrasiServerCore provides a comprehensive API for complete runtime control over sources, queries, and reactions. You can list, inspect, start, stop, add, and remove components dynamically.
 
-### Server Lifecycle
+### Component Lifecycle Control
 
+Start and stop individual components without affecting others:
+
+```rust
+// Create components with auto_start disabled
+let core = DrasiServerCore::builder()
+    .add_source(Source::mock("source1").auto_start(false).build())
+    .add_query(
+        Query::cypher("query1")
+            .query("MATCH (n) RETURN n")
+            .from_source("source1")
+            .auto_start(false)
+            .build()
+    )
+    .add_reaction(
+        Reaction::log("reaction1")
+            .subscribe_to("query1")
+            .auto_start(false)
+            .build()
+    )
+    .build()
+    .await?;
+
+// Start components manually when needed
+core.start_source("source1").await?;
+core.start_query("query1").await?;
+core.start_reaction("reaction1").await?;
+
+// Stop components independently
+core.stop_reaction("reaction1").await?;
+core.stop_query("query1").await?;
+core.stop_source("source1").await?;
 ```
-Created → build().await → Started → start() → Running → stop() → Stopped → start() → Running
+
+**Available lifecycle methods:**
+- `start_source(id: &str)` - Start a stopped source
+- `stop_source(id: &str)` - Stop a running source
+- `start_query(id: &str)` - Start a stopped query
+- `stop_query(id: &str)` - Stop a running query
+- `start_reaction(id: &str)` - Start a stopped reaction
+- `stop_reaction(id: &str)` - Stop a running reaction
+
+### Listing and Inspection
+
+Get information about all components or specific ones:
+
+```rust
+// List all components with their status
+let sources = core.list_sources().await?;
+for (id, status) in sources {
+    println!("Source {}: {:?}", id, status);
+}
+
+let queries = core.list_queries().await?;
+let reactions = core.list_reactions().await?;
+
+// Get detailed information about specific components
+let source_info = core.get_source_info("my-source").await?;
+println!("Type: {}", source_info.source_type);
+println!("Status: {:?}", source_info.status);
+println!("Properties: {:?}", source_info.properties);
+
+let query_info = core.get_query_info("my-query").await?;
+println!("Query: {}", query_info.query);
+println!("Sources: {:?}", query_info.sources);
+
+let reaction_info = core.get_reaction_info("my-reaction").await?;
+println!("Type: {}", reaction_info.reaction_type);
+println!("Queries: {:?}", reaction_info.queries);
+
+// Check component status
+let status = core.get_source_status("my-source").await?;
+let status = core.get_query_status("my-query").await?;
+let status = core.get_reaction_status("my-reaction").await?;
+
+// Get current query results
+let results = core.get_query_results("my-query").await?;
+println!("Current result set: {} items", results.len());
 ```
 
-**Key methods:**
-- `build().await` - Creates and initializes server (single phase)
-- `start().await` - Starts all auto_start components
-- `stop().await` - Gracefully stops all components
-- `is_running()` - Check current state
+### Dynamic Runtime Configuration
+
+Add or remove components while the server is running:
+
+```rust
+// Add components at runtime
+core.add_source_runtime(
+    Source::postgres("new-db")
+        .with_properties(
+            Properties::new()
+                .with_string("host", "localhost")
+                .with_string("database", "newdb")
+        )
+        .auto_start(true)
+        .build()
+).await?;
+
+core.add_query_runtime(
+    Query::cypher("new-query")
+        .query("MATCH (n) RETURN n")
+        .from_source("new-db")
+        .auto_start(true)
+        .build()
+).await?;
+
+core.add_reaction_runtime(
+    Reaction::http("new-webhook")
+        .subscribe_to("new-query")
+        .with_property("endpoint", json!("https://api.example.com"))
+        .auto_start(true)
+        .build()
+).await?;
+
+// Remove components when no longer needed
+// Note: Remove in dependency order (reactions -> queries -> sources)
+core.remove_reaction("new-webhook").await?;
+core.remove_query("new-query").await?;
+core.remove_source("new-db").await?;
+```
 
 ### Component States
 
@@ -801,67 +910,108 @@ pub enum ComponentStatus {
 }
 ```
 
-**Check component status:**
+### Server Lifecycle
+
+```
+Created → build().await → Initialized → start() → Running → stop() → Stopped
+```
+
+**Key methods:**
+- `build().await` - Creates and initializes server (single phase)
+- `start().await` - Starts all auto_start components
+- `stop().await` - Gracefully stops all components
+- `is_running()` - Check if server is running
+
+### Use Cases
+
+**Selective Component Activation:**
 ```rust
-let status = core.source_status("my-source")?;
-if status == ComponentStatus::Running {
-    println!("Source is active");
+// Start only specific components based on configuration
+let active_queries = vec!["query1", "query3"];
+
+for query_id in active_queries {
+    core.start_query(query_id).await?;
 }
 ```
 
-### Restart Behavior
-
-DrasiServerCore remembers which components were running:
-- `stop()` halts everything but remembers state
-- `start()` restarts previously running components
-- Failures don't affect other components
-
-**Example:**
+**Health Monitoring and Recovery:**
 ```rust
-core.start().await?;  // Starts all auto_start=true components
-// ... later ...
-core.stop().await?;   // Stops everything
-// ... later ...
-core.start().await?;  // Restarts what was running before
-```
-
-### Component-Level Control
-
-Control individual components:
-```rust
-// Start specific component
-core.start_source("my-source").await?;
-core.start_query("my-query").await?;
-core.start_reaction("my-reaction").await?;
-
-// Stop specific component
-core.stop_source("my-source").await?;
-
-// Check status
-let status = core.query_status("my-query")?;
-```
-
-### Error Recovery
-
-Component failures are isolated:
-- If a source fails, queries and reactions continue
-- Monitor status to detect failures
-- Restart failed components individually
-
-```rust
-// Monitor and recover
+// Monitor and restart failed components
 tokio::spawn(async move {
     loop {
         tokio::time::sleep(Duration::from_secs(30)).await;
-        if let Ok(status) = core.source_status("critical-source") {
-            if status == ComponentStatus::Error {
-                // Attempt restart
-                let _ = core.start_source("critical-source").await;
+
+        // Check component health
+        if let Ok(status) = core.get_query_status("critical-query").await {
+            if matches!(status, ComponentStatus::Error) {
+                println!("Query failed, restarting...");
+                let _ = core.stop_query("critical-query").await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let _ = core.start_query("critical-query").await;
             }
         }
     }
 });
 ```
+
+**Dynamic Monitoring:**
+```rust
+// Add monitoring for new services dynamically
+async fn monitor_service(core: &DrasiServerCore, service_id: &str) -> Result<()> {
+    let query_id = format!("monitor-{}", service_id);
+
+    // Add query to detect issues
+    core.add_query_runtime(
+        Query::cypher(&query_id)
+            .query(format!("MATCH (s:Service {{id: '{}'}}) WHERE s.status = 'down' RETURN s", service_id))
+            .from_source("services")
+            .auto_start(true)
+            .build()
+    ).await?;
+
+    // Add reaction to alert on issues
+    core.add_reaction_runtime(
+        Reaction::http(&format!("alert-{}", service_id))
+            .subscribe_to(&query_id)
+            .with_property("endpoint", json!("https://alerts.example.com"))
+            .auto_start(true)
+            .build()
+    ).await?;
+
+    Ok(())
+}
+```
+
+**Graceful Shutdown:**
+```rust
+// Stop components in correct order
+for (id, _) in core.list_reactions().await? {
+    core.stop_reaction(&id).await?;
+}
+
+for (id, _) in core.list_queries().await? {
+    core.stop_query(&id).await?;
+}
+
+for (id, _) in core.list_sources().await? {
+    core.stop_source(&id).await?;
+}
+
+core.stop().await?;
+```
+
+### Examples
+
+See working examples:
+```bash
+# Complete lifecycle control demo
+cargo run --example component_lifecycle
+
+# Listing and inspection demo
+cargo run --example component_inspection
+```
+
+For complete API documentation, see [COMPONENT_MANAGEMENT_API.md](COMPONENT_MANAGEMENT_API.md).
 
 ## Async Integration Patterns
 
