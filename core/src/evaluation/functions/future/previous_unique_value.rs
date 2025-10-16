@@ -117,7 +117,7 @@ impl ScalarFunction for PreviousUniqueValue {
             },
         })?;
 
-        let (prev_unique, before_value ) = match self.result_index.get(&result_key, &result_owner).await {
+        let (mut prev_unique, before_value ) = match self.result_index.get(&result_key, &result_owner).await {
             Ok(v) => match v {
                 Some(v) => match v {
                     ValueAccumulator::Map(m) => (m.get("0").cloned().unwrap_or_default(), m.get("1").cloned().unwrap_or_default()),
@@ -142,18 +142,17 @@ impl ScalarFunction for PreviousUniqueValue {
 
         println!("Previous unique value: {:?}, before value: {:?}", prev_unique, before_value);
 
+        
          //println!("Current value: {:?}, previous unique value: {:?}, before value: {:?}", current_value, prev_unique, before_value);
 
         match context.get_side_effects() {
             SideEffects::Apply => {                
 
-                let p = {
-                    if current_value == prev_unique {
-                        ValueAccumulator::Map(BTreeMap::from([("0".to_string(), current_value), ("1".to_string(), before_value.clone())]).into())
-                    } else {
-                        ValueAccumulator::Map(BTreeMap::from([("0".to_string(), current_value.clone()), ("1".to_string(), prev_unique.clone())]).into())
-                    }
-                };
+                if current_value != before_value {
+                    prev_unique = before_value.clone();
+                }
+
+                let p = ValueAccumulator::Map(BTreeMap::from([("0".to_string(), prev_unique.clone()), ("1".to_string(), current_value.clone())]).into());
 
                 println!("Storing p {:?} for key {:?}", p, result_key);
                 
@@ -176,9 +175,9 @@ impl ScalarFunction for PreviousUniqueValue {
                 };
                 Ok((&prev_unique).into())
             },
-            SideEffects::Snapshot => Ok((&before_value).into()),
-            SideEffects::RevertForUpdate => Ok((&before_value).into()),
-            SideEffects::RevertForDelete => Ok((&before_value).into())
+            SideEffects::Snapshot => Ok((&prev_unique).into()),
+            SideEffects::RevertForUpdate => Ok((&prev_unique).into()),
+            SideEffects::RevertForDelete => Ok((&prev_unique).into())
         }
     }
 }
