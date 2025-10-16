@@ -15,17 +15,20 @@
 use anyhow::{anyhow, Result};
 use log::{error, info, warn};
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::api::{DrasiError, HandleRegistry};
 use crate::channels::{ComponentStatus, *};
-use crate::config::RuntimeConfig;
+use crate::config::{DrasiServerCoreConfig, RuntimeConfig};
 use crate::queries::QueryManager;
 use crate::reactions::ReactionManager;
+use crate::reactions::ApplicationReactionHandle;
 use crate::routers::{BootstrapRouter, DataRouter, SubscriptionRouter};
-use crate::sources::SourceManager;
+use crate::sources::{ApplicationSourceHandle, SourceManager};
 
-/// Core Drasi server functionality without web API
+/// Core Drasi Server functionality without web API
 pub struct DrasiServerCore {
     config: Arc<RuntimeConfig>,
     source_manager: Arc<SourceManager>,
@@ -39,6 +42,8 @@ pub struct DrasiServerCore {
     initialized: Arc<RwLock<bool>>,
     // Track components that were running before server stop
     components_running_before_stop: Arc<RwLock<ComponentsRunningState>>,
+    // Handle registry for application sources and reactions
+    handle_registry: HandleRegistry,
 }
 
 #[derive(Default, Clone)]
@@ -84,6 +89,7 @@ impl DrasiServerCore {
             components_running_before_stop: Arc::new(
                 RwLock::new(ComponentsRunningState::default()),
             ),
+            handle_registry: HandleRegistry::new(),
         }
     }
 
@@ -153,6 +159,160 @@ impl DrasiServerCore {
 
         Ok(())
     }
+
+    // ============================================================================
+    // New Public API - Handle Access
+    // ============================================================================
+
+    /// Get a handle to an application source by ID
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_server_core::DrasiServerCore;
+    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// let handle = core.source_handle("my-source")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn source_handle(&self, id: &str) -> crate::api::Result<ApplicationSourceHandle> {
+        // Try to get from handle registry first
+        if let Ok(handle) = futures::executor::block_on(self.handle_registry.get_source_handle(id))
+        {
+            return Ok(handle);
+        }
+
+        // If not in registry, try to get from source manager
+        // This handles the case where the source exists but handle isn't registered yet
+        futures::executor::block_on(async {
+            if let Some(handle) = self.source_manager.get_application_handle(id).await {
+                // Register it for future use
+                self.handle_registry
+                    .register_source_handle(id.to_string(), handle.clone())
+                    .await;
+                Ok(handle)
+            } else {
+                Err(DrasiError::component_not_found("source", id))
+            }
+        })
+    }
+
+    /// Get a handle to an application reaction by ID
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_server_core::DrasiServerCore;
+    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// let handle = core.reaction_handle("my-reaction")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn reaction_handle(&self, id: &str) -> crate::api::Result<ApplicationReactionHandle> {
+        // Try to get from handle registry first
+        if let Ok(handle) =
+            futures::executor::block_on(self.handle_registry.get_reaction_handle(id))
+        {
+            return Ok(handle);
+        }
+
+        // If not in registry, try to get from reaction manager
+        futures::executor::block_on(async {
+            if let Some(handle) = self.reaction_manager.get_application_handle(id).await {
+                // Register it for future use
+                self.handle_registry
+                    .register_reaction_handle(id.to_string(), handle.clone())
+                    .await;
+                Ok(handle)
+            } else {
+                Err(DrasiError::component_not_found("reaction", id))
+            }
+        })
+    }
+
+    // ============================================================================
+    // Builder and Config File Loading
+    // ============================================================================
+
+    /// Create a builder for configuring DrasiServerCore programmatically
+    ///
+    /// # Example
+    /// ```no_run
+    /// use drasi_server_core::{DrasiServerCore, Source, Query, Reaction};
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let core = DrasiServerCore::builder()
+    ///     .with_id("my-server")
+    ///     .add_source(Source::application("source1").build())
+    ///     .add_query(Query::cypher("query1")
+    ///         .query("MATCH (n) RETURN n")
+    ///         .from_source("source1")
+    ///         .build())
+    ///     .add_reaction(Reaction::application("reaction1")
+    ///         .subscribe_to("query1")
+    ///         .build())
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn builder() -> crate::api::DrasiServerCoreBuilder {
+        crate::api::DrasiServerCoreBuilder::new()
+    }
+
+    /// Load configuration from a YAML or JSON file and create a ready-to-start server
+    ///
+    /// # Example
+    /// ```no_run
+    /// use drasi_server_core::DrasiServerCore;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let core = DrasiServerCore::from_config_file("config.yaml").await?;
+    /// core.start().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn from_config_file(path: impl AsRef<Path>) -> crate::api::Result<Self> {
+        let config = DrasiServerCoreConfig::load_from_file(path)?;
+        config.validate()?;
+
+        let runtime_config = Arc::new(RuntimeConfig::from(config));
+        let mut core = Self::new(runtime_config);
+        core.initialize().await?;
+
+        Ok(core)
+    }
+
+    /// Load configuration from a YAML or JSON string and create a ready-to-start server
+    ///
+    /// # Example
+    /// ```no_run
+    /// use drasi_server_core::DrasiServerCore;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let yaml = r#"
+    /// server:
+    ///   id: my-server
+    /// sources: []
+    /// queries: []
+    /// reactions: []
+    /// "#;
+    /// let core = DrasiServerCore::from_config_str(yaml).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn from_config_str(yaml: &str) -> crate::api::Result<Self> {
+        let config: DrasiServerCoreConfig = serde_yaml::from_str(yaml)?;
+        config.validate()?;
+
+        let runtime_config = Arc::new(RuntimeConfig::from(config));
+        let mut core = Self::new(runtime_config);
+        core.initialize().await?;
+
+        Ok(core)
+    }
+
+    // ============================================================================
+    // Legacy API - Manager Access (will be removed)
+    // ============================================================================
 
     /// Get references to managers for programmatic access
     pub fn source_manager(&self) -> &Arc<SourceManager> {

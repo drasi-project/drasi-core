@@ -48,6 +48,7 @@ pub async fn setup_redis() -> String {
 ///
 /// # Returns
 /// The stream ID of the published event
+#[allow(dead_code)]
 pub async fn publish_platform_event(
     redis_url: &str,
     stream_key: &str,
@@ -81,6 +82,7 @@ pub async fn publish_platform_event(
 ///
 /// # Returns
 /// Vec of (stream_id, event_data) tuples
+#[allow(dead_code)]
 pub async fn read_from_stream(
     redis_url: &str,
     stream_key: &str,
@@ -129,6 +131,7 @@ pub async fn read_from_stream(
 ///
 /// # Returns
 /// Ok if successful, Err if group already exists or other error
+#[allow(dead_code)]
 pub async fn create_consumer_group(
     redis_url: &str,
     stream_key: &str,
@@ -329,6 +332,7 @@ pub fn verify_cloudevent_structure(cloud_event: &Value) -> Result<()> {
 }
 
 /// Get stream length using XLEN command
+#[allow(dead_code)]
 pub async fn get_stream_length(redis_url: &str, stream_key: &str) -> Result<usize> {
     let client = redis::Client::open(redis_url)?;
     let mut conn = client.get_multiplexed_async_connection().await?;
@@ -342,6 +346,7 @@ pub async fn get_stream_length(redis_url: &str, stream_key: &str) -> Result<usiz
 }
 
 /// Get pending entries count for a consumer group
+#[allow(dead_code)]
 pub async fn get_pending_count(
     redis_url: &str,
     stream_key: &str,

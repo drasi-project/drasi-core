@@ -12,33 +12,78 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Public API module - clean interface for users
+pub mod api;
+
+// Internal modules - public for internal use but hidden from docs
+#[doc(hidden)]
 pub mod application;
+#[doc(hidden)]
 pub mod bootstrap;
+#[doc(hidden)]
 pub mod channels;
+#[doc(hidden)]
 pub mod config;
+#[doc(hidden)]
 pub mod error;
+#[doc(hidden)]
 pub mod queries;
+#[doc(hidden)]
 pub mod reactions;
+#[doc(hidden)]
 pub mod routers;
+#[doc(hidden)]
 pub mod server_core;
+#[doc(hidden)]
 pub mod sources;
+#[doc(hidden)]
 pub mod utils;
 
 #[cfg(test)]
 mod test_support;
 
-// Main exports for library users
-pub use server_core::DrasiServerCore;
-// DrasiServerCore now supports start()/stop() for library mode control
+// ============================================================================
+// New Clean Public API
+// ============================================================================
 
-// Re-export commonly used types
-pub use application::ApplicationHandle;
-pub use channels::{ComponentEvent, ComponentStatus, QueryResult};
-pub use config::{DrasiServerCoreConfig, QueryConfig, ReactionConfig, RuntimeConfig, SourceConfig};
-pub use error::DrasiError;
-pub use queries::{Query, QueryManager};
-pub use reactions::application::SubscriptionOptions;
+/// Main server type - use `DrasiServerCore::builder()` or `DrasiServerCore::from_config_file()`
+pub use server_core::DrasiServerCore;
+
+/// Builder types for fluent API
+pub use api::{
+    DrasiServerCoreBuilder, Properties, Query, QueryBuilder, Reaction, ReactionBuilder, Source,
+    SourceBuilder,
+};
+
+/// Error types
+pub use api::{DrasiError, Result};
+
+/// Application integration handles
+pub use sources::ApplicationSourceHandle;
 pub use reactions::ApplicationReactionHandle;
-pub use reactions::{Reaction, ReactionManager};
+
+/// Subscription options for reactions
+pub use reactions::application::SubscriptionOptions;
+
+/// Property map builder for sources
 pub use sources::application::PropertyMapBuilder;
-pub use sources::{ApplicationSourceHandle, Source, SourceManager};
+
+// ============================================================================
+// Re-exported for backward compatibility (will be deprecated)
+// ============================================================================
+
+#[doc(hidden)]
+pub use application::ApplicationHandle;
+#[doc(hidden)]
+pub use channels::{ComponentEvent, ComponentStatus, QueryResult};
+#[doc(hidden)]
+pub use config::{DrasiServerCoreConfig, QueryConfig, ReactionConfig, RuntimeConfig, SourceConfig};
+
+// Manager types - these are internal and should not be used directly
+// They are temporarily exported for backward compatibility
+#[doc(hidden)]
+pub use queries::{Query as QueryTrait, QueryManager};
+#[doc(hidden)]
+pub use reactions::{Reaction as ReactionTrait, ReactionManager};
+#[doc(hidden)]
+pub use sources::{Source as SourceTrait, SourceManager};

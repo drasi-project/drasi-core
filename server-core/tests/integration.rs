@@ -18,12 +18,19 @@
 
 use anyhow::Result;
 use drasi_server_core::{
-    config::{DrasiServerCoreSettings, QueryConfig, QueryLanguage, ReactionConfig, SourceConfig},
-    DrasiServerCore, RuntimeConfig,
+    DrasiServerCore, Properties, Query, Reaction, Source,
 };
+use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
+
+// Import old API for backward compatibility tests
+#[allow(deprecated)]
+use drasi_server_core::{QueryConfig, ReactionConfig, RuntimeConfig, SourceConfig};
+
+// Import schema types
+use drasi_server_core::config::{DrasiServerCoreSettings, QueryLanguage};
 
 /// Helper to create a minimal test configuration
 fn create_minimal_config() -> RuntimeConfig {
@@ -205,6 +212,92 @@ async fn test_multiple_sources_and_queries() -> Result<()> {
     core.start().await?;
 
     sleep(Duration::from_millis(100)).await;
+    assert!(core.is_running().await);
+
+    core.stop().await?;
+    Ok(())
+}
+
+// ============================================================================
+// New Builder API Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_builder_api_basic() -> Result<()> {
+    // Test the new fluent builder API
+    let core = DrasiServerCore::builder()
+        .with_id("test-builder-server")
+        .build()
+        .await?;
+
+    // Should be initialized and ready to start
+    assert!(!core.is_running().await);
+
+    core.start().await?;
+    assert!(core.is_running().await);
+
+    core.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_builder_api_with_components() -> Result<()> {
+    // Test building a complete pipeline with the new API
+    let core = DrasiServerCore::builder()
+        .with_id("test-pipeline")
+        .add_source(
+            Source::mock("source1")
+                .with_properties(
+                    Properties::new()
+                        .with_string("data_type", "sensor")
+                        .with_int("interval_ms", 500),
+                )
+                .build(),
+        )
+        .add_query(
+            Query::cypher("query1")
+                .query("MATCH (n) RETURN n")
+                .from_source("source1")
+                .build(),
+        )
+        .add_reaction(
+            Reaction::log("reaction1")
+                .subscribe_to("query1")
+                .with_property("log_level", json!("error"))
+                .build(),
+        )
+        .build()
+        .await?;
+
+    core.start().await?;
+    sleep(Duration::from_millis(200)).await;
+    assert!(core.is_running().await);
+
+    core.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_config_file_loading() -> Result<()> {
+    // Create a test config file
+    use std::io::Write;
+    let mut temp_file = tempfile::NamedTempFile::new()?;
+    writeln!(
+        temp_file,
+        r#"
+server:
+  id: test-from-file
+sources: []
+queries: []
+reactions: []
+"#
+    )?;
+
+    // Test loading from config file
+    let core = DrasiServerCore::from_config_file(temp_file.path()).await?;
+
+    assert!(!core.is_running().await);
+    core.start().await?;
     assert!(core.is_running().await);
 
     core.stop().await?;

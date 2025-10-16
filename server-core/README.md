@@ -19,7 +19,7 @@ Unlike traditional event-driven systems that require complex event parsing and s
 
 Traditional event-driven architectures often struggle with:
 - **Event Overload**: Processing streams of generic events to find what matters
-- **Complex Filtering**: Writing custom logic to parse event payloads and filter irrelevant changes  
+- **Complex Filtering**: Writing custom logic to parse event payloads and filter irrelevant changes
 - **State Management**: Maintaining context across multiple events to detect meaningful patterns
 - **Brittle Implementations**: Hard-coded change detection that breaks when systems evolve
 
@@ -43,79 +43,75 @@ Add DrasiServerCore to your `Cargo.toml`:
 ```toml
 [dependencies]
 drasi-server-core = "0.1.0"
-anyhow = "1.0"
 tokio = { version = "1", features = ["full"] }
 serde_json = "1.0"
 ```
 
-### Basic Example
+### Basic Example - Builder API
 
-Create a simple change detection pipeline:
+Create a change detection pipeline using the fluent builder API:
 
 ```rust
-use drasi_server_core::{
-    DrasiServerCore, RuntimeConfig,
-    config::{DrasiServerCoreSettings, SourceConfig, QueryConfig, ReactionConfig},
-};
-use std::collections::HashMap;
-use std::sync::Arc;
+use drasi_server_core::{DrasiServerCore, Source, Query, Reaction, Properties};
 use serde_json::json;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Configure a change-driven pipeline
-    let config = RuntimeConfig {
-        server: DrasiServerCoreSettings {
-            host: "127.0.0.1".to_string(),
-            port: 8080,
-            log_level: "info".to_string(),
-            max_connections: 100,
-            shutdown_timeout_seconds: 30,
-            disable_persistence: true,
-        },
-        sources: vec![
-            SourceConfig {
-                id: "sensor-data".to_string(),
-                source_type: "mock".to_string(),
-                auto_start: true,
-                properties: HashMap::from([
-                    ("data_type".to_string(), json!("sensor")),
-                    ("interval_ms".to_string(), json!(1000)),
-                ]),
-            }
-        ],
-        queries: vec![
-            QueryConfig {
-                id: "anomaly-detection".to_string(),
-                query: "MATCH (s:Sensor) WHERE s.temperature > 75 RETURN s.id, s.temperature".to_string(),
-                sources: vec!["sensor-data".to_string()],
-                auto_start: true,
-                properties: HashMap::new(),
-                joins: None,
-            }
-        ],
-        reactions: vec![
-            ReactionConfig {
-                id: "alert-handler".to_string(),
-                reaction_type: "log".to_string(),
-                queries: vec!["anomaly-detection".to_string()],
-                auto_start: true,
-                properties: HashMap::from([
-                    ("log_level".to_string(), json!("info")),
-                ]),
-            }
-        ],
-    };
+    // Configure a change-driven pipeline using the fluent builder API
+    let core = DrasiServerCore::builder()
+        .with_id("my-server")
+        .add_source(
+            Source::mock("sensor-data")
+                .with_properties(
+                    Properties::new()
+                        .with_string("data_type", "sensor")
+                        .with_int("interval_ms", 1000)
+                )
+                .build()
+        )
+        .add_query(
+            Query::cypher("anomaly-detection")
+                .query("MATCH (s:Sensor) WHERE s.temperature > 75 RETURN s.id, s.temperature")
+                .from_source("sensor-data")
+                .build()
+        )
+        .add_reaction(
+            Reaction::log("alert-handler")
+                .subscribe_to("anomaly-detection")
+                .with_property("log_level", json!("info"))
+                .build()
+        )
+        .build()
+        .await?;
 
-    // Create and start the change detection engine
-    let mut core = DrasiServerCore::new(Arc::new(config));
-    core.initialize().await?;
+    // Start the change detection engine
     core.start().await?;
 
     // Run for 10 seconds
     tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
 
-    // Shutdown
+    // Graceful shutdown
+    core.stop().await?;
+    Ok(())
+}
+```
+
+### Loading from Configuration File
+
+Load pre-existing YAML/JSON configuration:
+
+```rust
+use drasi_server_core::DrasiServerCore;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load and initialize from config file in one step
+    let core = DrasiServerCore::from_config_file("config.yaml").await?;
+
+    core.start().await?;
+
+    // ... your application logic ...
+
     core.stop().await?;
     Ok(())
 }
@@ -146,44 +142,57 @@ This model enables queries that understand not just individual changes, but chan
 
 ## Configuration
 
-### Programmatic Configuration
+### Fluent Builder API (Recommended)
 
-Build configurations in code for maximum control:
+Build configurations programmatically with type-safe, fluent API:
 
 ```rust
-use drasi_server_core::config::{SourceConfig, QueryConfig, ReactionConfig};
-use std::collections::HashMap;
+use drasi_server_core::{DrasiServerCore, Source, Query, Reaction, Properties};
 use serde_json::json;
 
-// Configure a PostgreSQL source for change data capture
-let pg_source = SourceConfig {
-    id: "orders-db".to_string(),
-    source_type: "postgres".to_string(),
-    auto_start: true,
-    properties: HashMap::from([
-        ("host".to_string(), json!("localhost")),
-        ("port".to_string(), json!(5432)),
-        ("database".to_string(), json!("orders")),
-        ("user".to_string(), json!("postgres")),
-        ("password".to_string(), json!("secret")),
-        ("tables".to_string(), json!(["orders", "order_items"])),
-    ]),
-};
+let core = DrasiServerCore::builder()
+    .with_id("order-monitoring")
+    // Configure a PostgreSQL source for change data capture
+    .add_source(
+        Source::postgres("orders-db")
+            .with_properties(
+                Properties::new()
+                    .with_string("host", "localhost")
+                    .with_int("port", 5432)
+                    .with_string("database", "orders")
+                    .with_string("user", "postgres")
+                    .with_string("password", "secret")
+            )
+            .with_postgres_bootstrap()
+            .build()
+    )
+    // Define a continuous query to detect business exceptions
+    .add_query(
+        Query::cypher("delayed-orders")
+            .query(r#"
+                MATCH (o:Order)-[:CONTAINS]->(i:OrderItem)
+                WHERE o.status = 'pending'
+                  AND duration.between(o.created_at, datetime()) > duration('PT24H')
+                RETURN o.id, o.customer_id, sum(i.quantity * i.price) as total
+            "#)
+            .from_source("orders-db")
+            .build()
+    )
+    // Configure HTTP reaction for alerts
+    .add_reaction(
+        Reaction::http("alert-webhook")
+            .subscribe_to("delayed-orders")
+            .with_properties(
+                Properties::new()
+                    .with_string("endpoint", "https://api.example.com/alerts")
+                    .with_string("method", "POST")
+            )
+            .build()
+    )
+    .build()
+    .await?;
 
-// Define a continuous query to detect business exceptions
-let query = QueryConfig {
-    id: "delayed-orders".to_string(),
-    query: r#"
-        MATCH (o:Order)-[:CONTAINS]->(i:OrderItem)
-        WHERE o.status = 'pending' 
-          AND duration.between(o.created_at, datetime()) > duration('PT24H')
-        RETURN o.id, o.customer_id, sum(i.quantity * i.price) as total
-    "#.to_string(),
-    sources: vec!["orders-db".to_string()],
-    auto_start: true,
-    properties: HashMap::new(),
-    joins: None,
-};
+core.start().await?;
 ```
 
 ### YAML Configuration
@@ -191,17 +200,10 @@ let query = QueryConfig {
 Load change detection pipelines from YAML or JSON files:
 
 ```rust
-use drasi_server_core::{DrasiServerCore, DrasiServerCoreConfig, RuntimeConfig};
-use std::sync::Arc;
+use drasi_server_core::DrasiServerCore;
 
 // Load configuration from YAML file
-let config = DrasiServerCoreConfig::load_from_file("config.yaml")?;
-
-// Convert to RuntimeConfig and create DrasiServerCore
-let runtime_config: RuntimeConfig = config.into();
-let mut core = DrasiServerCore::new(Arc::new(runtime_config));
-
-core.initialize().await?;
+let core = DrasiServerCore::from_config_file("config.yaml").await?;
 core.start().await?;
 ```
 
@@ -209,11 +211,7 @@ Example YAML configuration (`config.yaml`):
 
 ```yaml
 server:
-  host: 0.0.0.0
-  port: 8080
-  log_level: info
-  max_connections: 1000
-  disable_persistence: false
+  id: infrastructure-monitor
 
 sources:
   - id: infrastructure-metrics
@@ -223,15 +221,15 @@ sources:
       host: metrics.example.com
       port: 5432
       database: telemetry
-      replication_slot: drasi_slot
-      publication: drasi_pub
+      user: drasi_user
+      password: secret
 
 queries:
   - id: vm-health-monitor
     query: |
       MATCH (vm:VM)-[:RUNS]->(s:Service)
       WHERE vm.cpu_usage > 80 OR vm.memory_usage > 90
-      RETURN vm.id, vm.name, collect(s.name) as services, 
+      RETURN vm.id, vm.name, collect(s.name) as services,
              vm.cpu_usage, vm.memory_usage
     sources:
       - infrastructure-metrics
@@ -257,14 +255,13 @@ Sources are adapters that capture changes from your existing systems and convert
 Generate test data for development:
 
 ```rust
-SourceConfig {
-    id: "test-source".to_string(),
-    source_type: "mock".to_string(),
-    properties: HashMap::from([
-        ("data_type".to_string(), json!("sensor")), // sensor|counter|random
-        ("interval_ms".to_string(), json!(500)),
-    ]),
-}
+Source::mock("test-source")
+    .with_properties(
+        Properties::new()
+            .with_string("data_type", "sensor")  // sensor|counter|random
+            .with_int("interval_ms", 500)
+    )
+    .build()
 ```
 
 ### HTTP Source
@@ -272,15 +269,14 @@ SourceConfig {
 Receive changes via REST API:
 
 ```rust
-SourceConfig {
-    id: "http-ingestion".to_string(),
-    source_type: "http".to_string(),
-    properties: HashMap::from([
-        ("host".to_string(), json!("0.0.0.0")),
-        ("port".to_string(), json!(9000)),
-        ("path".to_string(), json!("/changes")),
-    ]),
-}
+Source::http("http-ingestion")
+    .with_properties(
+        Properties::new()
+            .with_string("host", "0.0.0.0")
+            .with_int("port", 9000)
+            .with_string("path", "/changes")
+    )
+    .build()
 ```
 
 Submit changes:
@@ -307,36 +303,32 @@ curl -X POST http://localhost:9000/changes \
 High-performance change ingestion:
 
 ```rust
-SourceConfig {
-    id: "grpc-stream".to_string(),
-    source_type: "grpc".to_string(),
-    properties: HashMap::from([
-        ("host".to_string(), json!("0.0.0.0")),
-        ("port".to_string(), json!(50051)),
-        ("max_message_size".to_string(), json!(4194304)),
-    ]),
-}
+Source::grpc("grpc-stream")
+    .with_properties(
+        Properties::new()
+            .with_string("host", "0.0.0.0")
+            .with_int("port", 50051)
+            .with_int("max_message_size", 4194304)
+    )
+    .build()
 ```
 
-### PostgreSQL Replication Source
+### PostgreSQL Source
 
 Stream changes directly from PostgreSQL using logical replication:
 
 ```rust
-SourceConfig {
-    id: "postgres-cdc".to_string(),
-    source_type: "postgres_replication".to_string(),
-    properties: HashMap::from([
-        ("host".to_string(), json!("localhost")),
-        ("port".to_string(), json!(5432)),
-        ("database".to_string(), json!("production")),
-        ("user".to_string(), json!("replication_user")),
-        ("password".to_string(), json!("secret")),
-        ("slot_name".to_string(), json!("drasi_slot")),
-        ("publication".to_string(), json!("drasi_publication")),
-        ("tables".to_string(), json!(["public.orders", "public.inventory"])),
-    ]),
-}
+Source::postgres("postgres-cdc")
+    .with_properties(
+        Properties::new()
+            .with_string("host", "localhost")
+            .with_int("port", 5432)
+            .with_string("database", "production")
+            .with_string("user", "replication_user")
+            .with_string("password", "secret")
+    )
+    .with_postgres_bootstrap()
+    .build()
 ```
 
 PostgreSQL setup:
@@ -356,34 +348,29 @@ SELECT pg_create_logical_replication_slot('drasi_slot', 'pgoutput');
 Embed change detection directly in your application:
 
 ```rust
-use drasi_server_core::sources::ApplicationSource;
-use drasi_core::models::{SourceChange, Element};
+use drasi_server_core::{DrasiServerCore, Source};
 
-let app_source = ApplicationSource::new("app-events");
-let sender = app_source.get_sender();
+// Configure application source
+let core = DrasiServerCore::builder()
+    .add_source(Source::application("app-events").build())
+    .build()
+    .await?;
 
-// In your business logic
-async fn process_order(order: Order) {
-    // Your existing logic...
-    
-    // Emit change for detection
-    let change = SourceChange::Insert {
-        element: Element::Node {
-            metadata: ElementMetadata {
-                reference: ElementReference::new("app", &order.id),
-                labels: Arc::new([Arc::from("Order")]),
-                effective_from: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
-            },
-            properties: ElementPropertyMap::from(json!({
-                "customer_id": order.customer_id,
-                "total": order.total,
-                "status": order.status,
-            })),
-        },
-    };
-    
-    sender.send(change).await.unwrap();
-}
+core.start().await?;
+
+// Get handle to send changes
+let source = core.source_handle("app-events")?;
+
+// In your business logic - send changes
+source.send_node_insert(
+    "order-123",
+    vec!["Order"],
+    property_map! {
+        "customer_id" => "cust-456",
+        "total" => 150.00,
+        "status" => "pending"
+    }
+).await?;
 ```
 
 ## Continuous Queries
@@ -401,63 +388,43 @@ Continuous queries are the heart of DrasiServerCore's change detection capabilit
 ### Example Continuous Queries
 
 **Detect Resource Anomalies**:
-```cypher
-MATCH (vm:VM)-[:HOSTS]->(app:Application)
-WHERE vm.cpu > 80 AND app.tier = 'production'
-  AND duration.between(vm.high_cpu_start, datetime()) > duration('PT5M')
-RETURN vm.id, vm.name, app.name, vm.cpu, vm.high_cpu_start
+```rust
+Query::cypher("resource-anomalies")
+    .query(r#"
+        MATCH (vm:VM)-[:HOSTS]->(app:Application)
+        WHERE vm.cpu > 80 AND app.tier = 'production'
+          AND duration.between(vm.high_cpu_start, datetime()) > duration('PT5M')
+        RETURN vm.id, vm.name, app.name, vm.cpu, vm.high_cpu_start
+    "#)
+    .from_source("infrastructure")
+    .build()
 ```
 
 **Track Inventory Depletion**:
-```cypher
-MATCH (p:Product)-[:STORED_IN]->(w:Warehouse)
-WHERE p.quantity < p.reorder_point 
-  AND NOT EXISTS((p)<-[:PENDING]-(:PurchaseOrder))
-RETURN p.sku, p.name, w.location, p.quantity, p.reorder_point
+```rust
+Query::cypher("low-inventory")
+    .query(r#"
+        MATCH (p:Product)-[:STORED_IN]->(w:Warehouse)
+        WHERE p.quantity < p.reorder_point
+          AND NOT EXISTS((p)<-[:PENDING]-(:PurchaseOrder))
+        RETURN p.sku, p.name, w.location, p.quantity, p.reorder_point
+    "#)
+    .from_sources(vec!["inventory-db".into(), "purchasing-db".into()])
+    .build()
 ```
 
 **Monitor Service Dependencies**:
-```cypher
-MATCH path = (s1:Service)-[:DEPENDS_ON*1..3]->(s2:Service)
-WHERE s2.status = 'unhealthy'
-RETURN s1.name as affected_service, 
-       [n IN nodes(path) | n.name] as dependency_chain,
-       s2.name as failed_service
-```
-
-**Detect Business Exceptions**:
-```cypher
-MATCH (c:Customer)-[:PLACED]->(o:Order)-[:CONTAINS]->(i:OrderItem)
-WHERE o.promised_date < datetime() AND o.status <> 'delivered'
-RETURN c.email, o.id, o.promised_date, 
-       sum(i.quantity * i.price) as order_value
-```
-
-### Query Joins
-
-Correlate changes from multiple sources:
-
 ```rust
-QueryConfig {
-    id: "order-fulfillment".to_string(),
-    query: "MATCH (o:Order), (i:Inventory) WHERE o.product_id = i.sku RETURN o, i".to_string(),
-    sources: vec!["orders-db".to_string(), "inventory-db".to_string()],
-    joins: Some(vec![
-        JoinConfig {
-            keys: vec![
-                JoinKey {
-                    label: "Order".to_string(),
-                    property: "product_id".to_string(),
-                },
-                JoinKey {
-                    label: "Inventory".to_string(),
-                    property: "sku".to_string(),
-                },
-            ],
-        },
-    ]),
-    ..Default::default()
-}
+Query::cypher("service-health")
+    .query(r#"
+        MATCH path = (s1:Service)-[:DEPENDS_ON*1..3]->(s2:Service)
+        WHERE s2.status = 'unhealthy'
+        RETURN s1.name as affected_service,
+               [n IN nodes(path) | n.name] as dependency_chain,
+               s2.name as failed_service
+    "#)
+    .from_source("service-mesh")
+    .build()
 ```
 
 ## Reactions
@@ -469,14 +436,10 @@ Reactions respond to detected changes by triggering downstream actions:
 Debug and monitor detected changes:
 
 ```rust
-ReactionConfig {
-    id: "change-logger".to_string(),
-    reaction_type: "log".to_string(),
-    properties: HashMap::from([
-        ("log_level".to_string(), json!("info")),
-        ("format".to_string(), json!("json")),
-    ]),
-}
+Reaction::log("change-logger")
+    .subscribe_to("my-query")
+    .with_property("log_level", json!("info"))
+    .build()
 ```
 
 ### HTTP Reaction
@@ -484,20 +447,14 @@ ReactionConfig {
 Trigger webhooks and REST APIs:
 
 ```rust
-ReactionConfig {
-    id: "alert-webhook".to_string(),
-    reaction_type: "http".to_string(),
-    properties: HashMap::from([
-        ("endpoint".to_string(), json!("https://api.example.com/alerts")),
-        ("method".to_string(), json!("POST")),
-        ("headers".to_string(), json!({
-            "Content-Type": "application/json",
-            "X-API-Key": "secret"
-        })),
-        ("batch_size".to_string(), json!(100)),
-        ("timeout_ms".to_string(), json!(5000)),
-    ]),
-}
+Reaction::http("alert-webhook")
+    .subscribe_to("anomaly-detection")
+    .with_properties(
+        Properties::new()
+            .with_string("endpoint", "https://api.example.com/alerts")
+            .with_string("method", "POST")
+    )
+    .build()
 ```
 
 ### SSE Reaction
@@ -505,16 +462,15 @@ ReactionConfig {
 Stream changes to web applications:
 
 ```rust
-ReactionConfig {
-    id: "live-updates".to_string(),
-    reaction_type: "sse".to_string(),
-    properties: HashMap::from([
-        ("host".to_string(), json!("0.0.0.0")),
-        ("port".to_string(), json!(8081)),
-        ("path".to_string(), json!("/changes")),
-        ("keepalive_seconds".to_string(), json!(30)),
-    ]),
-}
+Reaction::sse("live-updates")
+    .subscribe_to("real-time-data")
+    .with_properties(
+        Properties::new()
+            .with_string("host", "0.0.0.0")
+            .with_int("port", 8081)
+            .with_string("path", "/changes")
+    )
+    .build()
 ```
 
 Client connection:
@@ -522,7 +478,6 @@ Client connection:
 const changes = new EventSource('http://localhost:8081/changes');
 changes.onmessage = (event) => {
     const change = JSON.parse(event.data);
-    // React to detected change
     updateUI(change);
 };
 ```
@@ -532,15 +487,14 @@ changes.onmessage = (event) => {
 High-performance change streaming:
 
 ```rust
-ReactionConfig {
-    id: "grpc-notifications".to_string(),
-    reaction_type: "grpc".to_string(),
-    properties: HashMap::from([
-        ("host".to_string(), json!("notifications.example.com")),
-        ("port".to_string(), json!(50052)),
-        ("service".to_string(), json!("ChangeNotificationService")),
-    ]),
-}
+Reaction::grpc("grpc-notifications")
+    .subscribe_to("critical-events")
+    .with_properties(
+        Properties::new()
+            .with_string("host", "notifications.example.com")
+            .with_int("port", 50052)
+    )
+    .build()
 ```
 
 ### Application Reaction
@@ -548,80 +502,49 @@ ReactionConfig {
 Process detected changes in-process:
 
 ```rust
-use drasi_server_core::reactions::ApplicationReaction;
+use drasi_server_core::{DrasiServerCore, Reaction};
 
-let app_reaction = ApplicationReaction::new("change-handler", |changes| {
-    for change in changes {
-        match change {
-            QueryResult::Adding { after } => {
-                // New result detected
-                handle_new_detection(after);
-            },
-            QueryResult::Updating { before, after } => {
-                // Result changed
-                handle_change(before, after);
-            },
-            QueryResult::Removing { before } => {
-                // Result no longer matches
-                handle_removal(before);
-            },
-        }
-    }
-});
-```
+let core = DrasiServerCore::builder()
+    .add_reaction(
+        Reaction::application("change-handler")
+            .subscribe_to("my-query")
+            .build()
+    )
+    .build()
+    .await?;
 
-## Advanced Features
+core.start().await?;
 
-### Persistence
+// Get handle to receive changes
+let reaction = core.reaction_handle("change-handler")?;
 
-Enable persistence for production deployments:
-
-```rust
-let config = RuntimeConfig {
-    server: DrasiServerCoreSettings {
-        disable_persistence: false,  // Enable persistence
-        ..Default::default()
-    },
-    ..Default::default()
-};
-```
-
-### Custom Sources and Reactions
-
-Extend DrasiServerCore with custom adapters:
-
-```rust
-use drasi_server_core::sources::SourceTrait;
-use async_trait::async_trait;
-
-struct CustomSource {
-    // Your implementation
-}
-
-#[async_trait]
-impl SourceTrait for CustomSource {
-    async fn start(&mut self) -> Result<()> {
-        // Begin emitting changes
-    }
-    
-    async fn stop(&mut self) -> Result<()> {
-        // Cleanup
-    }
+// Process changes asynchronously
+let mut stream = reaction.as_stream().await.unwrap();
+while let Some(result) = stream.next().await {
+    println!("Detected change: {:?}", result);
+    // Handle the change...
 }
 ```
 
-### Error Handling
+## Error Handling
 
-Handle errors gracefully:
+The new API provides typed errors for better error handling:
 
 ```rust
-use drasi_server_core::error::DrasiError;
+use drasi_server_core::{DrasiError, Result};
 
 match core.start().await {
-    Ok(_) => println!("Change detection started"),
-    Err(DrasiError::Configuration(msg)) => eprintln!("Config error: {}", msg),
-    Err(DrasiError::Component(msg)) => eprintln!("Component error: {}", msg),
-    Err(e) => eprintln!("Unexpected error: {}", e),
+    Ok(_) => println!("Started successfully"),
+    Err(DrasiError::Configuration(msg)) => {
+        eprintln!("Configuration error: {}", msg);
+    }
+    Err(DrasiError::ComponentNotFound { kind, id }) => {
+        eprintln!("{} '{}' not found", kind, id);
+    }
+    Err(DrasiError::InvalidState(msg)) => {
+        eprintln!("Invalid state: {}", msg);
+    }
+    Err(e) => eprintln!("Error: {}", e),
 }
 ```
 
@@ -636,19 +559,8 @@ match core.start().await {
 
 ```bash
 # Clone the repository
-git clone https://github.com/drasi-project/drasi-server-core
-cd drasi-server-core
-
-# Initialize and update the Drasi Core submodule
-# This is required as the project depends on drasi-core as a Git submodule
-git submodule init
-git submodule update --recursive
-# Alternative: Initialize and update in one command
-# git submodule update --init --recursive
-
-# Verify the submodule is properly initialized
-# The drasi-core directory should contain the source files
-ls -la drasi-core/
+git clone https://github.com/drasi-project/drasi-core
+cd drasi-core/server-core
 
 # Build the library
 cargo build --release
@@ -660,22 +572,17 @@ cargo test
 cargo doc --open
 ```
 
-### Feature Flags
+## Examples
 
-```toml
-[dependencies]
-drasi-server-core = { 
-    version = "0.1.0",
-    features = ["postgres", "grpc", "persistence"]
-}
+The `examples/` directory contains working examples:
+
+```bash
+# Run basic integration example with builder API
+cargo run --example basic_integration builder
+
+# Run with config file
+cargo run --example basic_integration config config/basic.yaml
 ```
-
-Available features:
-- `postgres`: PostgreSQL change capture support
-- `grpc`: gRPC source/reaction support
-- `persistence`: Enable persistent query state
-- `metrics`: Prometheus metrics
-- `tracing`: Distributed tracing
 
 ## Performance Optimization
 
@@ -683,8 +590,7 @@ Available features:
 
 1. **Use Specific Patterns**: Be precise in your MATCH clauses
 2. **Filter Early**: Apply WHERE conditions as early as possible
-3. **Limit Scope**: Use LIMIT for queries that don't need all results
-4. **Index Properties**: Ensure frequently queried properties are indexed
+3. **Index Properties**: Ensure frequently queried properties are indexed
 
 ### Source Tuning
 
@@ -698,20 +604,6 @@ Available features:
 2. **Async Processing**: Use async reactions for better throughput
 3. **Timeout Configuration**: Set appropriate timeouts for reliability
 
-## Examples
-
-The `examples/` directory contains complete working examples:
-
-- `infrastructure_monitoring.rs`: Track VM and container health
-- `order_processing.rs`: Detect business exceptions in order flow
-- `iot_sensor_network.rs`: Monitor sensor readings for anomalies
-- `compliance_tracking.rs`: Audit sensitive data changes
-
-Run examples:
-```bash
-cargo run --example infrastructure_monitoring
-```
-
 ## Testing
 
 Run the test suite:
@@ -724,17 +616,17 @@ cargo test
 RUST_LOG=debug cargo test -- --nocapture
 
 # Run specific test
-cargo test test_continuous_query
+cargo test test_builder_api
 ```
 
 ## Troubleshooting
 
 ### Common Issues
 
-**Port Already in Use**:
+**Component Not Found**:
 ```rust
-// Use a different port
-config.server.port = 8081;
+// Ensure component IDs match
+let handle = core.source_handle("my-source")?;
 ```
 
 **PostgreSQL Replication Not Working**:
@@ -751,8 +643,29 @@ config.server.port = 8081;
 
 ```rust
 // Enable detailed logging
-std::env::set_var("RUST_LOG", "drasi_server_core=trace");
+std::env::set_var("RUST_LOG", "drasi_server_core=debug");
 env_logger::init();
+```
+
+## API Migration
+
+For users migrating from the old API, see the key changes:
+
+**Old API (Deprecated)**:
+```rust
+let config = Arc::new(RuntimeConfig { ... });
+let mut core = DrasiServerCore::new(config);
+core.initialize().await?;  // Two-phase
+core.start().await?;
+```
+
+**New API (Recommended)**:
+```rust
+let core = DrasiServerCore::builder()
+    .add_source(Source::mock("test").build())
+    .build()
+    .await?;  // Single-phase
+core.start().await?;
 ```
 
 ## Contributing
@@ -765,12 +678,11 @@ DrasiServerCore is licensed under the [Apache License 2.0](LICENSE).
 
 ## Support
 
-- **Issues**: [GitHub Issues](https://github.com/drasi-project/drasi-server-core/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/drasi-project/drasi-server-core/discussions)
+- **Issues**: [GitHub Issues](https://github.com/drasi-project/drasi-core/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/drasi-project/drasi-core/discussions)
 - **Documentation**: [https://drasi.io](https://drasi.io)
 
 ## Related Projects
 
 - [Drasi Platform](https://github.com/drasi-project/drasi-platform): Complete Drasi deployment platform
 - [Drasi Core](https://github.com/drasi-project/drasi-core): Core continuous query engine
-- [Drasi Examples](https://github.com/drasi-project/drasi-examples): Example applications demonstrating change-driven solutions

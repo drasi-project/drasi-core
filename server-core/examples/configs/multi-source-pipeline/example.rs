@@ -2,197 +2,151 @@
 // This example demonstrates a complex pipeline with multiple sources,
 // different bootstrap providers, and multiple queries and reactions.
 
-use drasi_server_core::{
-    config::{
-        DrasiServerCoreConfig, DrasiServerCoreSettings, QueryConfig, QueryLanguage,
-        ReactionConfig, SourceConfig,
-    },
-    bootstrap::BootstrapProviderConfig,
-};
+use drasi_server_core::{DrasiServerCore, Properties, Query, Reaction, Source};
 use serde_json::json;
-use std::collections::HashMap;
-
-fn create_multi_source_pipeline_config() -> DrasiServerCoreConfig {
-    // Enhanced server configuration
-    let server = DrasiServerCoreSettings {
-        host: "0.0.0.0".to_string(),
-        port: 8080,
-        log_level: "info".to_string(),
-        max_connections: 2000,
-        shutdown_timeout_seconds: 60,
-        disable_persistence: false,
-    };
-
-    // Sensor stream with script_file bootstrap
-    let mut sensor_properties = HashMap::new();
-    sensor_properties.insert("data_type".to_string(), json!("sensor"));
-    sensor_properties.insert("interval_ms".to_string(), json!(1000));
-    sensor_properties.insert("initial_count".to_string(), json!(0));
-
-    let sensor_source = SourceConfig {
-        id: "sensor-stream".to_string(),
-        source_type: "mock".to_string(),
-        auto_start: true,
-        properties: sensor_properties,
-        bootstrap_provider: Some(BootstrapProviderConfig::ScriptFile {
-            file_paths: vec!["examples/data/sensor_data.jsonl".to_string()],
-        }),
-    };
-
-    // User data with script_file bootstrap
-    let mut user_properties = HashMap::new();
-    user_properties.insert("data_type".to_string(), json!("person"));
-    user_properties.insert("interval_ms".to_string(), json!(10000));
-    user_properties.insert("initial_count".to_string(), json!(0));
-
-    let user_source = SourceConfig {
-        id: "user-data".to_string(),
-        source_type: "mock".to_string(),
-        auto_start: true,
-        properties: user_properties,
-        bootstrap_provider: Some(BootstrapProviderConfig::ScriptFile {
-            file_paths: vec!["/data/users.jsonl".to_string()],
-        }),
-    };
-
-    // Event stream without bootstrap (noop provider will be used)
-    let mut event_properties = HashMap::new();
-    event_properties.insert("data_type".to_string(), json!("event"));
-    event_properties.insert("interval_ms".to_string(), json!(2000));
-    event_properties.insert("initial_count".to_string(), json!(10));
-
-    let event_source = SourceConfig {
-        id: "event-stream".to_string(),
-        source_type: "mock".to_string(),
-        auto_start: true,
-        properties: event_properties,
-        bootstrap_provider: None, // Will use noop provider
-    };
-
-    // High temperature alert query
-    let mut temp_alert_props = HashMap::new();
-    temp_alert_props.insert("description".to_string(), json!("Alert on high temperature readings"));
-    temp_alert_props.insert("threshold".to_string(), json!(80));
-
-    let high_temp_query = QueryConfig {
-        id: "high-temp-alert".to_string(),
-        query: "MATCH (s:SensorReading) WHERE s.temperature > 80 RETURN s".to_string(),
-        query_language: QueryLanguage::Cypher,
-        sources: vec!["sensor-stream".to_string()],
-        auto_start: true,
-        properties: temp_alert_props,
-        joins: None,
-    };
-
-    // User activity query
-    let mut activity_props = HashMap::new();
-    activity_props.insert("description".to_string(), json!("Track user activity patterns"));
-
-    let user_activity_query = QueryConfig {
-        id: "user-activity".to_string(),
-        query: "MATCH (u:Person)-[:TRIGGERED]->(e:Event) RETURN u, e".to_string(),
-        query_language: QueryLanguage::Cypher,
-        sources: vec!["user-data".to_string(), "event-stream".to_string()],
-        auto_start: true,
-        properties: activity_props,
-        joins: None,
-    };
-
-    // Sensor summary query
-    let mut summary_props = HashMap::new();
-    summary_props.insert("description".to_string(), json!("Aggregate sensor readings by location"));
-
-    let sensor_summary_query = QueryConfig {
-        id: "sensor-summary".to_string(),
-        query: "MATCH (s:SensorReading) RETURN s.location, avg(s.temperature) as avg_temp".to_string(),
-        query_language: QueryLanguage::Cypher,
-        sources: vec!["sensor-stream".to_string()],
-        auto_start: true,
-        properties: summary_props,
-        joins: None,
-    };
-
-    // Critical alert reaction
-    let mut alert_props = HashMap::new();
-    alert_props.insert("log_level".to_string(), json!("warn"));
-    alert_props.insert("format".to_string(), json!("json"));
-    alert_props.insert("include_metadata".to_string(), json!(true));
-
-    let critical_alert_reaction = ReactionConfig {
-        id: "critical-alert-webhook".to_string(),
-        reaction_type: "internal.log".to_string(),
-        queries: vec!["high-temp-alert".to_string()],
-        auto_start: true,
-        properties: alert_props,
-    };
-
-    // Activity analytics reaction
-    let mut analytics_props = HashMap::new();
-    analytics_props.insert("log_level".to_string(), json!("info"));
-    analytics_props.insert("format".to_string(), json!("json"));
-    analytics_props.insert("batch_size".to_string(), json!(100));
-
-    let activity_analytics_reaction = ReactionConfig {
-        id: "activity-analytics".to_string(),
-        reaction_type: "internal.log".to_string(),
-        queries: vec!["user-activity".to_string()],
-        auto_start: true,
-        properties: analytics_props,
-    };
-
-    // Dashboard feed reaction
-    let mut dashboard_props = HashMap::new();
-    dashboard_props.insert("log_level".to_string(), json!("debug"));
-    dashboard_props.insert("format".to_string(), json!("json"));
-    dashboard_props.insert("update_interval".to_string(), json!(5000));
-
-    let dashboard_feed_reaction = ReactionConfig {
-        id: "dashboard-feed".to_string(),
-        reaction_type: "internal.log".to_string(),
-        queries: vec!["sensor-summary".to_string()],
-        auto_start: true,
-        properties: dashboard_props,
-    };
-
-    // Complete configuration
-    DrasiServerCoreConfig {
-        server,
-        sources: vec![sensor_source, user_source, event_source],
-        queries: vec![high_temp_query, user_activity_query, sensor_summary_query],
-        reactions: vec![critical_alert_reaction, activity_analytics_reaction, dashboard_feed_reaction],
-    }
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Create the configuration
-    let config = create_multi_source_pipeline_config();
+    env_logger::init();
 
-    // Initialize and start the server core
-    let runtime_config = std::sync::Arc::new(drasi_server_core::RuntimeConfig::from(config));
-    let mut core = drasi_server_core::DrasiServerCore::new(runtime_config);
+    println!("=== Multi-Source Pipeline Example ===");
+    println!("Building complex pipeline with fluent API...\n");
 
-    core.initialize().await?;
+    // Build server with multiple sources, queries, and reactions using fluent API
+    let core = DrasiServerCore::builder()
+        .with_id("multi-source-pipeline")
+        // Sensor stream with script_file bootstrap
+        .add_source(
+            Source::mock("sensor-stream")
+                .with_properties(
+                    Properties::new()
+                        .with_string("data_type", "sensor")
+                        .with_int("interval_ms", 1000)
+                        .with_int("initial_count", 0),
+                )
+                .with_script_bootstrap(vec!["examples/data/sensor_data.jsonl".to_string()])
+                .auto_start(true)
+                .build(),
+        )
+        // User data with script_file bootstrap
+        .add_source(
+            Source::mock("user-data")
+                .with_properties(
+                    Properties::new()
+                        .with_string("data_type", "person")
+                        .with_int("interval_ms", 10000)
+                        .with_int("initial_count", 0),
+                )
+                .with_script_bootstrap(vec!["/data/users.jsonl".to_string()])
+                .auto_start(true)
+                .build(),
+        )
+        // Event stream without bootstrap (noop provider will be used)
+        .add_source(
+            Source::mock("event-stream")
+                .with_properties(
+                    Properties::new()
+                        .with_string("data_type", "event")
+                        .with_int("interval_ms", 2000)
+                        .with_int("initial_count", 10),
+                )
+                .auto_start(true)
+                .build(),
+        )
+        // High temperature alert query
+        .add_query(
+            Query::cypher("high-temp-alert")
+                .query("MATCH (s:SensorReading) WHERE s.temperature > 80 RETURN s")
+                .from_source("sensor-stream")
+                .with_property("description", json!("Alert on high temperature readings"))
+                .with_property("threshold", json!(80))
+                .auto_start(true)
+                .build(),
+        )
+        // User activity query
+        .add_query(
+            Query::cypher("user-activity")
+                .query("MATCH (u:Person)-[:TRIGGERED]->(e:Event) RETURN u, e")
+                .from_sources(vec!["user-data", "event-stream"])
+                .with_property("description", json!("Track user activity patterns"))
+                .auto_start(true)
+                .build(),
+        )
+        // Sensor summary query
+        .add_query(
+            Query::cypher("sensor-summary")
+                .query("MATCH (s:SensorReading) RETURN s.location, avg(s.temperature) as avg_temp")
+                .from_source("sensor-stream")
+                .with_property("description", json!("Aggregate sensor readings by location"))
+                .auto_start(true)
+                .build(),
+        )
+        // Critical alert reaction
+        .add_reaction(
+            Reaction::log("critical-alert-webhook")
+                .subscribe_to("high-temp-alert")
+                .with_properties(
+                    Properties::new()
+                        .with_string("log_level", "warn")
+                        .with_string("format", "json")
+                        .with_bool("include_metadata", true),
+                )
+                .auto_start(true)
+                .build(),
+        )
+        // Activity analytics reaction
+        .add_reaction(
+            Reaction::log("activity-analytics")
+                .subscribe_to("user-activity")
+                .with_properties(
+                    Properties::new()
+                        .with_string("log_level", "info")
+                        .with_string("format", "json")
+                        .with_int("batch_size", 100),
+                )
+                .auto_start(true)
+                .build(),
+        )
+        // Dashboard feed reaction
+        .add_reaction(
+            Reaction::log("dashboard-feed")
+                .subscribe_to("sensor-summary")
+                .with_properties(
+                    Properties::new()
+                        .with_string("log_level", "debug")
+                        .with_string("format", "json")
+                        .with_int("update_interval", 5000),
+                )
+                .auto_start(true)
+                .build(),
+        )
+        .build()
+        .await?;
+
+    println!("✓ Server configured successfully");
+    println!("✓ Components:");
+    println!("  Sources:");
+    println!("    - sensor-stream: Mock sensors with script_file bootstrap");
+    println!("    - user-data: Mock users with script_file bootstrap");
+    println!("    - event-stream: Mock events (no bootstrap)");
+    println!("  Queries:");
+    println!("    - high-temp-alert: Monitor sensors > 80°");
+    println!("    - user-activity: Track user-event relationships");
+    println!("    - sensor-summary: Aggregate readings by location");
+    println!("  Reactions:");
+    println!("    - critical-alert-webhook: High temp alerts");
+    println!("    - activity-analytics: User activity data");
+    println!("    - dashboard-feed: Sensor summaries\n");
+
     core.start().await?;
-
-    println!("Drasi Server Core started with multi-source pipeline configuration");
-    println!("Sources:");
-    println!("  - sensor-stream: Mock sensors with script_file bootstrap (50 initial readings)");
-    println!("  - user-data: Mock users with script_file bootstrap from /data/users.jsonl");
-    println!("  - event-stream: Mock events with no bootstrap");
-    println!("Queries:");
-    println!("  - high-temp-alert: Monitor sensors > 80°");
-    println!("  - user-activity: Track user-event relationships");
-    println!("  - sensor-summary: Aggregate readings by location");
-    println!("Reactions:");
-    println!("  - critical-alert-webhook: High temp alerts");
-    println!("  - activity-analytics: User activity data");
-    println!("  - dashboard-feed: Sensor summaries");
+    println!("✓ Drasi Server Core started\n");
+    println!("Press Ctrl+C to stop...");
 
     // Keep running until interrupted
     tokio::signal::ctrl_c().await?;
-    println!("Shutting down...");
+    println!("\nShutting down...");
 
-    core.shutdown().await?;
+    core.stop().await?;
+    println!("✓ Shutdown complete");
     Ok(())
 }
