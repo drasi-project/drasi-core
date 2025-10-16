@@ -278,4 +278,10 @@ mod prev_unique {
         let test_config = RocksDbQueryConfig::new();
         prev_unique::prev_unique(&test_config).await;
     }
+
+    #[tokio::test]
+    async fn prev_unique_with_match() {
+        let test_config = RocksDbQueryConfig::new();
+        prev_unique::prev_unique_with_match(&test_config).await;
+    }
 }

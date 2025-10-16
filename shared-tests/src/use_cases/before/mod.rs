@@ -72,6 +72,29 @@ pub async fn before_value(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 0);        
     }
+
+    //Add invoice 2
+    {
+        let change = SourceChange::Insert {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("test", "i2"),
+                    labels: Arc::new([Arc::from("Invoice")]),
+                    effective_from: 0,
+                },
+                properties: ElementPropertyMap::from(json!({
+                    "id": "i2",
+                    "amount": 200,
+                })),
+            },
+        };
+
+        let result = opt_query
+            .process_source_change(change.clone())
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 0);        
+    }
     
     //update invoice 1 with increasing amount
     {

@@ -168,6 +168,44 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 0);        
     }
+
+    //update contract 1 tags
+    {
+        let change = SourceChange::Update {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("test", "c1"),
+                    labels: Arc::new([Arc::from("Contract")]),
+                    effective_from: 0,
+                },
+                properties: ElementPropertyMap::from(json!({
+                    "id": "c1",
+                    "status": "active",
+                    "tags": "tag3"
+                })),
+            },
+        };
+
+        let result = opt_query
+            .process_source_change(change.clone())
+            .await
+            .unwrap();
+        
+        assert_eq!(result.len(), 1);
+
+        assert!(result.contains(&QueryPartEvaluationContext::Updating { 
+            before: variablemap!(
+              "tags" => VariableValue::from(json!("tag2")),
+              "status" => VariableValue::from(json!("active")),
+              "id" => VariableValue::from(json!("c1"))
+            ),
+            after: variablemap!(
+              "tags" => VariableValue::from(json!("tag3")),
+              "status" => VariableValue::from(json!("active")),
+              "id" => VariableValue::from(json!("c1"))
+            ),
+        }));
+    }
     
     //update contract 2 with active status
     {
@@ -250,5 +288,256 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
             ),
         }));
     }
+
+}
+
+pub async fn prev_unique_with_match(config: &(impl QueryTestConfig + Send)) {
+    let opt_query = {
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::prev_unique_match_query(), parser)
+            .with_function_registry(function_registry);
+        builder = config.config_query(builder).await;
+        builder.build().await
+    };
+
+    //Add contract 1
+    {
+        let change = SourceChange::Insert {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("test", "c1"),
+                    labels: Arc::new([Arc::from("Contract")]),
+                    effective_from: 0,
+                },
+                properties: ElementPropertyMap::from(json!({
+                    "id": "c1",
+                    "status": "pending",
+                    "tags": "tag1"
+                })),
+            },
+        };
+
+        let result = opt_query
+            .process_source_change(change.clone())
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 0);        
+    }
+    
+    //update contract 1 with active status
+    {
+        let change = SourceChange::Update {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("test", "c1"),
+                    labels: Arc::new([Arc::from("Contract")]),
+                    effective_from: 0,
+                },
+                properties: ElementPropertyMap::from(json!({
+                    "id": "c1",
+                    "status": "active",
+                    "tags": "tag1"
+                })),
+            },
+        };
+
+        let result = opt_query
+            .process_source_change(change.clone())
+            .await
+            .unwrap();
+        
+        assert_eq!(result.len(), 1);
+
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
+            after: variablemap!(
+              "tags" => VariableValue::from(json!("tag1")),
+              "status" => VariableValue::from(json!("active")),
+              "id" => VariableValue::from(json!("c1"))
+            ),
+        }));
+    }
+
+    //update contract 1 tags
+    {
+        let change = SourceChange::Update {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("test", "c1"),
+                    labels: Arc::new([Arc::from("Contract")]),
+                    effective_from: 0,
+                },
+                properties: ElementPropertyMap::from(json!({
+                    "id": "c1",
+                    "status": "active",
+                    "tags": "tag2"
+                })),
+            },
+        };
+
+        let result = opt_query
+            .process_source_change(change.clone())
+            .await
+            .unwrap();
+        
+        assert_eq!(result.len(), 1);
+
+        assert!(result.contains(&QueryPartEvaluationContext::Updating { 
+            before: variablemap!(
+              "tags" => VariableValue::from(json!("tag1")),
+              "status" => VariableValue::from(json!("active")),
+              "id" => VariableValue::from(json!("c1"))
+            ),
+            after: variablemap!(
+              "tags" => VariableValue::from(json!("tag2")),
+              "status" => VariableValue::from(json!("active")),
+              "id" => VariableValue::from(json!("c1"))
+            ),
+        }));
+    }
+
+    //Add contract 2
+    {
+        let change = SourceChange::Insert {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("test", "c2"),
+                    labels: Arc::new([Arc::from("Contract")]),
+                    effective_from: 0,
+                },
+                properties: ElementPropertyMap::from(json!({
+                    "id": "c2",
+                    "status": "cancelled",
+                    "tags": "tag1"
+                })),
+            },
+        };
+
+        let result = opt_query
+            .process_source_change(change.clone())
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 0);        
+    }
+
+    //update contract 1 tags
+    {
+        let change = SourceChange::Update {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("test", "c1"),
+                    labels: Arc::new([Arc::from("Contract")]),
+                    effective_from: 0,
+                },
+                properties: ElementPropertyMap::from(json!({
+                    "id": "c1",
+                    "status": "active",
+                    "tags": "tag3"
+                })),
+            },
+        };
+
+        let result = opt_query
+            .process_source_change(change.clone())
+            .await
+            .unwrap();
+        
+        assert_eq!(result.len(), 1);
+
+        assert!(result.contains(&QueryPartEvaluationContext::Updating { 
+            before: variablemap!(
+              "tags" => VariableValue::from(json!("tag2")),
+              "status" => VariableValue::from(json!("active")),
+              "id" => VariableValue::from(json!("c1"))
+            ),
+            after: variablemap!(
+              "tags" => VariableValue::from(json!("tag3")),
+              "status" => VariableValue::from(json!("active")),
+              "id" => VariableValue::from(json!("c1"))
+            ),
+        }));
+    }
+    
+    //update contract 2 with active status
+    {
+        let change = SourceChange::Update {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("test", "c2"),
+                    labels: Arc::new([Arc::from("Contract")]),
+                    effective_from: 0,
+                },
+                properties: ElementPropertyMap::from(json!({
+                    "id": "c2",
+                    "status": "active",
+                    "tags": "tag1"
+                })),
+            },
+        };
+
+        let result = opt_query
+            .process_source_change(change.clone())
+            .await
+            .unwrap();
+        
+        assert_eq!(result.len(), 0);
+    }
+
+    //update contract 2 with pending status
+    {
+        let change = SourceChange::Update {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("test", "c2"),
+                    labels: Arc::new([Arc::from("Contract")]),
+                    effective_from: 0,
+                },
+                properties: ElementPropertyMap::from(json!({
+                    "id": "c2",
+                    "status": "pending",
+                    "tags": "tag1"
+                })),
+            },
+        };
+
+        let result = opt_query
+            .process_source_change(change.clone())
+            .await
+            .unwrap();
+        
+        assert_eq!(result.len(), 0);        
+    }
+
+    //update contract 2 with active status
+    {
+        let change = SourceChange::Update {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("test", "c2"),
+                    labels: Arc::new([Arc::from("Contract")]),
+                    effective_from: 0,
+                },
+                properties: ElementPropertyMap::from(json!({
+                    "id": "c2",
+                    "status": "active",
+                    "tags": "tag1"
+                })),
+            },
+        };
+
+        let result = opt_query
+            .process_source_change(change.clone())
+            .await
+            .unwrap();
+        
+        assert_eq!(result.len(), 1);
+        assert!(result.contains(&QueryPartEvaluationContext::Adding {
+            after: variablemap!(
+              "tags" => VariableValue::from(json!("tag1")),
+              "status" => VariableValue::from(json!("active")),
+              "id" => VariableValue::from(json!("c2"))
+            ),
+        }));
+    }    
 
 }

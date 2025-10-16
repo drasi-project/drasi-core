@@ -24,3 +24,14 @@ RETURN
   c.tags AS tags
   "
 }
+
+pub fn prev_unique_match_query() -> &'static str {
+    "
+MATCH 
+  (c:Contract WHERE c.status = 'active' AND drasi.previousUniqueValue(c.status) = 'pending')
+RETURN
+  c.id AS id,
+  c.status AS status,
+  c.tags AS tags
+  "
+}
