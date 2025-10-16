@@ -91,9 +91,15 @@ pub use reactions::application::SubscriptionOptions;
 /// Property map builder for creating source data
 pub use sources::application::PropertyMapBuilder;
 
+/// Component status type for monitoring component states
+pub use channels::ComponentStatus;
+
 // ============================================================================
 // Configuration Types (for file-based config)
 // ============================================================================
 
 /// Configuration types for YAML/JSON config files
-pub use config::{DrasiServerCoreConfig, QueryConfig, ReactionConfig, RuntimeConfig, SourceConfig};
+pub use config::{
+    DrasiServerCoreConfig, QueryConfig, QueryRuntime, ReactionConfig, ReactionRuntime,
+    RuntimeConfig, SourceConfig, SourceRuntime,
+};
