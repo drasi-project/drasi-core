@@ -88,7 +88,6 @@ impl<'a> ExpressionEvaluationContext<'a> {
         variables: &'a QueryVariables,
         clock: Arc<dyn QueryClock>,
         element_reference: &ElementReference,
-
     ) -> ExpressionEvaluationContext<'a> {
         ExpressionEvaluationContext {
             variables,
