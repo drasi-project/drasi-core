@@ -76,6 +76,21 @@ mod query;
 mod reaction;
 mod source;
 
+#[cfg(test)]
+mod builder_test;
+#[cfg(test)]
+mod error_test;
+#[cfg(test)]
+mod handles_test;
+#[cfg(test)]
+mod properties_test;
+#[cfg(test)]
+mod query_test;
+#[cfg(test)]
+mod reaction_test;
+#[cfg(test)]
+mod source_test;
+
 pub use builder::DrasiServerCoreBuilder;
 pub use error::{DrasiError, Result};
 pub use handles::HandleRegistry;

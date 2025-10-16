@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod events;
+//! Test support utilities for integration tests
 
-#[cfg(test)]
-mod events_test;
+pub mod redis_helpers;
 
-pub use events::*;
+// Re-export commonly used helpers
+pub use redis_helpers::*;

@@ -921,3 +921,378 @@ impl DrasiServerCore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::{Query, Reaction, Source};
+
+    #[tokio::test]
+    async fn test_server_initialization() {
+        let config = Arc::new(RuntimeConfig {
+            server: crate::config::DrasiServerCoreSettings {
+                id: "test-server".to_string(),
+            },
+            sources: vec![],
+            queries: vec![],
+            reactions: vec![],
+        });
+
+        let mut core = DrasiServerCore::new(config);
+        let result = core.initialize().await;
+
+        assert!(result.is_ok(), "Server initialization should succeed");
+        assert!(*core.initialized.read().await, "Server should be marked as initialized");
+    }
+
+    #[tokio::test]
+    async fn test_server_initialization_idempotent() {
+        let config = Arc::new(RuntimeConfig {
+            server: crate::config::DrasiServerCoreSettings {
+                id: "test-server".to_string(),
+            },
+            sources: vec![],
+            queries: vec![],
+            reactions: vec![],
+        });
+
+        let mut core = DrasiServerCore::new(config);
+
+        // First initialization
+        let result1 = core.initialize().await;
+        assert!(result1.is_ok(), "First initialization should succeed");
+
+        // Second initialization should also succeed (idempotent)
+        let result2 = core.initialize().await;
+        assert!(result2.is_ok(), "Second initialization should succeed (idempotent)");
+    }
+
+    #[tokio::test]
+    async fn test_start_without_initialization_fails() {
+        let config = Arc::new(RuntimeConfig {
+            server: crate::config::DrasiServerCoreSettings {
+                id: "test-server".to_string(),
+            },
+            sources: vec![],
+            queries: vec![],
+            reactions: vec![],
+        });
+
+        let core = DrasiServerCore::new(config);
+        let result = core.start().await;
+
+        assert!(result.is_err(), "Start should fail without initialization");
+        assert!(result.unwrap_err().to_string().contains("initialized"));
+    }
+
+    #[tokio::test]
+    async fn test_start_already_running_fails() {
+        let config = Arc::new(RuntimeConfig {
+            server: crate::config::DrasiServerCoreSettings {
+                id: "test-server".to_string(),
+            },
+            sources: vec![],
+            queries: vec![],
+            reactions: vec![],
+        });
+
+        let mut core = DrasiServerCore::new(config);
+        core.initialize().await.unwrap();
+
+        // First start should succeed
+        core.start().await.unwrap();
+
+        // Second start should fail
+        let result = core.start().await;
+        assert!(result.is_err(), "Start should fail when already running");
+        assert!(result.unwrap_err().to_string().contains("already running"));
+    }
+
+    #[tokio::test]
+    async fn test_stop_not_running_fails() {
+        let config = Arc::new(RuntimeConfig {
+            server: crate::config::DrasiServerCoreSettings {
+                id: "test-server".to_string(),
+            },
+            sources: vec![],
+            queries: vec![],
+            reactions: vec![],
+        });
+
+        let mut core = DrasiServerCore::new(config);
+        core.initialize().await.unwrap();
+
+        let result = core.stop().await;
+        assert!(result.is_err(), "Stop should fail when not running");
+        assert!(result.unwrap_err().to_string().contains("already stopped"));
+    }
+
+    #[tokio::test]
+    async fn test_start_and_stop_lifecycle() {
+        let config = Arc::new(RuntimeConfig {
+            server: crate::config::DrasiServerCoreSettings {
+                id: "test-server".to_string(),
+            },
+            sources: vec![],
+            queries: vec![],
+            reactions: vec![],
+        });
+
+        let mut core = DrasiServerCore::new(config);
+        core.initialize().await.unwrap();
+
+        assert!(!core.is_running().await, "Server should not be running initially");
+
+        core.start().await.unwrap();
+        assert!(core.is_running().await, "Server should be running after start");
+
+        core.stop().await.unwrap();
+        assert!(!core.is_running().await, "Server should not be running after stop");
+    }
+
+    #[tokio::test]
+    async fn test_builder_creates_initialized_server() {
+        let core = DrasiServerCore::builder()
+            .with_id("builder-test")
+            .build()
+            .await;
+
+        assert!(core.is_ok(), "Builder should create initialized server");
+        let core = core.unwrap();
+        assert!(*core.initialized.read().await, "Server should be initialized");
+    }
+
+    #[tokio::test]
+    async fn test_from_config_str_creates_server() {
+        let yaml = r#"
+server:
+  id: yaml-test
+sources: []
+queries: []
+reactions: []
+"#;
+        let core = DrasiServerCore::from_config_str(yaml).await;
+        assert!(core.is_ok(), "from_config_str should create server");
+        assert!(*core.unwrap().initialized.read().await);
+    }
+
+    #[tokio::test]
+    async fn test_source_handle_for_nonexistent_source() {
+        let core = DrasiServerCore::builder().build().await.unwrap();
+
+        let result = core.source_handle("nonexistent");
+        assert!(result.is_err(), "Should return error for nonexistent source");
+
+        match result {
+            Err(DrasiError::ComponentNotFound { kind, id }) => {
+                assert_eq!(kind, "source");
+                assert_eq!(id, "nonexistent");
+            }
+            _ => panic!("Expected ComponentNotFound error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reaction_handle_for_nonexistent_reaction() {
+        let core = DrasiServerCore::builder().build().await.unwrap();
+
+        let result = core.reaction_handle("nonexistent");
+        assert!(result.is_err(), "Should return error for nonexistent reaction");
+
+        match result {
+            Err(DrasiError::ComponentNotFound { kind, id }) => {
+                assert_eq!(kind, "reaction");
+                assert_eq!(id, "nonexistent");
+            }
+            _ => panic!("Expected ComponentNotFound error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_add_source_runtime_without_initialization() {
+        let config = Arc::new(RuntimeConfig {
+            server: crate::config::DrasiServerCoreSettings {
+                id: "test-server".to_string(),
+            },
+            sources: vec![],
+            queries: vec![],
+            reactions: vec![],
+        });
+
+        let core = DrasiServerCore::new(config);
+        let source = Source::application("runtime-source").build();
+
+        let result = core.add_source_runtime(source).await;
+        assert!(result.is_err(), "add_source_runtime should fail without initialization");
+        assert!(matches!(result.unwrap_err(), DrasiError::InvalidState(_)));
+    }
+
+    #[tokio::test]
+    async fn test_add_query_runtime_without_initialization() {
+        let config = Arc::new(RuntimeConfig {
+            server: crate::config::DrasiServerCoreSettings {
+                id: "test-server".to_string(),
+            },
+            sources: vec![],
+            queries: vec![],
+            reactions: vec![],
+        });
+
+        let core = DrasiServerCore::new(config);
+        let query = Query::cypher("runtime-query")
+            .query("MATCH (n) RETURN n")
+            .from_source("source1")
+            .build();
+
+        let result = core.add_query_runtime(query).await;
+        assert!(result.is_err(), "add_query_runtime should fail without initialization");
+        assert!(matches!(result.unwrap_err(), DrasiError::InvalidState(_)));
+    }
+
+    #[tokio::test]
+    async fn test_add_reaction_runtime_without_initialization() {
+        let config = Arc::new(RuntimeConfig {
+            server: crate::config::DrasiServerCoreSettings {
+                id: "test-server".to_string(),
+            },
+            sources: vec![],
+            queries: vec![],
+            reactions: vec![],
+        });
+
+        let core = DrasiServerCore::new(config);
+        let reaction = Reaction::log("runtime-reaction")
+            .subscribe_to("query1")
+            .build();
+
+        let result = core.add_reaction_runtime(reaction).await;
+        assert!(result.is_err(), "add_reaction_runtime should fail without initialization");
+        assert!(matches!(result.unwrap_err(), DrasiError::InvalidState(_)));
+    }
+
+    #[tokio::test]
+    async fn test_remove_source_without_initialization() {
+        let config = Arc::new(RuntimeConfig {
+            server: crate::config::DrasiServerCoreSettings {
+                id: "test-server".to_string(),
+            },
+            sources: vec![],
+            queries: vec![],
+            reactions: vec![],
+        });
+
+        let core = DrasiServerCore::new(config);
+
+        let result = core.remove_source("any-source").await;
+        assert!(result.is_err(), "remove_source should fail without initialization");
+        assert!(matches!(result.unwrap_err(), DrasiError::InvalidState(_)));
+    }
+
+    #[tokio::test]
+    async fn test_remove_query_without_initialization() {
+        let config = Arc::new(RuntimeConfig {
+            server: crate::config::DrasiServerCoreSettings {
+                id: "test-server".to_string(),
+            },
+            sources: vec![],
+            queries: vec![],
+            reactions: vec![],
+        });
+
+        let core = DrasiServerCore::new(config);
+
+        let result = core.remove_query("any-query").await;
+        assert!(result.is_err(), "remove_query should fail without initialization");
+        assert!(matches!(result.unwrap_err(), DrasiError::InvalidState(_)));
+    }
+
+    #[tokio::test]
+    async fn test_remove_reaction_without_initialization() {
+        let config = Arc::new(RuntimeConfig {
+            server: crate::config::DrasiServerCoreSettings {
+                id: "test-server".to_string(),
+            },
+            sources: vec![],
+            queries: vec![],
+            reactions: vec![],
+        });
+
+        let core = DrasiServerCore::new(config);
+
+        let result = core.remove_reaction("any-reaction").await;
+        assert!(result.is_err(), "remove_reaction should fail without initialization");
+        assert!(matches!(result.unwrap_err(), DrasiError::InvalidState(_)));
+    }
+
+    #[tokio::test]
+    async fn test_remove_nonexistent_source() {
+        let mut core = DrasiServerCore::builder().build().await.unwrap();
+        core.initialize().await.unwrap();
+
+        let result = core.remove_source("nonexistent").await;
+        assert!(result.is_err(), "Should fail to remove nonexistent source");
+        assert!(matches!(result.unwrap_err(), DrasiError::ComponentNotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_remove_nonexistent_query() {
+        let mut core = DrasiServerCore::builder().build().await.unwrap();
+        core.initialize().await.unwrap();
+
+        let result = core.remove_query("nonexistent").await;
+        assert!(result.is_err(), "Should fail to remove nonexistent query");
+        assert!(matches!(result.unwrap_err(), DrasiError::ComponentNotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_remove_nonexistent_reaction() {
+        let mut core = DrasiServerCore::builder().build().await.unwrap();
+        core.initialize().await.unwrap();
+
+        let result = core.remove_reaction("nonexistent").await;
+        assert!(result.is_err(), "Should fail to remove nonexistent reaction");
+        assert!(matches!(result.unwrap_err(), DrasiError::ComponentNotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_is_running_initial_state() {
+        let config = Arc::new(RuntimeConfig {
+            server: crate::config::DrasiServerCoreSettings {
+                id: "test-server".to_string(),
+            },
+            sources: vec![],
+            queries: vec![],
+            reactions: vec![],
+        });
+
+        let core = DrasiServerCore::new(config);
+        assert!(!core.is_running().await, "Server should not be running initially");
+    }
+
+    #[tokio::test]
+    async fn test_builder_with_components() {
+        let core = DrasiServerCore::builder()
+            .with_id("complex-server")
+            .add_source(Source::application("source1").build())
+            .add_query(
+                Query::cypher("query1")
+                    .query("MATCH (n) RETURN n")
+                    .from_source("source1")
+                    .build()
+            )
+            .add_reaction(
+                Reaction::log("reaction1")
+                    .subscribe_to("query1")
+                    .build()
+            )
+            .build()
+            .await;
+
+        assert!(core.is_ok(), "Builder with components should succeed");
+        let core = core.unwrap();
+        assert!(*core.initialized.read().await);
+        assert_eq!(core.config.sources.len(), 1);
+        assert_eq!(core.config.queries.len(), 1);
+        assert_eq!(core.config.reactions.len(), 1);
+    }
+}

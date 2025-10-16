@@ -268,3 +268,441 @@ impl BootstrapRouter {
             .cloned()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bootstrap::{BootstrapProviderConfig};
+    use crate::config::SourceConfig;
+    use crate::channels::{BootstrapRequest, BootstrapStatus};
+    use tokio::sync::mpsc;
+
+    fn create_test_source_config(id: &str) -> Arc<SourceConfig> {
+        Arc::new(SourceConfig {
+            id: id.to_string(),
+            source_type: "mock".to_string(),
+            auto_start: true,
+            properties: std::collections::HashMap::new(),
+            bootstrap_provider: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_router_creation() {
+        let router = BootstrapRouter::new();
+
+        // Verify empty initial state
+        assert!(router.providers.read().await.is_empty());
+        assert!(router.contexts.read().await.is_empty());
+        assert!(router.query_response_senders.read().await.is_empty());
+        assert!(router.bootstrap_state.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_register_provider() {
+        let router = BootstrapRouter::new();
+        let source_config = create_test_source_config("test-source");
+        let (source_event_tx, _) = mpsc::channel(100);
+
+        let result = router
+            .register_provider(
+                "test-server".to_string(),
+                source_config.clone(),
+                Some(BootstrapProviderConfig::Noop),
+                source_event_tx,
+            )
+            .await;
+
+        assert!(result.is_ok());
+
+        // Verify provider and context are registered
+        let providers = router.providers.read().await;
+        let contexts = router.contexts.read().await;
+        assert!(providers.contains_key("test-source"));
+        assert!(contexts.contains_key("test-source"));
+    }
+
+    #[tokio::test]
+    async fn test_register_provider_with_no_config() {
+        let router = BootstrapRouter::new();
+        let source_config = create_test_source_config("test-source");
+        let (source_event_tx, _) = mpsc::channel(100);
+
+        let result = router
+            .register_provider(
+                "test-server".to_string(),
+                source_config.clone(),
+                None, // No bootstrap config - should use Noop provider
+                source_event_tx,
+            )
+            .await;
+
+        assert!(result.is_ok());
+        assert!(router.providers.read().await.contains_key("test-source"));
+    }
+
+    #[tokio::test]
+    async fn test_unregister_provider() {
+        let router = BootstrapRouter::new();
+        let source_config = create_test_source_config("test-source");
+        let (source_event_tx, _) = mpsc::channel(100);
+
+        router
+            .register_provider(
+                "test-server".to_string(),
+                source_config.clone(),
+                Some(BootstrapProviderConfig::Noop),
+                source_event_tx,
+            )
+            .await
+            .unwrap();
+
+        // Verify registered
+        assert!(router.providers.read().await.contains_key("test-source"));
+
+        // Unregister
+        router.unregister_provider("test-source").await;
+
+        // Verify removed
+        assert!(!router.providers.read().await.contains_key("test-source"));
+        assert!(!router.contexts.read().await.contains_key("test-source"));
+    }
+
+    #[tokio::test]
+    async fn test_register_query() {
+        let router = BootstrapRouter::new();
+        let (response_tx, _response_rx) = mpsc::channel(100);
+
+        router
+            .register_query("test-query".to_string(), response_tx)
+            .await;
+
+        // Verify query is registered
+        let senders = router.query_response_senders.read().await;
+        assert!(senders.contains_key("test-query"));
+    }
+
+    #[tokio::test]
+    async fn test_unregister_query() {
+        let router = BootstrapRouter::new();
+        let (response_tx, _response_rx) = mpsc::channel(100);
+
+        router
+            .register_query("test-query".to_string(), response_tx)
+            .await;
+
+        // Verify registered
+        assert!(router
+            .query_response_senders
+            .read()
+            .await
+            .contains_key("test-query"));
+
+        // Unregister
+        router.unregister_query("test-query").await;
+
+        // Verify removed
+        assert!(!router
+            .query_response_senders
+            .read()
+            .await
+            .contains_key("test-query"));
+    }
+
+    #[tokio::test]
+    async fn test_register_multiple_providers() {
+        let router = BootstrapRouter::new();
+        let (source_event_tx, _) = mpsc::channel(100);
+
+        for i in 1..=3 {
+            let source_config = create_test_source_config(&format!("source-{}", i));
+            router
+                .register_provider(
+                    "test-server".to_string(),
+                    source_config,
+                    Some(BootstrapProviderConfig::Noop),
+                    source_event_tx.clone(),
+                )
+                .await
+                .unwrap();
+        }
+
+        // Verify all providers are registered
+        let providers = router.providers.read().await;
+        assert_eq!(providers.len(), 3);
+        assert!(providers.contains_key("source-1"));
+        assert!(providers.contains_key("source-2"));
+        assert!(providers.contains_key("source-3"));
+    }
+
+    #[tokio::test]
+    async fn test_register_multiple_queries() {
+        let router = BootstrapRouter::new();
+
+        for i in 1..=3 {
+            let (response_tx, _) = mpsc::channel(100);
+            router
+                .register_query(format!("query-{}", i), response_tx)
+                .await;
+        }
+
+        // Verify all queries are registered
+        let senders = router.query_response_senders.read().await;
+        assert_eq!(senders.len(), 3);
+        assert!(senders.contains_key("query-1"));
+        assert!(senders.contains_key("query-2"));
+        assert!(senders.contains_key("query-3"));
+    }
+
+    #[tokio::test]
+    async fn test_unregister_provider_clears_bootstrap_state() {
+        let router = BootstrapRouter::new();
+        let source_config = create_test_source_config("test-source");
+        let (source_event_tx, _) = mpsc::channel(100);
+
+        router
+            .register_provider(
+                "test-server".to_string(),
+                source_config.clone(),
+                Some(BootstrapProviderConfig::Noop),
+                source_event_tx,
+            )
+            .await
+            .unwrap();
+
+        // Simulate bootstrap state
+        router
+            .bootstrap_state
+            .write()
+            .await
+            .insert(
+                ("query-1".to_string(), "test-source".to_string()),
+                BootstrapState::Completed { element_count: 100 },
+            );
+
+        // Unregister provider
+        router.unregister_provider("test-source").await;
+
+        // Verify bootstrap state is cleared
+        let states = router.bootstrap_state.read().await;
+        assert!(!states.contains_key(&("query-1".to_string(), "test-source".to_string())));
+    }
+
+    #[tokio::test]
+    async fn test_unregister_query_clears_bootstrap_state() {
+        let router = BootstrapRouter::new();
+        let (response_tx, _) = mpsc::channel(100);
+
+        router
+            .register_query("test-query".to_string(), response_tx)
+            .await;
+
+        // Simulate bootstrap state
+        router
+            .bootstrap_state
+            .write()
+            .await
+            .insert(
+                ("test-query".to_string(), "source-1".to_string()),
+                BootstrapState::Completed { element_count: 50 },
+            );
+
+        // Unregister query
+        router.unregister_query("test-query").await;
+
+        // Verify bootstrap state is cleared
+        let states = router.bootstrap_state.read().await;
+        assert!(!states.contains_key(&("test-query".to_string(), "source-1".to_string())));
+    }
+
+    #[tokio::test]
+    async fn test_get_bootstrap_state_for_pending() {
+        let router = BootstrapRouter::new();
+
+        router
+            .bootstrap_state
+            .write()
+            .await
+            .insert(
+                ("query-1".to_string(), "source-1".to_string()),
+                BootstrapState::Pending,
+            );
+
+        let state = router.get_bootstrap_state("query-1", "source-1").await;
+        assert!(state.is_some());
+        assert!(matches!(state.unwrap(), BootstrapState::Pending));
+    }
+
+    #[tokio::test]
+    async fn test_get_bootstrap_state_for_nonexistent() {
+        let router = BootstrapRouter::new();
+
+        let state = router.get_bootstrap_state("nonexistent", "source-1").await;
+        assert!(state.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_state_transitions() {
+        let router = BootstrapRouter::new();
+        let key = ("query-1".to_string(), "source-1".to_string());
+
+        // Pending state
+        router
+            .bootstrap_state
+            .write()
+            .await
+            .insert(key.clone(), BootstrapState::Pending);
+        let state = router.get_bootstrap_state("query-1", "source-1").await;
+        assert!(matches!(state.unwrap(), BootstrapState::Pending));
+
+        // InProgress state
+        router
+            .bootstrap_state
+            .write()
+            .await
+            .insert(key.clone(), BootstrapState::InProgress);
+        let state = router.get_bootstrap_state("query-1", "source-1").await;
+        assert!(matches!(state.unwrap(), BootstrapState::InProgress));
+
+        // Completed state
+        router
+            .bootstrap_state
+            .write()
+            .await
+            .insert(key.clone(), BootstrapState::Completed { element_count: 100 });
+        let state = router.get_bootstrap_state("query-1", "source-1").await;
+        assert!(matches!(state.unwrap(), BootstrapState::Completed { .. }));
+
+        // Failed state
+        router
+            .bootstrap_state
+            .write()
+            .await
+            .insert(key.clone(), BootstrapState::Failed { error: "test error".to_string() });
+        let state = router.get_bootstrap_state("query-1", "source-1").await;
+        assert!(matches!(state.unwrap(), BootstrapState::Failed { .. }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_bootstrap_router_handles_request_with_no_providers() {
+        let router = Arc::new(BootstrapRouter::new());
+        let (request_tx, request_rx) = mpsc::channel(100);
+        let (response_tx, mut response_rx) = mpsc::channel(100);
+
+        // Register query but no providers
+        router
+            .register_query("test-query".to_string(), response_tx)
+            .await;
+
+        // Start router in background
+        let router_clone = router.clone();
+        let router_task = tokio::spawn(async move {
+            router_clone.start(request_rx).await;
+        });
+
+        // Send bootstrap request
+        let request = BootstrapRequest {
+            query_id: "test-query".to_string(),
+            node_labels: vec!["Person".to_string()],
+            relation_labels: vec![],
+            request_id: "req-1".to_string(),
+        };
+
+        request_tx.send(request).await.unwrap();
+
+        // Should receive Started acknowledgment (no providers to bootstrap from)
+        let response = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            response_rx.recv()
+        ).await;
+
+        assert!(response.is_ok());
+        let response = response.unwrap().unwrap();
+        assert_eq!(response.request_id, "req-1");
+        assert!(matches!(response.status, BootstrapStatus::Started));
+
+        // Clean up
+        drop(request_tx);
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            router_task
+        ).await;
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_router_default_initialization() {
+        let router = BootstrapRouter::default();
+
+        // Verify all collections are empty
+        assert!(router.providers.read().await.is_empty());
+        assert!(router.contexts.read().await.is_empty());
+        assert!(router.query_response_senders.read().await.is_empty());
+        assert!(router.bootstrap_state.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_state_enum_variants() {
+        // Test all BootstrapState variants can be created
+        let _pending = BootstrapState::Pending;
+        let _in_progress = BootstrapState::InProgress;
+        let _completed = BootstrapState::Completed { element_count: 42 };
+        let _failed = BootstrapState::Failed { error: "test error".to_string() };
+    }
+
+    #[tokio::test]
+    async fn test_register_provider_overwrites_existing() {
+        let router = BootstrapRouter::new();
+        let source_config = create_test_source_config("test-source");
+        let (source_event_tx1, _) = mpsc::channel(100);
+        let (source_event_tx2, _) = mpsc::channel(100);
+
+        // Register first provider
+        router
+            .register_provider(
+                "server-1".to_string(),
+                source_config.clone(),
+                Some(BootstrapProviderConfig::Noop),
+                source_event_tx1,
+            )
+            .await
+            .unwrap();
+
+        // Register second provider with same source ID
+        router
+            .register_provider(
+                "server-2".to_string(),
+                source_config.clone(),
+                Some(BootstrapProviderConfig::Noop),
+                source_event_tx2,
+            )
+            .await
+            .unwrap();
+
+        // Should still have only one provider (overwritten)
+        let providers = router.providers.read().await;
+        assert_eq!(providers.len(), 1);
+        assert!(providers.contains_key("test-source"));
+    }
+
+    #[tokio::test]
+    async fn test_unregister_nonexistent_provider() {
+        let router = BootstrapRouter::new();
+
+        // Should not panic when unregistering nonexistent provider
+        router.unregister_provider("nonexistent").await;
+
+        // State should remain empty
+        assert!(router.providers.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_unregister_nonexistent_query() {
+        let router = BootstrapRouter::new();
+
+        // Should not panic when unregistering nonexistent query
+        router.unregister_query("nonexistent").await;
+
+        // State should remain empty
+        assert!(router.query_response_senders.read().await.is_empty());
+    }
+}

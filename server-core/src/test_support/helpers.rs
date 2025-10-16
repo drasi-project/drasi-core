@@ -122,6 +122,41 @@ pub mod mock_helpers {
     }
 }
 
+/// Helper functions for creating test components
+pub async fn create_test_application_source(
+    id: &str,
+) -> (
+    crate::sources::application::ApplicationSource,
+    crate::sources::ApplicationSourceHandle,
+) {
+    use crate::sources::application::ApplicationSource;
+    use crate::test_support::helpers::test_fixtures::create_test_source_config;
+    use tokio::sync::mpsc;
+
+    let config = create_test_source_config(id, "application");
+    let (source_event_tx, _source_event_rx) = mpsc::channel(100);
+    let (event_tx, _event_rx) = mpsc::channel(100);
+
+    ApplicationSource::new(config, source_event_tx, event_tx)
+}
+
+/// Helper function for creating test application reactions
+pub async fn create_test_application_reaction(
+    id: &str,
+) -> (
+    crate::reactions::application::ApplicationReaction,
+    crate::reactions::ApplicationReactionHandle,
+) {
+    use crate::reactions::application::ApplicationReaction;
+    use crate::test_support::helpers::test_fixtures::create_test_reaction_config;
+    use tokio::sync::mpsc;
+
+    let config = create_test_reaction_config(id, vec![]);
+    let (event_tx, _event_rx) = mpsc::channel(100);
+
+    ApplicationReaction::new(config, event_tx)
+}
+
 #[cfg(test)]
 #[allow(dead_code)]
 pub mod async_test_helpers {

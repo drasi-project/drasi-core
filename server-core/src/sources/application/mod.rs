@@ -14,6 +14,9 @@
 
 mod property_builder;
 
+#[cfg(test)]
+mod tests;
+
 pub use property_builder::PropertyMapBuilder;
 
 use anyhow::Result;
