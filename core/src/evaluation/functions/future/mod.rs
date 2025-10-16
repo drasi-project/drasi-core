@@ -24,13 +24,13 @@ use self::{future_element::FutureElement, true_for::TrueFor, true_until::TrueUnt
 use super::{Function, FunctionRegistry};
 
 mod awaiting;
+mod before;
 mod future_element;
+mod previous_unique_value;
 mod true_for;
 mod true_later;
 mod true_now_or_later;
 mod true_until;
-mod before;
-mod previous_unique_value;
 
 #[cfg(test)]
 mod tests;

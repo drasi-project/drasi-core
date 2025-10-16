@@ -65,8 +65,14 @@ impl ScalarFunction for PreviousUniqueValue {
         let result_owner = ResultOwner::Function(expression.position_in_query);
         let value = &args[0];
         let default_value: ElementValue = {
-            if args.len() > 1 { &args[1] } else { &VariableValue::Null }
-        }.try_into().map_err(|_e| FunctionError {
+            if args.len() > 1 {
+                &args[1]
+            } else {
+                &VariableValue::Null
+            }
+        }
+        .try_into()
+        .map_err(|_e| FunctionError {
             function_name: expression.name.to_string(),
             error: FunctionEvaluationError::InvalidType {
                 expected: "ElementValue".to_string(),
@@ -117,28 +123,32 @@ impl ScalarFunction for PreviousUniqueValue {
             },
         })?;
 
-        let (mut prev_unique, before_value ) = match self.result_index.get(&result_key, &result_owner).await {
-            Ok(v) => match v {
-                Some(v) => match v {
-                    ValueAccumulator::Map(m) => (m.get("0").cloned().unwrap_or_default(), m.get("1").cloned().unwrap_or_default()),
-                    _ => {
-                        return Err(FunctionError {
-                            function_name: expression.name.to_string(),
-                            error: FunctionEvaluationError::InvalidType {
-                                expected: "ElementValue".to_string(),
-                            },
-                        })
-                    }
+        let (mut prev_unique, before_value) =
+            match self.result_index.get(&result_key, &result_owner).await {
+                Ok(v) => match v {
+                    Some(v) => match v {
+                        ValueAccumulator::Map(m) => (
+                            m.get("0").cloned().unwrap_or_default(),
+                            m.get("1").cloned().unwrap_or_default(),
+                        ),
+                        _ => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::InvalidType {
+                                    expected: "ElementValue".to_string(),
+                                },
+                            })
+                        }
+                    },
+                    None => (default_value.clone(), default_value.clone()),
                 },
-                None => (default_value.clone(), default_value.clone()),
-            },
-            Err(e) => {
-                return Err(FunctionError {
-                    function_name: expression.name.to_string(),
-                    error: FunctionEvaluationError::IndexError(e),
-                })
-            }
-        };
+                Err(e) => {
+                    return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::IndexError(e),
+                    })
+                }
+            };
 
         match context.get_side_effects() {
             SideEffects::Apply => {
@@ -146,15 +156,17 @@ impl ScalarFunction for PreviousUniqueValue {
                     prev_unique = before_value.clone();
                 }
 
-                let p = ValueAccumulator::Map(BTreeMap::from([("0".to_string(), prev_unique.clone()), ("1".to_string(), current_value.clone())]).into());
+                let p = ValueAccumulator::Map(
+                    BTreeMap::from([
+                        ("0".to_string(), prev_unique.clone()),
+                        ("1".to_string(), current_value.clone()),
+                    ])
+                    .into(),
+                );
 
                 match self
                     .result_index
-                    .set(
-                        result_key.clone(),
-                        result_owner,
-                        Some(p),
-                    )
+                    .set(result_key.clone(), result_owner, Some(p))
                     .await
                 {
                     Ok(()) => (),
@@ -166,10 +178,10 @@ impl ScalarFunction for PreviousUniqueValue {
                     }
                 };
                 Ok((&prev_unique).into())
-            },
+            }
             SideEffects::Snapshot => Ok((&prev_unique).into()),
             SideEffects::RevertForUpdate => Ok((&prev_unique).into()),
-            SideEffects::RevertForDelete => Ok((&prev_unique).into())
+            SideEffects::RevertForDelete => Ok((&prev_unique).into()),
         }
     }
 }

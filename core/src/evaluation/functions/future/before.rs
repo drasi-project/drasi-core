@@ -65,8 +65,14 @@ impl ScalarFunction for Before {
         let result_owner = ResultOwner::Function(expression.position_in_query);
         let value = &args[0];
         let default_value: ElementValue = {
-            if args.len() > 1 { &args[1] } else { &VariableValue::Null }
-        }.try_into().map_err(|_e| FunctionError {
+            if args.len() > 1 {
+                &args[1]
+            } else {
+                &VariableValue::Null
+            }
+        }
+        .try_into()
+        .map_err(|_e| FunctionError {
             function_name: expression.name.to_string(),
             error: FunctionEvaluationError::InvalidType {
                 expected: "ElementValue".to_string(),
@@ -120,7 +126,10 @@ impl ScalarFunction for Before {
         let prev_values = match self.result_index.get(&result_key, &result_owner).await {
             Ok(v) => match v {
                 Some(v) => match v {
-                    ValueAccumulator::Map(m) => (m.get("0").cloned().unwrap_or_default(), m.get("1").cloned().unwrap_or_default()),
+                    ValueAccumulator::Map(m) => (
+                        m.get("0").cloned().unwrap_or_default(),
+                        m.get("1").cloned().unwrap_or_default(),
+                    ),
                     _ => {
                         return Err(FunctionError {
                             function_name: expression.name.to_string(),
@@ -147,7 +156,13 @@ impl ScalarFunction for Before {
                     .set(
                         result_key.clone(),
                         result_owner,
-                        Some(ValueAccumulator::Map(BTreeMap::from([("0".to_string(), current_value), ("1".to_string(), prev_values.0.clone())]).into())),
+                        Some(ValueAccumulator::Map(
+                            BTreeMap::from([
+                                ("0".to_string(), current_value),
+                                ("1".to_string(), prev_values.0.clone()),
+                            ])
+                            .into(),
+                        )),
                     )
                     .await
                 {
@@ -160,10 +175,10 @@ impl ScalarFunction for Before {
                     }
                 };
                 Ok((&prev_values.0).into())
-            },
+            }
             SideEffects::Snapshot => Ok((&prev_values.1).into()),
             SideEffects::RevertForUpdate => Ok((&prev_values.1).into()),
-            SideEffects::RevertForDelete => Ok((&prev_values.1).into())
+            SideEffects::RevertForDelete => Ok((&prev_values.1).into()),
         }
     }
 }
