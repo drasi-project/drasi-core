@@ -140,22 +140,14 @@ impl ScalarFunction for PreviousUniqueValue {
             }
         };
 
-        println!("Previous unique value: {:?}, before value: {:?}", prev_unique, before_value);
-
-        
-         //println!("Current value: {:?}, previous unique value: {:?}, before value: {:?}", current_value, prev_unique, before_value);
-
         match context.get_side_effects() {
-            SideEffects::Apply => {                
-
+            SideEffects::Apply => {
                 if current_value != before_value {
                     prev_unique = before_value.clone();
                 }
 
                 let p = ValueAccumulator::Map(BTreeMap::from([("0".to_string(), prev_unique.clone()), ("1".to_string(), current_value.clone())]).into());
 
-                println!("Storing p {:?} for key {:?}", p, result_key);
-                
                 match self
                     .result_index
                     .set(

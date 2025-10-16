@@ -52,7 +52,6 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
 
     //Add contract 1
     {
-        println!("--- Inserting contract c1 with pending status ---");
         let change = SourceChange::Insert {
             element: Element::Node {
                 metadata: ElementMetadata {
@@ -77,7 +76,6 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
     
     //update contract 1 with active status
     {
-        println!("--- Updating contract c1 with active status ---");
         let change = SourceChange::Update {
             element: Element::Node {
                 metadata: ElementMetadata {
@@ -111,7 +109,6 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
 
     //update contract 1 tags
     {
-        println!("--- Updating contract c1 tags ---");
         let change = SourceChange::Update {
             element: Element::Node {
                 metadata: ElementMetadata {
@@ -134,8 +131,6 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
         
         assert_eq!(result.len(), 1);
 
-        println!("Result: {:#?}", result);
-
         assert!(result.contains(&QueryPartEvaluationContext::Updating { 
             before: variablemap!(
               "tags" => VariableValue::from(json!("tag1")),
@@ -152,7 +147,6 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
 
     //Add contract 2
     {
-        println!("--- Inserting contract c2 with cancelled status ---");
         let change = SourceChange::Insert {
             element: Element::Node {
                 metadata: ElementMetadata {
@@ -177,7 +171,6 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
     
     //update contract 2 with active status
     {
-        println!("--- Updating contract c2 with active status ---");
         let change = SourceChange::Update {
             element: Element::Node {
                 metadata: ElementMetadata {
@@ -203,7 +196,6 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
 
     //update contract 2 with pending status
     {
-        println!("--- Updating contract c2 with pending status ---");
         let change = SourceChange::Update {
             element: Element::Node {
                 metadata: ElementMetadata {
@@ -229,7 +221,6 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
 
     //update contract 2 with active status
     {
-        println!("--- Updating contract c2 with active status ---");
         let change = SourceChange::Update {
             element: Element::Node {
                 metadata: ElementMetadata {

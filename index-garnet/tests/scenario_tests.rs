@@ -337,3 +337,31 @@ mod index {
         shared_tests::index::future_queue::push_overwrite(&fqi).await;
     }
 }
+
+mod before {
+    use super::GarnetQueryConfig;
+    use shared_tests::use_cases::*;
+
+    #[tokio::test]
+    async fn before_value() {
+        let test_config = GarnetQueryConfig::new(false);
+        before::before_value(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn before_sum() {
+        let test_config = GarnetQueryConfig::new(false);
+        before::before_sum(&test_config).await;
+    }
+}
+
+mod prev_unique {
+    use super::GarnetQueryConfig;
+    use shared_tests::use_cases::*;
+
+    #[tokio::test]
+    async fn prev_unique() {
+        let test_config = GarnetQueryConfig::new(false);
+        prev_unique::prev_unique(&test_config).await;
+    }
+}

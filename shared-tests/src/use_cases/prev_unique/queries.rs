@@ -16,8 +16,8 @@ pub fn prev_unique_query() -> &'static str {
     "
 MATCH 
   (c:Contract)
-WHERE drasi.previousUniqueValue(c.status) = 'pending'
-AND c.status = 'active'
+WHERE c.status = 'active'
+AND drasi.previousUniqueValue(c.status) = 'pending'
 RETURN
   c.id AS id,
   c.status AS status,

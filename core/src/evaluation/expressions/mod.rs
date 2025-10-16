@@ -486,11 +486,11 @@ impl ExpressionEvaluator {
         let result = match expression {
             ast::BinaryExpression::And(c1, c2) => VariableValue::Bool(
                 self.evaluate_predicate(context, c1).await?
-                    && self.evaluate_predicate(context, c2).await?,
+                    & self.evaluate_predicate(context, c2).await?,
             ),
             ast::BinaryExpression::Or(c1, c2) => VariableValue::Bool(
                 self.evaluate_predicate(context, c1).await?
-                    || self.evaluate_predicate(context, c2).await?,
+                    | self.evaluate_predicate(context, c2).await?,
             ),
             ast::BinaryExpression::Eq(e1, e2) => match (
                 self.evaluate_expression(context, e1).await?,
