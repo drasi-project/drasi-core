@@ -484,3 +484,14 @@ mod before {
         before::before_sum(&test_config).await;
     }
 }
+
+mod prev_unique {
+    use super::InMemoryQueryConfig;
+    use crate::use_cases::*;
+
+    #[tokio::test]
+    async fn prev_unique() {
+        let test_config = InMemoryQueryConfig::new();
+        prev_unique::prev_unique(&test_config).await;
+    }
+}

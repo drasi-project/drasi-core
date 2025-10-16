@@ -12,27 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub fn increasing_value_query() -> &'static str {
+pub fn prev_unique_query() -> &'static str {
     "
 MATCH 
-  (i:Invoice)
-WHERE i.amount > drasi.beforeChange(i.amount)
+  (c:Contract)
+WHERE drasi.previousUniqueValue(c.status) = 'pending'
+AND c.status = 'active'
 RETURN
-  i.id AS id,
-  i.amount AS amount
+  c.id AS id,
+  c.status AS status,
+  c.tags AS tags
   "
 }
-
-pub fn increasing_sum_query() -> &'static str {
-    "
-MATCH 
-  (i:Invoice)-[:HAS]->(l:LineItem)
-WITH
-  i,
-  sum(l.amount) AS total
-WHERE total > drasi.beforeChange(total, 0)
-RETURN
-  i.id AS id
-  "
-}
-

@@ -327,8 +327,6 @@ pub async fn before_sum(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
 
-        println!("Result: {:?}", result);
-
         assert!(result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!(
               "id" => VariableValue::from(json!("i1"))

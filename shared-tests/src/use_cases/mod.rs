@@ -45,6 +45,7 @@ pub mod logical_conditions;
 pub mod rolling_average_decrease_by_ten;
 pub mod steps_happen_in_any_order;
 pub mod before;
+pub mod prev_unique;
 
 #[async_trait]
 pub trait QueryTestConfig {

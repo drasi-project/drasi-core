@@ -30,12 +30,12 @@ use crate::models::ElementValue;
 use async_trait::async_trait;
 use drasi_query_ast::ast;
 
-pub struct Before {
+pub struct PreviousUniqueValue {
     result_index: Arc<dyn ResultIndex>,
     expression_evaluator: Weak<ExpressionEvaluator>,
 }
 
-impl Before {
+impl PreviousUniqueValue {
     pub fn new(
         result_index: Arc<dyn ResultIndex>,
         expression_evaluator: Weak<ExpressionEvaluator>,
@@ -48,7 +48,7 @@ impl Before {
 }
 
 #[async_trait]
-impl ScalarFunction for Before {
+impl ScalarFunction for PreviousUniqueValue {
     async fn call(
         &self,
         context: &ExpressionEvaluationContext,
@@ -117,7 +117,7 @@ impl ScalarFunction for Before {
             },
         })?;
 
-        let prev_values = match self.result_index.get(&result_key, &result_owner).await {
+        let (prev_unique, before_value ) = match self.result_index.get(&result_key, &result_owner).await {
             Ok(v) => match v {
                 Some(v) => match v {
                     ValueAccumulator::Map(m) => (m.get("0").cloned().unwrap_or_default(), m.get("1").cloned().unwrap_or_default()),
@@ -140,14 +140,29 @@ impl ScalarFunction for Before {
             }
         };
 
+        println!("Previous unique value: {:?}, before value: {:?}", prev_unique, before_value);
+
+         //println!("Current value: {:?}, previous unique value: {:?}, before value: {:?}", current_value, prev_unique, before_value);
+
         match context.get_side_effects() {
-            SideEffects::Apply => {
+            SideEffects::Apply => {                
+
+                let p = {
+                    if current_value == prev_unique {
+                        ValueAccumulator::Map(BTreeMap::from([("0".to_string(), current_value), ("1".to_string(), before_value.clone())]).into())
+                    } else {
+                        ValueAccumulator::Map(BTreeMap::from([("0".to_string(), current_value.clone()), ("1".to_string(), prev_unique.clone())]).into())
+                    }
+                };
+
+                println!("Storing p {:?} for key {:?}", p, result_key);
+                
                 match self
                     .result_index
                     .set(
                         result_key.clone(),
                         result_owner,
-                        Some(ValueAccumulator::Map(BTreeMap::from([("0".to_string(), current_value), ("1".to_string(), prev_values.0.clone())]).into())),
+                        Some(p),
                     )
                     .await
                 {
@@ -159,11 +174,11 @@ impl ScalarFunction for Before {
                         })
                     }
                 };
-                Ok((&prev_values.0).into())
+                Ok((&prev_unique).into())
             },
-            SideEffects::Snapshot => Ok((&prev_values.1).into()),
-            SideEffects::RevertForUpdate => Ok((&prev_values.1).into()),
-            SideEffects::RevertForDelete => Ok((&prev_values.1).into())
+            SideEffects::Snapshot => Ok((&before_value).into()),
+            SideEffects::RevertForUpdate => Ok((&before_value).into()),
+            SideEffects::RevertForDelete => Ok((&before_value).into())
         }
     }
 }
