@@ -97,10 +97,12 @@ impl RegisterFutureFunctions for FunctionRegistry {
 
         self.register_function(
             "drasi.previousDistinctValue",
-            Function::Scalar(Arc::new(previous_distinct_value::PreviousDistinctValue::new(
-                result_index.clone(),
-                expression_evaluator.clone(),
-            ))),
+            Function::Scalar(Arc::new(
+                previous_distinct_value::PreviousDistinctValue::new(
+                    result_index.clone(),
+                    expression_evaluator.clone(),
+                ),
+            )),
         );
     }
 }
