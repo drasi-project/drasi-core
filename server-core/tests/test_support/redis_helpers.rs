@@ -48,6 +48,7 @@ pub async fn setup_redis() -> String {
 // ///
 // /// # Returns
 // /// The stream ID of the published event
+#[allow(dead_code)]
 pub async fn publish_platform_event(
     redis_url: &str,
     stream_key: &str,
@@ -81,6 +82,7 @@ pub async fn publish_platform_event(
 ///
 /// # Returns
 /// Vec of (stream_id, event_data) tuples
+#[allow(dead_code)]
 pub async fn read_from_stream(
     redis_url: &str,
     stream_key: &str,
