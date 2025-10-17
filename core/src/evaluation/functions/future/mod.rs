@@ -24,9 +24,9 @@ use self::{future_element::FutureElement, true_for::TrueFor, true_until::TrueUnt
 use super::{Function, FunctionRegistry};
 
 mod awaiting;
-mod before;
 mod future_element;
 mod previous_distinct_value;
+mod previous_value;
 mod true_for;
 mod true_later;
 mod true_now_or_later;
@@ -88,8 +88,8 @@ impl RegisterFutureFunctions for FunctionRegistry {
         );
 
         self.register_function(
-            "drasi.beforeChange",
-            Function::Scalar(Arc::new(before::Before::new(
+            "drasi.previousValue",
+            Function::Scalar(Arc::new(previous_value::PreviousValue::new(
                 result_index.clone(),
                 expression_evaluator.clone(),
             ))),

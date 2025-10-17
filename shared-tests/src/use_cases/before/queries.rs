@@ -16,7 +16,7 @@ pub fn increasing_value_query() -> &'static str {
     "
 MATCH 
   (i:Invoice)
-WHERE i.amount > drasi.beforeChange(i.amount)
+WHERE i.amount > drasi.previousValue(i.amount)
 RETURN
   i.id AS id,
   i.amount AS amount
@@ -30,7 +30,7 @@ MATCH
 WITH
   i,
   sum(l.amount) AS total
-WHERE total > drasi.beforeChange(total, 0)
+WHERE total > drasi.previousValue(total, 0)
 RETURN
   i.id AS id
   "
