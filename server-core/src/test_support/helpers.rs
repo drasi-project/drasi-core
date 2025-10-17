@@ -23,7 +23,7 @@ pub mod test_fixtures {
     #[allow(dead_code)]
     pub fn create_test_server_config() -> DrasiServerCoreConfig {
         DrasiServerCoreConfig {
-            server: DrasiServerCoreSettings {
+            server_core: DrasiServerCoreSettings {
                 id: "test-server".to_string(),
             },
             sources: vec![],

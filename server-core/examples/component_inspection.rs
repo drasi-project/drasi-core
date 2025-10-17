@@ -103,7 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Demonstrate runtime addition
     println!("➕ Adding a new source at runtime...");
-    core.add_source_runtime(Source::application("runtime-source").build())
+    core.create_source(Source::application("runtime-source").build())
         .await?;
 
     let sources = core.list_sources().await?;

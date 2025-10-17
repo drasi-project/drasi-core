@@ -35,7 +35,7 @@ fn validate_config_file(path: &Path) -> Result<(), String> {
     };
 
     // Validate server ID is present
-    if config.server.id.is_empty() {
+    if config.server_core.id.is_empty() {
         return Err("Server ID is empty - must be provided".to_string());
     }
 

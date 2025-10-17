@@ -227,7 +227,7 @@ reactions: []
         let yaml_str = fs::read_to_string(&config_path).unwrap();
         let config: DrasiServerCoreConfig = serde_yaml::from_str(&yaml_str).unwrap();
 
-        assert_eq!(config.server.id, "test-server");
+        assert_eq!(config.server_core.id, "test-server");
         assert_eq!(config.sources.len(), 1);
         assert_eq!(config.sources[0].id, "test-source");
     }
@@ -267,7 +267,7 @@ reactions: []
         let loaded_yaml = fs::read_to_string(&config_path).unwrap();
         let loaded_config: DrasiServerCoreConfig = serde_yaml::from_str(&loaded_yaml).unwrap();
 
-        assert_eq!(loaded_config.server.id, config.server.id);
+        assert_eq!(loaded_config.server_core.id, config.server_core.id);
         assert_eq!(loaded_config.sources.len(), config.sources.len());
         assert_eq!(loaded_config.queries.len(), config.queries.len());
         assert_eq!(loaded_config.reactions.len(), config.reactions.len());        

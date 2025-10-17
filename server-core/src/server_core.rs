@@ -1016,7 +1016,7 @@ impl DrasiServerCore {
     ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let yaml = r#"
-    /// server:
+    /// server_core:
     ///   id: my-server
     /// sources: []
     /// queries: []
@@ -1487,7 +1487,7 @@ mod tests {
     #[tokio::test]
     async fn test_server_initialization() {
         let config = Arc::new(RuntimeConfig {
-            server: crate::config::DrasiServerCoreSettings {
+            server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
             },
             sources: vec![],
@@ -1505,7 +1505,7 @@ mod tests {
     #[tokio::test]
     async fn test_server_initialization_idempotent() {
         let config = Arc::new(RuntimeConfig {
-            server: crate::config::DrasiServerCoreSettings {
+            server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
             },
             sources: vec![],
@@ -1527,7 +1527,7 @@ mod tests {
     #[tokio::test]
     async fn test_start_without_initialization_fails() {
         let config = Arc::new(RuntimeConfig {
-            server: crate::config::DrasiServerCoreSettings {
+            server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
             },
             sources: vec![],
@@ -1545,7 +1545,7 @@ mod tests {
     #[tokio::test]
     async fn test_start_already_running_fails() {
         let config = Arc::new(RuntimeConfig {
-            server: crate::config::DrasiServerCoreSettings {
+            server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
             },
             sources: vec![],
@@ -1568,7 +1568,7 @@ mod tests {
     #[tokio::test]
     async fn test_stop_not_running_fails() {
         let config = Arc::new(RuntimeConfig {
-            server: crate::config::DrasiServerCoreSettings {
+            server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
             },
             sources: vec![],
@@ -1587,7 +1587,7 @@ mod tests {
     #[tokio::test]
     async fn test_start_and_stop_lifecycle() {
         let config = Arc::new(RuntimeConfig {
-            server: crate::config::DrasiServerCoreSettings {
+            server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
             },
             sources: vec![],
@@ -1622,7 +1622,7 @@ mod tests {
     #[tokio::test]
     async fn test_from_config_str_creates_server() {
         let yaml = r#"
-server:
+server_core:
   id: yaml-test
 sources: []
 queries: []
@@ -1668,7 +1668,7 @@ reactions: []
     #[tokio::test]
     async fn test_create_source_without_initialization() {
         let config = Arc::new(RuntimeConfig {
-            server: crate::config::DrasiServerCoreSettings {
+            server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
             },
             sources: vec![],
@@ -1687,7 +1687,7 @@ reactions: []
     #[tokio::test]
     async fn test_create_query_without_initialization() {
         let config = Arc::new(RuntimeConfig {
-            server: crate::config::DrasiServerCoreSettings {
+            server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
             },
             sources: vec![],
@@ -1709,7 +1709,7 @@ reactions: []
     #[tokio::test]
     async fn test_create_reaction_without_initialization() {
         let config = Arc::new(RuntimeConfig {
-            server: crate::config::DrasiServerCoreSettings {
+            server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
             },
             sources: vec![],
@@ -1730,7 +1730,7 @@ reactions: []
     #[tokio::test]
     async fn test_remove_source_without_initialization() {
         let config = Arc::new(RuntimeConfig {
-            server: crate::config::DrasiServerCoreSettings {
+            server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
             },
             sources: vec![],
@@ -1748,7 +1748,7 @@ reactions: []
     #[tokio::test]
     async fn test_remove_query_without_initialization() {
         let config = Arc::new(RuntimeConfig {
-            server: crate::config::DrasiServerCoreSettings {
+            server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
             },
             sources: vec![],
@@ -1766,7 +1766,7 @@ reactions: []
     #[tokio::test]
     async fn test_remove_reaction_without_initialization() {
         let config = Arc::new(RuntimeConfig {
-            server: crate::config::DrasiServerCoreSettings {
+            server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
             },
             sources: vec![],
@@ -1814,7 +1814,7 @@ reactions: []
     #[tokio::test]
     async fn test_is_running_initial_state() {
         let config = Arc::new(RuntimeConfig {
-            server: crate::config::DrasiServerCoreSettings {
+            server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
             },
             sources: vec![],
@@ -1877,7 +1877,7 @@ reactions: []
     #[tokio::test]
     async fn test_list_sources_without_initialization() {
         let config = Arc::new(RuntimeConfig {
-            server: crate::config::DrasiServerCoreSettings {
+            server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
             },
             sources: vec![],
@@ -2369,7 +2369,7 @@ reactions: []
     #[tokio::test]
     async fn test_start_source_without_initialization() {
         let config = Arc::new(RuntimeConfig {
-            server: crate::config::DrasiServerCoreSettings {
+            server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
             },
             sources: vec![],
