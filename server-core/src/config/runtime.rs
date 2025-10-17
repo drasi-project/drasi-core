@@ -115,7 +115,7 @@ impl From<ReactionConfig> for ReactionRuntime {
 /// Runtime configuration for the Drasi server
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
-    pub server: super::schema::DrasiServerCoreSettings,
+    pub server_core: super::schema::DrasiServerCoreSettings,
     pub sources: Vec<SourceConfig>,
     pub queries: Vec<QueryConfig>,
     pub reactions: Vec<ReactionConfig>,
@@ -124,7 +124,7 @@ pub struct RuntimeConfig {
 impl From<super::schema::DrasiServerCoreConfig> for RuntimeConfig {
     fn from(config: super::schema::DrasiServerCoreConfig) -> Self {
         Self {
-            server: config.server,
+            server_core: config.server_core,
             sources: config.sources,
             queries: config.queries,
             reactions: config.reactions,

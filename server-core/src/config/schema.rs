@@ -34,7 +34,8 @@ impl Default for QueryLanguage {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DrasiServerCoreConfig {
-    pub server: DrasiServerCoreSettings,
+    #[serde(default)]
+    pub server_core: DrasiServerCoreSettings,
     pub sources: Vec<SourceConfig>,
     pub queries: Vec<QueryConfig>,
     pub reactions: Vec<ReactionConfig>,

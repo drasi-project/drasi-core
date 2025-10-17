@@ -234,13 +234,13 @@ impl DrasiServerCore {
     // Dynamic Runtime Configuration
     // ============================================================================
 
-    /// Add a source to a running server
+    /// Create a source in a running server
     ///
     /// # Example
     /// ```no_run
     /// # use drasi_server_core::{DrasiServerCore, Source};
     /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
-    /// core.add_source_runtime(
+    /// core.create_source(
     ///     Source::mock("new-source")
     ///         .auto_start(true)
     ///         .build()
@@ -248,7 +248,7 @@ impl DrasiServerCore {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn add_source_runtime(&self, source: crate::config::SourceConfig) -> crate::api::Result<()> {
+    pub async fn create_source(&self, source: crate::config::SourceConfig) -> crate::api::Result<()> {
         if !*self.initialized.read().await {
             return Err(DrasiError::invalid_state("Cannot add source to uninitialized server"));
         }
@@ -260,13 +260,13 @@ impl DrasiServerCore {
         Ok(())
     }
 
-    /// Add a query to a running server
+    /// Create a query in a running server
     ///
     /// # Example
     /// ```no_run
     /// # use drasi_server_core::{DrasiServerCore, Query};
     /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
-    /// core.add_query_runtime(
+    /// core.create_query(
     ///     Query::cypher("new-query")
     ///         .query("MATCH (n) RETURN n")
     ///         .from_source("source1")
@@ -276,7 +276,7 @@ impl DrasiServerCore {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn add_query_runtime(&self, query: crate::config::QueryConfig) -> crate::api::Result<()> {
+    pub async fn create_query(&self, query: crate::config::QueryConfig) -> crate::api::Result<()> {
         if !*self.initialized.read().await {
             return Err(DrasiError::invalid_state("Cannot add query to uninitialized server"));
         }
@@ -288,13 +288,13 @@ impl DrasiServerCore {
         Ok(())
     }
 
-    /// Add a reaction to a running server
+    /// Create a reaction in a running server
     ///
     /// # Example
     /// ```no_run
     /// # use drasi_server_core::{DrasiServerCore, Reaction};
     /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
-    /// core.add_reaction_runtime(
+    /// core.create_reaction(
     ///     Reaction::log("new-reaction")
     ///         .subscribe_to("query1")
     ///         .auto_start(true)
@@ -303,7 +303,7 @@ impl DrasiServerCore {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn add_reaction_runtime(&self, reaction: crate::config::ReactionConfig) -> crate::api::Result<()> {
+    pub async fn create_reaction(&self, reaction: crate::config::ReactionConfig) -> crate::api::Result<()> {
         if !*self.initialized.read().await {
             return Err(DrasiError::invalid_state("Cannot add reaction to uninitialized server"));
         }
@@ -946,8 +946,8 @@ impl DrasiServerCore {
         }
 
         Ok(DrasiServerCoreConfig {
-            server: crate::config::DrasiServerCoreSettings {
-                id: self.config.server.id.clone(),
+            server_core: crate::config::DrasiServerCoreSettings {
+                id: self.config.server_core.id.clone(),
             },
             sources,
             queries,
@@ -1179,7 +1179,7 @@ impl DrasiServerCore {
         if let Err(e) = self
             .bootstrap_router
             .register_provider(
-                self.config.server.id.clone(),
+                self.config.server_core.id.clone(),
                 source_config_arc,
                 bootstrap_provider_config,
                 source_event_tx,
@@ -1666,7 +1666,7 @@ reactions: []
     }
 
     #[tokio::test]
-    async fn test_add_source_runtime_without_initialization() {
+    async fn test_create_source_without_initialization() {
         let config = Arc::new(RuntimeConfig {
             server: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
@@ -1679,13 +1679,13 @@ reactions: []
         let core = DrasiServerCore::new(config);
         let source = Source::application("runtime-source").build();
 
-        let result = core.add_source_runtime(source).await;
-        assert!(result.is_err(), "add_source_runtime should fail without initialization");
+        let result = core.create_source(source).await;
+        assert!(result.is_err(), "create_source should fail without initialization");
         assert!(matches!(result.unwrap_err(), DrasiError::InvalidState(_)));
     }
 
     #[tokio::test]
-    async fn test_add_query_runtime_without_initialization() {
+    async fn test_create_query_without_initialization() {
         let config = Arc::new(RuntimeConfig {
             server: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
@@ -1701,13 +1701,13 @@ reactions: []
             .from_source("source1")
             .build();
 
-        let result = core.add_query_runtime(query).await;
-        assert!(result.is_err(), "add_query_runtime should fail without initialization");
+        let result = core.create_query(query).await;
+        assert!(result.is_err(), "create_query should fail without initialization");
         assert!(matches!(result.unwrap_err(), DrasiError::InvalidState(_)));
     }
 
     #[tokio::test]
-    async fn test_add_reaction_runtime_without_initialization() {
+    async fn test_create_reaction_without_initialization() {
         let config = Arc::new(RuntimeConfig {
             server: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
@@ -1722,8 +1722,8 @@ reactions: []
             .subscribe_to("query1")
             .build();
 
-        let result = core.add_reaction_runtime(reaction).await;
-        assert!(result.is_err(), "add_reaction_runtime should fail without initialization");
+        let result = core.create_reaction(reaction).await;
+        assert!(result.is_err(), "create_reaction should fail without initialization");
         assert!(matches!(result.unwrap_err(), DrasiError::InvalidState(_)));
     }
 
@@ -2135,7 +2135,7 @@ reactions: []
         assert_eq!(sources.len(), 0);
 
         // Add a source at runtime
-        core.add_source_runtime(Source::application("runtime-source").build())
+        core.create_source(Source::application("runtime-source").build())
             .await
             .unwrap();
 

@@ -94,7 +94,7 @@ impl DrasiServerCoreBuilder {
         };
 
         let config = Arc::new(RuntimeConfig {
-            server: server_settings,
+            server_core: server_settings,
             sources: self.sources,
             queries: self.queries,
             reactions: self.reactions,
