@@ -42,16 +42,40 @@ impl SubscriptionRouter {
     }
 
     /// Add a reaction subscription to specific queries
+    ///
+    /// If a subscription for this reaction already exists, this method will return an error
+    /// to prevent accidentally closing the existing subscription channel.
     pub async fn add_reaction_subscription(
         &self,
         reaction_id: String,
         query_ids: Vec<String>,
-    ) -> QueryResultReceiver {
+    ) -> Result<QueryResultReceiver, String> {
         let start_time = std::time::Instant::now();
+
+        // Log with backtrace information for debugging
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let backtrace_str = backtrace.to_string();
+        let caller_info: Vec<&str> = backtrace_str
+            .lines()
+            .filter(|line| line.contains("drasi_server") && !line.contains("subscription_router"))
+            .take(3)
+            .collect();
+
         info!(
-            "Starting to add subscription for reaction '{}' to queries: {:?}",
-            reaction_id, query_ids
+            "[SUBSCRIPTION-TRACE] add_reaction_subscription called for reaction '{}' to queries: {:?}. Caller: {:?}",
+            reaction_id, query_ids, caller_info
         );
+
+        // Check if reaction already has a subscription
+        let existing_sender = self.reaction_senders.read().await.contains_key(&reaction_id);
+        if existing_sender {
+            let error_msg = format!(
+                "[DUPLICATE-SUBSCRIPTION] Reaction '{}' already has an active subscription. This is the SECOND call - first call succeeded. Caller trace: {:?}",
+                reaction_id, caller_info
+            );
+            error!("{}", error_msg);
+            return Err(error_msg);
+        }
 
         let (tx, rx) = mpsc::channel(1000);
 
@@ -87,7 +111,7 @@ impl SubscriptionRouter {
             elapsed
         );
 
-        rx
+        Ok(rx)
     }
 
     /// Remove a reaction subscription
@@ -171,7 +195,8 @@ mod tests {
 
         let rx = router
             .add_reaction_subscription("reaction1".to_string(), vec!["query1".to_string()])
-            .await;
+            .await
+            .expect("Should create subscription");
 
         // Verify reaction sender is stored
         let senders = router.reaction_senders.read().await;
@@ -194,11 +219,13 @@ mod tests {
 
         let _rx1 = router
             .add_reaction_subscription("reaction1".to_string(), vec!["query1".to_string()])
-            .await;
+            .await
+            .expect("Should create subscription for reaction1");
 
         let _rx2 = router
             .add_reaction_subscription("reaction2".to_string(), vec!["query1".to_string()])
-            .await;
+            .await
+            .expect("Should create subscription for reaction2");
 
         let subscriptions = router.query_subscriptions.read().await;
         let query1_reactions = subscriptions.get("query1").unwrap();
@@ -214,7 +241,8 @@ mod tests {
 
         let _rx = router
             .add_reaction_subscription("reaction1".to_string(), vec!["query1".to_string()])
-            .await;
+            .await
+            .expect("Should create subscription");
 
         // Verify subscription exists
         assert!(router
@@ -229,5 +257,24 @@ mod tests {
         // Verify removal
         let senders = router.reaction_senders.read().await;
         assert!(!senders.contains_key("reaction1"));
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_subscription_fails() {
+        let router = SubscriptionRouter::new();
+
+        // First subscription should succeed
+        let _rx1 = router
+            .add_reaction_subscription("reaction1".to_string(), vec!["query1".to_string()])
+            .await
+            .expect("First subscription should succeed");
+
+        // Second subscription for same reaction should fail
+        let result = router
+            .add_reaction_subscription("reaction1".to_string(), vec!["query1".to_string()])
+            .await;
+
+        assert!(result.is_err(), "Duplicate subscription should fail");
+        assert!(result.unwrap_err().contains("already has an active subscription"));
     }
 }

@@ -846,7 +846,8 @@ impl QueryManager {
                 // Get a receiver connected to the data router
                 let rx = data_router
                     .add_query_subscription(id.clone(), config.sources.clone())
-                    .await;
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to add query subscription: {}", e))?;
                 info!("Auto-starting query: {}", id);
                 if let Err(e) = query.start(rx).await {
                     error!("Failed to start query {}: {}", id, e);

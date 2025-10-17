@@ -488,7 +488,8 @@ impl DrasiServerCore {
         let rx = self
             .data_router
             .add_query_subscription(id.to_string(), config.sources.clone())
-            .await;
+            .await
+            .map_err(|e| DrasiError::initialization(format!("Failed to add query subscription: {}", e)))?;
 
         // Start the query with the receiver
         self.query_manager.start_query(id.to_string(), rx).await
@@ -516,6 +517,7 @@ impl DrasiServerCore {
             return Err(DrasiError::invalid_state("Cannot stop query on uninitialized server"));
         }
 
+        // Stop the query first
         self.query_manager.stop_query(id.to_string()).await
             .map_err(|e| {
                 if e.to_string().contains("not found") {
@@ -523,7 +525,12 @@ impl DrasiServerCore {
                 } else {
                     DrasiError::invalid_state(e.to_string())
                 }
-            })
+            })?;
+
+        // Remove the subscription from the data router
+        self.data_router.remove_query_subscription(id).await;
+
+        Ok(())
     }
 
     /// Start a stopped reaction
@@ -552,7 +559,8 @@ impl DrasiServerCore {
         let rx = self
             .subscription_router
             .add_reaction_subscription(id.to_string(), config.queries.clone())
-            .await;
+            .await
+            .map_err(|e| DrasiError::initialization(format!("Failed to add reaction subscription: {}", e)))?;
 
         // Start the reaction with the receiver
         self.reaction_manager.start_reaction(id.to_string(), rx).await
@@ -580,6 +588,7 @@ impl DrasiServerCore {
             return Err(DrasiError::invalid_state("Cannot stop reaction on uninitialized server"));
         }
 
+        // Stop the reaction first
         self.reaction_manager.stop_reaction(id.to_string()).await
             .map_err(|e| {
                 if e.to_string().contains("not found") {
@@ -587,7 +596,12 @@ impl DrasiServerCore {
                 } else {
                     DrasiError::invalid_state(e.to_string())
                 }
-            })
+            })?;
+
+        // Remove the subscription from the subscription router
+        self.subscription_router.remove_reaction_subscription(id).await;
+
+        Ok(())
     }
 
     /// List all sources with their current status
@@ -647,6 +661,29 @@ impl DrasiServerCore {
         }
         self.source_manager.get_source_status(id.to_string()).await
             .map_err(|_| DrasiError::component_not_found("source", id))
+    }
+
+    /// Get the full configuration for a specific source
+    ///
+    /// This returns the complete source configuration including auto_start and bootstrap_provider,
+    /// unlike `get_source_info()` which only returns runtime information.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_server_core::DrasiServerCore;
+    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = core.get_source_config("my-source").await?;
+    /// println!("Auto-start: {}", config.auto_start);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_source_config(&self, id: &str) -> crate::api::Result<crate::config::SourceConfig> {
+        if !*self.initialized.read().await {
+            return Err(DrasiError::invalid_state("Cannot get source config from uninitialized server"));
+        }
+        self.source_manager.get_source_config(id)
+            .await
+            .ok_or_else(|| DrasiError::component_not_found("source", id))
     }
 
     /// List all queries with their current status
@@ -736,6 +773,29 @@ impl DrasiServerCore {
             })
     }
 
+    /// Get the full configuration for a specific query
+    ///
+    /// This returns the complete query configuration including all fields like auto_start and joins,
+    /// unlike `get_query_info()` which only returns runtime information.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_server_core::DrasiServerCore;
+    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = core.get_query_config("my-query").await?;
+    /// println!("Auto-start: {}", config.auto_start);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_query_config(&self, id: &str) -> crate::api::Result<crate::config::QueryConfig> {
+        if !*self.initialized.read().await {
+            return Err(DrasiError::invalid_state("Cannot get query config from uninitialized server"));
+        }
+        self.query_manager.get_query_config(id)
+            .await
+            .ok_or_else(|| DrasiError::component_not_found("query", id))
+    }
+
     /// List all reactions with their current status
     ///
     /// # Example
@@ -794,6 +854,105 @@ impl DrasiServerCore {
         }
         self.reaction_manager.get_reaction_status(id.to_string()).await
             .map_err(|_| DrasiError::component_not_found("reaction", id))
+    }
+
+    /// Get the full configuration for a specific reaction
+    ///
+    /// This returns the complete reaction configuration including all fields,
+    /// unlike `get_reaction_info()` which only returns runtime information.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_server_core::DrasiServerCore;
+    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = core.get_reaction_config("my-reaction").await?;
+    /// println!("Auto-start: {}", config.auto_start);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_reaction_config(&self, id: &str) -> crate::api::Result<crate::config::ReactionConfig> {
+        if !*self.initialized.read().await {
+            return Err(DrasiError::invalid_state("Cannot get reaction config from uninitialized server"));
+        }
+        self.reaction_manager.get_reaction_config(id)
+            .await
+            .ok_or_else(|| DrasiError::component_not_found("reaction", id))
+    }
+
+    // ============================================================================
+    // Full Configuration Snapshot
+    // ============================================================================
+
+    /// Get a complete configuration snapshot of all components
+    ///
+    /// Returns the full server configuration including all sources, queries, and reactions
+    /// with their complete configurations. This is useful for persistence, backups, or introspection.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_server_core::DrasiServerCore;
+    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = core.get_current_config().await?;
+    /// println!("Server has {} sources, {} queries, {} reactions",
+    ///          config.sources.len(), config.queries.len(), config.reactions.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_current_config(&self) -> crate::api::Result<DrasiServerCoreConfig> {
+        if !*self.initialized.read().await {
+            return Err(DrasiError::invalid_state("Cannot get config from uninitialized server"));
+        }
+
+        // Collect all source configs
+        let source_ids: Vec<String> = self.source_manager.list_sources()
+            .await
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+
+        let mut sources = Vec::new();
+        for id in source_ids {
+            if let Some(config) = self.source_manager.get_source_config(&id).await {
+                sources.push(config);
+            }
+        }
+
+        // Collect all query configs
+        let query_ids: Vec<String> = self.query_manager.list_queries()
+            .await
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+
+        let mut queries = Vec::new();
+        for id in query_ids {
+            if let Some(config) = self.query_manager.get_query_config(&id).await {
+                queries.push(config);
+            }
+        }
+
+        // Collect all reaction configs
+        let reaction_ids: Vec<String> = self.reaction_manager.list_reactions()
+            .await
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+
+        let mut reactions = Vec::new();
+        for id in reaction_ids {
+            if let Some(config) = self.reaction_manager.get_reaction_config(&id).await {
+                reactions.push(config);
+            }
+        }
+
+        Ok(DrasiServerCoreConfig {
+            server: crate::config::DrasiServerCoreSettings {
+                id: self.config.server.id.clone(),
+            },
+            sources,
+            queries,
+            reactions,
+        })
     }
 
     // ============================================================================
@@ -1065,7 +1224,8 @@ impl DrasiServerCore {
             let rx = self
                 .data_router
                 .add_query_subscription(query_id.clone(), sources)
-                .await;
+                .await
+                .map_err(|e| anyhow!("Failed to add query subscription: {}", e))?;
 
             self.query_manager.start_query(query_id.clone(), rx).await?;
         }
@@ -1093,7 +1253,8 @@ impl DrasiServerCore {
             let rx = self
                 .subscription_router
                 .add_reaction_subscription(reaction_id.clone(), queries)
-                .await;
+                .await
+                .map_err(|e| anyhow!("Failed to add reaction subscription: {}", e))?;
 
             self.reaction_manager
                 .start_reaction(reaction_id.clone(), rx)
@@ -1164,7 +1325,8 @@ impl DrasiServerCore {
                     let rx = self
                         .data_router
                         .add_query_subscription(id.clone(), sources)
-                        .await;
+                        .await
+                        .map_err(|e| anyhow!("Failed to add query subscription: {}", e))?;
                     info!("Subscription created, starting query '{}'", id);
                     self.query_manager.start_query(id.clone(), rx).await?;
                     info!("Query '{}' started successfully", id);
@@ -1207,7 +1369,8 @@ impl DrasiServerCore {
                     let rx = self
                         .subscription_router
                         .add_reaction_subscription(id.clone(), queries)
-                        .await;
+                        .await
+                        .map_err(|e| anyhow!("Failed to add reaction subscription: {}", e))?;
                     self.reaction_manager.start_reaction(id.clone(), rx).await?;
                 } else {
                     info!(
@@ -1263,6 +1426,9 @@ impl DrasiServerCore {
             if matches!(status, Ok(ComponentStatus::Running)) {
                 if let Err(e) = self.reaction_manager.stop_reaction(id.clone()).await {
                     error!("Error stopping reaction {}: {}", id, e);
+                } else {
+                    // Remove the subscription from the subscription router
+                    self.subscription_router.remove_reaction_subscription(&id).await;
                 }
             }
         }
@@ -1282,6 +1448,9 @@ impl DrasiServerCore {
             if matches!(status, Ok(ComponentStatus::Running)) {
                 if let Err(e) = self.query_manager.stop_query(id.clone()).await {
                     error!("Error stopping query {}: {}", id, e);
+                } else {
+                    // Remove the subscription from the data router
+                    self.data_router.remove_query_subscription(&id).await;
                 }
             }
         }

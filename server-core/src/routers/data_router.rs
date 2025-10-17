@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
@@ -42,21 +42,39 @@ impl DataRouter {
     }
 
     /// Add a query subscription to specific sources
+    ///
+    /// If a subscription for this query already exists, this method will return an error
+    /// to prevent accidentally closing the existing subscription channel.
     pub async fn add_query_subscription(
         &self,
         query_id: String,
         source_ids: Vec<String>,
-    ) -> SourceEventReceiver {
+    ) -> Result<SourceEventReceiver, String> {
         let start_time = std::time::Instant::now();
+
+        // Log with backtrace information for debugging
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let backtrace_str = backtrace.to_string();
+        let caller_info: Vec<&str> = backtrace_str
+            .lines()
+            .filter(|line| line.contains("drasi_server") && !line.contains("data_router"))
+            .take(3)
+            .collect();
+
         info!(
-            "Starting to add subscription for query '{}' to sources: {:?}",
-            query_id, source_ids
+            "[SUBSCRIPTION-TRACE] add_query_subscription called for query '{}' to sources: {:?}. Caller: {:?}",
+            query_id, source_ids, caller_info
         );
 
         // Check if query already has a subscription
         let existing_sender = self.query_event_senders.read().await.contains_key(&query_id);
         if existing_sender {
-            warn!("Query '{}' already has a subscription. Creating new subscription will disconnect the old one.", query_id);
+            let error_msg = format!(
+                "[DUPLICATE-SUBSCRIPTION] Query '{}' already has an active subscription. This is the SECOND call - first call succeeded. Caller trace: {:?}",
+                query_id, caller_info
+            );
+            error!("{}", error_msg);
+            return Err(error_msg);
         }
 
         let (tx, rx) = mpsc::channel(1000);
@@ -98,7 +116,7 @@ impl DataRouter {
             elapsed
         );
 
-        rx
+        Ok(rx)
     }
 
     /// Remove a query subscription
@@ -193,7 +211,8 @@ mod tests {
 
         let rx = router
             .add_query_subscription("query1".to_string(), vec!["source1".to_string()])
-            .await;
+            .await
+            .expect("Should create subscription");
 
         // Verify query sender is stored
         let senders = router.query_event_senders.read().await;
@@ -216,11 +235,13 @@ mod tests {
 
         let _rx1 = router
             .add_query_subscription("query1".to_string(), vec!["source1".to_string()])
-            .await;
+            .await
+            .expect("Should create subscription for query1");
 
         let _rx2 = router
             .add_query_subscription("query2".to_string(), vec!["source1".to_string()])
-            .await;
+            .await
+            .expect("Should create subscription for query2");
 
         let subscriptions = router.source_subscriptions.read().await;
         let source1_queries = subscriptions.get("source1").unwrap();
@@ -236,7 +257,8 @@ mod tests {
 
         let _rx = router
             .add_query_subscription("query1".to_string(), vec!["source1".to_string()])
-            .await;
+            .await
+            .expect("Should create subscription");
 
         // Verify subscription exists
         assert!(router.query_event_senders.read().await.contains_key("query1"));
@@ -247,5 +269,24 @@ mod tests {
         // Verify removal
         let senders = router.query_event_senders.read().await;
         assert!(!senders.contains_key("query1"));
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_subscription_fails() {
+        let router = DataRouter::new();
+
+        // First subscription should succeed
+        let _rx1 = router
+            .add_query_subscription("query1".to_string(), vec!["source1".to_string()])
+            .await
+            .expect("First subscription should succeed");
+
+        // Second subscription for same query should fail
+        let result = router
+            .add_query_subscription("query1".to_string(), vec!["source1".to_string()])
+            .await;
+
+        assert!(result.is_err(), "Duplicate subscription should fail");
+        assert!(result.unwrap_err().contains("already has an active subscription"));
     }
 }

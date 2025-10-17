@@ -406,14 +406,22 @@ impl ReactionManager {
             let config = reaction.get_config();
             if config.auto_start {
                 // Get a receiver connected to the subscription router
-                let rx = subscription_router
+                match subscription_router
                     .add_reaction_subscription(id.clone(), config.queries.clone())
-                    .await;
-                info!("Auto-starting reaction: {}", id);
-                if let Err(e) = reaction.start(rx).await {
-                    error!("Failed to start reaction {}: {}", id, e);
-                    failed_reactions.push((id.clone(), e.to_string()));
-                    // Continue starting other reactions instead of returning early
+                    .await
+                {
+                    Ok(rx) => {
+                        info!("Auto-starting reaction: {}", id);
+                        if let Err(e) = reaction.start(rx).await {
+                            error!("Failed to start reaction {}: {}", id, e);
+                            failed_reactions.push((id.clone(), e.to_string()));
+                            // Continue starting other reactions instead of returning early
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to create subscription for reaction {}: {}", id, e);
+                        failed_reactions.push((id.clone(), e));
+                    }
                 }
             } else {
                 info!(
