@@ -56,8 +56,8 @@ mod transformer;
 mod types;
 
 pub use types::{
-    ChangeEvent, CloudEvent, CloudEventConfig, ControlEvent, ControlSignal, ResultEvent,
-    UpdatePayload,
+    CloudEvent, CloudEventConfig, ControlSignal, ResultChangeEvent, ResultControlEvent,
+    ResultEvent, UpdatePayload,
 };
 
 use crate::channels::{ComponentEvent, ComponentEventSender, ComponentStatus, QueryResultReceiver};
@@ -147,18 +147,26 @@ impl PlatformReaction {
             return Ok(());
         }
 
-        let control_event = ControlEvent {
-            control_signal: signal,
-        };
-
-        let result_event = ResultEvent::Control(control_event);
-
         // Use first query ID from config for control events
         let query_id = self
             .config
             .queries
             .first()
             .ok_or_else(|| anyhow!("No queries configured for reaction"))?;
+
+        // Get next sequence
+        let sequence = {
+            let mut counter = self.sequence_counter.write().await;
+            *counter += 1;
+            *counter as u64
+        };
+
+        let result_event = ResultEvent::from_control_signal(
+            query_id,
+            sequence,
+            chrono::Utc::now().timestamp_millis() as u64,
+            signal,
+        );
 
         let cloud_event = CloudEvent::new(result_event, query_id, &self.cloud_event_config);
 

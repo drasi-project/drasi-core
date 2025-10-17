@@ -14,10 +14,10 @@
 
 //! Transformation logic for converting drasi-core QueryResult to Platform ChangeEvent
 
-use super::types::{ChangeEvent, ResultEvent, UpdatePayload};
+use super::types::{ResultChangeEvent, ResultEvent, UpdatePayload};
 use crate::channels::QueryResult;
 use anyhow::{anyhow, Result};
-use std::collections::HashMap;
+use serde_json::{Map, Value};
 
 /// Transform a QueryResult into a ResultEvent
 pub fn transform_query_result(
@@ -41,6 +41,8 @@ pub fn transform_query_result(
                 let data = result_item
                     .get("data")
                     .ok_or_else(|| anyhow!("Missing 'data' field in add result"))?
+                    .as_object()
+                    .ok_or_else(|| anyhow!("'data' field must be an object"))?
                     .clone();
                 added_results.push(data);
             }
@@ -49,10 +51,14 @@ pub fn transform_query_result(
                 let before = result_item
                     .get("before")
                     .ok_or_else(|| anyhow!("Missing 'before' field in update result"))?
+                    .as_object()
+                    .ok_or_else(|| anyhow!("'before' field must be an object"))?
                     .clone();
                 let after = result_item
                     .get("after")
                     .ok_or_else(|| anyhow!("Missing 'after' field in update result"))?
+                    .as_object()
+                    .ok_or_else(|| anyhow!("'after' field must be an object"))?
                     .clone();
 
                 // Optional grouping keys
@@ -66,8 +72,8 @@ pub fn transform_query_result(
                     });
 
                 updated_results.push(UpdatePayload {
-                    before,
-                    after,
+                    before: Some(before),
+                    after: Some(after),
                     grouping_keys,
                 });
             }
@@ -76,6 +82,8 @@ pub fn transform_query_result(
                 let data = result_item
                     .get("data")
                     .ok_or_else(|| anyhow!("Missing 'data' field in delete result"))?
+                    .as_object()
+                    .ok_or_else(|| anyhow!("'data' field must be an object"))?
                     .clone();
                 deleted_results.push(data);
             }
@@ -87,10 +95,10 @@ pub fn transform_query_result(
     }
 
     // Convert timestamp to milliseconds since epoch
-    let source_time_ms = query_result.timestamp.timestamp_millis();
+    let source_time_ms = query_result.timestamp.timestamp_millis() as u64;
 
     // Filter metadata - remove internal drasi-core fields that shouldn't be exposed
-    let filtered_metadata: HashMap<String, serde_json::Value> = query_result
+    let filtered_metadata: Map<String, Value> = query_result
         .metadata
         .into_iter()
         .filter(|(key, _)| {
@@ -109,9 +117,9 @@ pub fn transform_query_result(
         Some(filtered_metadata)
     };
 
-    let change_event = ChangeEvent {
+    let change_event = ResultChangeEvent {
         query_id: query_result.query_id,
-        sequence,
+        sequence: sequence as u64,
         source_time_ms,
         added_results,
         updated_results,
@@ -183,8 +191,8 @@ mod tests {
         match result {
             ResultEvent::Change(change) => {
                 assert_eq!(change.updated_results.len(), 1);
-                assert_eq!(change.updated_results[0].before["value"], 10);
-                assert_eq!(change.updated_results[0].after["value"], 20);
+                assert_eq!(change.updated_results[0].before.as_ref().unwrap()["value"], 10);
+                assert_eq!(change.updated_results[0].after.as_ref().unwrap()["value"], 20);
                 assert_eq!(change.updated_results[0].grouping_keys, None);
             }
             _ => panic!("Expected Change event"),
