@@ -75,7 +75,8 @@ async fn test_basic_insert_event_consumption() -> Result<()> {
     let stream_key = "test-insert-stream";
 
     // Create and start source
-    let (source, mut source_change_rx, _event_rx) = create_test_source(redis_url.clone(), stream_key);
+    let (source, mut source_change_rx, _event_rx) =
+        create_test_source(redis_url.clone(), stream_key);
     source.start().await?;
 
     // Give source time to set up consumer group
@@ -99,7 +100,10 @@ async fn test_basic_insert_event_consumption() -> Result<()> {
     match wrapper.event {
         SourceEvent::Change(SourceChange::Insert { element }) => {
             assert_eq!(element.get_reference().element_id.as_ref(), "1");
-            assert_eq!(element.get_metadata().labels.first(), Some(&"Person".into()));
+            assert_eq!(
+                element.get_metadata().labels.first(),
+                Some(&"Person".into())
+            );
         }
         _ => panic!("Expected Change(Insert) variant"),
     }
@@ -113,7 +117,8 @@ async fn test_basic_update_event_consumption() -> Result<()> {
     let redis_url = setup_redis().await;
     let stream_key = "test-update-stream";
 
-    let (source, mut source_change_rx, _event_rx) = create_test_source(redis_url.clone(), stream_key);
+    let (source, mut source_change_rx, _event_rx) =
+        create_test_source(redis_url.clone(), stream_key);
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -124,7 +129,15 @@ async fn test_basic_update_event_consumption() -> Result<()> {
     let mut new_props = HashMap::new();
     new_props.insert("value".to_string(), json!(20));
 
-    let event = build_platform_update_event("1", vec!["Counter"], old_props, new_props, "node", None, None);
+    let event = build_platform_update_event(
+        "1",
+        vec!["Counter"],
+        old_props,
+        new_props,
+        "node",
+        None,
+        None,
+    );
     publish_platform_event(&redis_url, stream_key, event).await?;
 
     // Wait for source change
@@ -151,7 +164,8 @@ async fn test_basic_delete_event_consumption() -> Result<()> {
     let redis_url = setup_redis().await;
     let stream_key = "test-delete-stream";
 
-    let (source, mut source_change_rx, _event_rx) = create_test_source(redis_url.clone(), stream_key);
+    let (source, mut source_change_rx, _event_rx) =
+        create_test_source(redis_url.clone(), stream_key);
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -185,7 +199,8 @@ async fn test_node_element_transformation() -> Result<()> {
     let redis_url = setup_redis().await;
     let stream_key = "test-node-transform";
 
-    let (source, mut source_change_rx, _event_rx) = create_test_source(redis_url.clone(), stream_key);
+    let (source, mut source_change_rx, _event_rx) =
+        create_test_source(redis_url.clone(), stream_key);
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -195,7 +210,14 @@ async fn test_node_element_transformation() -> Result<()> {
     props.insert("email".to_string(), json!("charlie@example.com"));
     props.insert("active".to_string(), json!(true));
 
-    let event = build_platform_insert_event("3", vec!["Person", "User"], props.clone(), "node", None, None);
+    let event = build_platform_insert_event(
+        "3",
+        vec!["Person", "User"],
+        props.clone(),
+        "node",
+        None,
+        None,
+    );
     publish_platform_event(&redis_url, stream_key, event).await?;
 
     // Wait for source change
@@ -242,7 +264,8 @@ async fn test_relation_element_transformation() -> Result<()> {
     let redis_url = setup_redis().await;
     let stream_key = "test-relation-transform";
 
-    let (source, mut source_change_rx, _event_rx) = create_test_source(redis_url.clone(), stream_key);
+    let (source, mut source_change_rx, _event_rx) =
+        create_test_source(redis_url.clone(), stream_key);
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -251,14 +274,8 @@ async fn test_relation_element_transformation() -> Result<()> {
     props.insert("since".to_string(), json!("2020-01-01"));
     props.insert("strength".to_string(), json!(0.95));
 
-    let event = build_platform_insert_event(
-        "r1",
-        vec!["KNOWS"],
-        props,
-        "rel",
-        Some("1"),
-        Some("2"),
-    );
+    let event =
+        build_platform_insert_event("r1", vec!["KNOWS"], props, "rel", Some("1"), Some("2"));
     publish_platform_event(&redis_url, stream_key, event).await?;
 
     // Wait for source change
@@ -270,7 +287,13 @@ async fn test_relation_element_transformation() -> Result<()> {
     match wrapper.event {
         SourceEvent::Change(SourceChange::Insert { element }) => {
             use drasi_core::models::{Element, ElementValue};
-            if let Element::Relation { metadata, properties, out_node, in_node } = element {
+            if let Element::Relation {
+                metadata,
+                properties,
+                out_node,
+                in_node,
+            } = element
+            {
                 assert_eq!(metadata.reference.element_id.as_ref(), "r1");
                 assert_eq!(metadata.labels.first(), Some(&"KNOWS".into()));
                 assert_eq!(out_node.element_id.as_ref(), "1");
@@ -296,7 +319,8 @@ async fn test_multiple_events_in_batch() -> Result<()> {
     let redis_url = setup_redis().await;
     let stream_key = "test-batch-stream";
 
-    let (source, mut source_change_rx, _event_rx) = create_test_source(redis_url.clone(), stream_key);
+    let (source, mut source_change_rx, _event_rx) =
+        create_test_source(redis_url.clone(), stream_key);
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -377,7 +401,8 @@ async fn test_event_acknowledgment() -> Result<()> {
     let redis_url = setup_redis().await;
     let stream_key = "test-ack-stream";
 
-    let (source, mut source_change_rx, _event_rx) = create_test_source(redis_url.clone(), stream_key);
+    let (source, mut source_change_rx, _event_rx) =
+        create_test_source(redis_url.clone(), stream_key);
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -409,7 +434,8 @@ async fn test_resume_from_position() -> Result<()> {
     let stream_key = "test-resume-stream";
 
     // Start source and process one event
-    let (source, mut source_change_rx, _event_rx) = create_test_source(redis_url.clone(), stream_key);
+    let (source, mut source_change_rx, _event_rx) =
+        create_test_source(redis_url.clone(), stream_key);
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -435,7 +461,8 @@ async fn test_resume_from_position() -> Result<()> {
     publish_platform_event(&redis_url, stream_key, event2).await?;
 
     // Restart source with same consumer group
-    let (source2, mut source_change_rx2, _event_rx2) = create_test_source(redis_url.clone(), stream_key);
+    let (source2, mut source_change_rx2, _event_rx2) =
+        create_test_source(redis_url.clone(), stream_key);
     source2.start().await?;
 
     // Should receive only the second event (resume from position)
@@ -461,7 +488,8 @@ async fn test_malformed_json_event() -> Result<()> {
     let redis_url = setup_redis().await;
     let stream_key = "test-malformed-stream";
 
-    let (source, mut source_change_rx, _event_rx) = create_test_source(redis_url.clone(), stream_key);
+    let (source, mut source_change_rx, _event_rx) =
+        create_test_source(redis_url.clone(), stream_key);
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -503,7 +531,8 @@ async fn test_missing_required_fields() -> Result<()> {
     let redis_url = setup_redis().await;
     let stream_key = "test-missing-fields";
 
-    let (source, mut source_change_rx, _event_rx) = create_test_source(redis_url.clone(), stream_key);
+    let (source, mut source_change_rx, _event_rx) =
+        create_test_source(redis_url.clone(), stream_key);
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -553,7 +582,8 @@ async fn test_invalid_operation_type() -> Result<()> {
     let redis_url = setup_redis().await;
     let stream_key = "test-invalid-op";
 
-    let (source, mut source_change_rx, _event_rx) = create_test_source(redis_url.clone(), stream_key);
+    let (source, mut source_change_rx, _event_rx) =
+        create_test_source(redis_url.clone(), stream_key);
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -628,7 +658,8 @@ async fn test_multiple_events_in_cloudevent_data_array() -> Result<()> {
     let redis_url = setup_redis().await;
     let stream_key = "test-multi-event-array";
 
-    let (source, mut source_change_rx, _event_rx) = create_test_source(redis_url.clone(), stream_key);
+    let (source, mut source_change_rx, _event_rx) =
+        create_test_source(redis_url.clone(), stream_key);
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -735,7 +766,8 @@ async fn test_graceful_shutdown() -> Result<()> {
     let redis_url = setup_redis().await;
     let stream_key = "test-shutdown";
 
-    let (source, mut source_change_rx, _event_rx) = create_test_source(redis_url.clone(), stream_key);
+    let (source, mut source_change_rx, _event_rx) =
+        create_test_source(redis_url.clone(), stream_key);
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -743,7 +775,14 @@ async fn test_graceful_shutdown() -> Result<()> {
     for i in 1..=3 {
         let mut props = HashMap::new();
         props.insert("value".to_string(), json!(i));
-        let event = build_platform_insert_event(&format!("shutdown-{}", i), vec!["Test"], props, "node", None, None);
+        let event = build_platform_insert_event(
+            &format!("shutdown-{}", i),
+            vec!["Test"],
+            props,
+            "node",
+            None,
+            None,
+        );
         publish_platform_event(&redis_url, stream_key, event).await?;
     }
 
@@ -758,7 +797,11 @@ async fn test_graceful_shutdown() -> Result<()> {
     sleep(Duration::from_millis(500)).await;
     let pending = get_pending_count(&redis_url, stream_key, "test-group").await?;
     // Note: Due to async timing, some events may still be pending
-    assert!(pending <= 2, "Most processed events should be acknowledged, got {} pending", pending);
+    assert!(
+        pending <= 2,
+        "Most processed events should be acknowledged, got {} pending",
+        pending
+    );
 
     Ok(())
 }
@@ -779,7 +822,9 @@ async fn test_restart_and_resume() -> Result<()> {
     let event1 = build_platform_insert_event("restart-1", vec!["Test"], props1, "node", None, None);
     publish_platform_event(&redis_url, stream_key, event1).await?;
 
-    timeout(Duration::from_secs(5), rx1.recv()).await?.expect("Should receive first");
+    timeout(Duration::from_secs(5), rx1.recv())
+        .await?
+        .expect("Should receive first");
 
     // Stop
     source1.stop().await?;
@@ -796,7 +841,9 @@ async fn test_restart_and_resume() -> Result<()> {
     source2.start().await?;
 
     // Should resume and get second event
-    let wrapper = timeout(Duration::from_secs(5), rx2.recv()).await?.expect("Should receive second");
+    let wrapper = timeout(Duration::from_secs(5), rx2.recv())
+        .await?
+        .expect("Should receive second");
 
     match wrapper.event {
         SourceEvent::Change(SourceChange::Insert { element }) => {

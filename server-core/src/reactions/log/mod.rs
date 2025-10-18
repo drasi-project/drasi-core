@@ -192,7 +192,8 @@ impl Reaction for LogReaction {
 
                     // Log profiling summary if available
                     if let (Some(source_send), Some(reaction_complete)) =
-                        (profiling.source_send_ns, profiling.reaction_complete_ns) {
+                        (profiling.source_send_ns, profiling.reaction_complete_ns)
+                    {
                         let total_latency_ns = reaction_complete - source_send;
                         debug!(
                             "[{}] End-to-end latency: {:.2}ms",

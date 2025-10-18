@@ -25,7 +25,10 @@ mod tests {
 
         assert_eq!(reaction.id, "app-reaction");
         assert_eq!(reaction.reaction_type, "application");
-        assert!(reaction.auto_start, "Application reaction should auto-start by default");
+        assert!(
+            reaction.auto_start,
+            "Application reaction should auto-start by default"
+        );
         assert!(reaction.queries.is_empty());
         assert!(reaction.properties.is_empty());
     }

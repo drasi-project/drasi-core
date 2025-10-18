@@ -27,8 +27,7 @@ use super::protocol::BackendMessage;
 use super::types::{StandbyStatusUpdate, WalMessage};
 use super::PostgresReplicationConfig;
 use crate::channels::{
-    ComponentEventSender, ComponentStatus, SourceEvent, SourceEventSender,
-    SourceEventWrapper,
+    ComponentEventSender, ComponentStatus, SourceEvent, SourceEventSender, SourceEventWrapper,
 };
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 

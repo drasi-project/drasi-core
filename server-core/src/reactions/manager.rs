@@ -183,7 +183,7 @@ impl ReactionManager {
         self.add_reaction_internal(config).await
     }
 
-    async fn add_reaction_internal(&self, config: ReactionConfig ) -> Result<()> {
+    async fn add_reaction_internal(&self, config: ReactionConfig) -> Result<()> {
         // Check if reaction with this id already exists
         if self.reactions.read().await.contains_key(&config.id) {
             return Err(anyhow::anyhow!(
@@ -207,7 +207,10 @@ impl ReactionManager {
                 config.clone(),
                 self.event_tx.clone(),
             )),
-            "platform" => Arc::new(PlatformReaction::new(config.clone(), self.event_tx.clone())?),
+            "platform" => Arc::new(PlatformReaction::new(
+                config.clone(),
+                self.event_tx.clone(),
+            )?),
             "profiler" => Arc::new(ProfilerReaction::new(config.clone(), self.event_tx.clone())),
             "application" => {
                 let (app_reaction, handle) =

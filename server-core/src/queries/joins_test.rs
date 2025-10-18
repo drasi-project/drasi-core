@@ -169,7 +169,11 @@ mod query_joins_tests {
         );
 
         source_tx
-            .send(SourceEventWrapper::new("vehicles".to_string(), SourceEvent::Change(SourceChange::Insert { element: vehicle1 }), chrono::Utc::now()))
+            .send(SourceEventWrapper::new(
+                "vehicles".to_string(),
+                SourceEvent::Change(SourceChange::Insert { element: vehicle1 }),
+                chrono::Utc::now(),
+            ))
             .await
             .unwrap();
 
@@ -186,7 +190,11 @@ mod query_joins_tests {
         );
 
         source_tx
-            .send(SourceEventWrapper::new("drivers".to_string(), SourceEvent::Change(SourceChange::Insert { element: driver1 }), chrono::Utc::now()))
+            .send(SourceEventWrapper::new(
+                "drivers".to_string(),
+                SourceEvent::Change(SourceChange::Insert { element: driver1 }),
+                chrono::Utc::now(),
+            ))
             .await
             .unwrap();
 
@@ -318,7 +326,11 @@ mod query_joins_tests {
             _ => panic!("Expected node element"),
         };
         source_tx
-            .send(SourceEventWrapper::new("orders".to_string(), SourceEvent::Change(SourceChange::Delete { metadata }), chrono::Utc::now()))
+            .send(SourceEventWrapper::new(
+                "orders".to_string(),
+                SourceEvent::Change(SourceChange::Delete { metadata }),
+                chrono::Utc::now(),
+            ))
             .await
             .unwrap();
 
@@ -407,7 +419,11 @@ mod query_joins_tests {
             HashMap::from([("id", json!("DRV001")), ("name", json!("Alice Smith"))]),
         );
         source_tx
-            .send(SourceEventWrapper::new("drivers".to_string(), SourceEvent::Change(SourceChange::Insert { element: driver }), chrono::Utc::now()))
+            .send(SourceEventWrapper::new(
+                "drivers".to_string(),
+                SourceEvent::Change(SourceChange::Insert { element: driver }),
+                chrono::Utc::now(),
+            ))
             .await
             .unwrap();
 
@@ -422,7 +438,11 @@ mod query_joins_tests {
             ]),
         );
         source_tx
-            .send(SourceEventWrapper::new("orders".to_string(), SourceEvent::Change(SourceChange::Insert { element: order }), chrono::Utc::now()))
+            .send(SourceEventWrapper::new(
+                "orders".to_string(),
+                SourceEvent::Change(SourceChange::Insert { element: order }),
+                chrono::Utc::now(),
+            ))
             .await
             .unwrap();
 
@@ -479,7 +499,11 @@ mod query_joins_tests {
             HashMap::from([("linkId", json!("LINK001"))]),
         );
         source_tx
-            .send(SourceEventWrapper::new("source1".to_string(), SourceEvent::Change(SourceChange::Insert { element: node_a }), chrono::Utc::now()))
+            .send(SourceEventWrapper::new(
+                "source1".to_string(),
+                SourceEvent::Change(SourceChange::Insert { element: node_a }),
+                chrono::Utc::now(),
+            ))
             .await
             .unwrap();
 
@@ -490,7 +514,11 @@ mod query_joins_tests {
             HashMap::from([("linkId", json!("LINK999"))]), // Different ID - no match
         );
         source_tx
-            .send(SourceEventWrapper::new("source2".to_string(), SourceEvent::Change(SourceChange::Insert { element: node_b }), chrono::Utc::now()))
+            .send(SourceEventWrapper::new(
+                "source2".to_string(),
+                SourceEvent::Change(SourceChange::Insert { element: node_b }),
+                chrono::Utc::now(),
+            ))
             .await
             .unwrap();
 
@@ -545,7 +573,11 @@ mod query_joins_tests {
             HashMap::from([("otherprop", json!("value"))]), // Missing optionalId
         );
         source_tx
-            .send(SourceEventWrapper::new("source1".to_string(), SourceEvent::Change(SourceChange::Insert { element: node_a }), chrono::Utc::now()))
+            .send(SourceEventWrapper::new(
+                "source1".to_string(),
+                SourceEvent::Change(SourceChange::Insert { element: node_a }),
+                chrono::Utc::now(),
+            ))
             .await
             .unwrap();
 
@@ -556,7 +588,11 @@ mod query_joins_tests {
             HashMap::from([("optionalId", json!(null))]), // Null value
         );
         source_tx
-            .send(SourceEventWrapper::new("source2".to_string(), SourceEvent::Change(SourceChange::Insert { element: node_b }), chrono::Utc::now()))
+            .send(SourceEventWrapper::new(
+                "source2".to_string(),
+                SourceEvent::Change(SourceChange::Insert { element: node_b }),
+                chrono::Utc::now(),
+            ))
             .await
             .unwrap();
 
@@ -610,7 +646,11 @@ mod query_joins_tests {
             HashMap::from([("id", json!("CAT001")), ("name", json!("Electronics"))]),
         );
         source_tx
-            .send(SourceEventWrapper::new("categories".to_string(), SourceEvent::Change(SourceChange::Insert { element: category }), chrono::Utc::now()))
+            .send(SourceEventWrapper::new(
+                "categories".to_string(),
+                SourceEvent::Change(SourceChange::Insert { element: category }),
+                chrono::Utc::now(),
+            ))
             .await
             .unwrap();
 
@@ -626,7 +666,11 @@ mod query_joins_tests {
                 ]),
             );
             source_tx
-                .send(SourceEventWrapper::new("products".to_string(), SourceEvent::Change(SourceChange::Insert { element: product }), chrono::Utc::now()))
+                .send(SourceEventWrapper::new(
+                    "products".to_string(),
+                    SourceEvent::Change(SourceChange::Insert { element: product }),
+                    chrono::Utc::now(),
+                ))
                 .await
                 .unwrap();
         }
@@ -669,7 +713,11 @@ mod query_joins_tests {
             HashMap::from([("userId", json!("USER001")), ("name", json!("Bob"))]),
         );
         source_tx
-            .send(SourceEventWrapper::new("users".to_string(), SourceEvent::Change(SourceChange::Insert { element: user1 }), chrono::Utc::now()))
+            .send(SourceEventWrapper::new(
+                "users".to_string(),
+                SourceEvent::Change(SourceChange::Insert { element: user1 }),
+                chrono::Utc::now(),
+            ))
             .await
             .unwrap();
 
@@ -684,7 +732,11 @@ mod query_joins_tests {
             ]),
         );
         source_tx
-            .send(SourceEventWrapper::new("posts".to_string(), SourceEvent::Change(SourceChange::Insert { element: post1 }), chrono::Utc::now()))
+            .send(SourceEventWrapper::new(
+                "posts".to_string(),
+                SourceEvent::Change(SourceChange::Insert { element: post1 }),
+                chrono::Utc::now(),
+            ))
             .await
             .unwrap();
 
@@ -731,7 +783,11 @@ mod query_joins_tests {
             ]),
         );
         source_tx
-            .send(SourceEventWrapper::new("posts".to_string(), SourceEvent::Change(SourceChange::Insert { element: post2 }), chrono::Utc::now()))
+            .send(SourceEventWrapper::new(
+                "posts".to_string(),
+                SourceEvent::Change(SourceChange::Insert { element: post2 }),
+                chrono::Utc::now(),
+            ))
             .await
             .unwrap();
 

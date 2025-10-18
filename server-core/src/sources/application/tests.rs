@@ -35,7 +35,9 @@ mod tests {
             .with_integer("age", 30)
             .build();
 
-        let result = handle.send_node_insert("node-1", vec!["Person"], props).await;
+        let result = handle
+            .send_node_insert("node-1", vec!["Person"], props)
+            .await;
         assert!(result.is_ok(), "Should send node insert successfully");
     }
 
@@ -48,7 +50,9 @@ mod tests {
             .with_integer("age", 25)
             .build();
 
-        let result = handle.send_node_update("node-1", vec!["Person"], props).await;
+        let result = handle
+            .send_node_update("node-1", vec!["Person"], props)
+            .await;
         assert!(result.is_ok(), "Should send node update successfully");
     }
 
@@ -96,9 +100,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_property_map_builder_integer() {
-        let props = PropertyMapBuilder::new()
-            .with_integer("age", 42)
-            .build();
+        let props = PropertyMapBuilder::new().with_integer("age", 42).build();
 
         // Verify property exists
         assert!(props.get("age").is_some());
@@ -106,9 +108,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_property_map_builder_bool() {
-        let props = PropertyMapBuilder::new()
-            .with_bool("active", true)
-            .build();
+        let props = PropertyMapBuilder::new().with_bool("active", true).build();
 
         // Verify property exists
         assert!(props.get("active").is_some());
@@ -116,9 +116,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_property_map_builder_float() {
-        let props = PropertyMapBuilder::new()
-            .with_float("price", 19.99)
-            .build();
+        let props = PropertyMapBuilder::new().with_float("price", 19.99).build();
 
         // Verify property exists
         assert!(props.get("price").is_some());
@@ -214,7 +212,13 @@ mod tests {
             .build();
 
         // Both handles should work
-        assert!(handle.send_node_insert("node-1", vec!["Person"], props.clone()).await.is_ok());
-        assert!(handle2.send_node_insert("node-2", vec!["Person"], props).await.is_ok());
+        assert!(handle
+            .send_node_insert("node-1", vec!["Person"], props.clone())
+            .await
+            .is_ok());
+        assert!(handle2
+            .send_node_insert("node-2", vec!["Person"], props)
+            .await
+            .is_ok());
     }
 }

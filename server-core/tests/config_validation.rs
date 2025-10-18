@@ -23,15 +23,14 @@ use std::path::{Path, PathBuf};
 fn validate_config_file(path: &Path) -> Result<(), String> {
     println!("Validating: {}", path.display());
 
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("Failed to read file: {}", e))?;
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
 
-    let config: DrasiServerCoreConfig = if path.extension().and_then(|s| s.to_str()) == Some("json") {
-        serde_json::from_str(&content)
-            .map_err(|e| format!("JSON parsing error: {}", e))?
+    let config: DrasiServerCoreConfig = if path.extension().and_then(|s| s.to_str()) == Some("json")
+    {
+        serde_json::from_str(&content).map_err(|e| format!("JSON parsing error: {}", e))?
     } else {
-        serde_yaml::from_str(&content)
-            .map_err(|e| format!("YAML parsing error: {}", e))?
+        serde_yaml::from_str(&content).map_err(|e| format!("YAML parsing error: {}", e))?
     };
 
     // Validate server ID is present
@@ -68,7 +67,10 @@ fn validate_config_file(path: &Path) -> Result<(), String> {
             return Err(format!("Reaction has empty ID"));
         }
         if reaction.reaction_type.is_empty() {
-            return Err(format!("Reaction '{}' has empty reaction_type", reaction.id));
+            return Err(format!(
+                "Reaction '{}' has empty reaction_type",
+                reaction.id
+            ));
         }
         if reaction.queries.is_empty() {
             return Err(format!("Reaction '{}' has no queries", reaction.id));
@@ -87,7 +89,10 @@ fn test_all_example_configs() {
     let mut config_files = Vec::new();
     find_config_files(&examples_dir, &mut config_files);
 
-    assert!(!config_files.is_empty(), "No config files found in examples directory");
+    assert!(
+        !config_files.is_empty(),
+        "No config files found in examples directory"
+    );
 
     let mut errors = Vec::new();
 
@@ -105,7 +110,10 @@ fn test_all_example_configs() {
         panic!("\n{} config file(s) failed validation", errors.len());
     }
 
-    println!("\n✓ All {} config files validated successfully", config_files.len());
+    println!(
+        "\n✓ All {} config files validated successfully",
+        config_files.len()
+    );
 }
 
 fn find_config_files(dir: &Path, files: &mut Vec<PathBuf>) {

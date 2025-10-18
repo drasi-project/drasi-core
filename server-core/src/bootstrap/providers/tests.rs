@@ -42,7 +42,12 @@ mod tests {
             bootstrap_provider: None,
         });
 
-        let context = BootstrapContext::new("test_server".to_string(), source_config, tx, "test_source".to_string());
+        let context = BootstrapContext::new(
+            "test_server".to_string(),
+            source_config,
+            tx,
+            "test_source".to_string(),
+        );
 
         (context, rx)
     }

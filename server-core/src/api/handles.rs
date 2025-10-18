@@ -15,8 +15,8 @@
 //! Handle registry for managing application source and reaction handles
 
 use crate::api::{DrasiError, Result};
-use crate::sources::ApplicationSourceHandle;
 use crate::reactions::ApplicationReactionHandle;
+use crate::sources::ApplicationSourceHandle;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;

@@ -83,7 +83,11 @@ pub struct SourceEventWrapper {
 
 impl SourceEventWrapper {
     /// Create a new SourceEventWrapper without profiling
-    pub fn new(source_id: String, event: SourceEvent, timestamp: chrono::DateTime<chrono::Utc>) -> Self {
+    pub fn new(
+        source_id: String,
+        event: SourceEvent,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
         Self {
             source_id,
             event,

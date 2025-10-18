@@ -217,7 +217,10 @@ mod tests {
             .build();
 
         assert_eq!(query.id, "chained-query");
-        assert_eq!(query.query, "MATCH (n:Order) WHERE n.status = 'active' RETURN n");
+        assert_eq!(
+            query.query,
+            "MATCH (n:Order) WHERE n.status = 'active' RETURN n"
+        );
         assert_eq!(query.sources.len(), 1);
         assert!(query.auto_start);
         assert_eq!(query.properties.len(), 1);

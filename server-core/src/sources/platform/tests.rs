@@ -829,7 +829,10 @@ fn test_detect_message_type_control_lowercase() {
     });
 
     let msg_type = detect_message_type(&cloud_event);
-    assert_eq!(msg_type, MessageType::Control("SourceSubscription".to_string()));
+    assert_eq!(
+        msg_type,
+        MessageType::Control("SourceSubscription".to_string())
+    );
 }
 
 #[test]
@@ -852,7 +855,10 @@ fn test_detect_message_type_control_uppercase() {
     });
 
     let msg_type = detect_message_type(&cloud_event);
-    assert_eq!(msg_type, MessageType::Control("SourceSubscription".to_string()));
+    assert_eq!(
+        msg_type,
+        MessageType::Control("SourceSubscription".to_string())
+    );
 }
 
 #[test]
@@ -875,7 +881,10 @@ fn test_detect_message_type_control_mixedcase() {
     });
 
     let msg_type = detect_message_type(&cloud_event);
-    assert_eq!(msg_type, MessageType::Control("SourceSubscription".to_string()));
+    assert_eq!(
+        msg_type,
+        MessageType::Control("SourceSubscription".to_string())
+    );
 }
 
 #[test]

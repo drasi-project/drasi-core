@@ -267,7 +267,12 @@ mod log_reaction_tests {
         reaction.start(query_rx).await.unwrap();
 
         // Send a query result
-        let result = QueryResult::new("query1".to_string(), chrono::Utc::now(), vec![json!({"test": "data"})], HashMap::new());
+        let result = QueryResult::new(
+            "query1".to_string(),
+            chrono::Utc::now(),
+            vec![json!({"test": "data"})],
+            HashMap::new(),
+        );
 
         query_tx.send(result).await.unwrap();
 

@@ -30,7 +30,10 @@ mod tests {
     fn test_error_initialization() {
         let err = DrasiError::initialization("Failed to initialize");
         assert!(matches!(err, DrasiError::Initialization(_)));
-        assert_eq!(err.to_string(), "Initialization error: Failed to initialize");
+        assert_eq!(
+            err.to_string(),
+            "Initialization error: Failed to initialize"
+        );
     }
 
     #[test]
@@ -44,14 +47,20 @@ mod tests {
     fn test_error_invalid_state() {
         let err = DrasiError::invalid_state("Cannot start - not initialized");
         assert!(matches!(err, DrasiError::InvalidState(_)));
-        assert_eq!(err.to_string(), "Invalid state: Cannot start - not initialized");
+        assert_eq!(
+            err.to_string(),
+            "Invalid state: Cannot start - not initialized"
+        );
     }
 
     #[test]
     fn test_error_component_error() {
         let err = DrasiError::component_error("query", "test-query", "Parse error");
         assert!(matches!(err, DrasiError::ComponentError { .. }));
-        assert_eq!(err.to_string(), "Component error (query 'test-query'): Parse error");
+        assert_eq!(
+            err.to_string(),
+            "Component error (query 'test-query'): Parse error"
+        );
     }
 
     #[test]
@@ -138,7 +147,10 @@ mod tests {
             id: "my-source".to_string(),
             message: "connection failed".to_string(),
         };
-        assert_eq!(format!("{}", err), "Component error (source 'my-source'): connection failed");
+        assert_eq!(
+            format!("{}", err),
+            "Component error (source 'my-source'): connection failed"
+        );
     }
 
     #[test]

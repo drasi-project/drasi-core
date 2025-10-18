@@ -63,7 +63,12 @@ async fn test_platform_bootstrap_with_mock_server() {
     });
 
     // Create bootstrap context
-    let context = BootstrapContext::new("test_server".to_string(), source_config, tx.clone(), "test-source".to_string());
+    let context = BootstrapContext::new(
+        "test_server".to_string(),
+        source_config,
+        tx.clone(),
+        "test-source".to_string(),
+    );
 
     // Create bootstrap request
     let request = BootstrapRequest {
@@ -118,7 +123,12 @@ async fn test_platform_bootstrap_label_filtering() {
         bootstrap_provider: None,
     });
 
-    let context = BootstrapContext::new("test_server".to_string(), source_config, tx.clone(), "test-source".to_string());
+    let context = BootstrapContext::new(
+        "test_server".to_string(),
+        source_config,
+        tx.clone(),
+        "test-source".to_string(),
+    );
 
     // Request only Person labels
     let request = BootstrapRequest {
@@ -156,7 +166,12 @@ async fn test_platform_bootstrap_connection_failure() {
         bootstrap_provider: None,
     });
 
-    let context = BootstrapContext::new("test_server".to_string(), source_config, tx.clone(), "test-source".to_string());
+    let context = BootstrapContext::new(
+        "test_server".to_string(),
+        source_config,
+        tx.clone(),
+        "test-source".to_string(),
+    );
 
     let request = BootstrapRequest {
         query_id: "test-query".to_string(),
@@ -199,7 +214,12 @@ this is not valid json
         bootstrap_provider: None,
     });
 
-    let context = BootstrapContext::new("test_server".to_string(), source_config, tx.clone(), "test-source".to_string());
+    let context = BootstrapContext::new(
+        "test_server".to_string(),
+        source_config,
+        tx.clone(),
+        "test-source".to_string(),
+    );
 
     let request = BootstrapRequest {
         query_id: "test-query".to_string(),

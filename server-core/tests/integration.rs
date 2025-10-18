@@ -17,9 +17,7 @@
 //! These tests verify the library can be used as intended by external consumers.
 
 use anyhow::Result;
-use drasi_server_core::{
-    DrasiServerCore, Properties, Query, Reaction, Source,
-};
+use drasi_server_core::{DrasiServerCore, Properties, Query, Reaction, Source};
 use serde_json::json;
 use tokio::time::{sleep, Duration};
 
@@ -156,8 +154,7 @@ async fn test_restart_capability() -> Result<()> {
 #[tokio::test]
 async fn test_multiple_sources_and_queries() -> Result<()> {
     // Use the builder API with multiple components
-    let mut builder = DrasiServerCore::builder()
-        .with_id("test-multiple");
+    let mut builder = DrasiServerCore::builder().with_id("test-multiple");
 
     // Add multiple sources
     for i in 1..=3 {

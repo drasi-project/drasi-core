@@ -86,35 +86,41 @@ impl ProfilingStats {
     fn add_sample(&mut self, profiling: ProfilingMetadata) {
         // Calculate latencies
         let source_to_query = if let (Some(send), Some(recv)) =
-            (profiling.source_send_ns, profiling.query_receive_ns) {
+            (profiling.source_send_ns, profiling.query_receive_ns)
+        {
             Some((recv - send) as f64)
         } else {
             None
         };
 
         let query_processing = if let (Some(call), Some(ret)) =
-            (profiling.query_core_call_ns, profiling.query_core_return_ns) {
+            (profiling.query_core_call_ns, profiling.query_core_return_ns)
+        {
             Some((ret - call) as f64)
         } else {
             None
         };
 
         let query_to_reaction = if let (Some(send), Some(recv)) =
-            (profiling.query_send_ns, profiling.reaction_receive_ns) {
+            (profiling.query_send_ns, profiling.reaction_receive_ns)
+        {
             Some((recv - send) as f64)
         } else {
             None
         };
 
-        let reaction_processing = if let (Some(recv), Some(complete)) =
-            (profiling.reaction_receive_ns, profiling.reaction_complete_ns) {
+        let reaction_processing = if let (Some(recv), Some(complete)) = (
+            profiling.reaction_receive_ns,
+            profiling.reaction_complete_ns,
+        ) {
             Some((complete - recv) as f64)
         } else {
             None
         };
 
         let total_latency = if let (Some(send), Some(complete)) =
-            (profiling.source_send_ns, profiling.reaction_complete_ns) {
+            (profiling.source_send_ns, profiling.reaction_complete_ns)
+        {
             Some((complete - send) as f64)
         } else {
             None
@@ -167,11 +173,11 @@ impl ProfilingStats {
     }
 
     /// Calculate percentiles from samples
-    fn calculate_percentiles(&self, extract_fn: impl Fn(&ProfilingMetadata) -> Option<f64>) -> (f64, f64, f64, f64, f64) {
-        let mut values: Vec<f64> = self.samples
-            .iter()
-            .filter_map(|p| extract_fn(p))
-            .collect();
+    fn calculate_percentiles(
+        &self,
+        extract_fn: impl Fn(&ProfilingMetadata) -> Option<f64>,
+    ) -> (f64, f64, f64, f64, f64) {
+        let mut values: Vec<f64> = self.samples.iter().filter_map(|p| extract_fn(p)).collect();
 
         if values.is_empty() {
             return (0.0, 0.0, 0.0, 0.0, 0.0);
@@ -434,9 +440,8 @@ impl Reaction for ProfilerReaction {
         let status_clone = self.status.clone();
 
         tokio::spawn(async move {
-            let mut report_timer = tokio::time::interval(
-                tokio::time::Duration::from_secs(report_interval)
-            );
+            let mut report_timer =
+                tokio::time::interval(tokio::time::Duration::from_secs(report_interval));
             report_timer.tick().await; // Skip first immediate tick
 
             loop {

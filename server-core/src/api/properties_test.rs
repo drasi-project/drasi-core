@@ -36,8 +36,14 @@ mod tests {
 
         let map = props.build();
         assert_eq!(map.len(), 2);
-        assert_eq!(map.get("host").unwrap(), &Value::String("localhost".to_string()));
-        assert_eq!(map.get("database").unwrap(), &Value::String("mydb".to_string()));
+        assert_eq!(
+            map.get("host").unwrap(),
+            &Value::String("localhost".to_string())
+        );
+        assert_eq!(
+            map.get("database").unwrap(),
+            &Value::String("mydb".to_string())
+        );
     }
 
     #[test]
@@ -181,8 +187,7 @@ mod tests {
 
     #[test]
     fn test_properties_clone() {
-        let props1 = Properties::new()
-            .with_string("key", "value");
+        let props1 = Properties::new().with_string("key", "value");
 
         let props2 = props1.clone();
         let map = props2.build();
@@ -203,8 +208,7 @@ mod tests {
 
     #[test]
     fn test_properties_negative_int() {
-        let props = Properties::new()
-            .with_int("negative", -42);
+        let props = Properties::new().with_int("negative", -42);
 
         let map = props.build();
         assert_eq!(map.get("negative").unwrap(), &json!(-42));
@@ -212,8 +216,7 @@ mod tests {
 
     #[test]
     fn test_properties_large_int() {
-        let props = Properties::new()
-            .with_int("large", i64::MAX);
+        let props = Properties::new().with_int("large", i64::MAX);
 
         let map = props.build();
         assert_eq!(map.get("large").unwrap(), &json!(i64::MAX));
@@ -233,8 +236,7 @@ mod tests {
             "options": ["opt1", "opt2"]
         });
 
-        let props = Properties::new()
-            .with_value("config", complex.clone());
+        let props = Properties::new().with_value("config", complex.clone());
 
         let map = props.build();
         assert_eq!(map.get("config").unwrap(), &complex);

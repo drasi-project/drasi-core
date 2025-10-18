@@ -24,7 +24,9 @@ mod test_support;
 use anyhow::Result;
 use drasi_server_core::channels::{ComponentEvent, QueryResult};
 use drasi_server_core::config::ReactionConfig;
-use drasi_server_core::reactions::platform::{CloudEvent, ControlSignal, PlatformReaction, ResultEvent};
+use drasi_server_core::reactions::platform::{
+    CloudEvent, ControlSignal, PlatformReaction, ResultEvent,
+};
 use drasi_server_core::reactions::Reaction;
 use serde_json::json;
 use std::collections::HashMap;
@@ -45,7 +47,10 @@ fn create_test_reaction(
 
     let mut properties = HashMap::new();
     properties.insert("redis_url".to_string(), json!(redis_url));
-    properties.insert("emit_control_events".to_string(), json!(emit_control_events));
+    properties.insert(
+        "emit_control_events".to_string(),
+        json!(emit_control_events),
+    );
 
     if let Some(max_len) = max_stream_length {
         properties.insert("max_stream_length".to_string(), json!(max_len));
@@ -150,7 +155,8 @@ async fn test_publish_add_results() -> Result<()> {
     let query_id = "test-query-add";
     let stream_key = format!("{}-results", query_id);
 
-    let (reaction, mut event_rx) = create_test_reaction(redis_url.clone(), query_id, false, None, None);
+    let (reaction, mut event_rx) =
+        create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
     // Create result channel
     let (result_tx, result_rx) = mpsc::channel(10);
@@ -177,10 +183,7 @@ async fn test_publish_add_results() -> Result<()> {
     }
 
     // Send add result
-    let query_result = build_query_result_add(
-        query_id,
-        vec![json!({"id": "1", "name": "Alice"})],
-    );
+    let query_result = build_query_result_add(query_id, vec![json!({"id": "1", "name": "Alice"})]);
     if let Err(e) = result_tx.send(query_result).await {
         panic!("Failed to send query result: {:?}", e);
     }
@@ -214,7 +217,8 @@ async fn test_publish_update_results() -> Result<()> {
     let query_id = "test-query-update";
     let stream_key = format!("{}-results", query_id);
 
-    let (reaction, _event_rx) = create_test_reaction(redis_url.clone(), query_id, false, None, None);
+    let (reaction, _event_rx) =
+        create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
     let (result_tx, result_rx) = mpsc::channel(10);
 
@@ -240,8 +244,14 @@ async fn test_publish_update_results() -> Result<()> {
 
     if let ResultEvent::Change(change_event) = cloud_event.data {
         assert_eq!(change_event.updated_results.len(), 1);
-        assert_eq!(change_event.updated_results[0].before.as_ref().unwrap()["value"], 10);
-        assert_eq!(change_event.updated_results[0].after.as_ref().unwrap()["value"], 20);
+        assert_eq!(
+            change_event.updated_results[0].before.as_ref().unwrap()["value"],
+            10
+        );
+        assert_eq!(
+            change_event.updated_results[0].after.as_ref().unwrap()["value"],
+            20
+        );
     } else {
         panic!("Expected Change event");
     }
@@ -255,7 +265,8 @@ async fn test_publish_delete_results() -> Result<()> {
     let query_id = "test-query-delete";
     let stream_key = format!("{}-results", query_id);
 
-    let (reaction, _event_rx) = create_test_reaction(redis_url.clone(), query_id, false, None, None);
+    let (reaction, _event_rx) =
+        create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
     let (result_tx, result_rx) = mpsc::channel(10);
 
@@ -264,10 +275,7 @@ async fn test_publish_delete_results() -> Result<()> {
     sleep(Duration::from_millis(150)).await;
 
     // Send delete result
-    let query_result = build_query_result_delete(
-        query_id,
-        vec![json!({"id": "2", "name": "Bob"})],
-    );
+    let query_result = build_query_result_delete(query_id, vec![json!({"id": "2", "name": "Bob"})]);
     result_tx.send(query_result).await?;
 
     sleep(Duration::from_millis(300)).await;
@@ -291,7 +299,8 @@ async fn test_mixed_result_types() -> Result<()> {
     let query_id = "test-query-mixed";
     let stream_key = format!("{}-results", query_id);
 
-    let (reaction, _event_rx) = create_test_reaction(redis_url.clone(), query_id, false, None, None);
+    let (reaction, _event_rx) =
+        create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
     let (result_tx, result_rx) = mpsc::channel(10);
 
@@ -335,7 +344,8 @@ async fn test_stream_naming_convention() -> Result<()> {
     let query_id = "my-custom-query";
     let expected_stream_key = format!("{}-results", query_id);
 
-    let (reaction, _event_rx) = create_test_reaction(redis_url.clone(), query_id, false, None, None);
+    let (reaction, _event_rx) =
+        create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
     let (result_tx, result_rx) = mpsc::channel(10);
 
@@ -351,7 +361,11 @@ async fn test_stream_naming_convention() -> Result<()> {
 
     // Verify stream exists with correct name
     let events = read_from_stream(&redis_url, &expected_stream_key, "0", 1).await?;
-    assert!(!events.is_empty(), "Stream should exist with name {}", expected_stream_key);
+    assert!(
+        !events.is_empty(),
+        "Stream should exist with name {}",
+        expected_stream_key
+    );
 
     Ok(())
 }
@@ -362,7 +376,8 @@ async fn test_metadata_preservation() -> Result<()> {
     let query_id = "test-query-metadata";
     let stream_key = format!("{}-results", query_id);
 
-    let (reaction, _event_rx) = create_test_reaction(redis_url.clone(), query_id, false, None, None);
+    let (reaction, _event_rx) =
+        create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
     let (result_tx, result_rx) = mpsc::channel(10);
 
@@ -408,7 +423,8 @@ async fn test_cloudevent_required_fields() -> Result<()> {
     let query_id = "test-cloudevent-fields";
     let stream_key = format!("{}-results", query_id);
 
-    let (reaction, _event_rx) = create_test_reaction(redis_url.clone(), query_id, false, None, None);
+    let (reaction, _event_rx) =
+        create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
     let (result_tx, result_rx) = mpsc::channel(10);
 
@@ -439,7 +455,8 @@ async fn test_cloudevent_topic_format() -> Result<()> {
     let query_id = "test-topic-format";
     let stream_key = format!("{}-results", query_id);
 
-    let (reaction, _event_rx) = create_test_reaction(redis_url.clone(), query_id, false, None, None);
+    let (reaction, _event_rx) =
+        create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
     let (result_tx, result_rx) = mpsc::channel(10);
 
@@ -466,7 +483,8 @@ async fn test_cloudevent_timestamp_format() -> Result<()> {
     let query_id = "test-timestamp";
     let stream_key = format!("{}-results", query_id);
 
-    let (reaction, _event_rx) = create_test_reaction(redis_url.clone(), query_id, false, None, None);
+    let (reaction, _event_rx) =
+        create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
     let (result_tx, result_rx) = mpsc::channel(10);
 
@@ -493,7 +511,8 @@ async fn test_cloudevent_data_content_type() -> Result<()> {
     let query_id = "test-content-type";
     let stream_key = format!("{}-results", query_id);
 
-    let (reaction, _event_rx) = create_test_reaction(redis_url.clone(), query_id, false, None, None);
+    let (reaction, _event_rx) =
+        create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
     let (result_tx, result_rx) = mpsc::channel(10);
 
@@ -519,7 +538,8 @@ async fn test_dapr_metadata_fields() -> Result<()> {
     let query_id = "test-dapr-metadata";
     let stream_key = format!("{}-results", query_id);
 
-    let (reaction, _event_rx) = create_test_reaction(redis_url.clone(), query_id, false, None, None);
+    let (reaction, _event_rx) =
+        create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
     let (result_tx, result_rx) = mpsc::channel(10);
 
@@ -608,7 +628,8 @@ async fn test_control_events_disabled() -> Result<()> {
     let query_id = "test-control-disabled";
     let stream_key = format!("{}-results", query_id);
 
-    let (reaction, _event_rx) = create_test_reaction(redis_url.clone(), query_id, false, None, None);
+    let (reaction, _event_rx) =
+        create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
     let (_result_tx, result_rx) = mpsc::channel(10);
 
@@ -618,7 +639,10 @@ async fn test_control_events_disabled() -> Result<()> {
 
     // Try to read - should have no events since control events are disabled
     let events = read_from_stream(&redis_url, &stream_key, "0", 10).await?;
-    assert!(events.is_empty(), "No control events should be published when disabled");
+    assert!(
+        events.is_empty(),
+        "No control events should be published when disabled"
+    );
 
     Ok(())
 }
@@ -631,7 +655,8 @@ async fn test_sequence_numbering() -> Result<()> {
     let query_id = "test-sequence";
     let stream_key = format!("{}-results", query_id);
 
-    let (reaction, _event_rx) = create_test_reaction(redis_url.clone(), query_id, false, None, None);
+    let (reaction, _event_rx) =
+        create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
     let (result_tx, result_rx) = mpsc::channel(10);
 
@@ -700,8 +725,15 @@ async fn test_maxlen_stream_trimming() -> Result<()> {
     // Redis MAXLEN with ~ (approximate) is efficient but may not trim immediately
     // It typically keeps the stream between max_len and 2*max_len depending on internal factors
     // For max_len=5, we should see trimming happen eventually, but allow for Redis's internal buffering
-    assert!(length <= 10, "Stream should eventually be trimmed (max_len=5, approx allows buffer), got {}", length);
-    assert!(length >= 5, "Stream should contain at least max_len entries");
+    assert!(
+        length <= 10,
+        "Stream should eventually be trimmed (max_len=5, approx allows buffer), got {}",
+        length
+    );
+    assert!(
+        length >= 5,
+        "Stream should contain at least max_len entries"
+    );
 
     Ok(())
 }
@@ -712,7 +744,8 @@ async fn test_update_with_grouping_keys() -> Result<()> {
     let query_id = "test-grouping-keys";
     let stream_key = format!("{}-results", query_id);
 
-    let (reaction, _event_rx) = create_test_reaction(redis_url.clone(), query_id, false, None, None);
+    let (reaction, _event_rx) =
+        create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
     let (result_tx, result_rx) = mpsc::channel(10);
 
@@ -737,7 +770,10 @@ async fn test_update_with_grouping_keys() -> Result<()> {
 
     if let ResultEvent::Change(change_event) = cloud_event.data {
         let update = &change_event.updated_results[0];
-        let keys = update.grouping_keys.as_ref().expect("Grouping keys should be present");
+        let keys = update
+            .grouping_keys
+            .as_ref()
+            .expect("Grouping keys should be present");
         assert_eq!(keys.len(), 2);
         assert_eq!(keys[0], "key1");
         assert_eq!(keys[1], "key2");
@@ -754,7 +790,8 @@ async fn test_empty_metadata_filtered() -> Result<()> {
     let query_id = "test-empty-metadata";
     let stream_key = format!("{}-results", query_id);
 
-    let (reaction, _event_rx) = create_test_reaction(redis_url.clone(), query_id, false, None, None);
+    let (reaction, _event_rx) =
+        create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
     let (result_tx, result_rx) = mpsc::channel(10);
 
@@ -777,7 +814,10 @@ async fn test_empty_metadata_filtered() -> Result<()> {
     let cloud_event = read_cloudevent_from_stream(&redis_url, &stream_key).await?;
 
     if let ResultEvent::Change(change_event) = cloud_event.data {
-        assert!(change_event.metadata.is_none(), "Empty metadata should be filtered out");
+        assert!(
+            change_event.metadata.is_none(),
+            "Empty metadata should be filtered out"
+        );
     } else {
         panic!("Expected Change event");
     }

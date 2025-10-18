@@ -270,7 +270,7 @@ reactions: []
         assert_eq!(loaded_config.server_core.id, config.server_core.id);
         assert_eq!(loaded_config.sources.len(), config.sources.len());
         assert_eq!(loaded_config.queries.len(), config.queries.len());
-        assert_eq!(loaded_config.reactions.len(), config.reactions.len());        
+        assert_eq!(loaded_config.reactions.len(), config.reactions.len());
     }
 
     #[test]

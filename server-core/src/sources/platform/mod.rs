@@ -34,7 +34,6 @@ use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChang
 #[cfg(test)]
 mod tests;
 
-
 /// Configuration for the platform source
 #[derive(Debug, Clone)]
 struct PlatformConfig {
@@ -146,7 +145,10 @@ impl PlatformSource {
             config.start_id = start_id.to_string();
         }
 
-        if let Some(always_create) = properties.get("always_create_consumer_group").and_then(|v| v.as_bool()) {
+        if let Some(always_create) = properties
+            .get("always_create_consumer_group")
+            .and_then(|v| v.as_bool())
+        {
             config.always_create_consumer_group = always_create;
         }
 
@@ -223,9 +225,9 @@ impl PlatformSource {
     ) -> Result<()> {
         // Determine the initial position for the consumer group
         let group_start_id = if start_id == ">" {
-            "$"  // ">" means only new messages, so create group at end
+            "$" // ">" means only new messages, so create group at end
         } else {
-            start_id  // "0" or specific ID
+            start_id // "0" or specific ID
         };
 
         // If always_create is true, delete the existing group first
@@ -351,8 +353,7 @@ impl PlatformSource {
             // Main consumer loop
             loop {
                 // Read from stream using ">" to get next undelivered messages for this consumer group
-                let read_result: Result<StreamReadReply, redis::RedisError> =
-                    redis::cmd("XREADGROUP")
+                let read_result: Result<StreamReadReply, redis::RedisError> = redis::cmd("XREADGROUP")
                         .arg("GROUP")
                         .arg(&platform_config.consumer_group)
                         .arg(&platform_config.consumer_name)
@@ -380,17 +381,25 @@ impl PlatformSource {
                                         match serde_json::from_str::<Value>(&event_json) {
                                             Ok(cloud_event) => {
                                                 // Detect message type
-                                                let message_type = detect_message_type(&cloud_event);
+                                                let message_type =
+                                                    detect_message_type(&cloud_event);
 
                                                 match message_type {
                                                     MessageType::Control(control_type) => {
                                                         // Handle control message
-                                                        debug!("Detected control message of type: {}", control_type);
+                                                        debug!(
+                                                            "Detected control message of type: {}",
+                                                            control_type
+                                                        );
 
-                                                        match transform_control_event(cloud_event, &control_type) {
+                                                        match transform_control_event(
+                                                            cloud_event,
+                                                            &control_type,
+                                                        ) {
                                                             Ok(control_events) => {
                                                                 // Publish control events
-                                                                for control_event in control_events {
+                                                                for control_event in control_events
+                                                                {
                                                                     // Create profiling metadata with timestamps
                                                                     let mut profiling = crate::profiling::ProfilingMetadata::new();
                                                                     profiling.source_send_ns = Some(crate::profiling::timestamp_ns());
@@ -401,7 +410,10 @@ impl PlatformSource {
                                                                         chrono::Utc::now(),
                                                                         profiling,
                                                                     );
-                                                                    if let Err(e) = source_event_tx.send(wrapper).await {
+                                                                    if let Err(e) = source_event_tx
+                                                                        .send(wrapper)
+                                                                        .await
+                                                                    {
                                                                         error!(
                                                                             "Failed to publish control event: {}",
                                                                             e
@@ -430,7 +442,8 @@ impl PlatformSource {
                                                         ) {
                                                             Ok(source_changes) => {
                                                                 // Publish source changes
-                                                                for source_change in source_changes {
+                                                                for source_change in source_changes
+                                                                {
                                                                     // Create profiling metadata with timestamps
                                                                     let mut profiling = crate::profiling::ProfilingMetadata::new();
                                                                     profiling.source_send_ns = Some(crate::profiling::timestamp_ns());
@@ -441,7 +454,10 @@ impl PlatformSource {
                                                                         chrono::Utc::now(),
                                                                         profiling,
                                                                     );
-                                                                    if let Err(e) = source_event_tx.send(wrapper).await {
+                                                                    if let Err(e) = source_event_tx
+                                                                        .send(wrapper)
+                                                                        .await
+                                                                    {
                                                                         error!(
                                                                             "Failed to publish source change: {}",
                                                                             e

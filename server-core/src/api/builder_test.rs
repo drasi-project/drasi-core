@@ -34,10 +34,7 @@ mod tests {
         let builder = DrasiServerCoreBuilder::new().with_id("test-server-123");
         let core = builder.build().await;
 
-        assert!(
-            core.is_ok(),
-            "Builder should create server with custom ID"
-        );
+        assert!(core.is_ok(), "Builder should create server with custom ID");
     }
 
     #[tokio::test]
@@ -83,10 +80,7 @@ mod tests {
             .add_query(query);
         let core = builder.build().await;
 
-        assert!(
-            core.is_ok(),
-            "Builder should create server with query"
-        );
+        assert!(core.is_ok(), "Builder should create server with query");
     }
 
     #[tokio::test]
@@ -131,10 +125,7 @@ mod tests {
             .add_reaction(reaction);
         let core = builder.build().await;
 
-        assert!(
-            core.is_ok(),
-            "Builder should create server with reaction"
-        );
+        assert!(core.is_ok(), "Builder should create server with reaction");
     }
 
     #[tokio::test]
@@ -183,10 +174,7 @@ mod tests {
             );
 
         let core = builder.build().await;
-        assert!(
-            core.is_ok(),
-            "Builder should create complete pipeline"
-        );
+        assert!(core.is_ok(), "Builder should create complete pipeline");
     }
 
     #[tokio::test]
@@ -202,11 +190,7 @@ mod tests {
                     .from_source("source-1")
                     .build(),
             )
-            .add_reaction(
-                Reaction::log("reaction-1")
-                    .subscribe_to("query-1")
-                    .build(),
-            )
+            .add_reaction(Reaction::log("reaction-1").subscribe_to("query-1").build())
             .build()
             .await;
 
@@ -218,10 +202,7 @@ mod tests {
         let builder = DrasiServerCoreBuilder::default();
         let core = builder.build().await;
 
-        assert!(
-            core.is_ok(),
-            "Default builder should create valid server"
-        );
+        assert!(core.is_ok(), "Default builder should create valid server");
     }
 
     #[tokio::test]

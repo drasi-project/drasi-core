@@ -20,12 +20,12 @@
 //!
 //! Run with: cargo run --example profiling_basic
 
-use drasi_server_core::{
-    channels::{QueryResult, SourceEvent, SourceEventWrapper},
-    profiling::{ProfilingMetadata, timestamp_ns},
-};
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+};
+use drasi_server_core::{
+    channels::{QueryResult, SourceEvent, SourceEventWrapper},
+    profiling::{timestamp_ns, ProfilingMetadata},
 };
 use std::sync::Arc;
 
@@ -76,11 +76,17 @@ async fn main() {
     // Simulate query core processing
     tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
     query_profiling.query_core_call_ns = Some(timestamp_ns());
-    println!("  query_core_call_ns: {:?}", query_profiling.query_core_call_ns);
+    println!(
+        "  query_core_call_ns: {:?}",
+        query_profiling.query_core_call_ns
+    );
 
     tokio::time::sleep(tokio::time::Duration::from_micros(200)).await;
     query_profiling.query_core_return_ns = Some(timestamp_ns());
-    println!("  query_core_return_ns: {:?}", query_profiling.query_core_return_ns);
+    println!(
+        "  query_core_return_ns: {:?}",
+        query_profiling.query_core_return_ns
+    );
 
     query_profiling.query_send_ns = Some(timestamp_ns());
     println!("  query_send_ns: {:?}\n", query_profiling.query_send_ns);
@@ -106,13 +112,19 @@ async fn main() {
 
     let mut reaction_profiling = query_profiling;
     reaction_profiling.reaction_receive_ns = Some(timestamp_ns());
-    println!("  reaction_receive_ns: {:?}", reaction_profiling.reaction_receive_ns);
+    println!(
+        "  reaction_receive_ns: {:?}",
+        reaction_profiling.reaction_receive_ns
+    );
 
     // Simulate reaction processing (e.g., HTTP call, database write)
     tokio::time::sleep(tokio::time::Duration::from_micros(300)).await;
 
     reaction_profiling.reaction_complete_ns = Some(timestamp_ns());
-    println!("  reaction_complete_ns: {:?}\n", reaction_profiling.reaction_complete_ns);
+    println!(
+        "  reaction_complete_ns: {:?}\n",
+        reaction_profiling.reaction_complete_ns
+    );
 
     // STEP 4: Calculate and display latencies
     println!("Step 4: Calculating end-to-end latencies");
@@ -120,7 +132,8 @@ async fn main() {
     if let Some(source_send) = reaction_profiling.source_send_ns {
         if let Some(query_recv) = reaction_profiling.query_receive_ns {
             let source_to_query = query_recv - source_send;
-            println!("  Source → Query:       {} ns ({:.3} ms)",
+            println!(
+                "  Source → Query:       {} ns ({:.3} ms)",
                 source_to_query,
                 source_to_query as f64 / 1_000_000.0
             );
@@ -129,7 +142,8 @@ async fn main() {
         if let Some(query_send) = reaction_profiling.query_send_ns {
             if let Some(reaction_recv) = reaction_profiling.reaction_receive_ns {
                 let query_to_reaction = reaction_recv - query_send;
-                println!("  Query → Reaction:     {} ns ({:.3} ms)",
+                println!(
+                    "  Query → Reaction:     {} ns ({:.3} ms)",
                     query_to_reaction,
                     query_to_reaction as f64 / 1_000_000.0
                 );
@@ -139,7 +153,8 @@ async fn main() {
         if let Some(query_core_call) = reaction_profiling.query_core_call_ns {
             if let Some(query_core_return) = reaction_profiling.query_core_return_ns {
                 let query_core_time = query_core_return - query_core_call;
-                println!("  Query Core Time:      {} ns ({:.3} ms)",
+                println!(
+                    "  Query Core Time:      {} ns ({:.3} ms)",
                     query_core_time,
                     query_core_time as f64 / 1_000_000.0
                 );
@@ -149,7 +164,8 @@ async fn main() {
         if let Some(reaction_recv) = reaction_profiling.reaction_receive_ns {
             if let Some(reaction_complete) = reaction_profiling.reaction_complete_ns {
                 let reaction_time = reaction_complete - reaction_recv;
-                println!("  Reaction Time:        {} ns ({:.3} ms)",
+                println!(
+                    "  Reaction Time:        {} ns ({:.3} ms)",
                     reaction_time,
                     reaction_time as f64 / 1_000_000.0
                 );
@@ -158,7 +174,8 @@ async fn main() {
 
         if let Some(reaction_complete) = reaction_profiling.reaction_complete_ns {
             let total_latency = reaction_complete - source_send;
-            println!("\n  Total End-to-End:     {} ns ({:.3} ms)",
+            println!(
+                "\n  Total End-to-End:     {} ns ({:.3} ms)",
                 total_latency,
                 total_latency as f64 / 1_000_000.0
             );

@@ -28,7 +28,7 @@
 use drasi_server_core::{
     channels::QueryResult,
     config::ReactionConfig,
-    profiling::{ProfilingMetadata, timestamp_ns},
+    profiling::{timestamp_ns, ProfilingMetadata},
     reactions::{ProfilerReaction, Reaction},
 };
 use tokio::sync::mpsc;

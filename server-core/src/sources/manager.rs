@@ -14,7 +14,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use log::{error, info };
+use log::{error, info};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -90,10 +90,7 @@ pub struct SourceManager {
 
 impl SourceManager {
     /// Create a new SourceManager with unified event sender
-    pub fn new(
-        source_event_tx: SourceEventSender,
-        event_tx: ComponentEventSender,
-    ) -> Self {
+    pub fn new(source_event_tx: SourceEventSender, event_tx: ComponentEventSender) -> Self {
         Self {
             sources: Arc::new(RwLock::new(HashMap::new())),
             source_event_tx,
@@ -116,7 +113,7 @@ impl SourceManager {
     }
 
     pub async fn add_source(&self, config: SourceConfig) -> Result<()> {
-        self.add_source_internal(config, true ).await
+        self.add_source_internal(config, true).await
     }
 
     pub async fn add_source_with_options(
@@ -124,8 +121,7 @@ impl SourceManager {
         config: SourceConfig,
         allow_auto_start: bool,
     ) -> Result<()> {
-        self.add_source_internal(config, allow_auto_start)
-            .await
+        self.add_source_internal(config, allow_auto_start).await
     }
 
     pub async fn add_source_without_save(
@@ -133,14 +129,13 @@ impl SourceManager {
         config: SourceConfig,
         allow_auto_start: bool,
     ) -> Result<()> {
-        self.add_source_internal(config, allow_auto_start )
-            .await
+        self.add_source_internal(config, allow_auto_start).await
     }
 
     async fn add_source_internal(
         &self,
         config: SourceConfig,
-        allow_auto_start: bool
+        allow_auto_start: bool,
     ) -> Result<()> {
         // Check if source with this id already exists
         if self.sources.read().await.contains_key(&config.id) {
@@ -317,7 +312,7 @@ impl SourceManager {
             // For now, update means remove and re-add
             self.delete_source(id.clone()).await?;
             // Add the new configuration
-            self.add_source_internal(config, false ).await?;
+            self.add_source_internal(config, false).await?;
 
             // If it was running, restart it
             if was_running {

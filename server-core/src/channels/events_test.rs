@@ -17,7 +17,9 @@
 #[cfg(test)]
 mod tests {
     use crate::channels::*;
-    use drasi_core::models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange};
+    use drasi_core::models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+    };
     use std::sync::Arc;
 
     #[test]
@@ -125,7 +127,10 @@ mod tests {
         };
         let event = SourceEvent::Control(control);
 
-        assert!(matches!(event, SourceEvent::Control(SourceControl::Subscription { .. })));
+        assert!(matches!(
+            event,
+            SourceEvent::Control(SourceControl::Subscription { .. })
+        ));
     }
 
     #[test]
@@ -185,7 +190,10 @@ mod tests {
         };
 
         assert!(!result.metadata.is_empty());
-        assert_eq!(result.metadata.get("key"), Some(&serde_json::json!("value")));
+        assert_eq!(
+            result.metadata.get("key"),
+            Some(&serde_json::json!("value"))
+        );
     }
 
     #[test]
@@ -261,11 +269,7 @@ mod tests {
 
     #[test]
     fn test_component_type_variants() {
-        let types = vec![
-            ComponentType::Source,
-            ComponentType::Query,
-            ComponentType::Reaction,
-        ];
+        let types = vec![ComponentType::Source, ComponentType::Query, ComponentType::Reaction];
 
         assert_eq!(types.len(), 3);
     }
@@ -346,7 +350,10 @@ mod tests {
         drop(tx);
 
         let result = rx.recv().await;
-        assert!(result.is_none(), "Channel should be closed after sender dropped");
+        assert!(
+            result.is_none(),
+            "Channel should be closed after sender dropped"
+        );
     }
 
     #[tokio::test]

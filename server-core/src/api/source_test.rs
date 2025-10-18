@@ -27,7 +27,10 @@ mod tests {
 
         assert_eq!(source.id, "app-source");
         assert_eq!(source.source_type, "application");
-        assert!(source.auto_start, "Application source should auto-start by default");
+        assert!(
+            source.auto_start,
+            "Application source should auto-start by default"
+        );
         assert!(source.properties.is_empty());
         assert!(source.bootstrap_provider.is_none());
     }
@@ -88,18 +91,14 @@ mod tests {
 
     #[test]
     fn test_source_auto_start_false() {
-        let source = Source::application("test-source")
-            .auto_start(false)
-            .build();
+        let source = Source::application("test-source").auto_start(false).build();
 
         assert!(!source.auto_start, "auto_start should be false");
     }
 
     #[test]
     fn test_source_auto_start_true() {
-        let source = Source::application("test-source")
-            .auto_start(true)
-            .build();
+        let source = Source::application("test-source").auto_start(true).build();
 
         assert!(source.auto_start, "auto_start should be true");
     }
@@ -123,9 +122,7 @@ mod tests {
             .with_int("port", 5432)
             .with_bool("ssl", true);
 
-        let source = Source::postgres("pg-source")
-            .with_properties(props)
-            .build();
+        let source = Source::postgres("pg-source").with_properties(props).build();
 
         assert_eq!(source.properties.len(), 3);
         assert_eq!(source.properties.get("host").unwrap(), &json!("localhost"));
@@ -145,7 +142,7 @@ mod tests {
 
         assert!(source.bootstrap_provider.is_some());
         match source.bootstrap_provider.unwrap() {
-            BootstrapProviderConfig::Postgres { .. } => {},
+            BootstrapProviderConfig::Postgres { .. } => {}
             _ => panic!("Expected Postgres bootstrap provider"),
         }
     }
@@ -161,7 +158,7 @@ mod tests {
         match source.bootstrap_provider.unwrap() {
             BootstrapProviderConfig::ScriptFile { file_paths } => {
                 assert_eq!(file_paths, files);
-            },
+            }
             _ => panic!("Expected ScriptFile bootstrap provider"),
         }
     }
@@ -181,7 +178,7 @@ mod tests {
             } => {
                 assert_eq!(query_api_url, Some("http://localhost:8080".to_string()));
                 assert_eq!(timeout_seconds, Some(300));
-            },
+            }
             _ => panic!("Expected Platform bootstrap provider"),
         }
     }
@@ -194,7 +191,7 @@ mod tests {
 
         assert!(source.bootstrap_provider.is_some());
         match source.bootstrap_provider.unwrap() {
-            BootstrapProviderConfig::Postgres { .. } => {},
+            BootstrapProviderConfig::Postgres { .. } => {}
             _ => panic!("Expected Postgres bootstrap provider"),
         }
     }
@@ -286,7 +283,7 @@ mod tests {
             BootstrapProviderConfig::ScriptFile { file_paths } => {
                 assert_eq!(file_paths.len(), 3);
                 assert_eq!(file_paths, files);
-            },
+            }
             _ => panic!("Expected ScriptFile bootstrap provider"),
         }
     }
@@ -305,15 +302,14 @@ mod tests {
             } => {
                 assert_eq!(query_api_url, Some("http://localhost:8080".to_string()));
                 assert_eq!(timeout_seconds, None);
-            },
+            }
             _ => panic!("Expected Platform bootstrap provider"),
         }
     }
 
     #[test]
     fn test_source_clone_builder() {
-        let builder1 = Source::application("test-source")
-            .with_property("key", json!("value"));
+        let builder1 = Source::application("test-source").with_property("key", json!("value"));
 
         let builder2 = builder1.clone();
         let source = builder2.build();

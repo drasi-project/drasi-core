@@ -293,8 +293,14 @@ pub fn build_platform_delete_event(
 pub fn verify_cloudevent_structure(cloud_event: &Value) -> Result<()> {
     // Required fields
     let required_fields = vec![
-        "id", "source", "specversion", "type",
-        "datacontenttype", "topic", "time", "data"
+        "id",
+        "source",
+        "specversion",
+        "type",
+        "datacontenttype",
+        "topic",
+        "time",
+        "data",
     ];
 
     for field in required_fields {
@@ -309,21 +315,26 @@ pub fn verify_cloudevent_structure(cloud_event: &Value) -> Result<()> {
     }
 
     if cloud_event["datacontenttype"] != "application/json" {
-        return Err(anyhow::anyhow!("Invalid datacontenttype, expected 'application/json'"));
+        return Err(anyhow::anyhow!(
+            "Invalid datacontenttype, expected 'application/json'"
+        ));
     }
 
     if cloud_event["type"] != "com.dapr.event.sent" {
-        return Err(anyhow::anyhow!("Invalid type, expected 'com.dapr.event.sent'"));
+        return Err(anyhow::anyhow!(
+            "Invalid type, expected 'com.dapr.event.sent'"
+        ));
     }
 
     // Verify ID is a valid UUID v4
-    let id = cloud_event["id"].as_str()
+    let id = cloud_event["id"]
+        .as_str()
         .ok_or_else(|| anyhow::anyhow!("id is not a string"))?;
-    uuid::Uuid::parse_str(id)
-        .map_err(|_| anyhow::anyhow!("id is not a valid UUID"))?;
+    uuid::Uuid::parse_str(id).map_err(|_| anyhow::anyhow!("id is not a valid UUID"))?;
 
     // Verify timestamp is ISO 8601
-    let time = cloud_event["time"].as_str()
+    let time = cloud_event["time"]
+        .as_str()
         .ok_or_else(|| anyhow::anyhow!("time is not a string"))?;
     chrono::DateTime::parse_from_rfc3339(time)
         .map_err(|_| anyhow::anyhow!("time is not valid ISO 8601 format"))?;
@@ -391,19 +402,15 @@ mod tests {
         props.insert("name".to_string(), json!("Alice"));
         props.insert("age".to_string(), json!(30));
 
-        let event = build_platform_insert_event(
-            "1",
-            vec!["Person"],
-            props,
-            "node",
-            None,
-            None,
-        );
+        let event = build_platform_insert_event("1", vec!["Person"], props, "node", None, None);
 
         assert_eq!(event["data"][0]["op"], "i");
         assert_eq!(event["data"][0]["payload"]["after"]["id"], "1");
         assert_eq!(event["data"][0]["payload"]["after"]["labels"][0], "Person");
-        assert_eq!(event["data"][0]["payload"]["after"]["properties"]["name"], "Alice");
+        assert_eq!(
+            event["data"][0]["payload"]["after"]["properties"]["name"],
+            "Alice"
+        );
         assert_eq!(event["data"][0]["payload"]["source"]["table"], "node");
     }
 
@@ -412,14 +419,8 @@ mod tests {
         let mut props = HashMap::new();
         props.insert("since".to_string(), json!("2020"));
 
-        let event = build_platform_insert_event(
-            "r1",
-            vec!["KNOWS"],
-            props,
-            "rel",
-            Some("1"),
-            Some("2"),
-        );
+        let event =
+            build_platform_insert_event("r1", vec!["KNOWS"], props, "rel", Some("1"), Some("2"));
 
         assert_eq!(event["data"][0]["op"], "i");
         assert_eq!(event["data"][0]["payload"]["after"]["startId"], "1");
@@ -445,8 +446,14 @@ mod tests {
         );
 
         assert_eq!(event["data"][0]["op"], "u");
-        assert_eq!(event["data"][0]["payload"]["before"]["properties"]["value"], 10);
-        assert_eq!(event["data"][0]["payload"]["after"]["properties"]["value"], 20);
+        assert_eq!(
+            event["data"][0]["payload"]["before"]["properties"]["value"],
+            10
+        );
+        assert_eq!(
+            event["data"][0]["payload"]["after"]["properties"]["value"],
+            20
+        );
     }
 
     #[test]
@@ -454,14 +461,7 @@ mod tests {
         let mut props = HashMap::new();
         props.insert("name".to_string(), json!("Bob"));
 
-        let event = build_platform_delete_event(
-            "2",
-            vec!["Person"],
-            props,
-            "node",
-            None,
-            None,
-        );
+        let event = build_platform_delete_event("2", vec!["Person"], props, "node", None, None);
 
         assert_eq!(event["data"][0]["op"], "d");
         assert_eq!(event["data"][0]["payload"]["before"]["id"], "2");

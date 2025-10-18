@@ -71,8 +71,12 @@ impl BootstrapRouter {
         let source_id = source_config.id.clone();
 
         // Create the bootstrap context
-        let context =
-            BootstrapContext::new(server_id, source_config.clone(), source_event_tx, source_id.clone());
+        let context = BootstrapContext::new(
+            server_id,
+            source_config.clone(),
+            source_event_tx,
+            source_id.clone(),
+        );
 
         // Create the provider (or use no-op if no config provided)
         let provider = match provider_config {
@@ -272,9 +276,9 @@ impl BootstrapRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bootstrap::{BootstrapProviderConfig};
-    use crate::config::SourceConfig;
+    use crate::bootstrap::BootstrapProviderConfig;
     use crate::channels::{BootstrapRequest, BootstrapStatus};
+    use crate::config::SourceConfig;
     use tokio::sync::mpsc;
 
     fn create_test_source_config(id: &str) -> Arc<SourceConfig> {
@@ -471,14 +475,10 @@ mod tests {
             .unwrap();
 
         // Simulate bootstrap state
-        router
-            .bootstrap_state
-            .write()
-            .await
-            .insert(
-                ("query-1".to_string(), "test-source".to_string()),
-                BootstrapState::Completed { element_count: 100 },
-            );
+        router.bootstrap_state.write().await.insert(
+            ("query-1".to_string(), "test-source".to_string()),
+            BootstrapState::Completed { element_count: 100 },
+        );
 
         // Unregister provider
         router.unregister_provider("test-source").await;
@@ -498,14 +498,10 @@ mod tests {
             .await;
 
         // Simulate bootstrap state
-        router
-            .bootstrap_state
-            .write()
-            .await
-            .insert(
-                ("test-query".to_string(), "source-1".to_string()),
-                BootstrapState::Completed { element_count: 50 },
-            );
+        router.bootstrap_state.write().await.insert(
+            ("test-query".to_string(), "source-1".to_string()),
+            BootstrapState::Completed { element_count: 50 },
+        );
 
         // Unregister query
         router.unregister_query("test-query").await;
@@ -519,14 +515,10 @@ mod tests {
     async fn test_get_bootstrap_state_for_pending() {
         let router = BootstrapRouter::new();
 
-        router
-            .bootstrap_state
-            .write()
-            .await
-            .insert(
-                ("query-1".to_string(), "source-1".to_string()),
-                BootstrapState::Pending,
-            );
+        router.bootstrap_state.write().await.insert(
+            ("query-1".to_string(), "source-1".to_string()),
+            BootstrapState::Pending,
+        );
 
         let state = router.get_bootstrap_state("query-1", "source-1").await;
         assert!(state.is_some());
@@ -565,20 +557,20 @@ mod tests {
         assert!(matches!(state.unwrap(), BootstrapState::InProgress));
 
         // Completed state
-        router
-            .bootstrap_state
-            .write()
-            .await
-            .insert(key.clone(), BootstrapState::Completed { element_count: 100 });
+        router.bootstrap_state.write().await.insert(
+            key.clone(),
+            BootstrapState::Completed { element_count: 100 },
+        );
         let state = router.get_bootstrap_state("query-1", "source-1").await;
         assert!(matches!(state.unwrap(), BootstrapState::Completed { .. }));
 
         // Failed state
-        router
-            .bootstrap_state
-            .write()
-            .await
-            .insert(key.clone(), BootstrapState::Failed { error: "test error".to_string() });
+        router.bootstrap_state.write().await.insert(
+            key.clone(),
+            BootstrapState::Failed {
+                error: "test error".to_string(),
+            },
+        );
         let state = router.get_bootstrap_state("query-1", "source-1").await;
         assert!(matches!(state.unwrap(), BootstrapState::Failed { .. }));
     }
@@ -611,10 +603,8 @@ mod tests {
         request_tx.send(request).await.unwrap();
 
         // Should receive Started acknowledgment (no providers to bootstrap from)
-        let response = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            response_rx.recv()
-        ).await;
+        let response =
+            tokio::time::timeout(std::time::Duration::from_millis(500), response_rx.recv()).await;
 
         assert!(response.is_ok());
         let response = response.unwrap().unwrap();
@@ -623,10 +613,7 @@ mod tests {
 
         // Clean up
         drop(request_tx);
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            router_task
-        ).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), router_task).await;
     }
 
     #[tokio::test]
@@ -646,7 +633,9 @@ mod tests {
         let _pending = BootstrapState::Pending;
         let _in_progress = BootstrapState::InProgress;
         let _completed = BootstrapState::Completed { element_count: 42 };
-        let _failed = BootstrapState::Failed { error: "test error".to_string() };
+        let _failed = BootstrapState::Failed {
+            error: "test error".to_string(),
+        };
     }
 
     #[tokio::test]

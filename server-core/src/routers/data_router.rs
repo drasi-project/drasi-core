@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
-use crate::channels::{SourceEventReceiver, SourceEventSender, SourceEvent};
+use crate::channels::{SourceEvent, SourceEventReceiver, SourceEventSender};
 
 /// Routes data changes from sources to subscribed queries
 pub struct DataRouter {
@@ -67,7 +67,11 @@ impl DataRouter {
         );
 
         // Check if query already has a subscription
-        let existing_sender = self.query_event_senders.read().await.contains_key(&query_id);
+        let existing_sender = self
+            .query_event_senders
+            .read()
+            .await
+            .contains_key(&query_id);
         if existing_sender {
             let error_msg = format!(
                 "[DUPLICATE-SUBSCRIPTION] Query '{}' already has an active subscription. This is the SECOND call - first call succeeded. Caller trace: {:?}",
@@ -143,10 +147,16 @@ impl DataRouter {
             // Log event type for visibility
             match &source_event_wrapper.event {
                 SourceEvent::Change(_) => {
-                    debug!("Data router received Change event from source '{}'", source_id);
+                    debug!(
+                        "Data router received Change event from source '{}'",
+                        source_id
+                    );
                 }
                 SourceEvent::Control(_) => {
-                    debug!("Data router received Control event from source '{}'", source_id);
+                    debug!(
+                        "Data router received Control event from source '{}'",
+                        source_id
+                    );
                 }
             }
 
@@ -261,7 +271,11 @@ mod tests {
             .expect("Should create subscription");
 
         // Verify subscription exists
-        assert!(router.query_event_senders.read().await.contains_key("query1"));
+        assert!(router
+            .query_event_senders
+            .read()
+            .await
+            .contains_key("query1"));
 
         // Remove subscription
         router.remove_query_subscription("query1").await;
@@ -287,6 +301,8 @@ mod tests {
             .await;
 
         assert!(result.is_err(), "Duplicate subscription should fail");
-        assert!(result.unwrap_err().contains("already has an active subscription"));
+        assert!(result
+            .unwrap_err()
+            .contains("already has an active subscription"));
     }
 }

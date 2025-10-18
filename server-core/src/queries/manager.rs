@@ -367,10 +367,7 @@ impl Query for DrasiQuery {
                 // Capture query_core_call_ns before calling drasi-core
                 profiling.query_core_call_ns = Some(crate::profiling::timestamp_ns());
 
-                match continuous_query
-                    .process_source_change(source_change)
-                    .await
-                {
+                match continuous_query.process_source_change(source_change).await {
                     Ok(results) => {
                         // Capture query_core_return_ns after drasi-core returns
                         profiling.query_core_return_ns = Some(crate::profiling::timestamp_ns());
@@ -487,7 +484,9 @@ impl Query for DrasiQuery {
                                     let mut meta = HashMap::new();
                                     meta.insert(
                                         "source_id".to_string(),
-                                        serde_json::Value::String(source_event_wrapper.source_id.clone()),
+                                        serde_json::Value::String(
+                                            source_event_wrapper.source_id.clone(),
+                                        ),
                                     );
                                     meta.insert(
                                         "query".to_string(),
@@ -625,7 +624,7 @@ impl QueryManager {
         self.add_query_internal(config).await
     }
 
-    async fn add_query_internal(&self, config: QueryConfig ) -> Result<()> {
+    async fn add_query_internal(&self, config: QueryConfig) -> Result<()> {
         // Check if query with this id already exists
         if self.queries.read().await.contains_key(&config.id) {
             return Err(anyhow::anyhow!(

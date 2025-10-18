@@ -32,11 +32,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create a server with components that do NOT auto-start
     let core = DrasiServerCore::builder()
         .with_id("lifecycle-example")
-        .add_source(
-            Source::mock("data-source")
+        .add_source(Source::mock("data-source")
                 .auto_start(false) // Explicitly disabled
-                .build(),
-        )
+                .build())
         .add_query(
             Query::cypher("user-query")
                 .query("MATCH (n:User) RETURN n")

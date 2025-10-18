@@ -540,7 +540,7 @@ impl BootstrapHandler {
                 source_id: event.source_id,
                 event: SourceEvent::Change(event.change),
                 timestamp: event.timestamp,
-            profiling: None,
+                profiling: None,
             };
             self.source_event_tx
                 .send(wrapper)

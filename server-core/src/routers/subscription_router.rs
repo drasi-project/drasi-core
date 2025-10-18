@@ -67,7 +67,11 @@ impl SubscriptionRouter {
         );
 
         // Check if reaction already has a subscription
-        let existing_sender = self.reaction_senders.read().await.contains_key(&reaction_id);
+        let existing_sender = self
+            .reaction_senders
+            .read()
+            .await
+            .contains_key(&reaction_id);
         if existing_sender {
             let error_msg = format!(
                 "[DUPLICATE-SUBSCRIPTION] Reaction '{}' already has an active subscription. This is the SECOND call - first call succeeded. Caller trace: {:?}",
@@ -275,6 +279,8 @@ mod tests {
             .await;
 
         assert!(result.is_err(), "Duplicate subscription should fail");
-        assert!(result.unwrap_err().contains("already has an active subscription"));
+        assert!(result
+            .unwrap_err()
+            .contains("already has an active subscription"));
     }
 }

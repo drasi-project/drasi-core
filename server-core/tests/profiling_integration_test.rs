@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use drasi_core::models::{
+    Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+};
 use drasi_server_core::{
     channels::{QueryResult, SourceEvent, SourceEventWrapper},
     profiling::ProfilingMetadata,
-};
-use drasi_core::models::{
-    Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -85,9 +85,16 @@ async fn test_profiling_end_to_end_flow() {
 
     // Verify timestamps are in order
     assert!(result_profiling.source_send_ns.unwrap() < result_profiling.query_receive_ns.unwrap());
-    assert!(result_profiling.query_receive_ns.unwrap() <= result_profiling.query_core_call_ns.unwrap());
-    assert!(result_profiling.query_core_call_ns.unwrap() < result_profiling.query_core_return_ns.unwrap());
-    assert!(result_profiling.query_core_return_ns.unwrap() <= result_profiling.query_send_ns.unwrap());
+    assert!(
+        result_profiling.query_receive_ns.unwrap() <= result_profiling.query_core_call_ns.unwrap()
+    );
+    assert!(
+        result_profiling.query_core_call_ns.unwrap()
+            < result_profiling.query_core_return_ns.unwrap()
+    );
+    assert!(
+        result_profiling.query_core_return_ns.unwrap() <= result_profiling.query_send_ns.unwrap()
+    );
 
     // Simulate reaction receiving and processing
     let mut reaction_profiling = query_profiling;
@@ -98,8 +105,14 @@ async fn test_profiling_end_to_end_flow() {
     // Verify reaction profiling
     assert!(reaction_profiling.reaction_receive_ns.is_some());
     assert!(reaction_profiling.reaction_complete_ns.is_some());
-    assert!(reaction_profiling.query_send_ns.unwrap() <= reaction_profiling.reaction_receive_ns.unwrap());
-    assert!(reaction_profiling.reaction_receive_ns.unwrap() < reaction_profiling.reaction_complete_ns.unwrap());
+    assert!(
+        reaction_profiling.query_send_ns.unwrap()
+            <= reaction_profiling.reaction_receive_ns.unwrap()
+    );
+    assert!(
+        reaction_profiling.reaction_receive_ns.unwrap()
+            < reaction_profiling.reaction_complete_ns.unwrap()
+    );
 
     // Verify we can calculate end-to-end latency
     let total_latency = reaction_profiling.reaction_complete_ns.unwrap()
@@ -170,7 +183,7 @@ async fn test_profiling_optional_timestamps() {
 #[test]
 fn test_profiling_elapsed_calculation() {
     let start = 1000000000; // 1 second in nanoseconds
-    let end = 1500000000;   // 1.5 seconds
+    let end = 1500000000; // 1.5 seconds
 
     let elapsed = end - start;
     assert_eq!(elapsed, 500000000); // 0.5 seconds

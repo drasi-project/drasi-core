@@ -339,9 +339,11 @@ mod tests {
 
         let (_reaction, handle) = ApplicationReaction::new(config, event_tx);
 
-        let result = handle.subscribe(|_result| {
-            // Callback logic
-        }).await;
+        let result = handle
+            .subscribe(|_result| {
+                // Callback logic
+            })
+            .await;
 
         assert!(result.is_ok());
     }
@@ -496,10 +498,9 @@ mod tests {
     #[tokio::test]
     async fn test_reaction_creation_with_properties() {
         let mut config = create_test_reaction_config("test-reaction", vec![]);
-        config.properties.insert(
-            "test_key".to_string(),
-            serde_json::json!("test_value"),
-        );
+        config
+            .properties
+            .insert("test_key".to_string(), serde_json::json!("test_value"));
 
         let (event_tx, _) = mpsc::channel(100);
         let (reaction, _handle) = ApplicationReaction::new(config, event_tx);
