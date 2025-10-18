@@ -17,7 +17,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use drasi_core::{ evaluation::context::{QueryPartEvaluationContext, QueryVariables}};
+use drasi_core::evaluation::context::{QueryPartEvaluationContext, QueryVariables};
 
 // /// Result event that can be either a Change or Control event
 // #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -484,10 +484,8 @@ mod tests {
         };
 
         let result_event = ResultEvent::Change(change);
-        let config = CloudEventConfig::with_values(
-            "custom-pubsub".to_string(),
-            "custom-source".to_string(),
-        );
+        let config =
+            CloudEventConfig::with_values("custom-pubsub".to_string(), "custom-source".to_string());
         let cloud_event = CloudEvent::new(result_event, "test-query", &config);
 
         let json = serde_json::to_value(&cloud_event).unwrap();
@@ -522,23 +520,23 @@ mod tests {
         assert!(!json_str.contains("metadata"));
     }
 
-//     #[test]
-//     fn test_metadata_serialization() {
-//         let mut metadata = HashMap::new();
-//         metadata.insert("source".to_string(), json!({"timing": 100}));
+    //     #[test]
+    //     fn test_metadata_serialization() {
+    //         let mut metadata = HashMap::new();
+    //         metadata.insert("source".to_string(), json!({"timing": 100}));
 
-//         let event = ResultChangeEvent {
-//             query_id: "test".to_string(),
-//             sequence: 1,
-//             source_time_ms: 0,
-//             added_results: vec![],
-//             updated_results: vec![],
-//             deleted_results: vec![],
-//             metadata: Some(metadata),
-//         };
+    //         let event = ResultChangeEvent {
+    //             query_id: "test".to_string(),
+    //             sequence: 1,
+    //             source_time_ms: 0,
+    //             added_results: vec![],
+    //             updated_results: vec![],
+    //             deleted_results: vec![],
+    //             metadata: Some(metadata),
+    //         };
 
-//         let json = serde_json::to_value(&event).unwrap();
-//         assert!(json["metadata"].is_object());
-//         assert_eq!(json["metadata"]["source"]["timing"], 100);
-//     }
+    //         let json = serde_json::to_value(&event).unwrap();
+    //         assert!(json["metadata"].is_object());
+    //         assert_eq!(json["metadata"]["source"]["timing"], 100);
+    //     }
 }

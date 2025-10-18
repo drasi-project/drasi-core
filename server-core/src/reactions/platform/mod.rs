@@ -229,12 +229,20 @@ impl Reaction for PlatformReaction {
 
         // Spawn task to process query results
         tokio::spawn(async move {
-            log::debug!("Platform Reaction '{}' processing task started", reaction_id);
+            log::debug!(
+                "Platform Reaction '{}' processing task started",
+                reaction_id
+            );
 
             loop {
                 tokio::select! {
                     // Handle query results
-                    Some(query_result) = result_rx.recv() => {
+                    Some(mut query_result) = result_rx.recv() => {
+                        // Capture reaction receive timestamp
+                        if let Some(ref mut profiling) = query_result.profiling {
+                            profiling.reaction_receive_ns = Some(crate::profiling::timestamp_ns());
+                        }
+
                         // Increment sequence counter
                         let sequence = {
                             let mut counter = sequence_counter.write().await;
@@ -243,7 +251,7 @@ impl Reaction for PlatformReaction {
                         };
 
                         // Transform query result to platform event
-                        match transformer::transform_query_result(query_result.clone(), sequence) {
+                        match transformer::transform_query_result(query_result.clone(), sequence, sequence as u64) {
                             Ok(result_event) => {
                                 // Wrap in CloudEvent
                                 let cloud_event = CloudEvent::new(
@@ -297,7 +305,10 @@ impl Reaction for PlatformReaction {
 
             // Update status to Stopped
             *status.write().await = ComponentStatus::Stopped;
-            log::info!("Platform Reaction '{}' processing task stopped", reaction_id);
+            log::info!(
+                "Platform Reaction '{}' processing task stopped",
+                reaction_id
+            );
         });
 
         Ok(())
@@ -394,7 +405,9 @@ mod tests {
         let result = PlatformReaction::new(config, event_tx);
         assert!(result.is_err());
         if let Err(e) = result {
-            assert!(e.to_string().contains("Missing required property: redis_url"));
+            assert!(e
+                .to_string()
+                .contains("Missing required property: redis_url"));
         }
     }
 
@@ -439,5 +452,135 @@ mod tests {
 
         let reaction = PlatformReaction::new(config, event_tx).unwrap();
         assert_eq!(reaction.status().await, ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_profiling_metadata_end_to_end() {
+        use crate::channels::QueryResult;
+        use crate::profiling::ProfilingMetadata;
+
+        // Create profiling metadata with all fields populated
+        let profiling = ProfilingMetadata {
+            source_ns: Some(1744055144490466971),
+            source_receive_ns: Some(1744055159124143047),
+            source_send_ns: Some(1744055173551481387),
+            query_receive_ns: Some(1744055178510629042),
+            query_core_call_ns: Some(1744055178510650750),
+            query_core_return_ns: Some(1744055178510848750),
+            query_send_ns: Some(1744055178510900000),
+            reaction_receive_ns: Some(1744055178510950000),
+            reaction_complete_ns: None, // Not included in output
+        };
+
+        // Create QueryResult with profiling data
+        let query_result = QueryResult {
+            query_id: "test-query".to_string(),
+            timestamp: chrono::DateTime::from_timestamp_millis(1744055173551).unwrap(),
+            results: vec![
+                json!({"type": "add", "data": {"id": "1", "value": "test"}}),
+                json!({"type": "delete", "data": {"id": "2"}}),
+            ],
+            metadata: HashMap::new(),
+            profiling: Some(profiling),
+        };
+
+        // Transform through the transformer
+        let result_event =
+            transformer::transform_query_result(query_result.clone(), 24851, 24851).unwrap();
+
+        // Create CloudEvent config
+        let cloud_event_config = CloudEventConfig {
+            pubsub_name: "test-pubsub".to_string(),
+            source: "test-source".to_string(),
+        };
+
+        // Wrap in CloudEvent
+        let cloud_event =
+            CloudEvent::new(result_event, &query_result.query_id, &cloud_event_config);
+
+        // Serialize to JSON
+        let json_str = serde_json::to_string(&cloud_event).unwrap();
+
+        // Deserialize and validate structure
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        // Validate CloudEvent structure
+        assert_eq!(parsed["source"], "test-source");
+        assert_eq!(parsed["topic"], "test-query-results");
+        assert_eq!(parsed["type"], "com.dapr.event.sent");
+
+        // Validate data structure (camelCase field names)
+        let data = &parsed["data"];
+        assert_eq!(data["kind"], "change");
+        assert_eq!(data["queryId"], "test-query");
+        assert_eq!(data["sequence"], 24851);
+        assert_eq!(data["addedResults"].as_array().unwrap().len(), 1);
+        assert_eq!(data["deletedResults"].as_array().unwrap().len(), 1);
+
+        // Validate tracking metadata structure
+        assert!(data["metadata"].is_object());
+        let metadata = &data["metadata"];
+        assert!(metadata["tracking"].is_object());
+
+        let tracking = &metadata["tracking"];
+
+        // Validate source tracking metadata
+        assert!(tracking["source"].is_object());
+        let source = &tracking["source"];
+        assert_eq!(source["seq"], 24851);
+        assert_eq!(source["source_ns"], 1744055144490466971u64);
+        assert_eq!(source["changeDispatcherEnd_ns"], 1744055173551481387u64);
+        assert_eq!(source["changeDispatcherStart_ns"], 1744055173551481387u64);
+        assert_eq!(source["changeRouterEnd_ns"], 1744055173551481387u64);
+        assert_eq!(source["changeRouterStart_ns"], 1744055159124143047u64);
+        assert_eq!(source["reactivatorEnd_ns"], 1744055144490466971u64);
+        assert_eq!(source["reactivatorStart_ns"], 1744055144490466971u64);
+
+        // Validate query tracking metadata
+        assert!(tracking["query"].is_object());
+        let query = &tracking["query"];
+        assert_eq!(query["enqueue_ns"], 1744055173551481387u64);
+        assert_eq!(query["dequeue_ns"], 1744055178510629042u64);
+        assert_eq!(query["queryStart_ns"], 1744055178510650750u64);
+        assert_eq!(query["queryEnd_ns"], 1744055178510848750u64);
+    }
+
+    #[tokio::test]
+    async fn test_profiling_metadata_without_profiling_data() {
+        use crate::channels::QueryResult;
+
+        // Create QueryResult WITHOUT profiling data
+        let query_result = QueryResult {
+            query_id: "test-query".to_string(),
+            timestamp: chrono::DateTime::from_timestamp_millis(1744055173551).unwrap(),
+            results: vec![json!({"type": "add", "data": {"id": "1"}})],
+            metadata: HashMap::new(),
+            profiling: None, // No profiling data
+        };
+
+        // Transform through the transformer
+        let result_event = transformer::transform_query_result(query_result.clone(), 1, 1).unwrap();
+
+        // Create CloudEvent config
+        let cloud_event_config = CloudEventConfig {
+            pubsub_name: "test-pubsub".to_string(),
+            source: "test-source".to_string(),
+        };
+
+        // Wrap in CloudEvent
+        let cloud_event =
+            CloudEvent::new(result_event, &query_result.query_id, &cloud_event_config);
+
+        // Serialize to JSON
+        let json_str = serde_json::to_string(&cloud_event).unwrap();
+
+        // Deserialize and validate structure
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        // Validate data structure
+        let data = &parsed["data"];
+
+        // Metadata should be None when there's no profiling data and no other metadata
+        assert!(data["metadata"].is_null() || !data.get("metadata").is_some());
     }
 }

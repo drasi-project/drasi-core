@@ -45,8 +45,7 @@ pub struct RedisStreamPublisher {
 impl RedisStreamPublisher {
     /// Create a new Redis Stream Publisher
     pub fn new(redis_url: &str, config: PublisherConfig) -> Result<Self> {
-        let client = Client::open(redis_url)
-            .context("Failed to create Redis client")?;
+        let client = Client::open(redis_url).context("Failed to create Redis client")?;
 
         Ok(Self { client, config })
     }
@@ -90,8 +89,7 @@ impl RedisStreamPublisher {
         let mut conn = self.get_connection().await?;
 
         // Serialize the CloudEvent to JSON
-        let json_data =
-            serde_json::to_string(&event).context("Failed to serialize CloudEvent")?;
+        let json_data = serde_json::to_string(&event).context("Failed to serialize CloudEvent")?;
 
         // Use the topic from the CloudEvent as the stream key
         let stream_key = &event.topic;
@@ -99,9 +97,14 @@ impl RedisStreamPublisher {
         // Publish to Redis Stream using XADD
         let message_id: String = if let Some(max_len) = self.config.max_stream_length {
             // Use MAXLEN with approximate trimming (~)
-            conn.xadd_maxlen(stream_key, redis::streams::StreamMaxlen::Approx(max_len), "*", &[("data", json_data.as_str())])
-                .await
-                .context("Failed to publish message to Redis Stream with MAXLEN")?
+            conn.xadd_maxlen(
+                stream_key,
+                redis::streams::StreamMaxlen::Approx(max_len),
+                "*",
+                &[("data", json_data.as_str())],
+            )
+            .await
+            .context("Failed to publish message to Redis Stream with MAXLEN")?
         } else {
             // No length limit
             conn.xadd(stream_key, "*", &[("data", json_data.as_str())])
