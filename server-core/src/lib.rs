@@ -49,6 +49,10 @@ pub mod utils;
 // Config module needs to be public for config file loading
 pub mod config;
 
+// Profiling module for performance monitoring
+#[cfg_attr(not(test), doc(hidden))]
+pub mod profiling;
+
 #[cfg(test)]
 mod test_support;
 

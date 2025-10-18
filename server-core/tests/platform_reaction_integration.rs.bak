@@ -241,7 +241,7 @@ async fn test_publish_update_results() -> Result<()> {
     if let ResultEvent::Change(change_event) = cloud_event.data {
         assert_eq!(change_event.updated_results.len(), 1);
         assert_eq!(change_event.updated_results[0].before.as_ref().unwrap()["value"], 10);
-        assert_eq!(change_event.updated_results[0].after.as_ref().unwrap()["value"], 20);
+        assert_eq!(change_event.updated_results[0].after["value"], 20);
     } else {
         panic!("Expected Change event");
     }
@@ -380,7 +380,6 @@ async fn test_metadata_preservation() -> Result<()> {
         timestamp: chrono::Utc::now(),
         results: vec![json!({"type": "add", "data": {"id": "1"}})],
         metadata,
-        profiling: None,
     };
     result_tx.send(query_result).await?;
 
@@ -768,7 +767,6 @@ async fn test_empty_metadata_filtered() -> Result<()> {
         timestamp: chrono::Utc::now(),
         results: vec![json!({"type": "add", "data": {"id": "1"}})],
         metadata: HashMap::new(), // Empty metadata
-        profiling: None,
     };
     result_tx.send(query_result).await?;
 

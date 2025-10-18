@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::profiling::ProfilingMetadata;
 use drasi_core::models::SourceChange;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -76,6 +77,35 @@ pub struct SourceEventWrapper {
     pub source_id: String,
     pub event: SourceEvent,
     pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// Optional profiling metadata for performance tracking
+    pub profiling: Option<ProfilingMetadata>,
+}
+
+impl SourceEventWrapper {
+    /// Create a new SourceEventWrapper without profiling
+    pub fn new(source_id: String, event: SourceEvent, timestamp: chrono::DateTime<chrono::Utc>) -> Self {
+        Self {
+            source_id,
+            event,
+            timestamp,
+            profiling: None,
+        }
+    }
+
+    /// Create a new SourceEventWrapper with profiling metadata
+    pub fn with_profiling(
+        source_id: String,
+        event: SourceEvent,
+        timestamp: chrono::DateTime<chrono::Utc>,
+        profiling: ProfilingMetadata,
+    ) -> Self {
+        Self {
+            source_id,
+            event,
+            timestamp,
+            profiling: Some(profiling),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +114,44 @@ pub struct QueryResult {
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub results: Vec<serde_json::Value>,
     pub metadata: HashMap<String, serde_json::Value>,
+    /// Optional profiling metadata for performance tracking
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profiling: Option<ProfilingMetadata>,
+}
+
+impl QueryResult {
+    /// Create a new QueryResult without profiling
+    pub fn new(
+        query_id: String,
+        timestamp: chrono::DateTime<chrono::Utc>,
+        results: Vec<serde_json::Value>,
+        metadata: HashMap<String, serde_json::Value>,
+    ) -> Self {
+        Self {
+            query_id,
+            timestamp,
+            results,
+            metadata,
+            profiling: None,
+        }
+    }
+
+    /// Create a new QueryResult with profiling metadata
+    pub fn with_profiling(
+        query_id: String,
+        timestamp: chrono::DateTime<chrono::Utc>,
+        results: Vec<serde_json::Value>,
+        metadata: HashMap<String, serde_json::Value>,
+        profiling: ProfilingMetadata,
+    ) -> Self {
+        Self {
+            query_id,
+            timestamp,
+            results,
+            metadata,
+            profiling: Some(profiling),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

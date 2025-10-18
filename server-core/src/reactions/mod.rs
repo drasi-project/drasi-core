@@ -20,6 +20,7 @@ pub mod http_adaptive;
 pub mod log;
 pub mod manager;
 pub mod platform;
+pub mod profiler;
 pub mod sse;
 
 #[cfg(test)]
@@ -33,4 +34,5 @@ pub use http_adaptive::AdaptiveHttpReaction;
 pub use log::LogReaction;
 pub use manager::*;
 pub use platform::PlatformReaction;
+pub use profiler::ProfilerReaction;
 pub use sse::SseReaction;

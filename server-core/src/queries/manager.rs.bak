@@ -355,25 +355,12 @@ impl Query for DrasiQuery {
                     query_id, source_event_wrapper.source_id
                 );
 
-                // Extract profiling metadata from source event or create new
-                let mut profiling = source_event_wrapper
-                    .profiling
-                    .unwrap_or_else(|| crate::profiling::ProfilingMetadata::new());
-
-                // Capture query_receive_ns timestamp
-                profiling.query_receive_ns = Some(crate::profiling::timestamp_ns());
-
                 // Process the change through the actual Drasi continuous query
-                // Capture query_core_call_ns before calling drasi-core
-                profiling.query_core_call_ns = Some(crate::profiling::timestamp_ns());
-
                 match continuous_query
                     .process_source_change(source_change)
                     .await
                 {
                     Ok(results) => {
-                        // Capture query_core_return_ns after drasi-core returns
-                        profiling.query_core_return_ns = Some(crate::profiling::timestamp_ns());
                         if !results.is_empty() {
                             debug!(
                                 "Query '{}' received {} results from drasi-core",
@@ -476,17 +463,15 @@ impl Query for DrasiQuery {
                             }
                             drop(result_set);
 
-                            // Capture query_send_ns before sending to reactions
-                            profiling.query_send_ns = Some(crate::profiling::timestamp_ns());
-
-                            let query_result = QueryResult::with_profiling(
-                                query_id.clone(),
-                                chrono::Utc::now(),
-                                converted_results,
-                                {
+                            let query_result = QueryResult {
+                                query_id: query_id.clone(),
+                                timestamp: chrono::Utc::now(),
+                                results: converted_results,
+                                metadata: {
                                     let mut meta = HashMap::new();
                                     meta.insert(
                                         "source_id".to_string(),
+            profiling: None,,
                                         serde_json::Value::String(source_event_wrapper.source_id.clone()),
                                     );
                                     meta.insert(
@@ -503,8 +488,7 @@ impl Query for DrasiQuery {
                                     );
                                     meta
                                 },
-                                profiling,
-                            );
+                            };
 
                             debug!(
                                 "Query '{}' sending {} results to reactions",

@@ -237,16 +237,12 @@ impl ApplicationSource {
                     bootstrap_data.write().await.push(change.clone());
                 }
 
-                // Create profiling metadata with timestamps
-                let mut profiling = crate::profiling::ProfilingMetadata::new();
-                profiling.source_send_ns = Some(crate::profiling::timestamp_ns());
-
-                let wrapper = SourceEventWrapper::with_profiling(
-                    source_name.clone(),
-                    SourceEvent::Change(change),
-                    chrono::Utc::now(),
-                    profiling,
-                );
+                let wrapper = SourceEventWrapper {
+                    source_id: source_name.clone(),
+                    event: SourceEvent::Change(change),
+                    timestamp: chrono::Utc::now(),
+            profiling: None,,
+                };
 
                 if let Err(e) = source_event_tx.send(wrapper).await {
                     error!("Failed to send change event: {}", e);

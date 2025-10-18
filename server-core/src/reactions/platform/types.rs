@@ -99,7 +99,7 @@ use drasi_core::{ evaluation::context::{QueryPartEvaluationContext, QueryVariabl
 //     Deleted,
 // }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "kind")]
 pub enum ControlSignal {
     #[serde(rename = "bootstrapStarted")]
@@ -120,7 +120,7 @@ pub enum ControlSignal {
 
 /// Represents an outgoing result event
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "kind")]
 pub enum ResultEvent {
     #[serde(rename = "change")]
@@ -130,7 +130,7 @@ pub enum ResultEvent {
     Control(ResultControlEvent),
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ResultChangeEvent {
     pub query_id: String,
@@ -143,7 +143,7 @@ pub struct ResultChangeEvent {
     pub metadata: Option<Map<String, Value>>,
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ResultControlEvent {
     pub query_id: String,
@@ -154,7 +154,7 @@ pub struct ResultControlEvent {
     pub control_signal: ControlSignal,
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdatePayload {
     #[serde(skip_serializing_if = "Option::is_none")]

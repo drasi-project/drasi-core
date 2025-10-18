@@ -138,7 +138,12 @@ impl Reaction for LogReaction {
                 _ => info!("[{}] {}", config_name, message),
             };
 
-            while let Some(query_result) = result_rx.recv().await {
+            while let Some(mut query_result) = result_rx.recv().await {
+                // Capture reaction_receive_ns timestamp
+                if let Some(ref mut profiling) = query_result.profiling {
+                    profiling.reaction_receive_ns = Some(crate::profiling::timestamp_ns());
+                }
+
                 if query_result.results.is_empty() {
                     debug!("[{}] Received empty result set from query", reaction_name);
                     continue;
@@ -178,6 +183,22 @@ impl Reaction for LogReaction {
                                 log_fn(&format!("[{}] {}", result_type.to_uppercase(), result));
                             }
                         }
+                    }
+                }
+
+                // Capture reaction_complete_ns timestamp
+                if let Some(ref mut profiling) = query_result.profiling {
+                    profiling.reaction_complete_ns = Some(crate::profiling::timestamp_ns());
+
+                    // Log profiling summary if available
+                    if let (Some(source_send), Some(reaction_complete)) =
+                        (profiling.source_send_ns, profiling.reaction_complete_ns) {
+                        let total_latency_ns = reaction_complete - source_send;
+                        debug!(
+                            "[{}] End-to-end latency: {:.2}ms",
+                            reaction_name,
+                            total_latency_ns as f64 / 1_000_000.0
+                        );
                     }
                 }
             }

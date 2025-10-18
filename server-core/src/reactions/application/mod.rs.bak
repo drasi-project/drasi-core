@@ -302,7 +302,7 @@ mod tests {
             query_id: query_id.to_string(),
             results: vec![],
             metadata: HashMap::new(),
-            profiling: None,
+            profiling: None,,
             timestamp: chrono::Utc::now(),
         }
     }

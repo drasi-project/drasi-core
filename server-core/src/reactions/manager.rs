@@ -26,7 +26,7 @@ use crate::utils::*;
 
 use super::{
     AdaptiveGrpcReaction, AdaptiveHttpReaction, ApplicationReaction, ApplicationReactionHandle,
-    GrpcReaction, HttpReaction, LogReaction, PlatformReaction, SseReaction,
+    GrpcReaction, HttpReaction, LogReaction, PlatformReaction, ProfilerReaction, SseReaction,
 };
 
 #[async_trait]
@@ -208,6 +208,7 @@ impl ReactionManager {
                 self.event_tx.clone(),
             )),
             "platform" => Arc::new(PlatformReaction::new(config.clone(), self.event_tx.clone())?),
+            "profiler" => Arc::new(ProfilerReaction::new(config.clone(), self.event_tx.clone())),
             "application" => {
                 let (app_reaction, handle) =
                     ApplicationReaction::new(config.clone(), self.event_tx.clone());

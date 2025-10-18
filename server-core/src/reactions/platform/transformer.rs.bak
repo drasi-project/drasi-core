@@ -154,6 +154,7 @@ mod tests {
             ],
             metadata: HashMap::new(),
             profiling: None,
+            profiling: None,
         };
 
         let result = transform_query_result(query_result, 1).unwrap();
@@ -186,6 +187,7 @@ mod tests {
             })],
             metadata: HashMap::new(),
             profiling: None,
+            profiling: None,
         };
 
         let result = transform_query_result(query_result, 2).unwrap();
@@ -214,6 +216,7 @@ mod tests {
             })],
             metadata: HashMap::new(),
             profiling: None,
+            profiling: None,
         };
 
         let result = transform_query_result(query_result, 2).unwrap();
@@ -240,6 +243,7 @@ mod tests {
                 "data": {"id": "1"}
             })],
             metadata: HashMap::new(),
+            profiling: None,
             profiling: None,
         };
 
@@ -270,6 +274,7 @@ mod tests {
             ],
             metadata: HashMap::new(),
             profiling: None,
+            profiling: None,
         };
 
         let result = transform_query_result(query_result, 4).unwrap();
@@ -296,7 +301,6 @@ mod tests {
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![json!({"type": "add", "data": {"id": "1"}})],
             metadata,
-            profiling: None,
         };
 
         let result = transform_query_result(query_result, 5).unwrap();
@@ -322,6 +326,7 @@ mod tests {
             results: vec![json!({"data": {"id": "1"}})], // Missing "type" field
             metadata: HashMap::new(),
             profiling: None,
+            profiling: None,
         };
 
         let result = transform_query_result(query_result, 1);
@@ -339,6 +344,7 @@ mod tests {
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![json!({"type": "add"})], // Missing "data" field
             metadata: HashMap::new(),
+            profiling: None,
             profiling: None,
         };
 
@@ -360,6 +366,7 @@ mod tests {
                 "after": {"id": "1", "value": 20}
             })],
             metadata: HashMap::new(),
+            profiling: None,
             profiling: None,
         };
 
@@ -383,6 +390,7 @@ mod tests {
             ],
             metadata: HashMap::new(),
             profiling: None,
+            profiling: None,
         };
 
         let result = transform_query_result(query_result, 1).unwrap();
@@ -404,7 +412,6 @@ mod tests {
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![json!({"type": "add", "data": {"id": "1"}})],
             metadata: HashMap::new(), // Empty metadata
-            profiling: None,
         };
 
         let result = transform_query_result(query_result, 1).unwrap();

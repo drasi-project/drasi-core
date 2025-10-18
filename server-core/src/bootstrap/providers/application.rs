@@ -125,11 +125,11 @@ impl BootstrapProvider for ApplicationBootstrapProvider {
         for change in bootstrap_data.iter() {
             // Filter by requested labels
             if self.matches_labels(change, &request) {
-                let wrapper = SourceEventWrapper {
-                    source_id: context.source_id.clone(),
-                    event: SourceEvent::Change(change.clone()),
-                    timestamp: chrono::Utc::now(),
-                };
+                let wrapper = SourceEventWrapper::new(
+                    context.source_id.clone(),
+                    SourceEvent::Change(change.clone()),
+                    chrono::Utc::now(),
+                );
 
                 if let Err(e) = context.source_event_tx.send(wrapper).await {
                     error!("Failed to send bootstrap event: {}", e);

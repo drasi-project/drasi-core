@@ -146,7 +146,7 @@ mod tests {
             source_id: "test-source".to_string(),
             event: SourceEvent::Change(change),
             timestamp: chrono::Utc::now(),
-            profiling: None,
+            profiling: None,,
         };
 
         assert_eq!(wrapper.source_id, "test-source");
@@ -161,7 +161,7 @@ mod tests {
             query_id: "query-1".to_string(),
             results: vec![],
             metadata: HashMap::new(),
-            profiling: None,
+            profiling: None,,
             timestamp: chrono::Utc::now(),
         };
 
@@ -180,7 +180,7 @@ mod tests {
             query_id: "query-1".to_string(),
             results: vec![],
             metadata: metadata.clone(),
-            profiling: None,
+            profiling: None,,
             timestamp: chrono::Utc::now(),
         };
 
@@ -310,7 +310,7 @@ mod tests {
             query_id: "query-1".to_string(),
             results: vec![],
             metadata: HashMap::new(),
-            profiling: None,
+            profiling: None,,
             timestamp: chrono::Utc::now(),
         };
 

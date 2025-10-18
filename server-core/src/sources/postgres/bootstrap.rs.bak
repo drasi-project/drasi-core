@@ -12,157 +12,61 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! PostgreSQL bootstrap provider for reading initial data from PostgreSQL databases
-
 use anyhow::{anyhow, Result};
-use async_trait::async_trait;
+use log::{debug, error, info, warn};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tokio_postgres::{Client, NoTls, Row, Transaction};
+
+use crate::channels::{
+    BootstrapRequest, SourceChangeEvent, SourceEvent, SourceEventSender, SourceEventWrapper,
+};
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
-use log::{debug, error, info, warn};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio_postgres::{Client, NoTls, Row, Transaction};
 
-use crate::bootstrap::{BootstrapContext, BootstrapProvider};
-use crate::channels::{BootstrapRequest, SourceChangeEvent, SourceEvent, SourceEventWrapper};
+use super::PostgresReplicationConfig;
 
-/// Bootstrap provider for PostgreSQL sources
-pub struct PostgresBootstrapProvider;
-
-impl PostgresBootstrapProvider {
-    pub fn new() -> Self {
-        Self
-    }
+/// Handles bootstrap operations for PostgreSQL source
+pub struct BootstrapHandler {
+    config: PostgresReplicationConfig,
+    source_id: String,
+    source_event_tx: SourceEventSender,
+    /// Stores the LSN at bootstrap time for replication coordination
+    pub snapshot_lsn: Arc<RwLock<Option<String>>>,
+    /// Stores primary key information for each table
+    pub table_primary_keys: Arc<RwLock<HashMap<String, Vec<String>>>>,
 }
 
-#[async_trait]
-impl BootstrapProvider for PostgresBootstrapProvider {
-    async fn bootstrap(
-        &self,
-        request: BootstrapRequest,
-        context: &BootstrapContext,
-    ) -> Result<usize> {
+impl BootstrapHandler {
+    pub fn new(
+        config: PostgresReplicationConfig,
+        source_id: String,
+        source_event_tx: SourceEventSender,
+    ) -> Self {
+        Self {
+            config,
+            source_id,
+            source_event_tx,
+            snapshot_lsn: Arc::new(RwLock::new(None)),
+            table_primary_keys: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Execute bootstrap for the given request
+    pub async fn execute(&self, request: BootstrapRequest) -> Result<usize> {
         info!(
-            "Starting PostgreSQL bootstrap for query '{}' with {} node labels and {} relation labels",
+            "Starting bootstrap for query '{}' with {} node labels and {} relation labels",
             request.query_id,
             request.node_labels.len(),
             request.relation_labels.len()
         );
 
-        // Parse PostgreSQL configuration from source properties
-        let config = PostgresConfig::from_context(context)?;
-
-        // Create bootstrap handler
-        let mut handler = PostgresBootstrapHandler::new(config, context.source_id.clone());
-
-        // Store query_id before moving request
-        let query_id = request.query_id.clone();
-
-        // Execute bootstrap
-        let count = handler.execute(request, context).await?;
-
-        info!(
-            "Completed PostgreSQL bootstrap for query {}: sent {} records",
-            query_id, count
-        );
-
-        Ok(count)
-    }
-}
-
-/// PostgreSQL configuration extracted from source properties
-#[derive(Debug, Clone)]
-struct PostgresConfig {
-    pub host: String,
-    pub port: u16,
-    pub database: String,
-    pub user: String,
-    pub password: String,
-    #[allow(dead_code)]
-    pub tables: Vec<String>,
-    pub table_keys: Vec<TableKeyConfig>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TableKeyConfig {
-    pub table: String,
-    pub key_columns: Vec<String>,
-}
-
-impl PostgresConfig {
-    fn from_context(context: &BootstrapContext) -> Result<Self> {
-        let props = &context.source_config.properties;
-
-        Ok(PostgresConfig {
-            host: props
-                .get("host")
-                .and_then(|v| v.as_str())
-                .unwrap_or("localhost")
-                .to_string(),
-            port: props.get("port").and_then(|v| v.as_u64()).unwrap_or(5432) as u16,
-            database: props
-                .get("database")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("database property is required for PostgreSQL bootstrap"))?
-                .to_string(),
-            user: props
-                .get("user")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("user property is required for PostgreSQL bootstrap"))?
-                .to_string(),
-            password: props
-                .get("password")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("password property is required for PostgreSQL bootstrap"))?
-                .to_string(),
-            tables: props
-                .get("tables")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str())
-                        .map(|s| s.to_string())
-                        .collect()
-                })
-                .unwrap_or_default(),
-            table_keys: props
-                .get("table_keys")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .unwrap_or_default(),
-        })
-    }
-}
-
-/// Handles bootstrap operations for PostgreSQL source
-struct PostgresBootstrapHandler {
-    config: PostgresConfig,
-    source_id: String,
-    /// Stores primary key information for each table
-    table_primary_keys: HashMap<String, Vec<String>>,
-}
-
-impl PostgresBootstrapHandler {
-    fn new(config: PostgresConfig, source_id: String) -> Self {
-        Self {
-            config,
-            source_id,
-            table_primary_keys: HashMap::new(),
-        }
-    }
-
-    /// Execute bootstrap for the given request
-    async fn execute(
-        &mut self,
-        request: BootstrapRequest,
-        context: &BootstrapContext,
-    ) -> Result<usize> {
         info!(
             "Bootstrap: Connecting to PostgreSQL at {}:{}",
             self.config.host, self.config.port
         );
-
         // Connect to PostgreSQL
         let mut client = self.connect().await?;
 
@@ -173,6 +77,8 @@ impl PostgresBootstrapHandler {
         // Start snapshot transaction and capture LSN
         let (transaction, lsn) = self.create_snapshot(&mut client).await?;
 
+        // Store LSN for replication coordination
+        *self.snapshot_lsn.write().await = Some(lsn.clone());
         info!("Bootstrap snapshot created at LSN: {}", lsn);
 
         // Map labels to tables
@@ -187,7 +93,7 @@ impl PostgresBootstrapHandler {
         let mut total_count = 0;
         for (label, table_name) in tables {
             let count = self
-                .bootstrap_table(&transaction, &label, &table_name, context)
+                .bootstrap_table(&transaction, &label, &table_name)
                 .await?;
             info!(
                 "Bootstrapped {} rows from table '{}' with label '{}'",
@@ -293,8 +199,8 @@ impl PostgresBootstrapHandler {
         let row = transaction
             .query_one(
                 "SELECT EXISTS (
-                    SELECT 1 FROM information_schema.tables
-                    WHERE table_schema = 'public'
+                    SELECT 1 FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
                     AND table_name = $1
                 )",
                 &[&table_name],
@@ -310,7 +216,6 @@ impl PostgresBootstrapHandler {
         transaction: &Transaction<'_>,
         label: &str,
         table_name: &str,
-        context: &BootstrapContext,
     ) -> Result<usize> {
         debug!(
             "Starting bootstrap of table '{}' with label '{}'",
@@ -340,7 +245,7 @@ impl PostgresBootstrapHandler {
             });
 
             if batch.len() >= batch_size {
-                self.send_batch(&mut batch, context).await?;
+                self.send_batch(&mut batch).await?;
                 count += batch_size;
             }
         }
@@ -348,7 +253,7 @@ impl PostgresBootstrapHandler {
         // Send remaining batch
         if !batch.is_empty() {
             count += batch.len();
-            self.send_batch(&mut batch, context).await?;
+            self.send_batch(&mut batch).await?;
         }
 
         Ok(count)
@@ -362,8 +267,8 @@ impl PostgresBootstrapHandler {
     ) -> Result<Vec<ColumnInfo>> {
         let rows = transaction
             .query(
-                "SELECT column_name, data_type,
-                        CASE
+                "SELECT column_name, data_type, 
+                        CASE 
                             WHEN data_type = 'character varying' THEN 1043
                             WHEN data_type = 'integer' THEN 23
                             WHEN data_type = 'bigint' THEN 20
@@ -401,11 +306,20 @@ impl PostgresBootstrapHandler {
     }
 
     /// Query primary key information for all tables in the database.
-    async fn query_primary_keys(&mut self, client: &Client) -> Result<()> {
+    ///
+    /// This method:
+    /// 1. Queries PostgreSQL system catalogs (pg_constraint, pg_class, pg_attribute)
+    /// 2. Identifies primary key columns for each table
+    /// 3. Stores them in table_primary_keys HashMap for use during element ID generation
+    /// 4. Overlays user-configured key columns from table_keys config
+    ///
+    /// The primary key information is critical for generating stable element IDs
+    /// that remain consistent across INSERT, UPDATE, and DELETE operations.
+    async fn query_primary_keys(&self, client: &Client) -> Result<()> {
         info!("Querying primary key information from PostgreSQL system catalogs");
 
         let query = r#"
-            SELECT
+            SELECT 
                 n.nspname as schema_name,
                 c.relname as table_name,
                 a.attname as column_name
@@ -461,7 +375,7 @@ impl PostgresBootstrapHandler {
         }
 
         // Store the primary keys
-        self.table_primary_keys = primary_keys.clone();
+        *self.table_primary_keys.write().await = primary_keys.clone();
 
         info!("Found primary keys for {} tables", primary_keys.len());
         for (table, keys) in &primary_keys {
@@ -482,7 +396,8 @@ impl PostgresBootstrapHandler {
         let mut properties = ElementPropertyMap::new();
 
         // Get primary key columns for this table
-        let pk_columns = self.table_primary_keys.get(table_name);
+        let primary_keys = self.table_primary_keys.read().await;
+        let pk_columns = primary_keys.get(table_name);
 
         // Collect values for element ID generation
         let mut pk_values = Vec::new();
@@ -619,20 +534,15 @@ impl PostgresBootstrapHandler {
     }
 
     /// Send a batch of changes through the channel
-    async fn send_batch(
-        &self,
-        batch: &mut Vec<SourceChangeEvent>,
-        context: &BootstrapContext,
-    ) -> Result<()> {
+    async fn send_batch(&self, batch: &mut Vec<SourceChangeEvent>) -> Result<()> {
         for event in batch.drain(..) {
             let wrapper = SourceEventWrapper {
                 source_id: event.source_id,
                 event: SourceEvent::Change(event.change),
                 timestamp: event.timestamp,
-                profiling: None,
+            profiling: None,,
             };
-            context
-                .source_event_tx
+            self.source_event_tx
                 .send(wrapper)
                 .await
                 .map_err(|e| anyhow!("Failed to send bootstrap event: {}", e))?;

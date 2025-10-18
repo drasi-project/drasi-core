@@ -391,16 +391,12 @@ impl PlatformSource {
                                                             Ok(control_events) => {
                                                                 // Publish control events
                                                                 for control_event in control_events {
-                                                                    // Create profiling metadata with timestamps
-                                                                    let mut profiling = crate::profiling::ProfilingMetadata::new();
-                                                                    profiling.source_send_ns = Some(crate::profiling::timestamp_ns());
-
-                                                                    let wrapper = SourceEventWrapper::with_profiling(
-                                                                        source_id.clone(),
-                                                                        SourceEvent::Control(control_event),
-                                                                        chrono::Utc::now(),
-                                                                        profiling,
-                                                                    );
+                                                                    let wrapper = SourceEventWrapper {
+                                                                        source_id: source_id.clone(),
+                                                                        event: SourceEvent::Control(control_event),
+                                                                        timestamp: chrono::Utc::now(),
+            profiling: None,,
+                                                                    };
                                                                     if let Err(e) = source_event_tx.send(wrapper).await {
                                                                         error!(
                                                                             "Failed to publish control event: {}",
@@ -431,16 +427,12 @@ impl PlatformSource {
                                                             Ok(source_changes) => {
                                                                 // Publish source changes
                                                                 for source_change in source_changes {
-                                                                    // Create profiling metadata with timestamps
-                                                                    let mut profiling = crate::profiling::ProfilingMetadata::new();
-                                                                    profiling.source_send_ns = Some(crate::profiling::timestamp_ns());
-
-                                                                    let wrapper = SourceEventWrapper::with_profiling(
-                                                                        source_id.clone(),
-                                                                        SourceEvent::Change(source_change),
-                                                                        chrono::Utc::now(),
-                                                                        profiling,
-                                                                    );
+                                                                    let wrapper = SourceEventWrapper {
+                                                                        source_id: source_id.clone(),
+                                                                        event: SourceEvent::Change(source_change),
+                                                                        timestamp: chrono::Utc::now(),
+            profiling: None,,
+                                                                    };
                                                                     if let Err(e) = source_event_tx.send(wrapper).await {
                                                                         error!(
                                                                             "Failed to publish source change: {}",

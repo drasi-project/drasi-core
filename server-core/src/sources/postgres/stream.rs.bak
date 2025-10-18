@@ -353,16 +353,12 @@ impl ReplicationStream {
                 if let Some(changes) = self.pending_transaction.take() {
                     // Send all changes in the transaction
                     for change in changes {
-                        // Create profiling metadata with timestamps
-                        let mut profiling = crate::profiling::ProfilingMetadata::new();
-                        profiling.source_send_ns = Some(crate::profiling::timestamp_ns());
-
-                        let wrapper = SourceEventWrapper::with_profiling(
-                            self.source_id.clone(),
-                            SourceEvent::Change(change),
-                            chrono::Utc::now(),
-                            profiling,
-                        );
+                        let wrapper = SourceEventWrapper {
+                            source_id: self.source_id.clone(),
+                            event: SourceEvent::Change(change),
+                            timestamp: chrono::Utc::now(),
+            profiling: None,,
+                        };
                         self.source_event_tx.send(wrapper).await?;
                     }
                     debug!(
@@ -393,15 +389,12 @@ impl ReplicationStream {
                         tx.push(change);
                     } else {
                         // No transaction context, send immediately
-                        let mut profiling = crate::profiling::ProfilingMetadata::new();
-                        profiling.source_send_ns = Some(crate::profiling::timestamp_ns());
-
-                        let wrapper = SourceEventWrapper::with_profiling(
-                            self.source_id.clone(),
-                            SourceEvent::Change(change),
-                            chrono::Utc::now(),
-                            profiling,
-                        );
+                        let wrapper = SourceEventWrapper {
+                            source_id: self.source_id.clone(),
+                            event: SourceEvent::Change(change),
+                            timestamp: chrono::Utc::now(),
+            profiling: None,,
+                        };
                         self.source_event_tx.send(wrapper).await?;
                     }
                 }
@@ -418,15 +411,12 @@ impl ReplicationStream {
                     if let Some(tx) = &mut self.pending_transaction {
                         tx.push(change);
                     } else {
-                        let mut profiling = crate::profiling::ProfilingMetadata::new();
-                        profiling.source_send_ns = Some(crate::profiling::timestamp_ns());
-
-                        let wrapper = SourceEventWrapper::with_profiling(
-                            self.source_id.clone(),
-                            SourceEvent::Change(change),
-                            chrono::Utc::now(),
-                            profiling,
-                        );
+                        let wrapper = SourceEventWrapper {
+                            source_id: self.source_id.clone(),
+                            event: SourceEvent::Change(change),
+                            timestamp: chrono::Utc::now(),
+            profiling: None,,
+                        };
                         self.source_event_tx.send(wrapper).await?;
                     }
                 }
@@ -439,15 +429,12 @@ impl ReplicationStream {
                     if let Some(tx) = &mut self.pending_transaction {
                         tx.push(change);
                     } else {
-                        let mut profiling = crate::profiling::ProfilingMetadata::new();
-                        profiling.source_send_ns = Some(crate::profiling::timestamp_ns());
-
-                        let wrapper = SourceEventWrapper::with_profiling(
-                            self.source_id.clone(),
-                            SourceEvent::Change(change),
-                            chrono::Utc::now(),
-                            profiling,
-                        );
+                        let wrapper = SourceEventWrapper {
+                            source_id: self.source_id.clone(),
+                            event: SourceEvent::Change(change),
+                            timestamp: chrono::Utc::now(),
+            profiling: None,,
+                        };
                         self.source_event_tx.send(wrapper).await?;
                     }
                 }

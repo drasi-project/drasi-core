@@ -1320,6 +1320,186 @@ RETURN max(n.value) as max_value, min(n.value) as min_value, avg(n.value) as avg
 3. **Sort in application** - Maintain sorted collections client-side
 4. **Use relationships** - Express ranking as graph structure
 
+## Performance Profiling
+
+DrasiServerCore includes built-in profiling capabilities to track end-to-end latency through the Source → Query → Reaction pipeline. Profiling captures nanosecond-precision timestamps at 9 key points throughout data processing, enabling you to identify bottlenecks and optimize performance.
+
+### Why Profiling Matters
+
+In change-driven architectures, understanding latency is critical:
+- **Detect Bottlenecks**: Identify which component (source, query, or reaction) is causing delays
+- **Monitor Performance**: Track latency distributions over time (p50, p95, p99)
+- **Optimize Resources**: Make data-driven decisions about scaling and tuning
+- **Alert on Degradation**: Set SLOs based on measured latency
+
+### Quick Start
+
+Enable profiling for any source by configuring it with profiling enabled:
+
+```rust
+use drasi_server_core::{DrasiServerCore, Source, Query, Reaction, Properties};
+use serde_json::json;
+
+let core = DrasiServerCore::builder()
+    .add_source(
+        Source::mock("profiled-source")
+            .with_properties(
+                Properties::new()
+                    .with_bool("enable_profiling", true)  // Enable profiling
+            )
+            .build()
+    )
+    .add_query(
+        Query::cypher("my-query")
+            .query("MATCH (n:Node) RETURN n")
+            .from_source("profiled-source")
+            .build()
+    )
+    .add_reaction(
+        Reaction::profiler("profiler")  // Automatic statistics collection
+            .subscribe_to("my-query")
+            .with_properties(
+                Properties::new()
+                    .with_int("window_size", 1000)        // Keep last 1000 samples
+                    .with_int("log_interval_seconds", 30) // Log stats every 30s
+            )
+            .build()
+    )
+    .build()
+    .await?;
+
+core.start().await?;
+```
+
+The ProfilerReaction will automatically log detailed statistics:
+
+```
+Profiling Statistics (1000 samples, window: 1000):
+
+Source → Query Latency:
+  count: 1000, mean: 245.3 μs, std dev: 78.2 μs
+  min: 120.5 μs, max: 892.1 μs
+  p50: 235.0 μs, p95: 387.5 μs, p99: 524.8 μs
+
+Query → Reaction Latency:
+  count: 1000, mean: 156.8 μs, std dev: 42.1 μs
+  min: 95.3 μs, max: 445.2 μs
+  p50: 148.5 μs, p95: 225.7 μs, p99: 312.4 μs
+
+Query Core Processing Time:
+  count: 1000, mean: 1.2 ms, std dev: 0.4 ms
+  min: 0.5 ms, max: 3.8 ms
+  p50: 1.1 ms, p95: 1.9 ms, p99: 2.4 ms
+```
+
+### Profiling Timestamps
+
+Profiling captures 9 timestamps through the pipeline:
+
+```
+Source Component:
+  1. source_ns           - When source receives/generates data
+  2. source_receive_ns   - When source receives external event (HTTP/gRPC/etc.)
+  3. source_send_ns      - When source sends to query
+
+Query Component:
+  4. query_receive_ns    - When query receives from source
+  5. query_core_call_ns  - Before query core evaluation
+  6. query_core_return_ns - After query core evaluation
+  7. query_send_ns       - When query sends to reaction
+
+Reaction Component:
+  8. reaction_receive_ns  - When reaction receives query result
+  9. reaction_complete_ns - When reaction finishes processing
+```
+
+### Latency Metrics
+
+ProfilerReaction automatically calculates 5 key latencies:
+
+1. **Source → Query**: Network and channel latency between source and query
+2. **Query → Reaction**: Network and channel latency between query and reaction
+3. **Query Core Time**: Time spent in continuous query evaluation
+4. **Reaction Time**: Time spent in reaction processing
+5. **Total End-to-End**: Complete latency from source to reaction completion
+
+### Manual Profiling
+
+For custom profiling scenarios, use the profiling API directly:
+
+```rust
+use drasi_server_core::profiling::{ProfilingMetadata, timestamp_ns};
+
+// Create profiling metadata
+let mut profiling = ProfilingMetadata::new();
+profiling.source_send_ns = Some(timestamp_ns());
+
+// Pass through SourceEventWrapper
+let event = SourceEventWrapper::with_profiling(
+    "my-source".to_string(),
+    SourceEvent::Change(change),
+    chrono::Utc::now(),
+    profiling,
+);
+
+// Profiling automatically flows through QueryResult
+// and can be accessed in reactions
+```
+
+### Configuration Options
+
+**ProfilerReaction Properties:**
+
+```rust
+Properties::new()
+    .with_int("window_size", 1000)        // Sample window for percentiles (default: 1000)
+    .with_int("log_interval_seconds", 30) // Statistics logging frequency (default: 30)
+```
+
+**Source Profiling:**
+
+Most sources support profiling via properties:
+
+```yaml
+sources:
+  - id: my-postgres-source
+    source_type: postgres
+    properties:
+      enable_profiling: true  # Enable profiling
+      host: localhost
+      # ... other properties
+```
+
+Supported sources: PostgreSQL, HTTP, gRPC, Platform, Application, Mock
+
+### Examples
+
+See complete profiling examples:
+
+```bash
+# Basic profiling usage
+cargo run --example profiling_basic
+
+# ProfilerReaction with statistics
+cargo run --example profiling_with_profiler_reaction
+```
+
+### Best Practices
+
+1. **Enable Selectively**: Profiling adds ~100ns overhead per event - enable only when needed
+2. **Choose Window Size**: Larger windows (1000-10000) provide stable percentiles; smaller windows (100-500) show recent trends
+3. **Monitor p99**: The 99th percentile reveals tail latency issues
+4. **Compare Metrics**: If "Query Core Time" is high, optimize your Cypher query; if "Reaction Time" is high, optimize reaction processing
+
+### Statistical Methods
+
+ProfilerReaction uses efficient algorithms for accurate statistics:
+- **Welford's Algorithm**: Online variance calculation without storing all samples
+- **Sliding Window**: VecDeque maintains recent samples for percentile calculation
+- **Nanosecond Precision**: Timestamps use `std::time::Instant` for accurate measurements
+
+For comprehensive profiling documentation, see [PROFILING.md](PROFILING.md).
+
 ## Building from Source
 
 ### Prerequisites

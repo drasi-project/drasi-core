@@ -270,16 +270,12 @@ impl AdaptiveHttpSource {
 
             // Send all events in the batch
             for event in batch {
-                // Create profiling metadata with timestamps
-                let mut profiling = crate::profiling::ProfilingMetadata::new();
-                profiling.source_send_ns = Some(crate::profiling::timestamp_ns());
-
-                let wrapper = SourceEventWrapper::with_profiling(
-                    event.source_id.clone(),
-                    SourceEvent::Change(event.change),
-                    event.timestamp,
-                    profiling,
-                );
+                let wrapper = SourceEventWrapper {
+                    source_id: event.source_id.clone(),
+                    event: SourceEvent::Change(event.change),
+                    timestamp: event.timestamp,
+            profiling: None,,
+                };
                 if let Err(e) = source_event_tx.send(wrapper).await {
                     error!("[{}] Failed to send batched event: {}", source_id, e);
                 }

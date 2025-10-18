@@ -283,7 +283,7 @@ impl BootstrapProvider for PlatformBootstrapProvider {
                 source_id: context.source_id.clone(),
                 event: SourceEvent::Change(source_change),
                 timestamp: Utc::now(),
-                profiling: None,
+            profiling: None,,
             };
 
             context

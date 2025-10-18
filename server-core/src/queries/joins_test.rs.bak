@@ -255,7 +255,6 @@ mod query_joins_tests {
                     element: restaurant1,
                 }),
                 timestamp: chrono::Utc::now(),
-                profiling: None,
             })
             .await
             .unwrap();
@@ -277,7 +276,6 @@ mod query_joins_tests {
                     element: order1.clone(),
                 }),
                 timestamp: chrono::Utc::now(),
-                profiling: None,
             })
             .await
             .unwrap();
@@ -303,7 +301,6 @@ mod query_joins_tests {
                     element: updated_order,
                 }),
                 timestamp: chrono::Utc::now(),
-                profiling: None,
             })
             .await
             .unwrap();
@@ -395,7 +392,6 @@ mod query_joins_tests {
                     element: restaurant,
                 }),
                 timestamp: chrono::Utc::now(),
-                profiling: None,
             })
             .await
             .unwrap();

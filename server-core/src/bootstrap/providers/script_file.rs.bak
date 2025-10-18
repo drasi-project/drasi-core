@@ -149,7 +149,7 @@ impl ScriptFileBootstrapProvider {
                             source_id: context.source_id.clone(),
                             event: SourceEvent::Change(source_change),
                             timestamp: chrono::Utc::now(),
-                            profiling: None,
+            profiling: None,,
                         };
 
                         context
@@ -179,7 +179,7 @@ impl ScriptFileBootstrapProvider {
                             source_id: context.source_id.clone(),
                             event: SourceEvent::Change(source_change),
                             timestamp: chrono::Utc::now(),
-            profiling: None,
+            profiling: None,,
                         };
 
                         context
