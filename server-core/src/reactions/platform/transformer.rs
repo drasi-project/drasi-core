@@ -30,7 +30,8 @@ use serde_json::{json, Map, Value};
 /// Field mappings (some fields use the same source value as placeholders):
 /// - changeDispatcherEnd_ns, changeDispatcherStart_ns, changeRouterEnd_ns ← source_send_ns
 /// - changeRouterStart_ns ← source_receive_ns
-/// - reactivatorEnd_ns, reactivatorStart_ns ← source_ns (temporary, will be updated later)
+/// - reactivatorEnd_ns ← reactivator_end_ns (with fallback to source_ns)
+/// - reactivatorStart_ns ← reactivator_start_ns (with fallback to source_ns)
 /// - seq ← sequence parameter
 /// - source_ns ← source_ns
 /// - enqueue_ns ← source_send_ns
@@ -53,9 +54,18 @@ fn build_tracking_metadata(profiling: &ProfilingMetadata, sequence: u64) -> Map<
     if let Some(source_receive_ns) = profiling.source_receive_ns {
         source.insert("changeRouterStart_ns".to_string(), json!(source_receive_ns));
     }
-    if let Some(source_ns) = profiling.source_ns {
+    // Use actual reactivator timestamps if available, fall back to source_ns
+    if let Some(reactivator_end_ns) = profiling.reactivator_end_ns {
+        source.insert("reactivatorEnd_ns".to_string(), json!(reactivator_end_ns));
+    } else if let Some(source_ns) = profiling.source_ns {
         source.insert("reactivatorEnd_ns".to_string(), json!(source_ns));
+    }
+    if let Some(reactivator_start_ns) = profiling.reactivator_start_ns {
+        source.insert("reactivatorStart_ns".to_string(), json!(reactivator_start_ns));
+    } else if let Some(source_ns) = profiling.source_ns {
         source.insert("reactivatorStart_ns".to_string(), json!(source_ns));
+    }
+    if let Some(source_ns) = profiling.source_ns {
         source.insert("source_ns".to_string(), json!(source_ns));
     }
     source.insert("seq".to_string(), json!(sequence));
@@ -511,6 +521,8 @@ mod tests {
 
         let profiling = ProfilingMetadata {
             source_ns: Some(1000),
+            reactivator_start_ns: Some(500),
+            reactivator_end_ns: Some(750),
             source_receive_ns: Some(2000),
             source_send_ns: Some(3000),
             query_receive_ns: Some(4000),
@@ -548,11 +560,11 @@ mod tests {
         );
         assert_eq!(
             source.get("reactivatorEnd_ns").unwrap().as_u64(),
-            Some(1000)
+            Some(750)
         );
         assert_eq!(
             source.get("reactivatorStart_ns").unwrap().as_u64(),
-            Some(1000)
+            Some(500)
         );
         assert_eq!(source.get("source_ns").unwrap().as_u64(), Some(1000));
         assert_eq!(source.get("seq").unwrap().as_u64(), Some(42));

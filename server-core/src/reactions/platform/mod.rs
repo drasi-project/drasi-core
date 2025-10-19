@@ -462,6 +462,8 @@ mod tests {
         // Create profiling metadata with all fields populated
         let profiling = ProfilingMetadata {
             source_ns: Some(1744055144490466971),
+            reactivator_start_ns: Some(1744055140000000000),
+            reactivator_end_ns: Some(1744055142000000000),
             source_receive_ns: Some(1744055159124143047),
             source_send_ns: Some(1744055173551481387),
             query_receive_ns: Some(1744055178510629042),
@@ -533,8 +535,8 @@ mod tests {
         assert_eq!(source["changeDispatcherStart_ns"], 1744055173551481387u64);
         assert_eq!(source["changeRouterEnd_ns"], 1744055173551481387u64);
         assert_eq!(source["changeRouterStart_ns"], 1744055159124143047u64);
-        assert_eq!(source["reactivatorEnd_ns"], 1744055144490466971u64);
-        assert_eq!(source["reactivatorStart_ns"], 1744055144490466971u64);
+        assert_eq!(source["reactivatorEnd_ns"], 1744055142000000000u64);
+        assert_eq!(source["reactivatorStart_ns"], 1744055140000000000u64);
 
         // Validate query tracking metadata
         assert!(tracking["query"].is_object());

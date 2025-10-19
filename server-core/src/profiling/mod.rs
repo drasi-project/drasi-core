@@ -26,6 +26,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct ProfilingMetadata {
     /// Timestamp provided by the external source (if available)
     pub source_ns: Option<u64>,
+    /// Reactivator start timestamp from external source event
+    pub reactivator_start_ns: Option<u64>,
+    /// Reactivator end timestamp from external source event
+    pub reactivator_end_ns: Option<u64>,
     /// Timestamp when the source received the event
     pub source_receive_ns: Option<u64>,
     /// Timestamp when the source sent the event to the channel
@@ -154,6 +158,12 @@ impl ProfilingMetadata {
     pub fn merge(&mut self, other: &ProfilingMetadata) {
         if self.source_ns.is_none() {
             self.source_ns = other.source_ns;
+        }
+        if self.reactivator_start_ns.is_none() {
+            self.reactivator_start_ns = other.reactivator_start_ns;
+        }
+        if self.reactivator_end_ns.is_none() {
+            self.reactivator_end_ns = other.reactivator_end_ns;
         }
         if self.source_receive_ns.is_none() {
             self.source_receive_ns = other.source_receive_ns;
