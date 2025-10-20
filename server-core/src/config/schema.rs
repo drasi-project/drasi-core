@@ -84,6 +84,15 @@ pub struct QueryConfig {
     /// Optional synthetic joins for the query
     #[serde(skip_serializing_if = "Option::is_none")]
     pub joins: Option<Vec<QueryJoinConfig>>,
+    /// Whether to enable bootstrap (default: true)
+    #[serde(default = "default_enable_bootstrap", rename = "enableBootstrap")]
+    pub enable_bootstrap: bool,
+    /// Maximum number of events to buffer during bootstrap (default: 10000)
+    #[serde(
+        default = "default_bootstrap_buffer_size",
+        rename = "bootstrapBufferSize"
+    )]
+    pub bootstrap_buffer_size: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,6 +231,14 @@ fn default_id() -> String {
 
 fn default_auto_start() -> bool {
     true
+}
+
+fn default_enable_bootstrap() -> bool {
+    true
+}
+
+fn default_bootstrap_buffer_size() -> usize {
+    10000
 }
 
 /// Helper to deserialize null as empty HashMap

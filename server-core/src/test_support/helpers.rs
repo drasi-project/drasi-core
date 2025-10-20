@@ -68,6 +68,8 @@ pub mod test_fixtures {
             auto_start: true,
             properties: HashMap::new(),
             joins: None,
+            enable_bootstrap: true,
+            bootstrap_buffer_size: 10000,
         }
     }
 
@@ -82,6 +84,8 @@ pub mod test_fixtures {
             auto_start: true,
             properties: HashMap::new(),
             joins: None,
+            enable_bootstrap: true,
+            bootstrap_buffer_size: 10000,
         }
     }
 

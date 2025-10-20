@@ -334,6 +334,8 @@ mod query_core_tests {
                 auto_start: false,
                 properties: HashMap::new(),
                 joins: None,
+                enable_bootstrap: true,
+                bootstrap_buffer_size: 10000,
             };
 
             // Just verify the config can be created
@@ -351,6 +353,8 @@ mod query_core_tests {
             auto_start: false,
             properties: HashMap::new(),
             joins: None,
+            enable_bootstrap: true,
+            bootstrap_buffer_size: 10000,
         };
 
         // Empty queries should be caught during validation

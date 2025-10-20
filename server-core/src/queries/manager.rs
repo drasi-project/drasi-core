@@ -338,13 +338,27 @@ impl Query for DrasiQuery {
                 }
 
                 // Extract the SourceChange from the SourceEvent
-                // Skip control messages - queries only process data changes
+                // Skip control messages and bootstrap markers - queries only process data changes
                 let source_change = match &source_event_wrapper.event {
                     SourceEvent::Change(change) => change.clone(),
                     SourceEvent::Control(_) => {
                         debug!(
                             "Query '{}' ignoring control event from source '{}'",
                             query_id, source_event_wrapper.source_id
+                        );
+                        continue;
+                    }
+                    SourceEvent::BootstrapStart { query_id: marker_query_id } => {
+                        debug!(
+                            "Query '{}' received bootstrap start marker for query '{}'",
+                            query_id, marker_query_id
+                        );
+                        continue;
+                    }
+                    SourceEvent::BootstrapEnd { query_id: marker_query_id } => {
+                        debug!(
+                            "Query '{}' received bootstrap end marker for query '{}'",
+                            query_id, marker_query_id
                         );
                         continue;
                     }

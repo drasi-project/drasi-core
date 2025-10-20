@@ -53,6 +53,8 @@ mod query_joins_tests {
             auto_start: false,
             properties: HashMap::new(),
             joins: Some(joins),
+            enable_bootstrap: true,
+            bootstrap_buffer_size: 10000,
         }
     }
 

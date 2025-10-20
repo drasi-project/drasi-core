@@ -181,6 +181,28 @@ impl BootstrapRouter {
                             .await
                             .insert(state_key.clone(), BootstrapState::InProgress);
 
+                        // Send BootstrapStart marker before bootstrap begins
+                        let start_marker = crate::channels::SourceEventWrapper::new(
+                            source_id.clone(),
+                            crate::channels::SourceEvent::BootstrapStart {
+                                query_id: query_id.clone(),
+                            },
+                            chrono::Utc::now(),
+                        );
+
+                        if let Err(e) = context.source_event_tx.send(start_marker).await {
+                            error!(
+                                "Failed to send bootstrap start marker for query '{}' from source '{}': {}",
+                                query_id, source_id, e
+                            );
+                            continue;
+                        }
+
+                        info!(
+                            "Sent bootstrap start marker for query '{}' from source '{}'",
+                            query_id, source_id
+                        );
+
                         // Execute bootstrap
                         match provider.bootstrap(request.clone(), context).await {
                             Ok(element_count) => {
@@ -188,6 +210,27 @@ impl BootstrapRouter {
                                 "Bootstrap completed for query '{}' from source '{}': {} elements",
                                 query_id, source_id, element_count
                             );
+
+                                // Send BootstrapEnd marker after bootstrap completes
+                                let end_marker = crate::channels::SourceEventWrapper::new(
+                                    source_id.clone(),
+                                    crate::channels::SourceEvent::BootstrapEnd {
+                                        query_id: query_id.clone(),
+                                    },
+                                    chrono::Utc::now(),
+                                );
+
+                                if let Err(e) = context.source_event_tx.send(end_marker).await {
+                                    error!(
+                                        "Failed to send bootstrap end marker for query '{}' from source '{}': {}",
+                                        query_id, source_id, e
+                                    );
+                                } else {
+                                    info!(
+                                        "Sent bootstrap end marker for query '{}' from source '{}'",
+                                        query_id, source_id
+                                    );
+                                }
 
                                 // Update state to completed
                                 self.bootstrap_state

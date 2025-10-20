@@ -158,6 +158,18 @@ impl DataRouter {
                         source_id
                     );
                 }
+                SourceEvent::BootstrapStart { query_id } => {
+                    debug!(
+                        "Data router received BootstrapStart marker from source '{}' for query '{}'",
+                        source_id, query_id
+                    );
+                }
+                SourceEvent::BootstrapEnd { query_id } => {
+                    debug!(
+                        "Data router received BootstrapEnd marker from source '{}' for query '{}'",
+                        source_id, query_id
+                    );
+                }
             }
 
             // Get list of queries subscribed to this source

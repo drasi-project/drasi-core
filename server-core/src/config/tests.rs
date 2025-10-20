@@ -121,6 +121,8 @@ mod schema_tests {
             auto_start: true,
             properties: HashMap::new(),
             joins: None,
+            enable_bootstrap: true,
+            bootstrap_buffer_size: 10000,
         };
 
         let json = serde_json::to_value(&config).unwrap();
@@ -337,6 +339,8 @@ mod runtime_tests {
             auto_start: false,
             properties: HashMap::new(),
             joins: None,
+            enable_bootstrap: true,
+            bootstrap_buffer_size: 10000,
         };
 
         let runtime = QueryRuntime::from(config.clone());
