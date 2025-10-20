@@ -17,11 +17,11 @@ The HTTP source is configured in your Drasi server YAML configuration file:
 ```yaml
 sources:
   - id: "my-http-source"
-    source_type: "http"  
+    source_type: "http"
     auto_start: true
     properties:
-      port: 9000         # Port to listen on (default: 9000)
-      host: "0.0.0.0"    # Host to bind to (default: 127.0.0.1)
+      port: 8080         # Port to listen on (default: 8080)
+      host: "0.0.0.0"    # Host to bind to (default: 0.0.0.0)
       
       # Adaptive batching configuration (all optional)
       adaptive_enabled: true              # Enable adaptive batching (default: true)
@@ -54,9 +54,17 @@ When an HTTP source is running, it exposes the following endpoints on the config
 
 - **POST** `/sources/{source_name}/events` - Submit a single data change event
 - **POST** `/sources/{source_name}/events/batch` - Submit multiple events (batch)
-- **GET** `/health` - Health check endpoint
-- **GET** `/openapi.json` - OpenAPI specification
-- **GET** `/docs` - Interactive API documentation (Swagger UI)
+- **GET** `/health` - Health check endpoint (returns JSON with service status and features)
+
+### Health Check Response
+
+```json
+{
+  "status": "healthy",
+  "service": "adaptive-http-source",
+  "features": ["adaptive-batching", "batch-endpoint"]
+}
+```
 
 ## Event Format (Direct Format)
 
@@ -156,7 +164,7 @@ The HTTP source uses a Direct Format that closely mirrors the internal Drasi Cor
 
 ### Insert a User Node
 ```bash
-curl -X POST http://localhost:9000/sources/my-http-source/events \
+curl -X POST http://localhost:8080/sources/my-http-source/events \
   -H "Content-Type: application/json" \
   -d '{
     "operation": "insert",
@@ -176,7 +184,7 @@ curl -X POST http://localhost:9000/sources/my-http-source/events \
 
 ### Update a User Node
 ```bash
-curl -X POST http://localhost:9000/sources/my-http-source/events \
+curl -X POST http://localhost:8080/sources/my-http-source/events \
   -H "Content-Type: application/json" \
   -d '{
     "operation": "update",
@@ -197,7 +205,7 @@ curl -X POST http://localhost:9000/sources/my-http-source/events \
 
 ### Create a Relationship
 ```bash
-curl -X POST http://localhost:9000/sources/my-http-source/events \
+curl -X POST http://localhost:8080/sources/my-http-source/events \
   -H "Content-Type: application/json" \
   -d '{
     "operation": "insert",
@@ -217,7 +225,7 @@ curl -X POST http://localhost:9000/sources/my-http-source/events \
 
 ### Delete an Element
 ```bash
-curl -X POST http://localhost:9000/sources/my-http-source/events \
+curl -X POST http://localhost:8080/sources/my-http-source/events \
   -H "Content-Type: application/json" \
   -d '{
     "operation": "delete",
@@ -228,7 +236,7 @@ curl -X POST http://localhost:9000/sources/my-http-source/events \
 
 ### Batch Submission
 ```bash
-curl -X POST http://localhost:9000/sources/my-http-source/events/batch \
+curl -X POST http://localhost:8080/sources/my-http-source/events/batch \
   -H "Content-Type: application/json" \
   -d '{
     "events": [
@@ -312,6 +320,32 @@ RETURN u.name, u.email, u.subscription
 MATCH (u1:User)-[f:FOLLOWS]->(u2:User)
 RETURN u1.name, u2.name, f.since
 ```
+
+## Performance Profiling
+
+The HTTP source automatically includes profiling metadata with each event when profiling is enabled in the DrasiServerCore configuration. This enables end-to-end performance tracking from source ingestion through query processing to reaction delivery.
+
+### Profiling Timestamps
+
+The HTTP source automatically captures the following timestamps:
+- **source_send_ns**: Timestamp when the source sends the event to the processing pipeline
+
+These timestamps are combined with timestamps from other components to provide a complete performance picture:
+- **query_receive_ns**: When the query receives the event
+- **query_core_call_ns**: When drasi-core processing begins
+- **query_core_return_ns**: When drasi-core processing completes
+- **reaction_receive_ns**: When the reaction receives the result
+- **reaction_complete_ns**: When the reaction finishes processing
+
+### Using Profiling Data
+
+Profiling metadata flows through the entire pipeline and can be:
+1. Analyzed for bottleneck identification
+2. Used to measure end-to-end latency
+3. Exported via profiler reactions for monitoring
+4. Aggregated to understand system performance under load
+
+For more information on configuring profiling, see the DrasiServerCore documentation.
 
 ## Performance Considerations
 

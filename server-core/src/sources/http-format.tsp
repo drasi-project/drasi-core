@@ -1,0 +1,274 @@
+// Copyright 2025 The Drasi Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+/**
+ * HTTP Direct Format Specification
+ *
+ * This format is used by the HTTP source for directly ingesting graph changes
+ * via HTTP POST requests. It provides a simple, JSON-based format for sending
+ * node and relation changes to Drasi.
+ *
+ * Source: server-core/src/sources/http/direct_format.rs
+ */
+
+import "@typespec/json-schema";
+import "./common-types.tsp";
+
+using TypeSpec.JsonSchema;
+
+namespace Drasi.Sources.Http;
+
+/**
+ * A source change event in the direct HTTP format.
+ *
+ * This is a tagged union discriminated by the "operation" field.
+ * Each operation type has different required fields.
+ *
+ * Based on: server-core/src/sources/http/direct_format.rs (lines 22-46)
+ */
+@jsonSchema
+@discriminator("operation")
+union DirectSourceChange {
+  /** Insert a new element */
+  insert: DirectInsert,
+
+  /** Update an existing element */
+  update: DirectUpdate,
+
+  /** Delete an element */
+  delete: DirectDelete
+}
+
+/**
+ * Insert operation in direct format.
+ */
+@jsonSchema
+model DirectInsert {
+  /** Operation type discriminator */
+  operation: "insert";
+
+  /** The element to insert (node or relation) */
+  element: DirectElement;
+
+  /** Optional timestamp in nanoseconds (defaults to current time if not provided) */
+  timestamp?: uint64;
+}
+
+/**
+ * Update operation in direct format.
+ */
+@jsonSchema
+model DirectUpdate {
+  /** Operation type discriminator */
+  operation: "update";
+
+  /** The updated element (full state after update) */
+  element: DirectElement;
+
+  /** Optional timestamp in nanoseconds (defaults to current time if not provided) */
+  timestamp?: uint64;
+}
+
+/**
+ * Delete operation in direct format.
+ *
+ * For deletes, only the ID is required. Labels are optional.
+ */
+@jsonSchema
+model DirectDelete {
+  /** Operation type discriminator */
+  operation: "delete";
+
+  /** ID of the element to delete */
+  id: string;
+
+  /** Optional labels for the element being deleted */
+  labels?: string[];
+
+  /** Optional timestamp in nanoseconds (defaults to current time if not provided) */
+  timestamp?: uint64;
+}
+
+/**
+ * A graph element in the direct format - either a Node or Relation.
+ *
+ * This is discriminated by the "type" field.
+ *
+ * Based on: server-core/src/sources/http/direct_format.rs (lines 48-68)
+ */
+@jsonSchema
+@discriminator("type")
+union DirectElement {
+  /** A node in the graph */
+  node: DirectNode,
+
+  /** A relation (edge) in the graph */
+  relation: DirectRelation
+}
+
+/**
+ * A node in the direct format.
+ *
+ * Represents an entity with an ID, labels, and properties.
+ */
+@jsonSchema
+model DirectNode {
+  /** Type discriminator */
+  type: "node";
+
+  /** Unique identifier for this node */
+  id: string;
+
+  /** Labels/types for this node (e.g., ["User", "Person"]) */
+  labels: string[];
+
+  /** Node properties (JSON object) */
+  @extension("x-typespec-name", "properties")
+  properties?: {};
+}
+
+/**
+ * A relation in the direct format.
+ *
+ * Represents a directed edge connecting two nodes.
+ */
+@jsonSchema
+model DirectRelation {
+  /** Type discriminator */
+  type: "relation";
+
+  /** Unique identifier for this relation */
+  id: string;
+
+  /** Labels/types for this relation (e.g., ["FOLLOWS", "LIKES"]) */
+  labels: string[];
+
+  /** ID of the source node (where the relation starts) */
+  from: string;
+
+  /** ID of the target node (where the relation points to) */
+  to: string;
+
+  /** Relation properties (JSON object) */
+  @extension("x-typespec-name", "properties")
+  properties?: {};
+}
+
+/**
+ * Batch of changes.
+ *
+ * The HTTP source can accept arrays of changes in a single request.
+ */
+@jsonSchema
+model DirectSourceChangeBatch is DirectSourceChange[];
+
+/**
+ * Example usage:
+ *
+ * Insert a node:
+ * ```json
+ * {
+ *   "operation": "insert",
+ *   "element": {
+ *     "type": "node",
+ *     "id": "user_123",
+ *     "labels": ["User", "Person"],
+ *     "properties": {
+ *       "name": "John Doe",
+ *       "age": 30,
+ *       "active": true
+ *     }
+ *   },
+ *   "timestamp": 1234567890000
+ * }
+ * ```
+ *
+ * Insert a relation:
+ * ```json
+ * {
+ *   "operation": "insert",
+ *   "element": {
+ *     "type": "relation",
+ *     "id": "follows_123",
+ *     "labels": ["FOLLOWS"],
+ *     "from": "user_123",
+ *     "to": "user_456",
+ *     "properties": {
+ *       "since": "2024-01-01"
+ *     }
+ *   }
+ * }
+ * ```
+ *
+ * Update a node:
+ * ```json
+ * {
+ *   "operation": "update",
+ *   "element": {
+ *     "type": "node",
+ *     "id": "user_123",
+ *     "labels": ["User"],
+ *     "properties": {
+ *       "name": "Jane Doe",
+ *       "age": 31
+ *     }
+ *   }
+ * }
+ * ```
+ *
+ * Delete an element:
+ * ```json
+ * {
+ *   "operation": "delete",
+ *   "id": "user_123",
+ *   "labels": ["User"],
+ *   "timestamp": 1234567890000
+ * }
+ * ```
+ *
+ * Batch of changes:
+ * ```json
+ * [
+ *   {
+ *     "operation": "insert",
+ *     "element": {
+ *       "type": "node",
+ *       "id": "user_1",
+ *       "labels": ["User"],
+ *       "properties": {"name": "Alice"}
+ *     }
+ *   },
+ *   {
+ *     "operation": "insert",
+ *     "element": {
+ *       "type": "node",
+ *       "id": "user_2",
+ *       "labels": ["User"],
+ *       "properties": {"name": "Bob"}
+ *     }
+ *   },
+ *   {
+ *     "operation": "insert",
+ *     "element": {
+ *       "type": "relation",
+ *       "id": "follows_1",
+ *       "labels": ["FOLLOWS"],
+ *       "from": "user_1",
+ *       "to": "user_2",
+ *       "properties": {"since": "2025-01-01"}
+ *     }
+ *   }
+ * ]
+ * ```
+ */

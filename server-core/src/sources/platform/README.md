@@ -43,6 +43,7 @@ The platform source acts as a bridge between external Drasi Platform sources and
 | `batch_size` | Number | 10 | Number of events to read per XREADGROUP call |
 | `block_ms` | Number | 5000 | Milliseconds to block waiting for new events |
 | `start_id` | String | ">" | Stream position to start from (">" for new, "0" for all) |
+| `always_create_consumer_group` | Boolean | false | If true, deletes and recreates consumer group on startup using start_id. If false, uses existing group position (ignores start_id if group exists) |
 | `max_retries` | Number | 3 | Maximum connection retry attempts |
 | `retry_delay_ms` | Number | 1000 | Delay between connection retries (with exponential backoff) |
 
@@ -60,6 +61,8 @@ sources:
       consumer_name: "consumer-1"
       batch_size: 10
       block_ms: 5000
+      start_id: ">"
+      always_create_consumer_group: false
 ```
 
 ### Kubernetes/Multi-Instance Configuration
@@ -82,41 +85,64 @@ The platform source consumes events in the Drasi Platform SDK format and transfo
 
 ### Platform Event Structure
 
+Events are wrapped in CloudEvent format with a data array containing change events:
+
 ```json
 {
-  "id": "event-123",
-  "sourceId": "my_source",
-  "type": "i",  // "i" = insert, "u" = update, "d" = delete
-  "elementType": "node",  // or "rel" for relations
-  "time": {
-    "seq": 1,
-    "ms": 1234567890000
-  },
-  "after": {  // or "before" for deletes
-    "id": "element1",
-    "labels": ["Person", "Employee"],
-    "properties": {
-      "name": "Alice",
-      "age": 30
-    }
-  }
+  "id": "5095316c-f4b6-43db-9887-f2730cf1dc2b",
+  "source": "hello-world-reactivator",
+  "type": "com.dapr.event.sent",
+  "specversion": "1.0",
+  "datacontenttype": "application/json",
+  "time": "2025-10-03T14:58:12Z",
+  "data": [{
+    "op": "u",  // "i" = insert, "u" = update, "d" = delete
+    "payload": {
+      "after": {  // or "before" for deletes
+        "id": "node1",
+        "labels": ["Person", "Employee"],
+        "properties": {
+          "name": "Alice",
+          "age": 30
+        }
+      },
+      "source": {
+        "db": "my_database",
+        "table": "node",  // or "rel" for relations
+        "ts_ns": 1759503489836973000
+      }
+    },
+    "reactivatorStart_ns": 1759503491640055712,
+    "reactivatorEnd_ns": 1759503491747344212
+  }]
 }
 ```
+
+**Note:**
+- The `reactivatorStart_ns` and `reactivatorEnd_ns` fields are optional profiling timestamps that track processing time in the upstream reactivator.
+- The `data` array can contain multiple events, which will all be processed in sequence from a single CloudEvent message.
 
 ### Relation Event Example
 
 ```json
 {
-  "type": "i",
-  "elementType": "rel",
-  "time": { "ms": 1000 },
-  "after": {
-    "id": "rel1",
-    "labels": ["KNOWS"],
-    "startId": "node1",
-    "endId": "node2",
-    "properties": { "since": 2020 }
-  }
+  "data": [{
+    "op": "i",
+    "payload": {
+      "after": {
+        "id": "rel1",
+        "labels": ["KNOWS"],
+        "startId": "node1",
+        "endId": "node2",
+        "properties": { "since": 2020 }
+      },
+      "source": {
+        "db": "my_database",
+        "table": "rel",
+        "ts_ns": 1000000000
+      }
+    }
+  }]
 }
 ```
 
@@ -124,14 +150,69 @@ The platform source consumes events in the Drasi Platform SDK format and transfo
 
 | Platform Event | drasi-core SourceChange |
 |----------------|-------------------------|
-| `type: "i"` | `SourceChange::Insert` |
-| `type: "u"` | `SourceChange::Update` |
-| `type: "d"` | `SourceChange::Delete` |
-| `elementType: "node"` | `Element::Node` |
-| `elementType: "rel"` | `Element::Relation` |
+| `op: "i"` | `SourceChange::Insert` |
+| `op: "u"` | `SourceChange::Update` |
+| `op: "d"` | `SourceChange::Delete` |
+| `payload.source.table: "node"` | `Element::Node` |
+| `payload.source.table: "rel"` or `"relation"` | `Element::Relation` |
 | `startId` | `out_node` |
 | `endId` | `in_node` |
-| `time.ms` | `effective_from` (× 1,000,000 to convert ms to ns) |
+| `payload.source.ts_ns` | `effective_from` (already in nanoseconds) |
+
+## Control Messages
+
+The Platform Source supports control messages for coordinating query subscriptions. Control messages are distinguished from data messages by the `payload.source.db` field.
+
+### Message Type Detection
+
+- **Data Message**: `payload.source.db` is any value except "Drasi" (case-insensitive)
+- **Control Message**: `payload.source.db` equals "Drasi" (case-insensitive)
+
+The control message type is determined by `payload.source.table` field.
+
+### Supported Control Types
+
+#### SourceSubscription
+
+Notifies the source about query subscriptions. Used to coordinate which queries are interested in which node and relation labels.
+
+**Event Structure:**
+
+```json
+{
+  "data": [{
+    "op": "i",  // "i" = insert, "u" = update, "d" = delete
+    "payload": {
+      "after": {
+        "queryId": "query1",
+        "queryNodeId": "default",
+        "nodeLabels": ["Person", "Employee"],
+        "relLabels": ["KNOWS", "WORKS_FOR"]
+      },
+      "source": {
+        "db": "Drasi",
+        "table": "SourceSubscription",
+        "ts_ns": 1000000000
+      }
+    }
+  }]
+}
+```
+
+**Fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `queryId` | String | Yes | Unique query identifier |
+| `queryNodeId` | String | Yes | Query node identifier |
+| `nodeLabels` | Array[String] | No | Node labels this query is interested in (defaults to empty) |
+| `relLabels` | Array[String] | No | Relation labels this query is interested in (defaults to empty) |
+
+**Behavior:**
+
+- Unknown control types are silently skipped (logged at info level)
+- Missing required fields (queryId, queryNodeId) cause event to be skipped with warning
+- Missing optional fields (nodeLabels, relLabels) default to empty arrays
 
 ## Redis Streams Concepts
 
@@ -238,6 +319,16 @@ Redis stream IDs have the format `{timestamp_ms}-{sequence}`:
 - Use `${HOSTNAME}` or pod name in Kubernetes
 - Check for zombie consumers: `XINFO CONSUMERS {stream} {group}`
 
+### Replaying Events from Start
+
+**Symptom**: Need to reprocess all events from the beginning of the stream
+
+**Solutions**:
+- Set `always_create_consumer_group: true` to force recreation of the consumer group on startup
+- Set `start_id: "0"` to start from the beginning of the stream
+- Note: This deletes the existing consumer group, so all consumers in the group will be affected
+- Use with caution in production environments
+
 ### Missing Events
 
 **Symptom**: Events not appearing in queries
@@ -288,6 +379,10 @@ let config = DrasiServerCoreConfig {
                 props.insert("stream_key".to_string(), json!("events:changes"));
                 props.insert("consumer_group".to_string(), json!("drasi-core"));
                 props.insert("consumer_name".to_string(), json!("consumer-1"));
+                props.insert("batch_size".to_string(), json!(10));
+                props.insert("block_ms".to_string(), json!(5000));
+                props.insert("start_id".to_string(), json!(">"));
+                props.insert("always_create_consumer_group".to_string(), json!(false));
                 props
             },
             bootstrap_provider: None,
@@ -309,12 +404,14 @@ core.start().await?;
 
 ### Publishing Events from External Source
 
-Events should be written to Redis using XADD:
+Events should be written to Redis using XADD with CloudEvent format:
 
 ```bash
 redis-cli XADD events:changes * \
-  data '{"type":"i","elementType":"node","time":{"ms":1000},"after":{"id":"1","labels":["Test"],"properties":{}}}'
+  data '{"data":[{"op":"i","payload":{"after":{"id":"1","labels":["Test"],"properties":{}},"source":{"db":"mydb","table":"node","ts_ns":1000000000}}}],"id":"test-1","source":"test-source","type":"com.dapr.event.sent"}'
 ```
+
+**Note:** Events can be written with multiple changes in the data array for batch processing.
 
 ## Monitoring
 
