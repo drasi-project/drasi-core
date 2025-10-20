@@ -74,7 +74,11 @@ impl DrasiServerCore {
 
         let subscription_router = Arc::new(SubscriptionRouter::new());
         let data_router = Arc::new(DataRouter::new());
-        let bootstrap_router = Arc::new(BootstrapRouter::new());
+
+        // Create bootstrap router and set control signal sender
+        let mut bootstrap_router = BootstrapRouter::new();
+        bootstrap_router.set_control_signal_sender(channels.control_signal_tx.clone());
+        let bootstrap_router = Arc::new(bootstrap_router);
 
         Self {
             config,
@@ -541,9 +545,10 @@ impl DrasiServerCore {
             .ok_or_else(|| DrasiError::component_not_found("query", id))?;
 
         // Create subscription to source data streams
+        let enable_bootstrap = config.enable_bootstrap;
         let rx = self
             .data_router
-            .add_query_subscription(id.to_string(), config.sources.clone())
+            .add_query_subscription(id.to_string(), config.sources.clone(), enable_bootstrap)
             .await
             .map_err(|e| {
                 DrasiError::initialization(format!("Failed to add query subscription: {}", e))
@@ -1295,11 +1300,12 @@ impl DrasiServerCore {
                 }
             });
 
-            // Start data router
+            // Start data router with control signal support
             let source_event_rx = receivers.source_event_rx;
+            let control_signal_rx = receivers.control_signal_rx;
             let data_router = self.data_router.clone();
             tokio::spawn(async move {
-                data_router.start(source_event_rx).await;
+                data_router.start(source_event_rx, control_signal_rx).await;
             });
 
             // Start subscription router
@@ -1364,6 +1370,7 @@ impl DrasiServerCore {
         let query_id = config.id.clone();
         let should_auto_start = config.auto_start;
         let sources = config.sources.clone();
+        let enable_bootstrap = config.enable_bootstrap;
 
         // Add the query (without saving during initialization)
         self.query_manager.add_query_without_save(config).await?;
@@ -1382,7 +1389,7 @@ impl DrasiServerCore {
             // Add query subscription and get receiver
             let rx = self
                 .data_router
-                .add_query_subscription(query_id.clone(), sources)
+                .add_query_subscription(query_id.clone(), sources, enable_bootstrap)
                 .await
                 .map_err(|e| anyhow!("Failed to add query subscription: {}", e))?;
 
@@ -1477,13 +1484,14 @@ impl DrasiServerCore {
                     );
                     // Get sources for this query
                     let sources = query_config.sources.clone();
+                    let enable_bootstrap = query_config.enable_bootstrap;
                     info!(
-                        "Creating subscription for query '{}' to sources: {:?}",
-                        id, sources
+                        "Creating subscription for query '{}' to sources: {:?} (bootstrap: {})",
+                        id, sources, enable_bootstrap
                     );
                     let rx = self
                         .data_router
-                        .add_query_subscription(id.clone(), sources)
+                        .add_query_subscription(id.clone(), sources, enable_bootstrap)
                         .await
                         .map_err(|e| anyhow!("Failed to add query subscription: {}", e))?;
                     info!("Subscription created, starting query '{}'", id);

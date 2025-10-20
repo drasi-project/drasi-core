@@ -20,7 +20,10 @@ use tokio::sync::RwLock;
 use crate::bootstrap::{
     BootstrapContext, BootstrapProvider, BootstrapProviderConfig, BootstrapProviderFactory,
 };
-use crate::channels::{BootstrapRequestReceiver, BootstrapResponseSender, SourceEventSender};
+use crate::channels::{
+    BootstrapRequestReceiver, BootstrapResponseSender, ControlSignal, ControlSignalSender,
+    ControlSignalWrapper, SourceEventSender
+};
 use crate::config::SourceConfig;
 
 /// Routes bootstrap requests from queries to providers and manages bootstrap state
@@ -33,6 +36,8 @@ pub struct BootstrapRouter {
     query_response_senders: Arc<RwLock<HashMap<String, BootstrapResponseSender>>>,
     /// Track bootstrap state for each query-source pair
     bootstrap_state: Arc<RwLock<HashMap<(String, String), BootstrapState>>>,
+    /// Control signal sender for bootstrap coordination
+    control_signal_tx: Option<ControlSignalSender>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +56,7 @@ impl Default for BootstrapRouter {
             contexts: Arc::new(RwLock::new(HashMap::new())),
             query_response_senders: Arc::new(RwLock::new(HashMap::new())),
             bootstrap_state: Arc::new(RwLock::new(HashMap::new())),
+            control_signal_tx: None,
         }
     }
 }
@@ -58,6 +64,11 @@ impl Default for BootstrapRouter {
 impl BootstrapRouter {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set the control signal sender for bootstrap coordination
+    pub fn set_control_signal_sender(&mut self, tx: ControlSignalSender) {
+        self.control_signal_tx = Some(tx);
     }
 
     /// Register a bootstrap provider for a source
@@ -181,7 +192,28 @@ impl BootstrapRouter {
                             .await
                             .insert(state_key.clone(), BootstrapState::InProgress);
 
-                        // Send BootstrapStart marker before bootstrap begins
+                        // Send control signal for bootstrap start
+                        if let Some(ref control_tx) = self.control_signal_tx {
+                            let start_signal = ControlSignalWrapper::new(
+                                ControlSignal::BootstrapStarted {
+                                    query_id: query_id.clone(),
+                                    source_id: source_id.clone(),
+                                }
+                            );
+                            if let Err(e) = control_tx.send(start_signal).await {
+                                error!(
+                                    "Failed to send bootstrap started control signal for query '{}' from source '{}': {}",
+                                    query_id, source_id, e
+                                );
+                            } else {
+                                info!(
+                                    "Sent bootstrap started control signal for query '{}' from source '{}'",
+                                    query_id, source_id
+                                );
+                            }
+                        }
+
+                        // Send BootstrapStart marker before bootstrap begins (for backward compatibility)
                         let start_marker = crate::channels::SourceEventWrapper::new(
                             source_id.clone(),
                             crate::channels::SourceEvent::BootstrapStart {
@@ -211,7 +243,28 @@ impl BootstrapRouter {
                                 query_id, source_id, element_count
                             );
 
-                                // Send BootstrapEnd marker after bootstrap completes
+                                // Send control signal for bootstrap completion
+                                if let Some(ref control_tx) = self.control_signal_tx {
+                                    let complete_signal = ControlSignalWrapper::new(
+                                        ControlSignal::BootstrapCompleted {
+                                            query_id: query_id.clone(),
+                                            source_id: source_id.clone(),
+                                        }
+                                    );
+                                    if let Err(e) = control_tx.send(complete_signal).await {
+                                        error!(
+                                            "Failed to send bootstrap completed control signal for query '{}' from source '{}': {}",
+                                            query_id, source_id, e
+                                        );
+                                    } else {
+                                        info!(
+                                            "Sent bootstrap completed control signal for query '{}' from source '{}'",
+                                            query_id, source_id
+                                        );
+                                    }
+                                }
+
+                                // Send BootstrapEnd marker after bootstrap completes (for backward compatibility)
                                 let end_marker = crate::channels::SourceEventWrapper::new(
                                     source_id.clone(),
                                     crate::channels::SourceEvent::BootstrapEnd {

@@ -216,6 +216,62 @@ pub type BootstrapRequestSender = mpsc::Sender<BootstrapRequest>;
 pub type BootstrapResponseReceiver = mpsc::Receiver<BootstrapResponse>;
 pub type BootstrapResponseSender = mpsc::Sender<BootstrapResponse>;
 
+/// Control signals for bootstrap coordination
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ControlSignal {
+    /// Bootstrap has started for a query-source pair
+    BootstrapStarted {
+        query_id: String,
+        source_id: String,
+    },
+    /// Bootstrap has completed for a query-source pair
+    BootstrapCompleted {
+        query_id: String,
+        source_id: String,
+    },
+    /// Query has entered running state
+    Running {
+        query_id: String,
+    },
+    /// Query has stopped
+    Stopped {
+        query_id: String,
+    },
+    /// Query has been deleted
+    Deleted {
+        query_id: String,
+    },
+}
+
+/// Wrapper for control signals with metadata
+#[derive(Debug, Clone)]
+pub struct ControlSignalWrapper {
+    pub signal: ControlSignal,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub sequence_number: Option<u64>,
+}
+
+impl ControlSignalWrapper {
+    pub fn new(signal: ControlSignal) -> Self {
+        Self {
+            signal,
+            timestamp: chrono::Utc::now(),
+            sequence_number: None,
+        }
+    }
+
+    pub fn with_sequence(signal: ControlSignal, sequence_number: u64) -> Self {
+        Self {
+            signal,
+            timestamp: chrono::Utc::now(),
+            sequence_number: Some(sequence_number),
+        }
+    }
+}
+
+pub type ControlSignalReceiver = mpsc::Receiver<ControlSignalWrapper>;
+pub type ControlSignalSender = mpsc::Sender<ControlSignalWrapper>;
+
 pub struct EventChannels {
     pub source_event_tx: SourceEventSender,
     pub query_result_tx: QueryResultSender,
@@ -224,6 +280,7 @@ pub struct EventChannels {
     pub bootstrap_request_tx: BootstrapRequestSender,
     #[allow(dead_code)]
     pub bootstrap_response_tx: BootstrapResponseSender,
+    pub control_signal_tx: ControlSignalSender,
 }
 
 pub struct EventReceivers {
@@ -234,6 +291,7 @@ pub struct EventReceivers {
     pub bootstrap_request_rx: BootstrapRequestReceiver,
     #[allow(dead_code)]
     pub bootstrap_response_rx: BootstrapResponseReceiver,
+    pub control_signal_rx: ControlSignalReceiver,
 }
 
 impl EventChannels {
@@ -244,6 +302,7 @@ impl EventChannels {
         let (control_tx, control_rx) = mpsc::channel(100);
         let (bootstrap_request_tx, bootstrap_request_rx) = mpsc::channel(100);
         let (bootstrap_response_tx, bootstrap_response_rx) = mpsc::channel(100);
+        let (control_signal_tx, control_signal_rx) = mpsc::channel(100);
 
         let channels = Self {
             source_event_tx,
@@ -252,6 +311,7 @@ impl EventChannels {
             _control_tx: control_tx,
             bootstrap_request_tx,
             bootstrap_response_tx,
+            control_signal_tx,
         };
 
         let receivers = EventReceivers {
@@ -261,6 +321,7 @@ impl EventChannels {
             _control_rx: control_rx,
             bootstrap_request_rx,
             bootstrap_response_rx,
+            control_signal_rx,
         };
 
         (channels, receivers)

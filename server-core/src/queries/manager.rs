@@ -874,11 +874,12 @@ impl QueryManager {
             let config = query.get_config();
             if config.auto_start {
                 // Get a receiver connected to the data router
+                let enable_bootstrap = config.enable_bootstrap;
                 let rx = data_router
-                    .add_query_subscription(id.clone(), config.sources.clone())
+                    .add_query_subscription(id.clone(), config.sources.clone(), enable_bootstrap)
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to add query subscription: {}", e))?;
-                info!("Auto-starting query: {}", id);
+                info!("Auto-starting query: {} (bootstrap: {})", id, enable_bootstrap);
                 if let Err(e) = query.start(rx).await {
                     error!("Failed to start query {}: {}", id, e);
                     failed_queries.push((id.clone(), e.to_string()));
