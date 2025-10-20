@@ -42,7 +42,7 @@ fn test_transform_platform_insert_node() {
     let results = transform_platform_event(cloud_event, "test_source").unwrap();
     assert_eq!(results.len(), 1);
 
-    match &results[0] {
+    match &results[0].source_change {
         SourceChange::Insert { element } => match element {
             Element::Node {
                 metadata,
@@ -88,7 +88,7 @@ fn test_transform_platform_update_node() {
     let results = transform_platform_event(cloud_event, "test_source").unwrap();
     assert_eq!(results.len(), 1);
 
-    match &results[0] {
+    match &results[0].source_change {
         SourceChange::Update { element } => match element {
             Element::Node { metadata, .. } => {
                 assert_eq!(metadata.reference.element_id.as_ref(), "node1");
@@ -124,7 +124,7 @@ fn test_transform_platform_delete_node() {
     let results = transform_platform_event(cloud_event, "test_source").unwrap();
     assert_eq!(results.len(), 1);
 
-    match &results[0] {
+    match &results[0].source_change {
         SourceChange::Delete { metadata } => {
             assert_eq!(metadata.reference.element_id.as_ref(), "node1");
             assert_eq!(metadata.reference.source_id.as_ref(), "test_source");
@@ -160,7 +160,7 @@ fn test_transform_platform_insert_relation() {
     let results = transform_platform_event(cloud_event, "test_source").unwrap();
     assert_eq!(results.len(), 1);
 
-    match &results[0] {
+    match &results[0].source_change {
         SourceChange::Insert { element } => match element {
             Element::Relation {
                 metadata,
@@ -210,7 +210,7 @@ fn test_transform_platform_update_relation() {
     let results = transform_platform_event(cloud_event, "test_source").unwrap();
     assert_eq!(results.len(), 1);
 
-    match &results[0] {
+    match &results[0].source_change {
         SourceChange::Update { element } => match element {
             Element::Relation {
                 out_node, in_node, ..
@@ -254,7 +254,7 @@ fn test_transform_property_types() {
     let results = transform_platform_event(cloud_event, "test_source").unwrap();
     assert_eq!(results.len(), 1);
 
-    match &results[0] {
+    match &results[0].source_change {
         SourceChange::Insert { element } => match element {
             Element::Node { properties, .. } => {
                 // All properties should be present
@@ -294,7 +294,7 @@ fn test_transform_empty_properties() {
     let results = transform_platform_event(cloud_event, "test_source").unwrap();
     assert_eq!(results.len(), 1);
 
-    match &results[0] {
+    match &results[0].source_change {
         SourceChange::Insert { element } => match element {
             Element::Node { properties, .. } => {
                 // Check that all common properties are not present
@@ -334,7 +334,7 @@ fn test_transform_multiple_labels() {
     let results = transform_platform_event(cloud_event, "test_source").unwrap();
     assert_eq!(results.len(), 1);
 
-    match &results[0] {
+    match &results[0].source_change {
         SourceChange::Insert { element } => match element {
             Element::Node { metadata, .. } => {
                 assert_eq!(metadata.labels.len(), 3);
@@ -610,7 +610,7 @@ fn test_transform_large_timestamp() {
     let results = transform_platform_event(cloud_event, "test_source").unwrap();
     assert_eq!(results.len(), 1);
 
-    match &results[0] {
+    match &results[0].source_change {
         SourceChange::Insert { element } => match element {
             Element::Node { metadata, .. } => {
                 // Verify large timestamp is preserved (already in nanoseconds)
@@ -697,7 +697,7 @@ fn test_transform_real_world_dapr_event() {
     let results = transform_platform_event(cloud_event, "hello-world-source").unwrap();
     assert_eq!(results.len(), 1);
 
-    match &results[0] {
+    match &results[0].source_change {
         SourceChange::Update { element } => match element {
             Element::Node {
                 metadata,
@@ -759,7 +759,7 @@ fn test_transform_multiple_events_in_data_array() {
     assert_eq!(results.len(), 2);
 
     // Verify first event
-    match &results[0] {
+    match &results[0].source_change {
         SourceChange::Insert { element } => match element {
             Element::Node { metadata, .. } => {
                 assert_eq!(metadata.reference.element_id.as_ref(), "node1");
@@ -770,7 +770,7 @@ fn test_transform_multiple_events_in_data_array() {
     }
 
     // Verify second event
-    match &results[1] {
+    match &results[1].source_change {
         SourceChange::Insert { element } => match element {
             Element::Node { metadata, .. } => {
                 assert_eq!(metadata.reference.element_id.as_ref(), "node2");
@@ -948,7 +948,7 @@ fn test_transform_control_event_source_subscription_insert() {
             assert_eq!(rel_labels.len(), 2);
             assert!(rel_labels.contains(&"KNOWS".to_string()));
             assert!(rel_labels.contains(&"WORKS_FOR".to_string()));
-            assert_eq!(*operation, ControlOperation::Insert);
+            assert_eq!(operation, &ControlOperation::Insert);
         }
     }
 }
@@ -979,7 +979,7 @@ fn test_transform_control_event_source_subscription_update() {
 
     match &results[0] {
         SourceControl::Subscription { operation, .. } => {
-            assert_eq!(*operation, ControlOperation::Update);
+            assert_eq!(operation, &ControlOperation::Update);
         }
     }
 }
@@ -1010,7 +1010,7 @@ fn test_transform_control_event_source_subscription_delete() {
 
     match &results[0] {
         SourceControl::Subscription { operation, .. } => {
-            assert_eq!(*operation, ControlOperation::Delete);
+            assert_eq!(operation, &ControlOperation::Delete);
         }
     }
 }

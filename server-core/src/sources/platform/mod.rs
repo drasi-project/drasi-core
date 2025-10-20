@@ -440,17 +440,24 @@ impl PlatformSource {
                                                             cloud_event,
                                                             &source_id,
                                                         ) {
-                                                            Ok(source_changes) => {
+                                                            Ok(source_changes_with_timestamps) => {
                                                                 // Publish source changes
-                                                                for source_change in source_changes
+                                                                for item in source_changes_with_timestamps
                                                                 {
                                                                     // Create profiling metadata with timestamps
                                                                     let mut profiling = crate::profiling::ProfilingMetadata::new();
                                                                     profiling.source_send_ns = Some(crate::profiling::timestamp_ns());
 
+                                                                    // Extract source_ns from SourceChange transaction time
+                                                                    profiling.source_ns = Some(item.source_change.get_transaction_time());
+
+                                                                    // Set reactivator timestamps from event
+                                                                    profiling.reactivator_start_ns = item.reactivator_start_ns;
+                                                                    profiling.reactivator_end_ns = item.reactivator_end_ns;
+
                                                                     let wrapper = SourceEventWrapper::with_profiling(
                                                                         source_id.clone(),
-                                                                        SourceEvent::Change(source_change),
+                                                                        SourceEvent::Change(item.source_change),
                                                                         chrono::Utc::now(),
                                                                         profiling,
                                                                     );
@@ -674,11 +681,19 @@ fn detect_message_type(cloud_event: &Value) -> MessageType {
     }
 }
 
+/// Helper struct to hold SourceChange along with reactivator timestamps
+#[derive(Debug)]
+struct SourceChangeWithTimestamps {
+    source_change: SourceChange,
+    reactivator_start_ns: Option<u64>,
+    reactivator_end_ns: Option<u64>,
+}
+
 /// Transform CloudEvent-wrapped platform event to drasi-core SourceChange(s)
 ///
 /// Handles events in CloudEvent format with a data array containing change events.
 /// Each event in the data array has: op, payload.after/before, payload.source
-fn transform_platform_event(cloud_event: Value, source_id: &str) -> Result<Vec<SourceChange>> {
+fn transform_platform_event(cloud_event: Value, source_id: &str) -> Result<Vec<SourceChangeWithTimestamps>> {
     let mut source_changes = Vec::new();
 
     // Extract the data array from CloudEvent wrapper
@@ -688,6 +703,10 @@ fn transform_platform_event(cloud_event: Value, source_id: &str) -> Result<Vec<S
 
     // Process each event in the data array
     for event in data_array {
+        // Extract reactivator timestamps from top-level event fields
+        let reactivator_start_ns = event["reactivatorStart_ns"].as_u64();
+        let reactivator_end_ns = event["reactivatorEnd_ns"].as_u64();
+
         // Extract operation type (op field: "i", "u", "d")
         let op = event["op"]
             .as_str()
@@ -752,7 +771,11 @@ fn transform_platform_event(cloud_event: Value, source_id: &str) -> Result<Vec<S
 
         // Handle delete operation (no properties needed)
         if op == "d" {
-            source_changes.push(SourceChange::Delete { metadata });
+            source_changes.push(SourceChangeWithTimestamps {
+                source_change: SourceChange::Delete { metadata },
+                reactivator_start_ns,
+                reactivator_end_ns,
+            });
             continue;
         }
 
@@ -795,7 +818,11 @@ fn transform_platform_event(cloud_event: Value, source_id: &str) -> Result<Vec<S
             _ => unreachable!(),
         };
 
-        source_changes.push(source_change);
+        source_changes.push(SourceChangeWithTimestamps {
+            source_change,
+            reactivator_start_ns,
+            reactivator_end_ns,
+        });
     }
 
     Ok(source_changes)
