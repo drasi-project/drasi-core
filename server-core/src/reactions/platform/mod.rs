@@ -226,6 +226,7 @@ impl Reaction for PlatformReaction {
         let cloud_event_config = self.cloud_event_config.clone();
         let reaction_id = self.config.id.clone();
         let status = self.status.clone();
+        let emit_control_events = self.emit_control_events;
 
         // Spawn task to process query results
         tokio::spawn(async move {
@@ -238,7 +239,58 @@ impl Reaction for PlatformReaction {
                 tokio::select! {
                     // Handle query results
                     Some(mut query_result) = result_rx.recv() => {
-                        // Capture reaction receive timestamp
+                        // Check if this is a control signal
+                        if let Some(control_signal) = query_result.metadata.get("control_signal") {
+                            if emit_control_events {
+                                // This is a control signal, emit it as a control event
+                                if let Some(signal_type) = control_signal.as_str() {
+                                    let control_signal = match signal_type {
+                                        "bootstrapStarted" => ControlSignal::BootstrapStarted,
+                                        "bootstrapCompleted" => ControlSignal::BootstrapCompleted,
+                                        _ => {
+                                            log::debug!("Unknown control signal type: {}", signal_type);
+                                            continue;
+                                        }
+                                    };
+
+                                    // Clone the publisher for the emit closure
+                                    let publisher_for_emit = publisher.clone();
+                                    let cloud_event_config_for_emit = cloud_event_config.clone();
+
+                                    // Get sequence for control event
+                                    let control_sequence = {
+                                        let mut counter = sequence_counter.write().await;
+                                        *counter += 1;
+                                        *counter
+                                    };
+
+                                    // Emit control event
+                                    let control_event = ResultControlEvent {
+                                        query_id: query_result.query_id.clone(),
+                                        sequence: control_sequence as u64,
+                                        source_time_ms: query_result.timestamp.timestamp_millis() as u64,
+                                        metadata: None,
+                                        control_signal: control_signal.clone(),
+                                    };
+
+                                    let cloud_event = CloudEvent::new(
+                                        ResultEvent::Control(control_event),
+                                        &query_result.query_id,
+                                        &cloud_event_config_for_emit,
+                                    );
+
+                                    if let Err(e) = publisher_for_emit.publish_with_retry(cloud_event, 3).await {
+                                        log::warn!("Failed to emit control event {}: {}", signal_type, e);
+                                    } else {
+                                        log::info!("Emitted control event: {}", signal_type);
+                                    }
+                                }
+                            }
+                            // Skip regular processing for control signals
+                            continue;
+                        }
+
+                        // Capture reaction receive timestamp for regular results
                         if let Some(ref mut profiling) = query_result.profiling {
                             profiling.reaction_receive_ns = Some(crate::profiling::timestamp_ns());
                         }

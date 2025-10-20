@@ -278,13 +278,28 @@ impl BootstrapProvider for PlatformBootstrapProvider {
             // Wrap in SourceChange::Insert
             let source_change = SourceChange::Insert { element };
 
-            // Send via channel
-            let wrapper = SourceEventWrapper {
-                source_id: context.source_id.clone(),
-                event: SourceEvent::Change(source_change),
-                timestamp: Utc::now(),
-                profiling: None,
-            };
+            // Get next sequence number for this bootstrap event
+            let _sequence = context.next_sequence();
+
+            // Create profiling metadata for bootstrap event
+            let mut profiling = crate::profiling::ProfilingMetadata::new();
+            let now = crate::profiling::timestamp_ns();
+
+            // Set timestamps as per spec for bootstrap events
+            profiling.source_ns = Some(0); // Always 0 for bootstrap events as per spec
+            profiling.source_send_ns = Some(now);
+            profiling.reactivator_start_ns = Some(now);
+            profiling.reactivator_end_ns = Some(now);
+
+            // Note: sequence number is tracked separately in context
+
+            // Send via channel with profiling
+            let wrapper = SourceEventWrapper::with_profiling(
+                context.source_id.clone(),
+                SourceEvent::Change(source_change),
+                Utc::now(),
+                profiling,
+            );
 
             context
                 .source_event_tx

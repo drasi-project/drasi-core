@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::channels::{BootstrapRequest, SourceEventSender};
 use crate::config::SourceConfig;
@@ -44,6 +45,8 @@ pub struct BootstrapContext {
     pub source_event_tx: SourceEventSender,
     /// Source ID for labeling bootstrap events
     pub source_id: String,
+    /// Sequence counter for bootstrap events
+    pub sequence_counter: Arc<AtomicU64>,
 }
 
 impl BootstrapContext {
@@ -58,7 +61,13 @@ impl BootstrapContext {
             source_config,
             source_event_tx,
             source_id,
+            sequence_counter: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Get the next sequence number for bootstrap events
+    pub fn next_sequence(&self) -> u64 {
+        self.sequence_counter.fetch_add(1, Ordering::SeqCst)
     }
 
     /// Get a property from the source configuration

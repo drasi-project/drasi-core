@@ -145,12 +145,26 @@ impl ScriptFileBootstrapProvider {
 
                         // Send as insert
                         let source_change = SourceChange::Insert { element };
-                        let wrapper = SourceEventWrapper {
-                            source_id: context.source_id.clone(),
-                            event: SourceEvent::Change(source_change),
-                            timestamp: chrono::Utc::now(),
-                            profiling: None,
-                        };
+
+                        // Get next sequence number for this bootstrap event
+                        let _sequence = context.next_sequence();
+
+                        // Create profiling metadata for bootstrap event
+                        let mut profiling = crate::profiling::ProfilingMetadata::new();
+                        let now = crate::profiling::timestamp_ns();
+
+                        // Set timestamps as per spec for bootstrap events
+                        profiling.source_ns = Some(0); // Always 0 for bootstrap events as per spec
+                        profiling.source_send_ns = Some(now);
+                        profiling.reactivator_start_ns = Some(now);
+                        profiling.reactivator_end_ns = Some(now);
+
+                        let wrapper = SourceEventWrapper::with_profiling(
+                            context.source_id.clone(),
+                            SourceEvent::Change(source_change),
+                            chrono::Utc::now(),
+                            profiling,
+                        );
 
                         context
                             .source_event_tx
@@ -175,12 +189,26 @@ impl ScriptFileBootstrapProvider {
 
                         // Send as insert
                         let source_change = SourceChange::Insert { element };
-                        let wrapper = SourceEventWrapper {
-                            source_id: context.source_id.clone(),
-                            event: SourceEvent::Change(source_change),
-                            timestamp: chrono::Utc::now(),
-                            profiling: None,
-                        };
+
+                        // Get next sequence number for this bootstrap event
+                        let _sequence = context.next_sequence();
+
+                        // Create profiling metadata for bootstrap event
+                        let mut profiling = crate::profiling::ProfilingMetadata::new();
+                        let now = crate::profiling::timestamp_ns();
+
+                        // Set timestamps as per spec for bootstrap events
+                        profiling.source_ns = Some(0); // Always 0 for bootstrap events as per spec
+                        profiling.source_send_ns = Some(now);
+                        profiling.reactivator_start_ns = Some(now);
+                        profiling.reactivator_end_ns = Some(now);
+
+                        let wrapper = SourceEventWrapper::with_profiling(
+                            context.source_id.clone(),
+                            SourceEvent::Change(source_change),
+                            chrono::Utc::now(),
+                            profiling,
+                        );
 
                         context
                             .source_event_tx

@@ -20,8 +20,10 @@ use std::time::{Duration, Instant};
 
 use crate::channels::{
     ControlSignal, ControlSignalReceiver, ControlSignalWrapper,
+    QueryResult, QueryResultSender,
     SourceEvent, SourceEventReceiver, SourceEventSender, SourceEventWrapper
 };
+use serde_json::json;
 
 /// Bootstrap phase for a query-source pair
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -55,6 +57,8 @@ pub struct DataRouter {
     bootstrap_timeout: Duration,
     /// Track bootstrap start times for timeout detection
     bootstrap_start_times: Arc<RwLock<HashMap<QuerySourceKey, Instant>>>,
+    /// Query result sender for emitting control signals to reactions
+    query_result_tx: Option<QueryResultSender>,
 }
 
 impl Default for DataRouter {
@@ -67,6 +71,7 @@ impl Default for DataRouter {
             max_buffer_size: 10000, // Default buffer size
             bootstrap_timeout: Duration::from_secs(300), // 5 minute default timeout
             bootstrap_start_times: Arc::new(RwLock::new(HashMap::new())),
+            query_result_tx: None,
         }
     }
 }
@@ -74,6 +79,37 @@ impl Default for DataRouter {
 impl DataRouter {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set the query result sender for emitting control signals
+    pub fn set_query_result_tx(&mut self, tx: QueryResultSender) {
+        self.query_result_tx = Some(tx);
+    }
+
+    /// Emit a control signal as a QueryResult to reactions
+    async fn emit_control_signal_as_result(&self, query_id: &str, signal_type: &str) {
+        if let Some(ref tx) = self.query_result_tx {
+            let mut metadata = HashMap::new();
+            metadata.insert("control_signal".to_string(), json!(signal_type));
+
+            // Create a synthetic QueryResult representing the control signal
+            let control_result = QueryResult::new(
+                query_id.to_string(),
+                chrono::Utc::now(),
+                vec![], // No data results for control signals
+                metadata,
+            );
+
+            if let Err(e) = tx.send(control_result).await {
+                warn!("Failed to emit control signal '{}' as QueryResult for query '{}': {}",
+                    signal_type, query_id, e);
+            } else {
+                info!("Emitted control signal '{}' as QueryResult for query '{}'",
+                    signal_type, query_id);
+            }
+        } else {
+            debug!("No query_result_tx configured, control signal '{}' not emitted to reactions", signal_type);
+        }
     }
 
     /// Add a query subscription to specific sources
@@ -412,13 +448,19 @@ impl DataRouter {
             ControlSignal::BootstrapStarted { query_id, source_id } => {
                 info!("Received BootstrapStarted signal for query '{}' source '{}'",
                     query_id, source_id);
-                self.set_bootstrap_phase(query_id, source_id, BootstrapPhase::InProgress).await;
+                self.set_bootstrap_phase(query_id.clone(), source_id, BootstrapPhase::InProgress).await;
+
+                // Emit bootstrapStarted control signal as QueryResult
+                self.emit_control_signal_as_result(&query_id, "bootstrapStarted").await;
             }
             ControlSignal::BootstrapCompleted { query_id, source_id } => {
                 info!("Received BootstrapCompleted signal for query '{}' source '{}'",
                     query_id, source_id);
                 self.set_bootstrap_phase(query_id.clone(), source_id.clone(), BootstrapPhase::Completed).await;
-                self.release_buffered_events(query_id, source_id).await;
+                self.release_buffered_events(query_id.clone(), source_id).await;
+
+                // Emit bootstrapCompleted control signal as QueryResult
+                self.emit_control_signal_as_result(&query_id, "bootstrapCompleted").await;
             }
             ControlSignal::Running { query_id } => {
                 debug!("Query '{}' is now running", query_id);

@@ -625,12 +625,25 @@ impl PostgresBootstrapHandler {
         context: &BootstrapContext,
     ) -> Result<()> {
         for event in batch.drain(..) {
-            let wrapper = SourceEventWrapper {
-                source_id: event.source_id,
-                event: SourceEvent::Change(event.change),
-                timestamp: event.timestamp,
-                profiling: None,
-            };
+            // Get next sequence number for this bootstrap event
+            let _sequence = context.next_sequence();
+
+            // Create profiling metadata for bootstrap event
+            let mut profiling = crate::profiling::ProfilingMetadata::new();
+            let now = crate::profiling::timestamp_ns();
+
+            // Set timestamps as per spec for bootstrap events
+            profiling.source_ns = Some(0); // Always 0 for bootstrap events as per spec
+            profiling.source_send_ns = Some(now);
+            profiling.reactivator_start_ns = Some(now);
+            profiling.reactivator_end_ns = Some(now);
+
+            let wrapper = SourceEventWrapper::with_profiling(
+                event.source_id,
+                SourceEvent::Change(event.change),
+                event.timestamp,
+                profiling,
+            );
             context
                 .source_event_tx
                 .send(wrapper)

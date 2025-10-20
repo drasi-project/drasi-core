@@ -125,10 +125,24 @@ impl BootstrapProvider for ApplicationBootstrapProvider {
         for change in bootstrap_data.iter() {
             // Filter by requested labels
             if self.matches_labels(change, &request) {
-                let wrapper = SourceEventWrapper::new(
+                // Get next sequence number for this bootstrap event
+                let _sequence = context.next_sequence();
+
+                // Create profiling metadata for bootstrap event
+                let mut profiling = crate::profiling::ProfilingMetadata::new();
+                let now = crate::profiling::timestamp_ns();
+
+                // Set timestamps as per spec for bootstrap events
+                profiling.source_ns = Some(0); // Always 0 for bootstrap events as per spec
+                profiling.source_send_ns = Some(now);
+                profiling.reactivator_start_ns = Some(now);
+                profiling.reactivator_end_ns = Some(now);
+
+                let wrapper = SourceEventWrapper::with_profiling(
                     context.source_id.clone(),
                     SourceEvent::Change(change.clone()),
                     chrono::Utc::now(),
+                    profiling,
                 );
 
                 if let Err(e) = context.source_event_tx.send(wrapper).await {

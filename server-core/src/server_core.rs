@@ -38,6 +38,7 @@ pub struct DrasiServerCore {
     data_router: Arc<DataRouter>,
     bootstrap_router: Arc<BootstrapRouter>,
     event_receivers: Option<EventReceivers>,
+    query_result_tx: QueryResultSender,
     running: Arc<RwLock<bool>>,
     initialized: Arc<RwLock<bool>>,
     // Track components that were running before server stop
@@ -73,7 +74,11 @@ impl DrasiServerCore {
         let reaction_manager = Arc::new(ReactionManager::new(channels.component_event_tx.clone()));
 
         let subscription_router = Arc::new(SubscriptionRouter::new());
-        let data_router = Arc::new(DataRouter::new());
+
+        // Create data router and set query result sender before wrapping in Arc
+        let mut data_router = DataRouter::new();
+        data_router.set_query_result_tx(channels.query_result_tx.clone());
+        let data_router = Arc::new(data_router);
 
         // Create bootstrap router and set control signal sender
         let mut bootstrap_router = BootstrapRouter::new();
@@ -89,6 +94,7 @@ impl DrasiServerCore {
             data_router,
             bootstrap_router,
             event_receivers: Some(receivers),
+            query_result_tx: channels.query_result_tx,
             running: Arc::new(RwLock::new(false)),
             initialized: Arc::new(RwLock::new(false)),
             components_running_before_stop: Arc::new(
