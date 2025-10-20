@@ -309,261 +309,66 @@ Source::platform("external")
 
 ## Sources
 
-Sources are adapters that capture changes from your existing systems and convert them into the graph model:
+Sources are adapters that capture changes from your existing systems and convert them into the graph model.
 
-### Mock Source
+> **Detailed Documentation:** Each source has comprehensive documentation in its respective directory with configuration properties, examples, input/output formats, and troubleshooting guides.
+>
+> See: `src/sources/{source-name}/README.md`
 
-Generate test data for development:
+### Available Sources
 
-```rust
-Source::mock("test-source")
-    .with_properties(
-        Properties::new()
-            .with_string("data_type", "sensor")  // sensor|counter|random
-            .with_int("interval_ms", 500)
-    )
-    .build()
-```
+**Mock Source** - Generate test data for development and testing.
 
-### HTTP Source
+**HTTP Source** - Accept changes via REST API for webhook-based integrations.
 
-Accept changes via REST API for webhook-based integrations.
+**gRPC Source** - High-performance bidirectional streaming for high-throughput scenarios.
 
-**Configuration:**
+**PostgreSQL Source** - Stream changes from PostgreSQL using logical replication for real-time change data capture.
+
+**Application Source** - Embed change detection directly in your application for in-process data integration.
+
+**Platform Source** - Consume events from external Drasi Platform sources via Redis Streams.
+
+### Example: HTTP Source
+
+Accept changes via REST API:
+
 ```rust
 Source::http("http-ingestion")
     .with_properties(
         Properties::new()
             .with_string("host", "0.0.0.0")
             .with_int("port", 9000)
-            .with_string("path", "/changes")  // Default: /changes
+            .with_string("path", "/changes")
     )
     .build()
 ```
 
-**Request format:**
-```bash
-curl -X POST http://localhost:9000/changes \
-  -H "Content-Type: application/json" \
-  -d '{
-    "op": "i",  // "i" = insert, "u" = update, "d" = delete
-    "element": {
-      "type": "node",
-      "id": "order-123",
-      "labels": ["Order"],
-      "properties": {
-        "status": "pending",
-        "created_at": "2024-01-15T10:00:00Z",
-        "customer_id": "cust-456"
-      }
-    }
-  }'
-```
-
-**Relationship example:**
+Send changes via HTTP POST:
 ```bash
 curl -X POST http://localhost:9000/changes \
   -H "Content-Type: application/json" \
   -d '{
     "op": "i",
     "element": {
-      "type": "relation",
-      "id": "rel-1",
-      "labels": ["CONTAINS"],
-      "start_id": "order-123",
-      "end_id": "item-456",
+      "type": "node",
+      "id": "order-123",
+      "labels": ["Order"],
       "properties": {
-        "quantity": 2
+        "status": "pending",
+        "created_at": "2024-01-15T10:00:00Z"
       }
     }
   }'
 ```
 
-**Authentication:** Add reverse proxy (nginx, etc.) for auth
-**Rate limiting:** Use load balancer or API gateway
-
-### gRPC Source
-
-High-performance bidirectional streaming for high-throughput scenarios.
-
-**Configuration:**
-```rust
-Source::grpc("grpc-stream")
-    .with_properties(
-        Properties::new()
-            .with_string("host", "0.0.0.0")
-            .with_int("port", 50051)
-            .with_int("max_message_size", 4194304)  // 4MB default
-            .with_int("timeout_seconds", 300)
-    )
-    .build()
-```
-
-**Protocol:** Uses drasi.v1.Source service (proto definitions in `proto/drasi/v1/`)
-
-**Features:**
-- Bidirectional streaming for high throughput
-- Message batching support
-- Automatic reconnection
-- Backpressure handling
-
-**Use when:**
-- Sending > 1000 changes/second
-- Need ordered delivery guarantees
-- Integrating with services that support gRPC
-
-### PostgreSQL Source
-
-Stream changes from PostgreSQL using logical replication for real-time change data capture.
-
-**Configuration:**
-```rust
-Source::postgres("postgres-cdc")
-    .with_properties(
-        Properties::new()
-            .with_string("host", "localhost")
-            .with_int("port", 5432)
-            .with_string("database", "production")
-            .with_string("user", "replication_user")
-            .with_string("password", "secret")
-            .with_string("publication", "drasi_publication")  // Optional
-            .with_string("slot_name", "drasi_slot")           // Optional
-    )
-    .with_postgres_bootstrap()  // Snapshot + streaming
-    .build()
-```
-
-**PostgreSQL setup:**
-
-1. **Enable logical replication** (requires restart):
-```sql
-ALTER SYSTEM SET wal_level = logical;
-ALTER SYSTEM SET max_replication_slots = 10;
--- Restart PostgreSQL
-```
-
-2. **Create replication user:**
-```sql
-CREATE USER replication_user WITH REPLICATION PASSWORD 'secret';
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO replication_user;
-GRANT USAGE ON SCHEMA public TO replication_user;
-```
-
-3. **Create publication** (specify tables to track):
-```sql
--- Track specific tables
-CREATE PUBLICATION drasi_publication FOR TABLE orders, inventory, customers;
-
--- Or track all tables
-CREATE PUBLICATION drasi_publication FOR ALL TABLES;
-```
-
-4. **Create replication slot:**
-```sql
-SELECT pg_create_logical_replication_slot('drasi_slot', 'pgoutput');
-```
-
-**How it works:**
-- Bootstrap: Takes initial snapshot of published tables
-- Streaming: Receives INSERT/UPDATE/DELETE from WAL
-- LSN tracking: Resumes from last processed position
-
-**Troubleshooting:**
-
-*Publication not found:*
-```sql
--- List publications
-SELECT * FROM pg_publication;
-
--- Add tables to publication
-ALTER PUBLICATION drasi_publication ADD TABLE new_table;
-```
-
-*Permission errors:*
-```sql
--- Grant table permissions
-GRANT SELECT ON TABLE orders TO replication_user;
-```
-
-*Replication lag:*
-```sql
--- Check replication status
-SELECT * FROM pg_replication_slots WHERE slot_name = 'drasi_slot';
-
--- Monitor lag
-SELECT pg_current_wal_lsn() - confirmed_flush_lsn AS lag
-FROM pg_replication_slots
-WHERE slot_name = 'drasi_slot';
-```
-
-### Application Source
-
-Embed change detection directly in your application for in-process data integration.
-
-**Basic setup:**
-```rust
-use drasi_server_core::{DrasiServerCore, Source};
-use drasi_server_core::sources::application::PropertyMapBuilder;
-
-let core = DrasiServerCore::builder()
-    .add_source(Source::application("app-events").build())
-    .build()
-    .await?;
-
-core.start().await?;
-
-// Get handle to send changes
-let source = core.source_handle("app-events")?;
-```
-
-**Send node changes:**
-```rust
-// Insert new node
-source.send_node_insert(
-    "order-123",
-    vec!["Order"],
-    PropertyMapBuilder::new()
-        .with_string("customer_id", "cust-456")
-        .with_float("total", 150.00)
-        .with_string("status", "pending")
-        .build()
-).await?;
-
-// Update existing node
-source.send_node_update(
-    "order-123",
-    vec!["Order"],
-    PropertyMapBuilder::new()
-        .with_string("customer_id", "cust-456")
-        .with_float("total", 150.00)
-        .with_string("status", "shipped")  // Changed
-        .build()
-).await?;
-
-// Delete node
-source.send_delete("order-123", vec!["Order"]).await?;
-```
-
-**Send relationship changes:**
-```rust
-// Insert relationship
-source.send_relation_insert(
-    "rel-1",
-    vec!["CONTAINS"],
-    PropertyMapBuilder::new()
-        .with_integer("quantity", 2)
-        .build(),
-    "order-123",  // Start node ID
-    "item-456"    // End node ID
-).await?;
-```
-
-**Thread safety:**
-- Handles are `Clone + Send` - share across threads
-- Channel has 1000-element buffer by default
-- Operations are async and non-blocking
-
-**Complete example:** See [`examples/bidirectional/`](examples/bidirectional/)
+For detailed configuration, data formats, and examples, see:
+- **[Mock Source README](src/sources/mock/README.md)**
+- **[HTTP Source README](src/sources/http/README.md)**
+- **[gRPC Source README](src/sources/grpc/README.md)**
+- **[PostgreSQL Source README](src/sources/postgres/README.md)**
+- **[Application Source README](src/sources/application/README.md)**
+- **[Platform Source README](src/sources/platform/README.md)**
 
 ## Continuous Queries
 
@@ -674,22 +479,35 @@ Query::cypher("service-health")
 
 ## Reactions
 
-Reactions respond to detected changes by triggering downstream actions:
+Reactions respond to detected changes by triggering downstream actions.
 
-### Log Reaction
+> **Detailed Documentation:** Each reaction has comprehensive documentation in its respective directory with configuration properties, examples, input/output formats, and troubleshooting guides.
+>
+> See: `src/reactions/{reaction-name}/README.md`
 
-Debug and monitor detected changes:
+### Available Reactions
 
-```rust
-Reaction::log("change-logger")
-    .subscribe_to("my-query")
-    .with_property("log_level", json!("info"))
-    .build()
-```
+**Log Reaction** - Debug and monitor detected changes by logging to stdout.
 
-### HTTP Reaction
+**HTTP Reaction** - Trigger webhooks and REST APIs with detected changes.
 
-Trigger webhooks and REST APIs:
+**HTTP Adaptive Reaction** - HTTP reaction with adaptive batching for high-volume scenarios.
+
+**gRPC Reaction** - High-performance change streaming via gRPC.
+
+**gRPC Adaptive Reaction** - gRPC reaction with adaptive batching for high-volume scenarios.
+
+**SSE Reaction** - Stream changes to web applications via Server-Sent Events.
+
+**Application Reaction** - Process detected changes in-process within your application.
+
+**Platform Reaction** - Publish changes to Redis Streams for Drasi Platform integration.
+
+**Profiler Reaction** - Collect and report performance statistics for the query processing pipeline.
+
+### Example: HTTP Reaction
+
+Trigger webhooks when changes are detected:
 
 ```rust
 Reaction::http("alert-webhook")
@@ -702,53 +520,11 @@ Reaction::http("alert-webhook")
     .build()
 ```
 
-### SSE Reaction
+### Example: Application Reaction
 
-Stream changes to web applications:
-
-```rust
-Reaction::sse("live-updates")
-    .subscribe_to("real-time-data")
-    .with_properties(
-        Properties::new()
-            .with_string("host", "0.0.0.0")
-            .with_int("port", 8081)
-            .with_string("path", "/changes")
-    )
-    .build()
-```
-
-Client connection:
-```javascript
-const changes = new EventSource('http://localhost:8081/changes');
-changes.onmessage = (event) => {
-    const change = JSON.parse(event.data);
-    updateUI(change);
-};
-```
-
-### gRPC Reaction
-
-High-performance change streaming:
+Process changes in-process:
 
 ```rust
-Reaction::grpc("grpc-notifications")
-    .subscribe_to("critical-events")
-    .with_properties(
-        Properties::new()
-            .with_string("host", "notifications.example.com")
-            .with_int("port", 50052)
-    )
-    .build()
-```
-
-### Application Reaction
-
-Process detected changes in-process:
-
-```rust
-use drasi_server_core::{DrasiServerCore, Reaction};
-
 let core = DrasiServerCore::builder()
     .add_reaction(
         Reaction::application("change-handler")
@@ -770,6 +546,17 @@ while let Some(result) = stream.next().await {
     // Handle the change...
 }
 ```
+
+For detailed configuration, data formats, and examples, see:
+- **[Log Reaction README](src/reactions/log/README.md)**
+- **[HTTP Reaction README](src/reactions/http/README.md)**
+- **[HTTP Adaptive Reaction README](src/reactions/http_adaptive/README.md)**
+- **[gRPC Reaction README](src/reactions/grpc/README.md)**
+- **[gRPC Adaptive Reaction README](src/reactions/grpc_adaptive/README.md)**
+- **[SSE Reaction README](src/reactions/sse/README.md)**
+- **[Application Reaction README](src/reactions/application/README.md)**
+- **[Platform Reaction README](src/reactions/platform/README.md)**
+- **[Profiler Reaction README](src/reactions/profiler/README.md)**
 
 ## Component Management API
 
@@ -980,24 +767,6 @@ async fn monitor_service(core: &DrasiServerCore, service_id: &str) -> Result<()>
 
     Ok(())
 }
-```
-
-**Graceful Shutdown:**
-```rust
-// Stop components in correct order
-for (id, _) in core.list_reactions().await? {
-    core.stop_reaction(&id).await?;
-}
-
-for (id, _) in core.list_queries().await? {
-    core.stop_query(&id).await?;
-}
-
-for (id, _) in core.list_sources().await? {
-    core.stop_source(&id).await?;
-}
-
-core.stop().await?;
 ```
 
 ### Examples
@@ -1322,24 +1091,13 @@ RETURN max(n.value) as max_value, min(n.value) as min_value, avg(n.value) as avg
 
 ## Performance Profiling
 
-DrasiServerCore includes built-in profiling capabilities to track end-to-end latency through the Source → Query → Reaction pipeline. Profiling captures nanosecond-precision timestamps at 9 key points throughout data processing, enabling you to identify bottlenecks and optimize performance.
-
-### Why Profiling Matters
-
-In change-driven architectures, understanding latency is critical:
-- **Detect Bottlenecks**: Identify which component (source, query, or reaction) is causing delays
-- **Monitor Performance**: Track latency distributions over time (p50, p95, p99)
-- **Optimize Resources**: Make data-driven decisions about scaling and tuning
-- **Alert on Degradation**: Set SLOs based on measured latency
+DrasiServerCore includes built-in profiling capabilities to track end-to-end latency through the Source → Query → Reaction pipeline.
 
 ### Quick Start
 
-Enable profiling for any source by configuring it with profiling enabled:
+Enable profiling for any source and add a Profiler reaction:
 
 ```rust
-use drasi_server_core::{DrasiServerCore, Source, Query, Reaction, Properties};
-use serde_json::json;
-
 let core = DrasiServerCore::builder()
     .add_source(
         Source::mock("profiled-source")
@@ -1360,145 +1118,67 @@ let core = DrasiServerCore::builder()
             .subscribe_to("my-query")
             .with_properties(
                 Properties::new()
-                    .with_int("window_size", 1000)        // Keep last 1000 samples
-                    .with_int("log_interval_seconds", 30) // Log stats every 30s
+                    .with_int("window_size", 1000)
+                    .with_int("report_interval_secs", 30)
             )
             .build()
     )
     .build()
     .await?;
-
-core.start().await?;
 ```
 
-The ProfilerReaction will automatically log detailed statistics:
+The Profiler reaction automatically logs detailed statistics:
 
 ```
-Profiling Statistics (1000 samples, window: 1000):
+Profiling Statistics (1000 samples):
 
 Source → Query Latency:
   count: 1000, mean: 245.3 μs, std dev: 78.2 μs
   min: 120.5 μs, max: 892.1 μs
   p50: 235.0 μs, p95: 387.5 μs, p99: 524.8 μs
 
-Query → Reaction Latency:
-  count: 1000, mean: 156.8 μs, std dev: 42.1 μs
-  min: 95.3 μs, max: 445.2 μs
-  p50: 148.5 μs, p95: 225.7 μs, p99: 312.4 μs
-
-Query Core Processing Time:
+Query Processing Time:
   count: 1000, mean: 1.2 ms, std dev: 0.4 ms
   min: 0.5 ms, max: 3.8 ms
   p50: 1.1 ms, p95: 1.9 ms, p99: 2.4 ms
+
+Total End-to-End:
+  count: 1000, mean: 2.5 ms, std dev: 0.6 ms
+  min: 1.2 ms, max: 5.3 ms
+  p50: 2.4 ms, p95: 3.6 ms, p99: 4.2 ms
 ```
 
-### Profiling Timestamps
+### Profiling Documentation
 
-Profiling captures 9 timestamps through the pipeline:
+For comprehensive profiling documentation, see:
 
-```
-Source Component:
-  1. source_ns           - When source receives/generates data
-  2. source_receive_ns   - When source receives external event (HTTP/gRPC/etc.)
-  3. source_send_ns      - When source sends to query
+- **[Profiler Reaction README](src/reactions/profiler/README.md)** - Complete profiler reaction documentation
+  - Configuration properties and examples
+  - Statistical methods (Welford's algorithm, percentiles)
+  - Interpreting results and identifying bottlenecks
+  - Performance tuning and troubleshooting
 
-Query Component:
-  4. query_receive_ns    - When query receives from source
-  5. query_core_call_ns  - Before query core evaluation
-  6. query_core_return_ns - After query core evaluation
-  7. query_send_ns       - When query sends to reaction
+- **[PROFILING.md](docs/PROFILING.md)** - Overall profiling system architecture
+  - Profiling metadata structure and flow
+  - Timestamp capture points (9 stages)
+  - Source configuration for profiling
+  - Manual profiling in custom components
+  - Performance impact analysis
 
-Reaction Component:
-  8. reaction_receive_ns  - When reaction receives query result
-  9. reaction_complete_ns - When reaction finishes processing
-```
+### Key Features
 
-### Latency Metrics
-
-ProfilerReaction automatically calculates 5 key latencies:
-
-1. **Source → Query**: Network and channel latency between source and query
-2. **Query → Reaction**: Network and channel latency between query and reaction
-3. **Query Core Time**: Time spent in continuous query evaluation
-4. **Reaction Time**: Time spent in reaction processing
-5. **Total End-to-End**: Complete latency from source to reaction completion
-
-### Manual Profiling
-
-For custom profiling scenarios, use the profiling API directly:
-
-```rust
-use drasi_server_core::profiling::{ProfilingMetadata, timestamp_ns};
-
-// Create profiling metadata
-let mut profiling = ProfilingMetadata::new();
-profiling.source_send_ns = Some(timestamp_ns());
-
-// Pass through SourceEventWrapper
-let event = SourceEventWrapper::with_profiling(
-    "my-source".to_string(),
-    SourceEvent::Change(change),
-    chrono::Utc::now(),
-    profiling,
-);
-
-// Profiling automatically flows through QueryResult
-// and can be accessed in reactions
-```
-
-### Configuration Options
-
-**ProfilerReaction Properties:**
-
-```rust
-Properties::new()
-    .with_int("window_size", 1000)        // Sample window for percentiles (default: 1000)
-    .with_int("log_interval_seconds", 30) // Statistics logging frequency (default: 30)
-```
-
-**Source Profiling:**
-
-Most sources support profiling via properties:
-
-```yaml
-sources:
-  - id: my-postgres-source
-    source_type: postgres
-    properties:
-      enable_profiling: true  # Enable profiling
-      host: localhost
-      # ... other properties
-```
-
-Supported sources: PostgreSQL, HTTP, gRPC, Platform, Application, Mock
-
-### Examples
-
-See complete profiling examples:
-
-```bash
-# Basic profiling usage
-cargo run --example profiling_basic
-
-# ProfilerReaction with statistics
-cargo run --example profiling_with_profiler_reaction
-```
+- **9 Timestamp Points**: Captures latency at every stage of processing
+- **5 Key Metrics**: Source→Query, Query Processing, Query→Reaction, Reaction Processing, Total End-to-End
+- **Statistical Analysis**: Mean, standard deviation, percentiles (p50, p95, p99)
+- **Sliding Window**: Configurable sample window for accurate percentile calculation
+- **Periodic Reports**: Automatic logging at configurable intervals
 
 ### Best Practices
 
 1. **Enable Selectively**: Profiling adds ~100ns overhead per event - enable only when needed
-2. **Choose Window Size**: Larger windows (1000-10000) provide stable percentiles; smaller windows (100-500) show recent trends
-3. **Monitor p99**: The 99th percentile reveals tail latency issues
-4. **Compare Metrics**: If "Query Core Time" is high, optimize your Cypher query; if "Reaction Time" is high, optimize reaction processing
-
-### Statistical Methods
-
-ProfilerReaction uses efficient algorithms for accurate statistics:
-- **Welford's Algorithm**: Online variance calculation without storing all samples
-- **Sliding Window**: VecDeque maintains recent samples for percentile calculation
-- **Nanosecond Precision**: Timestamps use `std::time::Instant` for accurate measurements
-
-For comprehensive profiling documentation, see [PROFILING.md](PROFILING.md).
+2. **Monitor p99**: The 99th percentile reveals tail latency issues
+3. **Compare Metrics**: Identify bottlenecks by comparing latencies across pipeline stages
+4. **Use for SLOs**: Set Service Level Objectives based on measured percentiles
 
 ## Building from Source
 
@@ -1575,7 +1255,7 @@ See `examples/configs/` for YAML configuration templates:
 
 ### Reaction Optimization
 
-1. **Enable Batching**: Group change notifications for efficiency
+1. **Enable Batching**: Use adaptive reactions for high-volume scenarios
 2. **Async Processing**: Use async reactions for better throughput
 3. **Timeout Configuration**: Set appropriate timeouts for reliability
 
