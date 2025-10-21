@@ -167,7 +167,20 @@ impl DataRouter {
             .insert(query_id.clone(), tx);
         info!("Channel created and sender stored for query '{}'", query_id);
 
-        // Update source subscriptions
+        // CRITICAL: Set bootstrap phase BEFORE adding subscriptions
+        // This prevents race condition where events arrive before phase is set
+        if enable_bootstrap {
+            info!("[BOOTSTRAP] Query '{}' enabling bootstrap for {} sources", query_id, source_ids.len());
+            for source_id in &source_ids {
+                self.set_bootstrap_phase(query_id.clone(), source_id.clone(), BootstrapPhase::InProgress).await;
+                info!("[BOOTSTRAP] Set state to InProgress for query '{}' source '{}'", query_id, source_id);
+            }
+        } else {
+            info!("[BOOTSTRAP] Query '{}' bootstrap disabled, events will flow immediately", query_id);
+        }
+
+        // Update source subscriptions AFTER setting bootstrap phase
+        // This ensures any events that arrive will see the correct phase
         let mut subscriptions = self.source_subscriptions.write().await;
         for source_id in &source_ids {
             let query_list = subscriptions
@@ -187,18 +200,6 @@ impl DataRouter {
                     query_id, source_id
                 );
             }
-        }
-
-        // If bootstrap is enabled, set all query-source pairs to InProgress state
-        // This ensures events are buffered until bootstrap completes
-        if enable_bootstrap {
-            info!("[BOOTSTRAP] Query '{}' enabling bootstrap for {} sources", query_id, source_ids.len());
-            for source_id in &source_ids {
-                self.set_bootstrap_phase(query_id.clone(), source_id.clone(), BootstrapPhase::InProgress).await;
-                info!("[BOOTSTRAP] Set state to InProgress for query '{}' source '{}'", query_id, source_id);
-            }
-        } else {
-            info!("[BOOTSTRAP] Query '{}' bootstrap disabled, events will flow immediately", query_id);
         }
 
         let elapsed = start_time.elapsed();
@@ -349,10 +350,28 @@ impl DataRouter {
         // Release buffered change events
         self.release_buffered_events(query_id.clone(), source_id.clone()).await;
 
-        // Emit bootstrapCompleted control signal as QueryResult to reactions
-        self.emit_control_signal_as_result(&query_id, "bootstrapCompleted").await;
+        // Forward the BootstrapEnd marker to the query so it can emit the bootstrapCompleted signal
+        // after it has finished processing all the bootstrap data
+        let marker = SourceEventWrapper::new(
+            source_id.clone(),
+            SourceEvent::BootstrapEnd {
+                query_id: query_id.clone(),
+            },
+            chrono::Utc::now(),
+        );
 
-        info!("[BOOTSTRAP] Bootstrap completed for query '{}' source '{}'", query_id, source_id);
+        let senders = self.query_event_senders.read().await;
+        if let Some(sender) = senders.get(&query_id) {
+            if let Err(e) = sender.send(marker).await {
+                error!("Failed to send BootstrapEnd marker to query '{}': {}", query_id, e);
+            } else {
+                info!("[BOOTSTRAP] Forwarded BootstrapEnd marker to query '{}' for final signal emission", query_id);
+            }
+        } else {
+            warn!("No sender found for query '{}' when forwarding BootstrapEnd marker", query_id);
+        }
+
+        info!("[BOOTSTRAP] Bootstrap data delivery completed for query '{}' source '{}'", query_id, source_id);
     }
 
     /// Check if bootstrap has timed out for any query-source pairs

@@ -355,11 +355,38 @@ impl Query for DrasiQuery {
                         );
                         continue;
                     }
-                    SourceEvent::BootstrapEnd { query_id: marker_query_id } => {
-                        debug!(
-                            "Query '{}' received bootstrap end marker for query '{}'",
-                            query_id, marker_query_id
+                    SourceEvent::BootstrapEnd { query_id: _marker_query_id } => {
+                        info!(
+                            "[BOOTSTRAP] Query '{}' received BootstrapEnd marker - all bootstrap data processed",
+                            query_id
                         );
+
+                        // Create and send bootstrapCompleted control signal
+                        let mut metadata = HashMap::new();
+                        metadata.insert(
+                            "control_signal".to_string(),
+                            serde_json::json!("bootstrapCompleted"),
+                        );
+
+                        let control_result = QueryResult::new(
+                            query_id.clone(),
+                            chrono::Utc::now(),
+                            vec![], // No data results for control signals
+                            metadata,
+                        );
+
+                        if let Err(e) = result_tx.send(control_result).await {
+                            error!(
+                                "Failed to send bootstrapCompleted signal for query '{}': {}",
+                                query_id, e
+                            );
+                        } else {
+                            info!(
+                                "[BOOTSTRAP] Emitted bootstrapCompleted signal for query '{}'",
+                                query_id
+                            );
+                        }
+
                         continue;
                     }
                 };
