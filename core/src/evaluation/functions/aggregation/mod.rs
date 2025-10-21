@@ -29,7 +29,7 @@ pub use max::Max;
 pub use min::Min;
 pub use sum::Sum;
 
-use crate::models::ElementValue;
+use crate::models::{ElementPropertyMap, ElementValue};
 
 use self::lazy_sorted_set::LazySortedSet;
 
@@ -57,6 +57,7 @@ pub enum ValueAccumulator {
         cov: f64,
     },
     Value(ElementValue),
+    Map(ElementPropertyMap),
 }
 
 #[derive(Clone)]

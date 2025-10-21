@@ -25,6 +25,8 @@ use super::{Function, FunctionRegistry};
 
 mod awaiting;
 mod future_element;
+mod previous_distinct_value;
+mod previous_value;
 mod true_for;
 mod true_later;
 mod true_now_or_later;
@@ -83,6 +85,24 @@ impl RegisterFutureFunctions for FunctionRegistry {
             Function::Scalar(Arc::new(true_now_or_later::TrueNowOrLater::new(
                 future_queue.clone(),
             ))),
+        );
+
+        self.register_function(
+            "drasi.previousValue",
+            Function::Scalar(Arc::new(previous_value::PreviousValue::new(
+                result_index.clone(),
+                expression_evaluator.clone(),
+            ))),
+        );
+
+        self.register_function(
+            "drasi.previousDistinctValue",
+            Function::Scalar(Arc::new(
+                previous_distinct_value::PreviousDistinctValue::new(
+                    result_index.clone(),
+                    expression_evaluator.clone(),
+                ),
+            )),
         );
     }
 }

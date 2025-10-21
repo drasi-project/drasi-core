@@ -13,12 +13,14 @@
 // limitations under the License.
 
 use drasi_query_ast::ast;
+use hashers::jenkins::spooky_hash::SpookyHasher;
 use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::evaluation::variable_value::VariableValue;
 use crate::interface::QueryClock;
-use crate::models::{Element, ElementTimestamp};
+use crate::models::{Element, ElementReference, ElementTimestamp};
 use crate::path_solver::solution::SolutionSignature;
 
 pub type QueryVariables = BTreeMap<Box<str>, VariableValue>;
@@ -76,6 +78,22 @@ impl<'a> ExpressionEvaluationContext<'a> {
             side_effects: SideEffects::Apply,
             output_grouping_key: None,
             input_grouping_hash: u64::default(),
+            clock,
+            solution_signature: None,
+            anchor_element: None,
+        }
+    }
+
+    pub fn from_slot(
+        variables: &'a QueryVariables,
+        clock: Arc<dyn QueryClock>,
+        element_reference: &ElementReference,
+    ) -> ExpressionEvaluationContext<'a> {
+        ExpressionEvaluationContext {
+            variables,
+            side_effects: SideEffects::Apply,
+            output_grouping_key: None,
+            input_grouping_hash: extract_element_reference_hash(element_reference),
             clock,
             solution_signature: None,
             anchor_element: None,
@@ -176,4 +194,11 @@ pub struct ChangeContext {
     pub is_future_reprocess: bool,
     pub before_grouping_hash: u64,
     pub after_grouping_hash: u64,
+}
+
+fn extract_element_reference_hash(element_reference: &ElementReference) -> u64 {
+    let mut hasher = SpookyHasher::default();
+    element_reference.source_id.hash(&mut hasher);
+    element_reference.element_id.hash(&mut hasher);
+    hasher.finish()
 }
