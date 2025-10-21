@@ -325,6 +325,36 @@ impl DataRouter {
         }
     }
 
+    /// Handle bootstrap end marker - ensures all bootstrap data has been received
+    /// before transitioning to Completed state
+    async fn handle_bootstrap_end_marker(&self, query_id: String, source_id: String) {
+        info!("[BOOTSTRAP] Processing BootstrapEnd marker for query '{}' source '{}'",
+            query_id, source_id);
+
+        // Check current bootstrap phase
+        let phase = self.get_bootstrap_phase(&query_id, &source_id).await;
+
+        if phase != BootstrapPhase::InProgress {
+            warn!("[BOOTSTRAP] Received BootstrapEnd marker for query '{}' source '{}' but phase is {:?}, ignoring",
+                query_id, source_id, phase);
+            return;
+        }
+
+        info!("[BOOTSTRAP] Completing bootstrap for query '{}' source '{}' - all data received",
+            query_id, source_id);
+
+        // Transition to Completed state now that all data has arrived
+        self.set_bootstrap_phase(query_id.clone(), source_id.clone(), BootstrapPhase::Completed).await;
+
+        // Release buffered change events
+        self.release_buffered_events(query_id.clone(), source_id.clone()).await;
+
+        // Emit bootstrapCompleted control signal as QueryResult to reactions
+        self.emit_control_signal_as_result(&query_id, "bootstrapCompleted").await;
+
+        info!("[BOOTSTRAP] Bootstrap completed for query '{}' source '{}'", query_id, source_id);
+    }
+
     /// Check if bootstrap has timed out for any query-source pairs
     async fn check_bootstrap_timeouts(&self) {
         let now = Instant::now();
@@ -374,9 +404,10 @@ impl DataRouter {
                 return;
             }
             SourceEvent::BootstrapEnd { query_id } => {
-                debug!("Data router received BootstrapEnd marker from source '{}' for query '{}'",
+                info!("[BOOTSTRAP] Data router received BootstrapEnd marker from source '{}' for query '{}'",
                     source_id, query_id);
-                // These markers are now replaced by control signals
+                // Process the bootstrap end marker - this ensures all bootstrap data has arrived
+                self.handle_bootstrap_end_marker(query_id.clone(), source_id.clone()).await;
                 return;
             }
         }
@@ -454,13 +485,12 @@ impl DataRouter {
                 self.emit_control_signal_as_result(&query_id, "bootstrapStarted").await;
             }
             ControlSignal::BootstrapCompleted { query_id, source_id } => {
-                info!("Received BootstrapCompleted signal for query '{}' source '{}'",
+                // This control signal is now deprecated in favor of BootstrapEnd marker
+                // which flows through the same channel as bootstrap data
+                debug!("Received deprecated BootstrapCompleted signal for query '{}' source '{}' - ignoring (using BootstrapEnd marker instead)",
                     query_id, source_id);
-                self.set_bootstrap_phase(query_id.clone(), source_id.clone(), BootstrapPhase::Completed).await;
-                self.release_buffered_events(query_id.clone(), source_id).await;
-
-                // Emit bootstrapCompleted control signal as QueryResult
-                self.emit_control_signal_as_result(&query_id, "bootstrapCompleted").await;
+                // The actual completion is now handled by BootstrapEnd marker
+                // which ensures all bootstrap data has been delivered before completion
             }
             ControlSignal::Running { query_id } => {
                 debug!("Query '{}' is now running", query_id);
