@@ -26,15 +26,24 @@ use crate::bootstrap::{BootstrapContext, BootstrapProvider};
 
 /// Bootstrap provider for application sources that replays stored insert events
 pub struct ApplicationBootstrapProvider {
-    /// Stores bootstrap data (insert events) for replay
+    /// Shared reference to bootstrap data (insert events) for replay
+    /// This should be connected to ApplicationSource's bootstrap_data via shared Arc
     bootstrap_data: Arc<RwLock<Vec<SourceChange>>>,
 }
 
 impl ApplicationBootstrapProvider {
+    /// Create a new provider with its own isolated bootstrap data storage
+    /// Note: This creates an independent storage that won't be connected to any ApplicationSource
     pub fn new() -> Self {
         Self {
             bootstrap_data: Arc::new(RwLock::new(Vec::new())),
         }
+    }
+
+    /// Create a new provider with a shared reference to ApplicationSource's bootstrap data
+    /// This allows the provider to access the actual data stored by ApplicationSource
+    pub fn with_shared_data(bootstrap_data: Arc<RwLock<Vec<SourceChange>>>) -> Self {
+        Self { bootstrap_data }
     }
 
     /// Store an insert event for future bootstrap replay
@@ -96,7 +105,7 @@ impl BootstrapProvider for ApplicationBootstrapProvider {
     async fn bootstrap(
         &self,
         request: BootstrapRequest,
-        context: &BootstrapContext,
+        _context: &BootstrapContext,
         _event_tx: crate::channels::BootstrapEventSender,
     ) -> Result<usize> {
         info!(
@@ -126,21 +135,9 @@ impl BootstrapProvider for ApplicationBootstrapProvider {
         for change in bootstrap_data.iter() {
             // Filter by requested labels
             if self.matches_labels(change, &request) {
-                // Get next sequence number for this bootstrap event
-                let _sequence = context.next_sequence();
-
-                // Create profiling metadata for bootstrap event
-                let mut profiling = crate::profiling::ProfilingMetadata::new();
-                let now = crate::profiling::timestamp_ns();
-
-                // Set timestamps as per spec for bootstrap events
-                profiling.source_ns = Some(0); // Always 0 for bootstrap events as per spec
-                profiling.source_send_ns = Some(now);
-                profiling.reactivator_start_ns = Some(now);
-                profiling.reactivator_end_ns = Some(now);
-
-                // Bootstrap happens through dedicated channels in source.subscribe()
-                let _profiling = profiling; // Keep for potential future use
+                // Note: Sequence numbering and profiling metadata are handled by
+                // ApplicationSource.subscribe() which sends bootstrap events through
+                // dedicated channels. This provider only counts matching events.
                 count += 1;
             }
         }
@@ -153,12 +150,24 @@ impl BootstrapProvider for ApplicationBootstrapProvider {
     }
 }
 
-// Note: In a full implementation, we would need a way for the ApplicationSource
-// to share its bootstrap data with this provider. This could be done through:
-// 1. A shared data structure passed during provider creation
-// 2. A registry where sources register their bootstrap data
-// 3. Integration through the server core that connects them
+// Implementation Note: Bootstrap Data Connection
 //
-// For now, this provider maintains its own bootstrap data storage,
-// but in practice it would need to be connected to the actual ApplicationSource's
-// bootstrap_data field.
+// This provider can be connected to ApplicationSource's actual bootstrap data in two ways:
+//
+// 1. Via with_shared_data() constructor:
+//    When creating an ApplicationSource, pass the bootstrap_data Arc to the provider:
+//    ```rust
+//    let (source, handle) = ApplicationSource::new(config, event_tx);
+//    let provider = ApplicationBootstrapProvider::with_shared_data(
+//        source.get_bootstrap_data()
+//    );
+//    ```
+//
+// 2. Via BootstrapContext properties:
+//    Store the bootstrap_data Arc in the source config properties as a special internal
+//    property that can be retrieved by the provider during bootstrap operations.
+//
+// Currently, ApplicationSource handles bootstrap directly in its subscribe() method
+// (lines 337-384 in sources/application/mod.rs), so this provider is not actively used
+// by ApplicationSource. The provider exists for testing and potential future integration
+// where bootstrap logic might be delegated to the provider system.

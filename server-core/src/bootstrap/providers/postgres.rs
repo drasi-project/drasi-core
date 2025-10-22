@@ -81,8 +81,6 @@ struct PostgresConfig {
     pub database: String,
     pub user: String,
     pub password: String,
-    #[allow(dead_code)]
-    pub tables: Vec<String>,
     pub table_keys: Vec<TableKeyConfig>,
 }
 
@@ -118,16 +116,6 @@ impl PostgresConfig {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("password property is required for PostgreSQL bootstrap"))?
                 .to_string(),
-            tables: props
-                .get("tables")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str())
-                        .map(|s| s.to_string())
-                        .collect()
-                })
-                .unwrap_or_default(),
             table_keys: props
                 .get("table_keys")
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -246,11 +234,6 @@ impl PostgresBootstrapHandler {
             .await?;
         let lsn: String = row.get(0);
 
-        // Export snapshot for consistency (optional, mainly for documentation)
-        let _snapshot_row = transaction
-            .query_one("SELECT pg_export_snapshot()", &[])
-            .await?;
-
         Ok((transaction, lsn))
     }
 
@@ -365,7 +348,7 @@ impl PostgresBootstrapHandler {
     ) -> Result<Vec<ColumnInfo>> {
         let rows = transaction
             .query(
-                "SELECT column_name, data_type,
+                "SELECT column_name,
                         CASE
                             WHEN data_type = 'character varying' THEN 1043
                             WHEN data_type = 'integer' THEN 23
@@ -395,8 +378,7 @@ impl PostgresBootstrapHandler {
         for row in rows {
             columns.push(ColumnInfo {
                 name: row.get(0),
-                data_type: row.get(1),
-                type_oid: row.get::<_, i32>(2),
+                type_oid: row.get::<_, i32>(1),
             });
         }
 
@@ -650,7 +632,5 @@ impl PostgresBootstrapHandler {
 #[derive(Debug)]
 struct ColumnInfo {
     name: String,
-    #[allow(dead_code)]
-    data_type: String,
     type_oid: i32,
 }

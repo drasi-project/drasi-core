@@ -26,6 +26,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
 
+use crate::bootstrap::{BootstrapContext, BootstrapProviderFactory, BootstrapRequest};
 use crate::channels::{ComponentStatus, ComponentType, *};
 use crate::config::SourceConfig;
 use crate::sources::Source;
@@ -193,6 +194,12 @@ impl ApplicationSource {
         (source, handle)
     }
 
+    /// Get a clone of the bootstrap data Arc for sharing with ApplicationBootstrapProvider
+    /// This allows the provider to access the actual bootstrap data stored by this source
+    pub fn get_bootstrap_data(&self) -> Arc<RwLock<Vec<SourceChange>>> {
+        Arc::clone(&self.bootstrap_data)
+    }
+
     async fn process_events(&self) -> Result<()> {
         let mut rx = self
             .app_rx
@@ -338,45 +345,112 @@ impl Source for ApplicationSource {
         &self,
         query_id: String,
         enable_bootstrap: bool,
-        _node_labels: Vec<String>,
-        _relation_labels: Vec<String>,
+        node_labels: Vec<String>,
+        relation_labels: Vec<String>,
     ) -> Result<SubscriptionResponse> {
         info!(
-            "Query {} subscribing to ApplicationSource {} (bootstrap: {})",
+            "Query '{}' subscribing to ApplicationSource '{}' (bootstrap: {})",
             query_id, self.config.id, enable_bootstrap
         );
 
         let broadcast_receiver = self.broadcast_tx.subscribe();
 
-        // ApplicationSource supports bootstrap via stored insert events
+        // Clone query_id for later use since it will be moved into async block
+        let query_id_for_response = query_id.clone();
+
+        // Handle bootstrap if requested
         let bootstrap_receiver = if enable_bootstrap {
-            let (tx, rx) = tokio::sync::mpsc::channel(1000);
-            let bootstrap_data = self.bootstrap_data.read().await;
+            // Check if bootstrap provider is configured
+            if let Some(provider_config) = &self.config.bootstrap_provider {
+                info!(
+                    "Bootstrap enabled for query '{}' with {} node labels and {} relation labels, delegating to bootstrap provider",
+                    query_id,
+                    node_labels.len(),
+                    relation_labels.len()
+                );
 
-            info!(
-                "Sending {} bootstrap events for ApplicationSource {}",
-                bootstrap_data.len(),
-                self.config.id
-            );
+                let (tx, rx) = tokio::sync::mpsc::channel(1000);
 
-            // Send bootstrap events
-            for (seq, change) in bootstrap_data.iter().enumerate() {
-                let event = BootstrapEvent {
-                    source_id: self.config.id.clone(),
-                    change: change.clone(),
-                    timestamp: chrono::Utc::now(),
-                    sequence: seq as u64,
+                // Create bootstrap provider - if it's Application type, use shared data
+                let provider: Box<dyn crate::bootstrap::BootstrapProvider> =
+                    if matches!(provider_config, crate::bootstrap::BootstrapProviderConfig::Application { .. }) {
+                        // Create ApplicationBootstrapProvider with shared reference to our bootstrap_data
+                        Box::new(
+                            crate::bootstrap::providers::application::ApplicationBootstrapProvider::with_shared_data(
+                                self.get_bootstrap_data()
+                            )
+                        )
+                    } else {
+                        // For other provider types, use the factory
+                        BootstrapProviderFactory::create_provider(provider_config)?
+                    };
+
+                // Create bootstrap context
+                let context = BootstrapContext::new(
+                    self.config.id.clone(), // server_id (using source_id as placeholder)
+                    Arc::new(self.config.clone()),
+                    self.config.id.clone(),
+                );
+
+                // Create bootstrap request
+                let request = BootstrapRequest {
+                    query_id: query_id.clone(),
+                    node_labels,
+                    relation_labels,
+                    request_id: format!("{}-{}", query_id, uuid::Uuid::new_v4()),
                 };
-                let _ = tx.send(event).await;
-            }
 
-            Some(rx)
+                // Spawn bootstrap task
+                tokio::spawn(async move {
+                    match provider.bootstrap(request, &context, tx).await {
+                        Ok(count) => {
+                            info!(
+                                "Bootstrap completed successfully for query '{}', sent {} events",
+                                query_id, count
+                            );
+                        }
+                        Err(e) => {
+                            log::error!("Bootstrap failed for query '{}': {}", query_id, e);
+                        }
+                    }
+                });
+
+                Some(rx)
+            } else {
+                // No bootstrap provider configured, fall back to internal bootstrap logic
+                info!(
+                    "Bootstrap requested for query '{}' but no bootstrap provider configured, using internal bootstrap",
+                    query_id
+                );
+
+                let (tx, rx) = tokio::sync::mpsc::channel(1000);
+                let bootstrap_data = self.bootstrap_data.read().await;
+
+                info!(
+                    "Sending {} bootstrap events for ApplicationSource '{}' (internal)",
+                    bootstrap_data.len(),
+                    self.config.id
+                );
+
+                // Send bootstrap events
+                for (seq, change) in bootstrap_data.iter().enumerate() {
+                    let event = BootstrapEvent {
+                        source_id: self.config.id.clone(),
+                        change: change.clone(),
+                        timestamp: chrono::Utc::now(),
+                        sequence: seq as u64,
+                    };
+                    let _ = tx.send(event).await;
+                }
+
+                Some(rx)
+            }
         } else {
             None
         };
 
         Ok(SubscriptionResponse {
-            query_id,
+            query_id: query_id_for_response,
             source_id: self.config.id.clone(),
             broadcast_receiver,
             bootstrap_receiver,

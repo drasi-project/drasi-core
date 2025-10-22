@@ -59,7 +59,6 @@ struct BootstrapElement {
 /// Platform bootstrap provider that connects to Query API service
 pub struct PlatformBootstrapProvider {
     query_api_url: String,
-    _timeout: Duration,
     client: Client,
 }
 
@@ -85,7 +84,6 @@ impl PlatformBootstrapProvider {
 
         Ok(Self {
             query_api_url,
-            _timeout: timeout,
             client,
         })
     }

@@ -17,7 +17,17 @@ DrasiServerCore is a Rust library for real-time data change processing that impl
 - **Bootstrap Providers**: Pluggable components for initial data delivery
 
 ### Bootstrap Provider Architecture
-DrasiServerCore features a pluggable bootstrap provider system that separates bootstrap concerns from source streaming logic:
+DrasiServerCore features a **universal pluggable bootstrap provider system** where ALL sources support configurable bootstrap providers, completely separating bootstrap (initial data delivery) from source streaming logic.
+
+**Key Architectural Principle**: Bootstrap providers are independent from sources. Any source can use any bootstrap provider, enabling powerful use cases like "bootstrap from database, stream changes from HTTP endpoint."
+
+#### All Sources Support Bootstrap Providers
+- **PostgresReplicationSource**: ✅ Delegates to configured provider
+- **HttpSource (Adaptive)**: ✅ Delegates to configured provider
+- **GrpcSource**: ✅ Delegates to configured provider
+- **MockSource**: ✅ Delegates to configured provider
+- **PlatformSource**: ✅ Delegates to configured provider
+- **ApplicationSource**: ✅ Delegates to configured provider (falls back to internal if no provider configured)
 
 #### Bootstrap Provider Types
 - **PostgreSQL Provider**: Handles PostgreSQL snapshot-based bootstrap with LSN coordination
@@ -26,7 +36,9 @@ DrasiServerCore features a pluggable bootstrap provider system that separates bo
 - **Platform Provider**: Bootstraps data from a Query API service running in a remote Drasi environment via HTTP streaming
 - **No-Op Provider**: Default provider that returns no data
 
-#### Bootstrap Configuration Example
+#### Bootstrap Configuration Examples
+
+**Standard Configuration** (source and provider match):
 ```yaml
 sources:
   - id: my_postgres_source
@@ -37,40 +49,57 @@ sources:
       host: localhost
       database: mydb
       # ... other postgres config
+```
 
-  - id: my_script_source
+**Mix-and-Match Configuration** (any source with any provider):
+```yaml
+sources:
+  # HTTP source with PostgreSQL bootstrap - bootstrap 1M records from DB, stream changes via HTTP
+  - id: http_with_postgres_bootstrap
+    source_type: http
+    bootstrap_provider:
+      type: postgres  # Bootstrap from PostgreSQL
+      # provider uses source properties for connection details
+    properties:
+      host: localhost
+      port: 9000
+      database: mydb  # Used by postgres bootstrap provider
+      user: dbuser
+      password: dbpass
+      tables: ["stocks", "portfolio"]
+      table_keys:
+        - table: stocks
+          key_columns: ["symbol"]
+
+  # gRPC source with ScriptFile bootstrap - load test data from file, stream changes via gRPC
+  - id: grpc_with_file_bootstrap
+    source_type: grpc
+    bootstrap_provider:
+      type: scriptfile
+      file_paths:
+        - "/path/to/initial_data.jsonl"
+    properties:
+      # gRPC properties here
+
+  # Mock source with ScriptFile bootstrap - for testing
+  - id: test_source
     source_type: mock
     bootstrap_provider:
       type: scriptfile
       file_paths:
-        - "/path/to/script1.jsonl"
-        - "/path/to/script2.jsonl"
-    properties:
-      # ... other mock config
+        - "/path/to/test_data.jsonl"
+    properties: {}
 
-  - id: my_platform_source
+  # Platform source with Platform bootstrap
+  - id: platform_source
     source_type: platform
     bootstrap_provider:
       type: platform
-      query_api_url: "http://my-source-query-api:8080"  # URL of Query API service
-      timeout_seconds: 300  # Optional, defaults to 300
+      query_api_url: "http://remote-drasi:8080"
     properties:
       redis_url: "redis://localhost:6379"
       stream_key: "external-source:changes"
       consumer_group: "drasi-core"
-      consumer_name: "consumer-1"
-
-  # Alternative: query_api_url can be in source properties instead
-  - id: my_platform_source_alt
-    source_type: platform
-    bootstrap_provider:
-      type: platform  # Will use query_api_url from properties
-    properties:
-      redis_url: "redis://localhost:6379"
-      stream_key: "external-source:changes"
-      consumer_group: "drasi-core"
-      consumer_name: "consumer-1"
-      query_api_url: "http://my-source-query-api:8080"
 ```
 
 **Script File Format**: JSONL (JSON Lines) with record types: Header (required first), Node, Relation, Comment (filtered), Label (checkpoint), and Finish (optional end). Supports multi-file reading in sequence.

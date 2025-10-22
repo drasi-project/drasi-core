@@ -19,6 +19,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tonic::{transport::Server, Request, Response, Status};
 
+use crate::bootstrap::{BootstrapContext, BootstrapProviderFactory, BootstrapRequest};
 use crate::channels::*;
 use crate::config::SourceConfig;
 use crate::sources::Source;
@@ -208,26 +209,78 @@ impl Source for GrpcSource {
         &self,
         query_id: String,
         enable_bootstrap: bool,
-        _node_labels: Vec<String>,
-        _relation_labels: Vec<String>,
+        node_labels: Vec<String>,
+        relation_labels: Vec<String>,
     ) -> Result<SubscriptionResponse> {
         info!(
-            "Query {} subscribing to GrpcSource {} (bootstrap: {})",
+            "Query '{}' subscribing to gRPC source '{}' (bootstrap: {})",
             query_id, self.config.id, enable_bootstrap
         );
 
         let broadcast_receiver = self.broadcast_tx.subscribe();
 
-        // GrpcSource doesn't support bootstrap
+        // Clone query_id for later use since it will be moved into async block
+        let query_id_for_response = query_id.clone();
+
+        // Handle bootstrap if requested and bootstrap provider is configured
         let bootstrap_receiver = if enable_bootstrap {
-            info!("Bootstrap requested for GrpcSource but not supported");
-            None
+            if let Some(provider_config) = &self.config.bootstrap_provider {
+                info!(
+                    "Bootstrap enabled for query '{}' with {} node labels and {} relation labels, delegating to bootstrap provider",
+                    query_id,
+                    node_labels.len(),
+                    relation_labels.len()
+                );
+
+                let (tx, rx) = tokio::sync::mpsc::channel(1000);
+
+                // Create bootstrap provider
+                let provider = BootstrapProviderFactory::create_provider(provider_config)?;
+
+                // Create bootstrap context
+                let context = BootstrapContext::new(
+                    self.config.id.clone(), // server_id (using source_id as placeholder)
+                    Arc::new(self.config.clone()),
+                    self.config.id.clone(),
+                );
+
+                // Create bootstrap request
+                let request = BootstrapRequest {
+                    query_id: query_id.clone(),
+                    node_labels,
+                    relation_labels,
+                    request_id: format!("{}-{}", query_id, uuid::Uuid::new_v4()),
+                };
+
+                // Spawn bootstrap task
+                tokio::spawn(async move {
+                    match provider.bootstrap(request, &context, tx).await {
+                        Ok(count) => {
+                            info!(
+                                "Bootstrap completed successfully for query '{}', sent {} events",
+                                query_id, count
+                            );
+                        }
+                        Err(e) => {
+                            error!("Bootstrap failed for query '{}': {}", query_id, e);
+                        }
+                    }
+                });
+
+                Some(rx)
+            } else {
+                info!(
+                    "Bootstrap requested for query '{}' but no bootstrap provider configured for source '{}'",
+                    query_id, self.config.id
+                );
+                None
+            }
         } else {
             None
         };
 
         Ok(SubscriptionResponse {
-            query_id,
+            query_id: query_id_for_response,
             source_id: self.config.id.clone(),
             broadcast_receiver,
             bootstrap_receiver,
