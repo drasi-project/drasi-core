@@ -209,11 +209,8 @@ mod persistence_tests {
         let config_path = temp_dir.path().join("test_config.yaml");
 
         let yaml_content = r#"
-server:
+server_core:
   id: "test-server"
-  host: "127.0.0.1"
-  port: 8080
-  log_level: "info"
 sources:
   - id: "test-source"
     source_type: "mock"

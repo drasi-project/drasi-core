@@ -16,9 +16,92 @@
 mod manager_tests {
     use super::super::*;
     use crate::channels::*;
+    use crate::config::QueryConfig;
+    use crate::queries::Query;
+    use crate::server_core::DrasiServerCore;
     use crate::test_support::helpers::test_fixtures::*;
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use std::collections::HashMap;
     use std::sync::Arc;
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, RwLock};
+
+    /// Mock query for testing reactions
+    struct MockQuery {
+        config: QueryConfig,
+        status: Arc<RwLock<ComponentStatus>>,
+        broadcast_tx: QueryResultBroadcastSender,
+    }
+
+    impl MockQuery {
+        fn new(query_id: &str) -> Self {
+            let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
+            Self {
+                config: QueryConfig {
+                    id: query_id.to_string(),
+                    query: "MATCH (n) RETURN n".to_string(),
+                    query_language: crate::config::QueryLanguage::Cypher,
+                    sources: vec![],
+                    auto_start: false,
+                    properties: HashMap::new(),
+                    joins: None,
+                    enable_bootstrap: false,
+                    bootstrap_buffer_size: 10000,
+                },
+                status: Arc::new(RwLock::new(ComponentStatus::Running)),
+                broadcast_tx,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Query for MockQuery {
+        async fn start(&self) -> Result<()> {
+            *self.status.write().await = ComponentStatus::Running;
+            Ok(())
+        }
+
+        async fn stop(&self) -> Result<()> {
+            *self.status.write().await = ComponentStatus::Stopped;
+            Ok(())
+        }
+
+        async fn status(&self) -> ComponentStatus {
+            self.status.read().await.clone()
+        }
+
+        fn get_config(&self) -> &QueryConfig {
+            &self.config
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        async fn subscribe(
+            &self,
+            reaction_id: String,
+        ) -> Result<QuerySubscriptionResponse, String> {
+            let broadcast_receiver = self.broadcast_tx.subscribe();
+            Ok(QuerySubscriptionResponse {
+                query_id: self.config.id.clone(),
+                reaction_id,
+                broadcast_receiver,
+            })
+        }
+    }
+
+    async fn create_test_server_with_query(
+        query_id: &str,
+    ) -> Result<Arc<DrasiServerCore>> {
+        let mock_query = Arc::new(MockQuery::new(query_id));
+        let server_core = DrasiServerCore::builder().build().await?;
+        server_core
+            .query_manager()
+            .add_query_instance_for_test(mock_query)
+            .await?;
+        Ok(Arc::new(server_core))
+    }
 
     async fn create_test_manager() -> (Arc<ReactionManager>, mpsc::Receiver<ComponentEvent>) {
         let (event_tx, event_rx) = mpsc::channel(100);
@@ -73,40 +156,70 @@ mod manager_tests {
     }
 
     #[tokio::test]
-    #[ignore = "Requires DrasiServerCore setup - needs refactoring for new broadcast architecture"]
     async fn test_start_reaction() {
-        let (manager, _event_rx) = create_test_manager().await;
+        let (manager, mut event_rx) = create_test_manager().await;
 
         let config = create_test_reaction_config("test-reaction", vec!["query1".to_string()]);
         manager.add_reaction(config).await.unwrap();
 
-        // NOTE: In the new architecture, start_reaction requires Arc<DrasiServerCore>
-        // instead of a QueryResultReceiver. This test needs a full server setup.
-        // TODO: Create a test helper that builds a minimal DrasiServerCore for testing
+        // Create test server with mock query
+        let server_core = create_test_server_with_query("query1").await.unwrap();
 
-        // This would need to be:
-        // let server_core = create_test_server_core().await;
-        // let result = manager.start_reaction("test-reaction".to_string(), server_core).await;
+        // Start the reaction
+        let result = manager
+            .start_reaction("test-reaction".to_string(), server_core)
+            .await;
+        assert!(result.is_ok(), "Should be able to start reaction");
 
-        // For now, just verify reaction was added
-        let result = manager.get_reaction_status("test-reaction".to_string()).await;
-        assert!(result.is_ok());
+        // Wait for status event
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while let Some(event) = event_rx.recv().await {
+                if event.component_id == "test-reaction" {
+                    assert!(
+                        matches!(event.status, ComponentStatus::Starting)
+                            || matches!(event.status, ComponentStatus::Running)
+                    );
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("Timeout waiting for status event");
     }
 
     #[tokio::test]
-    #[ignore = "Requires DrasiServerCore setup - needs refactoring for new broadcast architecture"]
     async fn test_stop_reaction() {
-        let (manager, _event_rx) = create_test_manager().await;
+        let (manager, mut event_rx) = create_test_manager().await;
 
-        let config = create_test_reaction_config("test-reaction", vec![]);
+        let config = create_test_reaction_config("test-reaction", vec!["query1".to_string()]);
         manager.add_reaction(config).await.unwrap();
 
-        // NOTE: In the new architecture, start_reaction requires Arc<DrasiServerCore>
-        // This test needs refactoring to work with the new subscription model
+        // Create test server and start reaction
+        let server_core = create_test_server_with_query("query1").await.unwrap();
+        manager
+            .start_reaction("test-reaction".to_string(), server_core)
+            .await
+            .unwrap();
 
-        // For now, just verify reaction exists and can be queried
-        let status = manager.get_reaction_status("test-reaction".to_string()).await;
-        assert!(status.is_ok());
+        // Wait a bit for reaction to start
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Stop the reaction
+        let result = manager.stop_reaction("test-reaction".to_string()).await;
+        assert!(result.is_ok(), "Should be able to stop reaction");
+
+        // Wait for stop event
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while let Some(event) = event_rx.recv().await {
+                if event.component_id == "test-reaction"
+                    && matches!(event.status, ComponentStatus::Stopped)
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("Timeout waiting for stop event");
     }
 
     #[tokio::test]
@@ -126,48 +239,80 @@ mod manager_tests {
     }
 
     #[tokio::test]
-    #[ignore = "Requires DrasiServerCore setup - needs refactoring for new broadcast architecture"]
     async fn test_update_reaction() {
         let (manager, _event_rx) = create_test_manager().await;
 
         let mut config = create_test_reaction_config("test-reaction", vec!["query1".to_string()]);
         manager.add_reaction(config.clone()).await.unwrap();
 
-        // Update config
+        // Update config to add another query
         config.queries.push("query2".to_string());
 
-        // NOTE: update_reaction now requires Option<Arc<DrasiServerCore>> as third parameter
-        // This test needs refactoring to work with the new subscription model
-        // Would need: manager.update_reaction("test-reaction".to_string(), config.clone(), None).await;
+        // Update with server_core (not started, so pass None)
+        let result = manager
+            .update_reaction("test-reaction".to_string(), config.clone(), None)
+            .await;
+        assert!(result.is_ok(), "Should be able to update reaction");
 
-        // For now, just verify the reaction exists
+        // Verify config was updated
         let retrieved = manager.get_reaction_config("test-reaction").await.unwrap();
-        assert_eq!(retrieved.queries.len(), 1);
+        assert_eq!(retrieved.queries.len(), 2);
+        assert_eq!(retrieved.queries[0], "query1");
+        assert_eq!(retrieved.queries[1], "query2");
     }
 
     #[tokio::test]
-    #[ignore = "Requires DrasiServerCore setup - needs refactoring for new broadcast architecture"]
     async fn test_reaction_lifecycle() {
         let (manager, _event_rx) = create_test_manager().await;
 
         let config = create_test_reaction_config("test-reaction", vec!["query1".to_string()]);
         manager.add_reaction(config).await.unwrap();
 
-        // Verify reaction is in stopped state
+        // 1. Verify reaction starts in stopped state
         let status = manager
             .get_reaction_status("test-reaction".to_string())
             .await
             .unwrap();
-        assert!(matches!(status, ComponentStatus::Stopped));
+        assert!(
+            matches!(status, ComponentStatus::Stopped),
+            "Reaction should start in stopped state"
+        );
 
-        // NOTE: In the new architecture, start_reaction requires Arc<DrasiServerCore>
-        // This test needs refactoring to work with the new subscription model
-        // The lifecycle would be:
-        // 1. let server_core = create_test_server_core().await;
-        // 2. manager.start_reaction("test-reaction".to_string(), server_core).await.unwrap();
-        // 3. Verify running
-        // 4. manager.stop_reaction("test-reaction".to_string()).await.unwrap();
-        // 5. Verify stopped
+        // 2. Create server and start reaction
+        let server_core = create_test_server_with_query("query1").await.unwrap();
+        manager
+            .start_reaction("test-reaction".to_string(), server_core)
+            .await
+            .unwrap();
+
+        // 3. Verify reaction is running
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        let status = manager
+            .get_reaction_status("test-reaction".to_string())
+            .await
+            .unwrap();
+        assert!(
+            matches!(status, ComponentStatus::Starting)
+                || matches!(status, ComponentStatus::Running),
+            "Reaction should be starting or running"
+        );
+
+        // 4. Stop reaction
+        manager
+            .stop_reaction("test-reaction".to_string())
+            .await
+            .unwrap();
+
+        // 5. Verify reaction is stopped
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        let status = manager
+            .get_reaction_status("test-reaction".to_string())
+            .await
+            .unwrap();
+        assert!(
+            matches!(status, ComponentStatus::Stopped),
+            "Reaction should be stopped"
+        );
     }
 }
 
@@ -175,10 +320,92 @@ mod manager_tests {
 mod log_reaction_tests {
     use super::super::{LogReaction, Reaction};
     use crate::channels::*;
-    use crate::config::ReactionConfig;
+    use crate::config::{QueryConfig, ReactionConfig};
+    use crate::queries::Query;
+    use crate::server_core::DrasiServerCore;
+    use anyhow::Result;
+    use async_trait::async_trait;
     use serde_json::json;
     use std::collections::HashMap;
-    use tokio::sync::mpsc;
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, RwLock};
+
+    /// Mock query for testing reactions
+    struct MockQuery {
+        config: QueryConfig,
+        status: Arc<RwLock<ComponentStatus>>,
+        broadcast_tx: QueryResultBroadcastSender,
+    }
+
+    impl MockQuery {
+        fn new(query_id: &str) -> Self {
+            let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
+            Self {
+                config: QueryConfig {
+                    id: query_id.to_string(),
+                    query: "MATCH (n) RETURN n".to_string(),
+                    query_language: crate::config::QueryLanguage::Cypher,
+                    sources: vec![],
+                    auto_start: false,
+                    properties: HashMap::new(),
+                    joins: None,
+                    enable_bootstrap: false,
+                    bootstrap_buffer_size: 10000,
+                },
+                status: Arc::new(RwLock::new(ComponentStatus::Running)),
+                broadcast_tx,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Query for MockQuery {
+        async fn start(&self) -> Result<()> {
+            *self.status.write().await = ComponentStatus::Running;
+            Ok(())
+        }
+
+        async fn stop(&self) -> Result<()> {
+            *self.status.write().await = ComponentStatus::Stopped;
+            Ok(())
+        }
+
+        async fn status(&self) -> ComponentStatus {
+            self.status.read().await.clone()
+        }
+
+        fn get_config(&self) -> &QueryConfig {
+            &self.config
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        async fn subscribe(
+            &self,
+            reaction_id: String,
+        ) -> Result<QuerySubscriptionResponse, String> {
+            let broadcast_receiver = self.broadcast_tx.subscribe();
+            Ok(QuerySubscriptionResponse {
+                query_id: self.config.id.clone(),
+                reaction_id,
+                broadcast_receiver,
+            })
+        }
+    }
+
+    async fn create_test_server_with_query(
+        query_id: &str,
+    ) -> Result<Arc<DrasiServerCore>> {
+        let mock_query = Arc::new(MockQuery::new(query_id));
+        let server_core = DrasiServerCore::builder().build().await?;
+        server_core
+            .query_manager()
+            .add_query_instance_for_test(mock_query)
+            .await?;
+        Ok(Arc::new(server_core))
+    }
 
     #[tokio::test]
     async fn test_log_reaction_creation() {
@@ -200,7 +427,6 @@ mod log_reaction_tests {
     }
 
     #[tokio::test]
-    #[ignore = "Requires DrasiServerCore setup - needs refactoring for new broadcast architecture"]
     async fn test_log_reaction_processes_results() {
         let (event_tx, _event_rx) = mpsc::channel(100);
 
@@ -214,15 +440,21 @@ mod log_reaction_tests {
 
         let reaction = LogReaction::new(config, event_tx);
 
-        // NOTE: In the new architecture, reaction.start() requires Arc<DrasiServerCore>
-        // The reaction would subscribe to queries via the server core's query manager
-        // This test needs refactoring to work with the new subscription model
+        // Create test server with mock query
+        let server_core = create_test_server_with_query("query1").await.unwrap();
 
-        // Would need:
-        // let server_core = create_test_server_core().await;
-        // reaction.start(server_core).await.unwrap();
+        // Start the reaction (it will subscribe to the mock query)
+        reaction.start(server_core).await.unwrap();
 
-        // Verify reaction can be stopped
+        // Verify reaction is running
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        assert_eq!(reaction.status().await, ComponentStatus::Running);
+
+        // Stop the reaction
         reaction.stop().await.unwrap();
+
+        // Verify reaction is stopped
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        assert_eq!(reaction.status().await, ComponentStatus::Stopped);
     }
 }

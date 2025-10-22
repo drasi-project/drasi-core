@@ -735,7 +735,32 @@ mod query_joins_tests {
             .await
             .unwrap();
 
-        // Get mock source instances
+        // Create and start query with join FIRST
+        let join_config = create_query_join_config(
+            "AUTHORED_BY",
+            vec![
+                ("Post".to_string(), "authorId".to_string()),
+                ("User".to_string(), "userId".to_string()),
+            ],
+        );
+
+        let query_config = create_query_config_with_joins(
+            "user-posts-query",
+            "MATCH (p:Post)-[:AUTHORED_BY]->(u:User) RETURN p.title, u.name",
+            vec!["users".to_string(), "posts".to_string()],
+            vec![join_config],
+        );
+
+        query_manager.add_query(query_config).await.unwrap();
+        query_manager
+            .start_query("user-posts-query".to_string())
+            .await
+            .unwrap();
+
+        // Give query time to subscribe to sources
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Get mock source instances AFTER query is started and subscribed
         let users_mock = source_manager
             .get_source_instance("users")
             .await
@@ -753,7 +778,7 @@ mod query_joins_tests {
             .downcast_ref::<crate::sources::mock::MockSource>()
             .expect("MockSource");
 
-        // Pre-populate data before starting query
+        // Inject data after query is subscribed (simulates initial data load)
         let user1 = create_node_with_properties(
             "users",
             "u1",
@@ -780,31 +805,7 @@ mod query_joins_tests {
             .await
             .unwrap();
 
-        // Now create and start query with join
-        let join_config = create_query_join_config(
-            "AUTHORED_BY",
-            vec![
-                ("Post".to_string(), "authorId".to_string()),
-                ("User".to_string(), "userId".to_string()),
-            ],
-        );
-
-        let query_config = create_query_config_with_joins(
-            "user-posts-query",
-            "MATCH (p:Post)-[:AUTHORED_BY]->(u:User) RETURN p.title, u.name",
-            vec!["users".to_string(), "posts".to_string()],
-            vec![join_config],
-        );
-
-        query_manager.add_query(query_config).await.unwrap();
-
-        // Start query - should trigger bootstrap
-        query_manager
-            .start_query("user-posts-query".to_string())
-            .await
-            .unwrap();
-
-        // NOTE: Bootstrap results would need subscription to verify
+        // Give query time to process initial data
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Add new data after bootstrap
