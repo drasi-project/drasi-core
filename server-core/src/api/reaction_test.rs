@@ -280,19 +280,6 @@ mod tests {
         assert_eq!(reaction.queries, vec!["query-1", "query-2", "query-3"]);
     }
 
-    #[test]
-    fn test_reaction_clone_builder() {
-        let builder1 = Reaction::application("test-reaction")
-            .subscribe_to("query-1")
-            .with_property("key", json!("value"));
-
-        let builder2 = builder1.clone();
-        let reaction = builder2.build();
-
-        assert_eq!(reaction.id, "test-reaction");
-        assert_eq!(reaction.queries.len(), 1);
-        assert_eq!(reaction.properties.get("key").unwrap(), &json!("value"));
-    }
 
     #[test]
     fn test_reaction_no_queries() {

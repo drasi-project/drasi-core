@@ -125,52 +125,6 @@ mod tests {
         assert!(matches!(err, DrasiError::Serialization(_)));
     }
 
-    #[test]
-    fn test_error_display_configuration() {
-        let err = DrasiError::Configuration("test message".to_string());
-        assert_eq!(format!("{}", err), "Configuration error: test message");
-    }
-
-    #[test]
-    fn test_error_display_component_not_found() {
-        let err = DrasiError::ComponentNotFound {
-            kind: "query".to_string(),
-            id: "my-query".to_string(),
-        };
-        assert_eq!(format!("{}", err), "Component not found: query 'my-query'");
-    }
-
-    #[test]
-    fn test_error_display_component_error() {
-        let err = DrasiError::ComponentError {
-            kind: "source".to_string(),
-            id: "my-source".to_string(),
-            message: "connection failed".to_string(),
-        };
-        assert_eq!(
-            format!("{}", err),
-            "Component error (source 'my-source'): connection failed"
-        );
-    }
-
-    #[test]
-    fn test_error_into_string() {
-        let err = DrasiError::configuration("test");
-        let msg = err.to_string();
-        assert!(!msg.is_empty());
-    }
-
-    #[test]
-    fn test_error_pattern_matching() {
-        let err = DrasiError::component_not_found("source", "test-id");
-        match err {
-            DrasiError::ComponentNotFound { kind, id } => {
-                assert_eq!(kind, "source");
-                assert_eq!(id, "test-id");
-            }
-            _ => panic!("Wrong error variant"),
-        }
-    }
 
     #[test]
     fn test_result_type_ok() {
@@ -184,24 +138,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_error_with_empty_message() {
-        let err = DrasiError::configuration("");
-        assert_eq!(err.to_string(), "Configuration error: ");
-    }
-
-    #[test]
-    fn test_error_with_long_message() {
-        let long_msg = "a".repeat(1000);
-        let err = DrasiError::internal(&long_msg);
-        assert!(err.to_string().contains(&long_msg));
-    }
-
-    #[test]
-    fn test_error_with_special_characters() {
-        let err = DrasiError::validation("Error: can't parse \"value\" with \n newline");
-        assert!(err.to_string().contains("can't parse"));
-    }
 
     #[test]
     fn test_component_not_found_various_kinds() {

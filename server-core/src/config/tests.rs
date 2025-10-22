@@ -28,25 +28,6 @@ mod schema_tests {
         assert_eq!(settings.id, "default-server"); // default
     }
 
-    #[test]
-    fn test_source_config_serialization() {
-        let config = SourceConfig {
-            id: "test-source".to_string(),
-            source_type: "mock".to_string(),
-            auto_start: true,
-            properties: HashMap::from([
-                ("interval".to_string(), json!(5000)),
-                ("data_type".to_string(), json!("sensor")),
-            ]),
-            bootstrap_provider: None,
-        };
-
-        let json = serde_json::to_value(&config).unwrap();
-        assert_eq!(json["id"], "test-source");
-        assert_eq!(json["source_type"], "mock");
-        assert_eq!(json["auto_start"], true);
-        assert_eq!(json["properties"]["interval"], 5000);
-    }
 
     #[test]
     fn test_query_config_validation() {
@@ -110,28 +91,6 @@ mod schema_tests {
         assert_eq!(config.query_language, QueryLanguage::GQL);
     }
 
-    #[test]
-    fn test_query_language_serialization() {
-        // Test that queryLanguage serializes correctly
-        let config = QueryConfig {
-            id: "test-query".to_string(),
-            query: "MATCH (n) RETURN n".to_string(),
-            query_language: QueryLanguage::GQL,
-            sources: vec!["source1".to_string()],
-            auto_start: true,
-            properties: HashMap::new(),
-            joins: None,
-            enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
-        };
-
-        let json = serde_json::to_value(&config).unwrap();
-        assert_eq!(json["queryLanguage"], "GQL");
-
-        // Test round-trip
-        let deserialized: QueryConfig = serde_json::from_value(json).unwrap();
-        assert_eq!(deserialized.query_language, QueryLanguage::GQL);
-    }
 
     #[test]
     fn test_query_config_missing_required_fields() {

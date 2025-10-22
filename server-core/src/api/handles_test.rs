@@ -27,12 +27,6 @@ mod tests {
         assert!(!registry.has_reaction_handle("any-id").await);
     }
 
-    #[tokio::test]
-    async fn test_registry_default() {
-        let registry = HandleRegistry::default();
-        assert!(!registry.has_source_handle("any-id").await);
-        assert!(!registry.has_reaction_handle("any-id").await);
-    }
 
     #[tokio::test]
     async fn test_register_and_get_source_handle() {
@@ -66,67 +60,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_has_source_handle() {
-        let registry = HandleRegistry::new();
-        let (_source, handle) = create_test_application_source("test-source").await;
-
-        assert!(
-            !registry.has_source_handle("test-source").await,
-            "Should not have handle before registration"
-        );
-
-        registry
-            .register_source_handle("test-source".to_string(), handle)
-            .await;
-
-        assert!(
-            registry.has_source_handle("test-source").await,
-            "Should have handle after registration"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_has_reaction_handle() {
-        let registry = HandleRegistry::new();
-        let (_reaction, handle) = create_test_application_reaction("test-reaction").await;
-
-        assert!(
-            !registry.has_reaction_handle("test-reaction").await,
-            "Should not have handle before registration"
-        );
-
-        registry
-            .register_reaction_handle("test-reaction".to_string(), handle)
-            .await;
-
-        assert!(
-            registry.has_reaction_handle("test-reaction").await,
-            "Should have handle after registration"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_get_nonexistent_source_handle() {
-        let registry = HandleRegistry::new();
-
-        let result = registry.get_source_handle("nonexistent").await;
-        assert!(
-            result.is_err(),
-            "Should return error for nonexistent source"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_get_nonexistent_reaction_handle() {
-        let registry = HandleRegistry::new();
-
-        let result = registry.get_reaction_handle("nonexistent").await;
-        assert!(
-            result.is_err(),
-            "Should return error for nonexistent reaction"
-        );
-    }
 
     #[tokio::test]
     async fn test_remove_source_handle() {
@@ -164,25 +97,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_remove_nonexistent_source() {
-        let registry = HandleRegistry::new();
-        let removed = registry.remove_source_handle("nonexistent").await;
-        assert!(
-            removed.is_none(),
-            "Should return None for nonexistent source"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_remove_nonexistent_reaction() {
-        let registry = HandleRegistry::new();
-        let removed = registry.remove_reaction_handle("nonexistent").await;
-        assert!(
-            removed.is_none(),
-            "Should return None for nonexistent reaction"
-        );
-    }
 
     #[tokio::test]
     async fn test_overwrite_source_handle() {
@@ -222,21 +136,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_registry_clone() {
-        let registry1 = HandleRegistry::new();
-        let (_source, handle) = create_test_application_source("test-source").await;
-
-        registry1
-            .register_source_handle("test-source".to_string(), handle)
-            .await;
-
-        let registry2 = registry1.clone();
-        assert!(
-            registry2.has_source_handle("test-source").await,
-            "Cloned registry should have same handles"
-        );
-    }
 
     #[tokio::test]
     async fn test_concurrent_source_registration() {

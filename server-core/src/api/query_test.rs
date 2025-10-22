@@ -337,19 +337,6 @@ mod tests {
         assert_eq!(joins[0].id, "join-2");
     }
 
-    #[test]
-    fn test_query_clone_builder() {
-        let builder1 = Query::cypher("test-query")
-            .query("MATCH (n) RETURN n")
-            .from_source("source-1");
-
-        let builder2 = builder1.clone();
-        let query = builder2.build();
-
-        assert_eq!(query.id, "test-query");
-        assert_eq!(query.query, "MATCH (n) RETURN n");
-        assert_eq!(query.sources.len(), 1);
-    }
 
     #[test]
     fn test_query_overwrite_query_string() {

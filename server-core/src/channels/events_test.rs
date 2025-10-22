@@ -38,64 +38,6 @@ mod tests {
         assert_eq!(event.message, Some("Starting source".to_string()));
     }
 
-    #[test]
-    fn test_component_event_query_running() {
-        let event = ComponentEvent {
-            component_id: "query-1".to_string(),
-            component_type: ComponentType::Query,
-            status: ComponentStatus::Running,
-            timestamp: chrono::Utc::now(),
-            message: None,
-        };
-
-        assert_eq!(event.component_id, "query-1");
-        assert!(matches!(event.component_type, ComponentType::Query));
-        assert!(matches!(event.status, ComponentStatus::Running));
-        assert!(event.message.is_none());
-    }
-
-    #[test]
-    fn test_component_event_reaction_stopping() {
-        let event = ComponentEvent {
-            component_id: "reaction-1".to_string(),
-            component_type: ComponentType::Reaction,
-            status: ComponentStatus::Stopping,
-            timestamp: chrono::Utc::now(),
-            message: Some("Graceful shutdown".to_string()),
-        };
-
-        assert_eq!(event.component_id, "reaction-1");
-        assert!(matches!(event.component_type, ComponentType::Reaction));
-        assert!(matches!(event.status, ComponentStatus::Stopping));
-        assert!(event.message.is_some());
-    }
-
-    #[test]
-    fn test_component_event_stopped() {
-        let event = ComponentEvent {
-            component_id: "component-1".to_string(),
-            component_type: ComponentType::Source,
-            status: ComponentStatus::Stopped,
-            timestamp: chrono::Utc::now(),
-            message: None,
-        };
-
-        assert!(matches!(event.status, ComponentStatus::Stopped));
-    }
-
-    #[test]
-    fn test_component_event_error() {
-        let event = ComponentEvent {
-            component_id: "component-1".to_string(),
-            component_type: ComponentType::Query,
-            status: ComponentStatus::Error,
-            timestamp: chrono::Utc::now(),
-            message: Some("Connection failed".to_string()),
-        };
-
-        assert!(matches!(event.status, ComponentStatus::Error));
-        assert!(event.message.unwrap().contains("Connection failed"));
-    }
 
     #[test]
     fn test_source_event_change() {

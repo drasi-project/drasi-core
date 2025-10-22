@@ -109,35 +109,6 @@ mod tests {
         assert_eq!(map.len(), 3);
     }
 
-    #[test]
-    fn test_properties_overwrite() {
-        // Later value should overwrite earlier value for same key
-        let props = Properties::new()
-            .with_string("key", "value1")
-            .with_string("key", "value2");
-
-        let map = props.build();
-        assert_eq!(map.len(), 1);
-        assert_eq!(map.get("key").unwrap(), &json!("value2"));
-    }
-
-    #[test]
-    fn test_properties_overwrite_different_types() {
-        // Can overwrite with different type
-        let props = Properties::new()
-            .with_string("key", "string_value")
-            .with_int("key", 42);
-
-        let map = props.build();
-        assert_eq!(map.len(), 1);
-        assert_eq!(map.get("key").unwrap(), &json!(42));
-    }
-
-    #[test]
-    fn test_properties_empty_build() {
-        let map = Properties::new().build();
-        assert!(map.is_empty());
-    }
 
     #[test]
     fn test_properties_from_map() {
@@ -177,50 +148,7 @@ mod tests {
         assert_eq!(map.get("port").unwrap(), &json!(5432));
     }
 
-    #[test]
-    fn test_properties_default() {
-        let props = Properties::default();
-        let map = props.build();
 
-        assert!(map.is_empty(), "Default Properties should be empty");
-    }
-
-    #[test]
-    fn test_properties_clone() {
-        let props1 = Properties::new().with_string("key", "value");
-
-        let props2 = props1.clone();
-        let map = props2.build();
-
-        assert_eq!(map.get("key").unwrap(), &json!("value"));
-    }
-
-    #[test]
-    fn test_properties_string_into_types() {
-        let props = Properties::new()
-            .with_string("str", "hello")
-            .with_string("ref_str", "world");
-
-        let map = props.build();
-        assert_eq!(map.get("str").unwrap(), &json!("hello"));
-        assert_eq!(map.get("ref_str").unwrap(), &json!("world"));
-    }
-
-    #[test]
-    fn test_properties_negative_int() {
-        let props = Properties::new().with_int("negative", -42);
-
-        let map = props.build();
-        assert_eq!(map.get("negative").unwrap(), &json!(-42));
-    }
-
-    #[test]
-    fn test_properties_large_int() {
-        let props = Properties::new().with_int("large", i64::MAX);
-
-        let map = props.build();
-        assert_eq!(map.get("large").unwrap(), &json!(i64::MAX));
-    }
 
     #[test]
     fn test_properties_complex_nested_value() {

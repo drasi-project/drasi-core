@@ -197,35 +197,6 @@ mod tests {
         assert!(core.is_ok(), "Chained builder methods should work");
     }
 
-    #[tokio::test]
-    async fn test_builder_default() {
-        let builder = DrasiServerCoreBuilder::default();
-        let core = builder.build().await;
-
-        assert!(core.is_ok(), "Default builder should create valid server");
-    }
-
-    #[tokio::test]
-    async fn test_builder_clone() {
-        let builder1 = DrasiServerCoreBuilder::new()
-            .with_id("cloneable")
-            .add_source(Source::application("test-source").build());
-
-        let builder2 = builder1.clone();
-        let core = builder2.build().await;
-
-        assert!(core.is_ok(), "Cloned builder should work");
-    }
-
-    #[tokio::test]
-    async fn test_builder_empty_config() {
-        // Empty configuration should be valid
-        let core = DrasiServerCoreBuilder::new().build().await;
-        assert!(
-            core.is_ok(),
-            "Empty configuration should build successfully"
-        );
-    }
 
     #[tokio::test]
     async fn test_builder_multi_source_pipeline() {

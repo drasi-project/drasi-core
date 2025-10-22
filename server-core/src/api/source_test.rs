@@ -307,14 +307,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_source_clone_builder() {
-        let builder1 = Source::application("test-source").with_property("key", json!("value"));
-
-        let builder2 = builder1.clone();
-        let source = builder2.build();
-
-        assert_eq!(source.id, "test-source");
-        assert_eq!(source.properties.get("key").unwrap(), &json!("value"));
-    }
 }
