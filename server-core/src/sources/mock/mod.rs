@@ -37,10 +37,7 @@ pub struct MockSource {
 }
 
 impl MockSource {
-    pub fn new(
-        config: SourceConfig,
-        event_tx: ComponentEventSender,
-    ) -> Self {
+    pub fn new(config: SourceConfig, event_tx: ComponentEventSender) -> Self {
         // Create broadcast channel with capacity for 1000 events
         let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
 
@@ -57,7 +54,9 @@ impl MockSource {
     ///
     /// This method is intended for use in tests to receive events broadcast by the source.
     /// In production, queries subscribe to sources through the SourceManager.
-    pub fn test_subscribe(&self) -> tokio::sync::broadcast::Receiver<Arc<crate::channels::SourceEventWrapper>> {
+    pub fn test_subscribe(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<Arc<crate::channels::SourceEventWrapper>> {
         self.broadcast_tx.subscribe()
     }
 }
@@ -406,7 +405,10 @@ impl MockSource {
         let arc_wrapper = Arc::new(wrapper);
         if let Err(e) = self.broadcast_tx.send(arc_wrapper) {
             error!("Failed to broadcast injected change: {}", e);
-            return Err(anyhow::anyhow!("Failed to broadcast event - no subscribers: {}", e));
+            return Err(anyhow::anyhow!(
+                "Failed to broadcast event - no subscribers: {}",
+                e
+            ));
         }
 
         Ok(())

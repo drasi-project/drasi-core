@@ -17,7 +17,9 @@
 #[cfg(test)]
 mod tests {
     use super::super::*;
-    use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapProviderConfig, BootstrapRequest};
+    use crate::bootstrap::{
+        BootstrapContext, BootstrapProvider, BootstrapProviderConfig, BootstrapRequest,
+    };
     use crate::config::SourceConfig;
     use serde_json::json;
     use std::collections::HashMap;

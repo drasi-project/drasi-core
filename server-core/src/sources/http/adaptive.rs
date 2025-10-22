@@ -65,10 +65,7 @@ struct AdaptiveAppState {
 }
 
 impl AdaptiveHttpSource {
-    pub fn new(
-        config: SourceConfig,
-        event_tx: ComponentEventSender,
-    ) -> Self {
+    pub fn new(config: SourceConfig, event_tx: ComponentEventSender) -> Self {
         // Configure adaptive batching
         let mut adaptive_config = AdaptiveBatchConfig::default();
 
@@ -244,7 +241,8 @@ impl AdaptiveHttpSource {
     }
 
     async fn run_adaptive_batcher(
-        batch_rx: mpsc::Receiver<SourceChangeEvent>,        broadcast_tx: SourceBroadcastSender,
+        batch_rx: mpsc::Receiver<SourceChangeEvent>,
+        broadcast_tx: SourceBroadcastSender,
         adaptive_config: AdaptiveBatchConfig,
         source_id: String,
     ) {
@@ -354,7 +352,8 @@ impl Source for AdaptiveHttpSource {
         let source_id = self.config.id.clone();
 
         tokio::spawn(Self::run_adaptive_batcher(
-            batch_rx,            self.broadcast_tx.clone(),
+            batch_rx,
+            self.broadcast_tx.clone(),
             adaptive_config,
             source_id.clone(),
         ));

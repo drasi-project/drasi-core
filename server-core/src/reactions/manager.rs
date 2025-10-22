@@ -21,7 +21,7 @@ use tokio::sync::RwLock;
 
 use crate::channels::*;
 use crate::config::{ReactionConfig, ReactionRuntime};
-use crate::routers::SubscriptionRouter;
+use crate::server_core::DrasiServerCore;
 use crate::utils::*;
 
 use super::{
@@ -29,11 +29,46 @@ use super::{
     GrpcReaction, HttpReaction, LogReaction, PlatformReaction, ProfilerReaction, SseReaction,
 };
 
+/// Trait defining the interface for all reaction implementations.
+///
+/// # Subscription Model
+///
+/// Reactions now manage their own subscriptions to queries using the broadcast channel pattern:
+/// - Each reaction receives a reference to `DrasiServerCore` on startup
+/// - Reactions access the `QueryManager` via `server_core.query_manager()`
+/// - For each query in their configuration, reactions call `query_manager.get_query_instance(query_id)`
+/// - They then subscribe directly to each query using `query.subscribe(reaction_id)`
+/// - Each subscription provides a broadcast receiver for that query's results
+/// - Reactions use a priority queue to process results from multiple queries in timestamp order
+///
+/// This architecture enables:
+/// - Zero-copy result distribution via Arc-wrapped types
+/// - Direct query-to-reaction communication without centralized routing
+/// - Timestamp-ordered processing across multiple query subscriptions
+/// - Independent scaling of query and reaction components
 #[async_trait]
 pub trait Reaction: Send + Sync {
-    async fn start(&self, result_rx: QueryResultReceiver) -> Result<()>;
+    /// Start the reaction with access to the server core for query subscriptions.
+    ///
+    /// # Parameters
+    /// - `server_core`: Arc reference to DrasiServerCore, providing access to QueryManager
+    ///   for subscribing to queries
+    ///
+    /// # Implementation Notes
+    /// Implementations should:
+    /// 1. Access QueryManager via `server_core.query_manager()`
+    /// 2. For each query_id in config.queries, get the query instance and subscribe
+    /// 3. Create a priority queue for timestamp-ordered processing
+    /// 4. Spawn task(s) to process results from all subscriptions
+    async fn start(&self, server_core: Arc<DrasiServerCore>) -> Result<()>;
+
+    /// Stop the reaction, cleaning up all subscriptions and tasks
     async fn stop(&self) -> Result<()>;
+
+    /// Get the current status of the reaction
     async fn status(&self) -> ComponentStatus;
+
+    /// Get the reaction's configuration
     fn get_config(&self) -> &ReactionConfig;
 }
 
@@ -55,7 +90,7 @@ impl MockReaction {
 
 #[async_trait]
 impl Reaction for MockReaction {
-    async fn start(&self, mut result_rx: QueryResultReceiver) -> Result<()> {
+    async fn start(&self, _server_core: Arc<DrasiServerCore>) -> Result<()> {
         log_component_start("Reaction", &self.config.id);
 
         *self.status.write().await = ComponentStatus::Starting;
@@ -86,29 +121,12 @@ impl Reaction for MockReaction {
             error!("Failed to send component event: {}", e);
         }
 
-        // Start processing query results
-        let query_filter = self.config.queries.clone();
-        let reaction_id = self.config.id.clone();
-
-        tokio::spawn(async move {
-            while let Some(query_result) = result_rx.recv().await {
-                // Filter results based on configured queries
-                if !query_filter.contains(&query_result.query_id) {
-                    continue;
-                }
-
-                // Mock reaction processing - just log the result
-                info!(
-                    "Reaction '{}' processing result from query {}: {} results",
-                    reaction_id,
-                    query_result.query_id,
-                    query_result.results.len()
-                );
-
-                // Simulate some processing time
-                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-            }
-        });
+        // Mock reaction - no actual subscription or processing
+        // Real reactions would:
+        // 1. Access query_manager via server_core.query_manager()
+        // 2. Subscribe to each configured query
+        // 3. Create priority queue for timestamp-ordered processing
+        // 4. Spawn task to process results
 
         Ok(())
     }
@@ -246,12 +264,21 @@ impl ReactionManager {
         Ok(())
     }
 
-    pub async fn start_reaction(&self, id: String, result_rx: QueryResultReceiver) -> Result<()> {
+    /// Start a reaction with access to the server core for query subscriptions.
+    ///
+    /// # Parameters
+    /// - `id`: The reaction ID to start
+    /// - `server_core`: Arc reference to DrasiServerCore for query subscriptions
+    pub async fn start_reaction(
+        &self,
+        id: String,
+        server_core: Arc<DrasiServerCore>,
+    ) -> Result<()> {
         let reactions = self.reactions.read().await;
         if let Some(reaction) = reactions.get(&id) {
             let status = reaction.status().await;
             is_operation_valid(&status, &Operation::Start).map_err(|e| anyhow::anyhow!(e))?;
-            reaction.start(result_rx).await?;
+            reaction.start(server_core).await?;
         } else {
             return Err(anyhow::anyhow!("Reaction not found: {}", id));
         }
@@ -303,7 +330,19 @@ impl ReactionManager {
         }
     }
 
-    pub async fn update_reaction(&self, id: String, config: ReactionConfig) -> Result<()> {
+    /// Update a reaction configuration.
+    ///
+    /// # Parameters
+    /// - `id`: The reaction ID to update
+    /// - `config`: The new configuration
+    /// - `server_core`: Optional server core reference. Required if the reaction is currently running
+    ///   and needs to be restarted after the update.
+    pub async fn update_reaction(
+        &self,
+        id: String,
+        config: ReactionConfig,
+        server_core: Option<Arc<DrasiServerCore>>,
+    ) -> Result<()> {
         let reactions = self.reactions.read().await;
         if let Some(reaction) = reactions.get(&id) {
             let status = reaction.status().await;
@@ -333,9 +372,14 @@ impl ReactionManager {
 
             // If it was running, restart it
             if was_running {
-                // Need to get a receiver for the reaction
-                let (_tx, rx) = tokio::sync::mpsc::channel(100);
-                self.start_reaction(id, rx).await?;
+                if let Some(core) = server_core {
+                    self.start_reaction(id, core).await?;
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "Cannot restart reaction '{}' after update: server_core parameter required",
+                        id
+                    ));
+                }
             }
         } else {
             return Err(anyhow::anyhow!("Reaction not found: {}", id));
@@ -402,30 +446,24 @@ impl ReactionManager {
         reactions.get(name).map(|r| r.get_config().clone())
     }
 
-    pub async fn start_all(&self, subscription_router: &SubscriptionRouter) -> Result<()> {
+    /// Start all reactions marked for auto-start.
+    ///
+    /// # Parameters
+    /// - `server_core`: Arc reference to DrasiServerCore for query subscriptions
+    ///
+    /// Reactions will manage their own subscriptions to queries using the broadcast channel pattern.
+    pub async fn start_all(&self, server_core: Arc<DrasiServerCore>) -> Result<()> {
         let reactions = self.reactions.read().await;
         let mut failed_reactions = Vec::new();
 
         for (id, reaction) in reactions.iter() {
             let config = reaction.get_config();
             if config.auto_start {
-                // Get a receiver connected to the subscription router
-                match subscription_router
-                    .add_reaction_subscription(id.clone(), config.queries.clone())
-                    .await
-                {
-                    Ok(rx) => {
-                        info!("Auto-starting reaction: {}", id);
-                        if let Err(e) = reaction.start(rx).await {
-                            error!("Failed to start reaction {}: {}", id, e);
-                            failed_reactions.push((id.clone(), e.to_string()));
-                            // Continue starting other reactions instead of returning early
-                        }
-                    }
-                    Err(e) => {
-                        error!("Failed to create subscription for reaction {}: {}", id, e);
-                        failed_reactions.push((id.clone(), e));
-                    }
+                info!("Auto-starting reaction: {}", id);
+                if let Err(e) = reaction.start(Arc::clone(&server_core)).await {
+                    error!("Failed to start reaction {}: {}", id, e);
+                    failed_reactions.push((id.clone(), e.to_string()));
+                    // Continue starting other reactions instead of returning early
                 }
             } else {
                 info!(

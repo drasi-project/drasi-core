@@ -60,14 +60,17 @@ pub use types::{
     ResultEvent, UpdatePayload,
 };
 
-use crate::channels::{ComponentEvent, ComponentEventSender, ComponentStatus, QueryResultReceiver};
+use crate::channels::priority_queue::PriorityQueue;
+use crate::channels::{ComponentEvent, ComponentEventSender, ComponentStatus, QueryResult};
 use crate::config::ReactionConfig;
 use crate::reactions::Reaction;
+use crate::server_core::DrasiServerCore;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use publisher::{PublisherConfig, RedisStreamPublisher};
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::RwLock;
 
 /// Platform Reaction for publishing to Redis Streams
 pub struct PlatformReaction {
@@ -76,9 +79,11 @@ pub struct PlatformReaction {
     event_tx: ComponentEventSender,
     publisher: Arc<RedisStreamPublisher>,
     sequence_counter: Arc<RwLock<i64>>,
-    shutdown_tx: Arc<RwLock<Option<mpsc::Sender<()>>>>,
     cloud_event_config: CloudEventConfig,
     emit_control_events: bool,
+    subscription_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
+    priority_queue: PriorityQueue<QueryResult>,
+    processing_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl PlatformReaction {
@@ -135,9 +140,11 @@ impl PlatformReaction {
             event_tx,
             publisher: Arc::new(publisher),
             sequence_counter: Arc::new(RwLock::new(0)),
-            shutdown_tx: Arc::new(RwLock::new(None)),
             cloud_event_config,
             emit_control_events,
+            subscription_tasks: Arc::new(RwLock::new(Vec::new())),
+            priority_queue: PriorityQueue::new(10000),
+            processing_task: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -178,7 +185,7 @@ impl PlatformReaction {
 
 #[async_trait]
 impl Reaction for PlatformReaction {
-    async fn start(&self, mut result_rx: QueryResultReceiver) -> Result<()> {
+    async fn start(&self, server_core: Arc<DrasiServerCore>) -> Result<()> {
         log::info!("Starting Platform Reaction: {}", self.config.id);
 
         // Update status to Starting
@@ -216,152 +223,207 @@ impl Reaction for PlatformReaction {
             log::error!("Failed to send reaction running event: {}", e);
         }
 
-        // Create shutdown channel
-        let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
-        *self.shutdown_tx.write().await = Some(shutdown_tx);
+        // Get QueryManager from server_core
+        let query_manager = server_core.query_manager();
 
-        // Clone what we need for the async task
+        // Subscribe to all configured queries
+        let mut subscription_tasks = self.subscription_tasks.write().await;
+        for query_id in &self.config.queries {
+            // Get the query instance
+            let query = query_manager
+                .get_query_instance(query_id)
+                .await
+                .map_err(|e| anyhow!("Failed to get query instance '{}': {}", query_id, e))?;
+
+            // Subscribe to the query
+            let subscription_response = query
+                .subscribe(self.config.id.clone())
+                .await
+                .map_err(|e| anyhow!("Failed to subscribe to query '{}': {}", query_id, e))?;
+
+            let mut broadcast_receiver = subscription_response.broadcast_receiver;
+            let priority_queue = self.priority_queue.clone();
+            let query_id_for_task = query_id.clone();
+            let reaction_id = self.config.id.clone();
+
+            // Spawn forwarder task for this query subscription
+            let forwarder_task = tokio::spawn(async move {
+                log::debug!(
+                    "Platform Reaction '{}' forwarder task started for query '{}'",
+                    reaction_id,
+                    query_id_for_task
+                );
+
+                loop {
+                    match broadcast_receiver.recv().await {
+                        Ok(query_result) => {
+                            // Enqueue into priority queue for timestamp-ordered processing
+                            if !priority_queue.enqueue(query_result).await {
+                                log::warn!(
+                                    "Priority queue full for reaction '{}', dropping result from query '{}'",
+                                    reaction_id,
+                                    query_id_for_task
+                                );
+                            }
+                        }
+                        Err(RecvError::Lagged(count)) => {
+                            log::warn!(
+                                "Reaction '{}' lagged behind query '{}' by {} messages",
+                                reaction_id,
+                                query_id_for_task,
+                                count
+                            );
+                            // Continue receiving
+                        }
+                        Err(RecvError::Closed) => {
+                            log::info!(
+                                "Query '{}' broadcast channel closed for reaction '{}'",
+                                query_id_for_task,
+                                reaction_id
+                            );
+                            break;
+                        }
+                    }
+                }
+
+                log::debug!(
+                    "Platform Reaction '{}' forwarder task stopped for query '{}'",
+                    reaction_id,
+                    query_id_for_task
+                );
+            });
+
+            subscription_tasks.push(forwarder_task);
+        }
+        drop(subscription_tasks);
+
+        // Clone what we need for the processing task
         let publisher = self.publisher.clone();
         let sequence_counter = self.sequence_counter.clone();
         let cloud_event_config = self.cloud_event_config.clone();
         let reaction_id = self.config.id.clone();
-        let status = self.status.clone();
         let emit_control_events = self.emit_control_events;
+        let priority_queue = self.priority_queue.clone();
 
-        // Spawn task to process query results
-        tokio::spawn(async move {
+        // Spawn main processing task
+        let processing_task_handle = tokio::spawn(async move {
             log::debug!(
                 "Platform Reaction '{}' processing task started",
                 reaction_id
             );
 
             loop {
-                tokio::select! {
-                    // Handle query results
-                    Some(mut query_result) = result_rx.recv() => {
-                        // Check if this is a control signal
-                        if let Some(control_signal) = query_result.metadata.get("control_signal") {
-                            if emit_control_events {
-                                // This is a control signal, emit it as a control event
-                                if let Some(signal_type) = control_signal.as_str() {
-                                    let control_signal = match signal_type {
-                                        "bootstrapStarted" => ControlSignal::BootstrapStarted,
-                                        "bootstrapCompleted" => ControlSignal::BootstrapCompleted,
-                                        _ => {
-                                            log::debug!("Unknown control signal type: {}", signal_type);
-                                            continue;
-                                        }
-                                    };
+                // Dequeue from priority queue (blocking until available)
+                let query_result = priority_queue.dequeue().await;
 
-                                    // Clone the publisher for the emit closure
-                                    let publisher_for_emit = publisher.clone();
-                                    let cloud_event_config_for_emit = cloud_event_config.clone();
-
-                                    // Get sequence for control event
-                                    let control_sequence = {
-                                        let mut counter = sequence_counter.write().await;
-                                        *counter += 1;
-                                        *counter
-                                    };
-
-                                    // Emit control event
-                                    let control_event = ResultControlEvent {
-                                        query_id: query_result.query_id.clone(),
-                                        sequence: control_sequence as u64,
-                                        source_time_ms: query_result.timestamp.timestamp_millis() as u64,
-                                        metadata: None,
-                                        control_signal: control_signal.clone(),
-                                    };
-
-                                    let cloud_event = CloudEvent::new(
-                                        ResultEvent::Control(control_event),
-                                        &query_result.query_id,
-                                        &cloud_event_config_for_emit,
-                                    );
-
-                                    if let Err(e) = publisher_for_emit.publish_with_retry(cloud_event, 3).await {
-                                        log::warn!("Failed to emit control event {}: {}", signal_type, e);
-                                    } else {
-                                        log::info!("Emitted control event: {}", signal_type);
-                                    }
+                // Check if this is a control signal
+                if let Some(control_signal) = query_result.metadata.get("control_signal") {
+                    if emit_control_events {
+                        // This is a control signal, emit it as a control event
+                        if let Some(signal_type) = control_signal.as_str() {
+                            let control_signal = match signal_type {
+                                "bootstrapStarted" => ControlSignal::BootstrapStarted,
+                                "bootstrapCompleted" => ControlSignal::BootstrapCompleted,
+                                _ => {
+                                    log::debug!("Unknown control signal type: {}", signal_type);
+                                    continue;
                                 }
+                            };
+
+                            // Get sequence for control event
+                            let control_sequence = {
+                                let mut counter = sequence_counter.write().await;
+                                *counter += 1;
+                                *counter
+                            };
+
+                            // Emit control event
+                            let control_event = ResultControlEvent {
+                                query_id: query_result.query_id.clone(),
+                                sequence: control_sequence as u64,
+                                source_time_ms: query_result.timestamp.timestamp_millis() as u64,
+                                metadata: None,
+                                control_signal: control_signal.clone(),
+                            };
+
+                            let cloud_event = CloudEvent::new(
+                                ResultEvent::Control(control_event),
+                                &query_result.query_id,
+                                &cloud_event_config,
+                            );
+
+                            if let Err(e) = publisher.publish_with_retry(cloud_event, 3).await {
+                                log::warn!("Failed to emit control event {}: {}", signal_type, e);
+                            } else {
+                                log::info!("Emitted control event: {}", signal_type);
                             }
-                            // Skip regular processing for control signals
-                            continue;
                         }
+                    }
+                    // Skip regular processing for control signals
+                    continue;
+                }
 
-                        // Capture reaction receive timestamp for regular results
-                        if let Some(ref mut profiling) = query_result.profiling {
-                            profiling.reaction_receive_ns = Some(crate::profiling::timestamp_ns());
-                        }
+                // Create a mutable clone for profiling updates
+                let mut query_result_mut = (*query_result).clone();
 
-                        // Increment sequence counter
-                        let sequence = {
-                            let mut counter = sequence_counter.write().await;
-                            *counter += 1;
-                            *counter
-                        };
+                // Capture reaction receive timestamp for regular results
+                if let Some(ref mut profiling) = query_result_mut.profiling {
+                    profiling.reaction_receive_ns = Some(crate::profiling::timestamp_ns());
+                }
 
-                        // Transform query result to platform event
-                        match transformer::transform_query_result(query_result.clone(), sequence, sequence as u64) {
-                            Ok(result_event) => {
-                                // Wrap in CloudEvent
-                                let cloud_event = CloudEvent::new(
-                                    result_event,
-                                    &query_result.query_id,
-                                    &cloud_event_config,
+                // Increment sequence counter
+                let sequence = {
+                    let mut counter = sequence_counter.write().await;
+                    *counter += 1;
+                    *counter
+                };
+
+                // Transform query result to platform event
+                match transformer::transform_query_result(
+                    query_result_mut.clone(),
+                    sequence,
+                    sequence as u64,
+                ) {
+                    Ok(result_event) => {
+                        // Wrap in CloudEvent
+                        let cloud_event = CloudEvent::new(
+                            result_event,
+                            &query_result_mut.query_id,
+                            &cloud_event_config,
+                        );
+
+                        // Publish to Redis
+                        match publisher.publish_with_retry(cloud_event, 3).await {
+                            Ok(message_id) => {
+                                log::debug!(
+                                    "Published query result for '{}' (sequence: {}, message_id: {})",
+                                    query_result_mut.query_id,
+                                    sequence,
+                                    message_id
                                 );
-
-                                // Publish to Redis
-                                match publisher.publish_with_retry(cloud_event, 3).await {
-                                    Ok(message_id) => {
-                                        log::debug!(
-                                            "Published query result for '{}' (sequence: {}, message_id: {})",
-                                            query_result.query_id,
-                                            sequence,
-                                            message_id
-                                        );
-                                    }
-                                    Err(e) => {
-                                        log::error!(
-                                            "Failed to publish query result for '{}': {}",
-                                            query_result.query_id,
-                                            e
-                                        );
-                                    }
-                                }
                             }
                             Err(e) => {
                                 log::error!(
-                                    "Failed to transform query result for '{}': {}",
-                                    query_result.query_id,
+                                    "Failed to publish query result for '{}': {}",
+                                    query_result_mut.query_id,
                                     e
                                 );
                             }
                         }
                     }
-
-                    // Handle shutdown signal
-                    _ = shutdown_rx.recv() => {
-                        log::info!("Platform Reaction '{}' received shutdown signal", reaction_id);
-                        break;
-                    }
-
-                    // Handle channel closure
-                    else => {
-                        log::warn!("Platform Reaction '{}' result channel closed", reaction_id);
-                        break;
+                    Err(e) => {
+                        log::error!(
+                            "Failed to transform query result for '{}': {}",
+                            query_result_mut.query_id,
+                            e
+                        );
                     }
                 }
             }
-
-            // Update status to Stopped
-            *status.write().await = ComponentStatus::Stopped;
-            log::info!(
-                "Platform Reaction '{}' processing task stopped",
-                reaction_id
-            );
         });
+
+        // Store the processing task handle
+        *self.processing_task.write().await = Some(processing_task_handle);
 
         Ok(())
     }
@@ -369,9 +431,28 @@ impl Reaction for PlatformReaction {
     async fn stop(&self) -> Result<()> {
         log::info!("Stopping Platform Reaction: {}", self.config.id);
 
-        // Send shutdown signal
-        if let Some(shutdown_tx) = self.shutdown_tx.write().await.take() {
-            let _ = shutdown_tx.send(()).await;
+        // Abort all subscription forwarder tasks
+        let mut subscription_tasks = self.subscription_tasks.write().await;
+        for task in subscription_tasks.drain(..) {
+            task.abort();
+        }
+        drop(subscription_tasks);
+
+        // Abort the processing task
+        let mut processing_task = self.processing_task.write().await;
+        if let Some(task) = processing_task.take() {
+            task.abort();
+        }
+        drop(processing_task);
+
+        // Drain the priority queue
+        let drained = self.priority_queue.drain().await;
+        if !drained.is_empty() {
+            log::info!(
+                "Drained {} events from priority queue for reaction '{}'",
+                drained.len(),
+                self.config.id
+            );
         }
 
         // Emit Stopped control event

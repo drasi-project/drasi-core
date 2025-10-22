@@ -2,8 +2,8 @@
 
 This document provides a comprehensive overview of the drasi-core server-core architecture, including the relationships between components, channel communication patterns, lifecycle management, and bootstrap processes.
 
-**Last Updated:** 2025-10-21
-**Version:** Current implementation with subscription-based bootstrap
+**Last Updated:** 2025-10-22
+**Version:** 3.0 - Router-free architecture with direct subscriptions throughout
 
 ---
 
@@ -23,15 +23,20 @@ This document provides a comprehensive overview of the drasi-core server-core ar
 
 ## Overview
 
-The server-core implements a reactive, event-driven architecture for continuous query processing over streaming data. The system consists of three primary component types (**Sources**, **Queries**, **Reactions**), three managers (**SourceManager**, **QueryManager**, **ReactionManager**), one router (**SubscriptionRouter**), and an event channel infrastructure.
+The server-core implements a reactive, event-driven architecture for continuous query processing over streaming data. The system consists of three primary component types (**Sources**, **Queries**, **Reactions**), three managers (**SourceManager**, **QueryManager**, **ReactionManager**), and a broadcast channel infrastructure for zero-copy event distribution.
 
 ### Key Design Principles
 
-- **Direct Subscription**: Queries subscribe directly to Sources via broadcast channels
-- **Zero-Copy Distribution**: Sources use broadcast channels with Arc-wrapped events for efficient distribution
-- **Priority Queue Processing**: Each Query maintains a priority queue for ordered event processing
-- **Pluggable Bootstrap**: Bootstrap providers are passed as parameters to the bootstrap() method
-- **Dual Channel Architecture**: Broadcast channels for live events, dedicated mpsc for bootstrap
+- **Direct Subscriptions**:
+  - Queries subscribe directly to Sources via per-source broadcast channels
+  - Reactions subscribe directly to Queries via per-query broadcast channels
+  - No centralized routers (SubscriptionRouter, DataRouter, BootstrapRouter all removed)
+- **Zero-Copy Distribution**: All event distribution uses broadcast channels with Arc-wrapped data
+- **Priority Queue Processing**:
+  - Each Query maintains a priority queue for ordered source event processing
+  - Each Reaction maintains a priority queue for ordered query result processing
+- **Pluggable Bootstrap**: Bootstrap providers execute during source subscription
+- **Dual Channel Architecture per Source**: Broadcast channels for live events, dedicated mpsc for bootstrap
 - **Silent Bootstrap**: Bootstrap results are processed but not sent to reactions (only live changes trigger reactions)
 
 ---
@@ -51,23 +56,32 @@ The server-core implements a reactive, event-driven architecture for continuous 
 │         │                 │                 │                     │
 │  ┌──────▼──────┐   ┌─────▼──────┐  ┌──────▼──────┐             │
 │  │  Sources    │   │  Queries   │  │ Reactions   │             │
-│  │  (HashMap)  │◄──┤ (HashMap)  │  │ (HashMap)   │             │
-│  │             │   │            │  └──────┬──────┘             │
-│  │ Each Source │   │ Each Query │         │                     │
-│  │  contains:  │   │ contains:  │         │                     │
-│  │             │   │            │  ┌──────▼──────────┐         │
-│  │ - Broadcast │   │ - Priority │  │  Subscription   │         │
-│  │   Channel   │   │   Queue    │  │  Router         │         │
-│  │ - Bootstrap │   │ - Subscr.  │  └─────────────────┘         │
-│  │   Provider  │   │   Tasks    │                               │
-│  └─────────────┘   │ - Bootstrap│                               │
-│                     │   State    │                               │
-│                     └────────────┘                               │
-│                           │                                       │
-│                    ┌──────▼──────┐                               │
-│                    │ Event       │                               │
-│                    │ Channels    │                               │
-│                    └─────────────┘                               │
+│  │  (HashMap)  │   │ (HashMap)  │  │ (HashMap)   │             │
+│  │             │   │            │  │             │             │
+│  │ Each Source │   │ Each Query │  │ Each Reaction│             │
+│  │  contains:  │   │ contains:  │  │  contains:  │             │
+│  │             │   │            │  │             │             │
+│  │ - Broadcast │   │ - Broadcast│  │ - Priority  │             │
+│  │   TX (live) │   │   TX (res.)│  │   Queue     │             │
+│  │ - Bootstrap │   │ - Priority │  │ - Subscr.   │             │
+│  │   Provider  │   │   Queue    │  │   Tasks     │             │
+│  │             │   │ - Subscr.  │  │             │             │
+│  └──────┬──────┘   │   Tasks    │  └──────▲──────┘             │
+│         │          │ - Bootstrap│         │                     │
+│         │          │   State    │         │                     │
+│         │          └──────┬─────┘         │                     │
+│         │                 │               │                     │
+│         │ broadcast       │ broadcast     │ direct              │
+│         │ subscribe()     │ subscribe()   │ subscribe()         │
+│         └────────────────►│               │                     │
+│                           └───────────────┘                     │
+│                                                                   │
+│  ┌───────────────────────────────────────────────────┐         │
+│  │  System Event Channels (EventChannels)            │         │
+│  │  - component_event_tx (lifecycle events)          │         │
+│  │  - control_signal_tx (coordination signals)       │         │
+│  │  - _control_tx (deprecated)                       │         │
+│  └───────────────────────────────────────────────────┘         │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -81,31 +95,29 @@ The server-core implements a reactive, event-driven architecture for continuous 
 
 ## Channel Architecture
 
-The system uses a combination of **shared channels** (mpsc) and **dedicated channels** (broadcast per-source, mpsc per-bootstrap) for communication.
+The system uses a combination of **system-wide channels** (mpsc) and **dedicated per-component broadcast channels** for zero-copy event distribution.
 
-### Shared System Channels
+### System-Wide Channels (EventChannels)
 
 Created once by `EventChannels::new()` and distributed to all components:
 
 ```rust
 pub struct EventChannels {
-    pub query_result_tx: QueryResultSender,        // mpsc
     pub component_event_tx: ComponentEventSender,  // mpsc
     pub _control_tx: ControlMessageSender,         // mpsc (deprecated)
-    pub control_signal_tx: ControlSignalSender,    // mpsc (unused)
+    pub control_signal_tx: ControlSignalSender,    // mpsc
 }
 ```
 
-**File**: `server-core/src/channels/events.rs:312`
+**File**: `server-core/src/channels/events.rs:308-312`
 
-#### Channel Purposes
+#### System Channel Purposes
 
 | Channel | Type | Direction | Purpose | Capacity | Status |
 |---------|------|-----------|---------|----------|--------|
-| `query_result_tx/rx` | mpsc | Query → SubscriptionRouter | Query results for reactions | 1000 | ✅ Active |
-| `component_event_tx/rx` | mpsc | All Components → DrasiServerCore | Component status events | 1000 | ✅ Active |
+| `component_event_tx/rx` | mpsc | All Components → DrasiServerCore | Component lifecycle events (Starting, Running, Stopped, Error) | 1000 | ✅ Active |
 | `_control_tx/rx` | mpsc | (unused) | Legacy control messages | 100 | ⚠️ Deprecated |
-| `control_signal_tx/rx` | mpsc | (unused) | Control signals | 100 | ⚠️ Unused |
+| `control_signal_tx/rx` | mpsc | Components → ? | Control signals (Running, Stopped, Deleted) | 100 | ⚠️ No active consumers |
 
 ### Per-Source Broadcast Channels
 
@@ -129,6 +141,31 @@ let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
 - `server-core/src/sources/mock/mod.rs:45` - MockSource broadcast channel
 - `server-core/src/sources/platform/mod.rs:96` - PlatformSource broadcast channel
 - `server-core/src/sources/http/adaptive.rs:104` - HttpSource broadcast channel
+
+### Per-Query Broadcast Channels
+
+Each query maintains its own broadcast channel for distributing results to multiple reactions:
+
+```rust
+// Created in query constructor
+let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
+```
+
+- **Type**: `tokio::sync::broadcast::Sender<Arc<QueryResult>>`
+- **Capacity**: 1000 (hardcoded)
+- **Purpose**: Zero-copy distribution of QueryResult to multiple reactions
+- **Event Format**: `Arc<QueryResult>` containing:
+  - `query_id`: String
+  - `timestamp`: DateTime<Utc>
+  - `results`: QueryResult (added/updated/removed records)
+  - `sequence`: u64
+  - `profiling`: Optional profiling metadata
+
+**Subscription Method**: Reactions call `query.subscribe(reaction_id)` which returns a `QuerySubscriptionResponse` with `broadcast_receiver`
+
+**File Examples**:
+- `server-core/src/queries/manager.rs:837-851` - Query.subscribe() method
+- `server-core/src/reactions/log/mod.rs:98-150` - Reaction subscribing to queries
 
 ### Per-Bootstrap Dedicated Channels
 
@@ -486,7 +523,7 @@ If reactions need initial results, they must either:
 
 ## Event Flow
 
-### Live Event Flow (After Bootstrap)
+### Source to Query Event Flow (Live Events After Bootstrap)
 
 ```
 ┌──────────┐
@@ -498,7 +535,7 @@ If reactions need initial results, they must either:
       │
       ▼
 ┌──────────────────┐
-│ Broadcast        │ broadcast_tx.send(Arc<SourceEventWrapper>)
+│ Source Broadcast │ broadcast_tx.send(Arc<SourceEventWrapper>)
 │ Channel          │ (zero-copy distribution)
 └─────┬────────────┘
       │
@@ -517,8 +554,8 @@ If reactions need initial results, they must either:
       │
       ▼
 ┌──────────────────┐
-│ Priority Queue   │ Orders events by sequence/timestamp
-│ (capacity: 10000)│
+│ Query Priority   │ Orders events by timestamp
+│ Queue (10000)    │
 └─────┬────────────┘
       │
       │ Processing Task dequeues events
@@ -530,24 +567,40 @@ If reactions need initial results, they must either:
 └─────┬────────────┘
       │
       │ Produces QueryResults
+      │ Wraps in Arc<QueryResult>
       │
       ▼
 ┌──────────────────┐
-│ Query Result     │ query_result_tx.send(QueryResult)
-│ Channel (mpsc)   │
+│ Query Broadcast  │ broadcast_tx.send(Arc<QueryResult>)
+│ Channel          │ (zero-copy distribution)
 └─────┬────────────┘
       │
-      ▼
-┌──────────────────┐
-│ Subscription     │ Routes results to subscribed reactions
-│ Router           │
-└─────┬────────────┘
-      │
+      │ Multiple Reaction Subscribers
       ├──────────┬──────────┬───────────┐
       ▼          ▼          ▼           ▼
-  ┌──────────┐┌──────────┐┌──────────┐
-  │Reaction 1││Reaction 2││Reaction N│
-  └──────────┘└──────────┘└──────────┘
+  ┌────────┐ ┌────────┐ ┌────────┐
+  │React 1 │ │React 2 │ │React N │
+  │        │ │        │ │        │
+  │Forward │ │Forward │ │Forward │
+  │  Task  │ │  Task  │ │  Task  │
+  └───┬────┘ └───┬────┘ └───┬────┘
+      │          │          │
+      │ Receives Arc<QueryResult>
+      │ Enqueues into Priority Queue
+      │
+      ▼
+┌──────────────────┐
+│ Reaction Priority│ Orders results by timestamp
+│ Queue (10000)    │
+└─────┬────────────┘
+      │
+      │ Processing Task dequeues results
+      │
+      ▼
+┌──────────────────┐
+│ Reaction Handler │ HTTP POST / gRPC call / Log / etc.
+│                  │
+└──────────────────┘
 ```
 
 ### Bootstrap Event Flow (During Bootstrap)
@@ -606,16 +659,18 @@ If reactions need initial results, they must either:
 ### Key Files and Line Numbers
 
 #### Core Architecture
-- **DrasiServerCore**: `server-core/src/server_core.rs:32`
-- **EventChannels**: `server-core/src/channels/events.rs:312`
-- **SubscriptionResponse**: `server-core/src/channels/events.rs:151`
-- **BootstrapEvent**: `server-core/src/channels/events.rs:126`
+- **DrasiServerCore**: `server-core/src/server_core.rs` (main server struct)
+- **EventChannels**: `server-core/src/channels/events.rs:308` (system-wide channels)
+- **SubscriptionResponse**: `server-core/src/channels/events.rs:151` (source subscription response)
+- **QuerySubscriptionResponse**: `server-core/src/channels/events.rs` (query subscription response)
+- **BootstrapEvent**: `server-core/src/channels/events.rs:137`
 
 #### Managers
-- **SourceManager**: `server-core/src/sources/manager.rs:68`
-- **QueryManager**: `server-core/src/queries/manager.rs:45`
-- **Query (DrasiQuery)**: `server-core/src/queries/manager.rs:91`
+- **SourceManager**: `server-core/src/sources/manager.rs`
+- **QueryManager**: `server-core/src/queries/manager.rs`
+- **Query (DrasiQuery)**: `server-core/src/queries/manager.rs:121`
 - **ReactionManager**: `server-core/src/reactions/manager.rs`
+- **Reaction trait**: `server-core/src/reactions/manager.rs:50`
 
 #### Sources
 - **Source trait**: `server-core/src/sources/manager.rs:34`
@@ -634,10 +689,21 @@ If reactions need initial results, they must either:
 - **ScriptFileBootstrapProvider**: `server-core/src/bootstrap/providers/script_file.rs`
 
 #### Queries
-- **Query.start() subscription logic**: `server-core/src/queries/manager.rs:282-487`
-- **Broadcast forwarder task**: `server-core/src/queries/manager.rs:341-378`
-- **Bootstrap processing task**: `server-core/src/queries/manager.rs:429-502`
-- **Priority queue**: `server-core/src/queries/priority_queue.rs`
+- **Query trait**: `server-core/src/queries/manager.rs:103-118` (trait definition)
+- **Query.subscribe() for reactions**: `server-core/src/queries/manager.rs:837-851`
+- **Query.start() subscription logic**: `server-core/src/queries/manager.rs:275-544` (subscribing to sources)
+- **Broadcast forwarder task**: `server-core/src/queries/manager.rs:342-388` (forwards source events to priority queue)
+- **Bootstrap processing task**: `server-core/src/queries/manager.rs:397-538` (processes bootstrap events)
+- **Priority queue**: `server-core/src/channels/priority_queue.rs` (generic priority queue implementation)
+- **Query-specific priority queue**: `server-core/src/queries/priority_queue.rs` (type alias for SourceEventWrapper)
+
+#### Reactions
+- **Reaction trait**: `server-core/src/reactions/manager.rs:50-73` (defines start with DrasiServerCore parameter)
+- **LogReaction example**: `server-core/src/reactions/log/mod.rs:32-94`
+  - **LogReaction.start()**: `server-core/src/reactions/log/mod.rs:98-150` (subscribes to queries)
+  - **Forwarder task**: `server-core/src/reactions/log/mod.rs:139-170` (forwards query results to priority queue)
+  - **Processing task**: `server-core/src/reactions/log/mod.rs:172-240` (dequeues and processes results)
+- **Reaction priority queue**: Uses generic `PriorityQueue<QueryResult>` from `server-core/src/channels/priority_queue.rs`
 
 ---
 
@@ -652,29 +718,41 @@ This section identifies incomplete implementations, potential issues, and future
 - **Current State**:
   - ✅ Control signals defined (Running, Stopped, Deleted)
   - ❌ No active consumers of control_signal_rx
-  - ❌ Channel created but immediately dropped in EventReceivers
-- **Files**: `server-core/src/channels/events.rs:310`, `server-core/src/server_core.rs`
+  - ❌ Channel created in EventChannels but no receiver actively processes it
+- **Files**: `server-core/src/channels/events.rs:308-312`, `server-core/src/server_core.rs`
 - **Impact**: Wasted channel infrastructure, potential confusion
 - **Action**: Either implement signal consumers or remove the control_signal channel entirely
 
-#### 2. **Priority Queue Capacity Hardcoded**
-- **Issue**: Each query's priority queue has a hardcoded capacity of 10,000
-- **File**: `server-core/src/queries/manager.rs:146`
+#### 2. **Legacy Control Channel Deprecated**
+- **Issue**: `_control_tx` channel exists with underscore prefix indicating it's unused
+- **Current State**: Channel is created but marked deprecated via underscore naming
+- **Files**: `server-core/src/channels/events.rs:310`
+- **Impact**: Unused channel consuming 100 slots of capacity
+- **Action**: Remove deprecated channel entirely from EventChannels struct
+
+#### 3. **Priority Queue Capacity Hardcoded**
+- **Issue**: Both query and reaction priority queues have hardcoded capacity of 10,000
+- **Files**:
+  - `server-core/src/queries/manager.rs:146` - Query priority queue
+  - `server-core/src/reactions/log/mod.rs:57` - Reaction priority queue
 - **Impact**:
   - May drop events if source produces faster than query processes
+  - May drop results if query produces faster than reaction processes
   - No configuration option for tuning based on workload
-- **Action**: Make capacity configurable per query or globally
+- **Action**: Make capacity configurable per query/reaction or globally
 
 ### 🟡 Medium Concerns
 
-#### 3. **Subscription Task Cleanup**
-- **Issue**: Query stores subscription_tasks but doesn't explicitly abort them on stop
-- **File**: `server-core/src/queries/manager.rs:132`
+#### 4. **Subscription Task Cleanup**
+- **Issue**: Both queries and reactions store subscription_tasks but may not explicitly abort them on stop
+- **Files**:
+  - `server-core/src/queries/manager.rs:132` - Query subscription tasks
+  - `server-core/src/reactions/log/mod.rs:37` - Reaction subscription tasks
 - **Current Behavior**: Tasks continue running until broadcast channel closes
-- **Impact**: Tasks may continue briefly after query stop, consuming resources
-- **Action**: Abort subscription tasks explicitly in `Query::stop()`
+- **Impact**: Tasks may continue briefly after component stop, consuming resources
+- **Action**: Abort subscription tasks explicitly in `Query::stop()` and `Reaction::stop()`
 
-#### 4. **Broadcast Receiver Lagging**
+#### 5. **Broadcast Receiver Lagging**
 - **Issue**: If a query's priority queue is full or processing is slow, broadcast receivers may lag
 - **Current Handling**: Logs warning about skipped events but continues
 - **File**: `server-core/src/queries/manager.rs:358-362`
@@ -735,76 +813,100 @@ This section identifies incomplete implementations, potential issues, and future
 
 ### ✅ Completed Migrations
 
-#### **BootstrapRouter Removal - Complete**
-- **Status**: ✅ Migration complete (2025-10-21)
+#### **All Routers Removed - Complete**
+- **Status**: ✅ Migration complete (2025-10-21 and earlier)
 - **Changes**:
-  - BootstrapRouter code completely removed
-  - Bootstrap request/response channels removed from EventChannels
-  - BootstrapRequest moved from channels module to bootstrap module
-  - BootstrapProvider trait updated: added `event_tx` parameter
-  - All 5 bootstrap providers updated (postgres, platform, script_file, application, noop)
-  - Queries no longer hold bootstrap_request_tx/bootstrap_response_rx
-  - QueryManager simplified to remove bootstrap channel management
-  - Documentation updated to reflect subscription-based only approach
-  - All test compilation errors fixed (451 tests passing)
+
+1. **BootstrapRouter Removal** (2025-10-21):
+   - BootstrapRouter code completely removed
+   - Bootstrap request/response channels removed from EventChannels
+   - BootstrapRequest moved from channels module to bootstrap module
+   - BootstrapProvider trait updated: added `event_tx` parameter
+   - All 5 bootstrap providers updated (postgres, platform, script_file, application, noop)
+   - Bootstrap happens entirely within source.subscribe() flow
+   - Bootstrap data flows through dedicated per-subscription mpsc channels
+
+2. **DataRouter Removal** (prior to 2025-10-21):
+   - DataRouter code completely removed
+   - Direct query-to-source subscription pattern implemented
+   - Each source has its own broadcast channel for zero-copy event distribution
+   - Queries spawn forwarder tasks to receive from source broadcast channels
+
+3. **SubscriptionRouter Removal** (2025-10-21):
+   - SubscriptionRouter code completely removed
+   - Direct reaction-to-query subscription pattern implemented
+   - Each query has its own broadcast channel for zero-copy result distribution
+   - Reactions spawn forwarder tasks to receive from query broadcast channels
+   - Reactions access QueryManager via DrasiServerCore reference
 
 **Evidence**:
-- No references to BootstrapRouter in codebase
-- Bootstrap happens entirely within source.subscribe() flow
-- Bootstrap data flows through dedicated per-subscription channels
-- Clean separation: broadcast for live events, mpsc for bootstrap
-
-#### **DataRouter Removal - Complete**
-- **Status**: ✅ Migration complete (prior to BootstrapRouter removal)
-- **Evidence**:
-  - No active code references DataRouter
-  - Direct subscription pattern fully implemented
-  - Broadcast channels handle all event distribution
-  - Only remnants are in .bak files (not compiled)
+- `/server-core/src/routers/mod.rs` contains only a comment: "SubscriptionRouter has been removed - reactions now subscribe directly to queries"
+- No router references in codebase (all removed)
+- EventChannels no longer contains query_result_tx/rx
+- Clean separation: per-component broadcast for data, system-wide mpsc for control/lifecycle
+- Reactions receive `Arc<DrasiServerCore>` in start() method for accessing QueryManager
 
 ---
 
 ## Summary of Current State
 
 ### What Works Well ✅
-- Direct query-to-source subscription via broadcast channels
-- Zero-copy event distribution using Arc-wrapped events
-- Priority queue ordered processing per query
-- Bootstrap via subscription flow with dedicated channels
-- All 5 bootstrap provider types implemented and working
-- Query result routing to reactions through SubscriptionRouter
-- Component lifecycle management (start/stop/delete)
-- Clean separation between bootstrap and live event channels
-- Parallel bootstrap from multiple sources
-- Silent bootstrap (state building without reaction triggers)
+- **Direct Subscriptions Throughout**:
+  - Queries subscribe directly to sources via per-source broadcast channels
+  - Reactions subscribe directly to queries via per-query broadcast channels
+  - No centralized routers - all components removed
+- **Zero-Copy Distribution**: Arc-wrapped events for efficient multi-subscriber access
+- **Priority Queue Processing**:
+  - Each query has a priority queue for timestamp-ordered source event processing
+  - Each reaction has a priority queue for timestamp-ordered query result processing
+- **Bootstrap via Subscription**: Bootstrap integrated into source.subscribe() flow with dedicated mpsc channels
+- **All 5 Bootstrap Provider Types**: postgres, platform, script_file, application, noop - all working
+- **Component Lifecycle Management**: Consistent start/stop/delete across all components
+- **Clean Channel Separation**:
+  - Per-component broadcast channels for data (zero-copy)
+  - System-wide mpsc channels for control and lifecycle events
+  - Dedicated mpsc channels for bootstrap data
+- **Parallel Bootstrap**: Multiple sources can bootstrap simultaneously
+- **Silent Bootstrap**: State building without triggering reactions
 
 ### What Needs Attention ⚠️
 - Control signal infrastructure exists but is unused (remove or implement?)
-- Hardcoded capacity limits for all channels (make configurable)
+- Legacy _control_tx channel deprecated but still exists (remove entirely?)
+- Hardcoded capacity limits for all channels and priority queues (make configurable)
 - No active bootstrap in MockSource (implement for testing)
-- Subscription tasks not explicitly aborted on query stop
+- Subscription tasks not explicitly aborted on component stop (both queries and reactions)
 - Lagging subscriber handling needs metrics and policy options
 - Label extraction is best-effort (may over-fetch bootstrap data)
 - Test helper methods (`test_subscribe`) exposed in public API
 
 ### Architecture Decisions ✔️
-- **Bootstrap**: Subscription-based only (BootstrapRouter removed)
-- **Event Distribution**: Broadcast channels with Arc (DataRouter removed)
-- **Event Ordering**: Priority queues per query
+- **No Routers**: All routers removed - direct subscriptions throughout
+  - BootstrapRouter removed - bootstrap via source.subscribe()
+  - DataRouter removed - queries subscribe directly to sources
+  - SubscriptionRouter removed - reactions subscribe directly to queries
+- **Event Distribution**: Broadcast channels with Arc for zero-copy distribution
+- **Event Ordering**: Priority queues per query (for sources) and per reaction (for queries)
 - **Bootstrap Data**: Dedicated mpsc channels per subscription
 - **Bootstrap Results**: Silent (results discarded during bootstrap phase)
 - **Bootstrap Provider Parameters**: Event sender passed explicitly as parameter
 - **Channel Types**:
-  - System-wide: mpsc for query results and component events
-  - Per-source: broadcast for live event distribution
+  - System-wide: mpsc for component lifecycle and control signals (EventChannels)
+  - Per-source: broadcast for live event distribution to queries
+  - Per-query: broadcast for result distribution to reactions
   - Per-bootstrap: mpsc for dedicated bootstrap data delivery
+- **Reaction Initialization**: Reactions receive `Arc<DrasiServerCore>` to access QueryManager
 
 ### Performance Characteristics
 - **Zero-copy**: Arc-wrapped events allow multiple subscribers without cloning data
-- **Parallel Processing**: Each query processes events independently
-- **Ordered Processing**: Priority queue ensures correct event ordering per query
+- **Parallel Processing**:
+  - Each query processes events independently
+  - Each reaction processes results independently
+- **Ordered Processing**:
+  - Priority queue ensures correct event ordering per query
+  - Priority queue ensures correct result ordering per reaction
 - **Non-blocking Bootstrap**: Bootstrap runs in background task, doesn't block live events
-- **Bounded Queues**: All channels have capacity limits (prevents unbounded memory growth)
+- **Bounded Queues**: All channels and priority queues have capacity limits (prevents unbounded memory growth)
+- **Direct Communication**: No router overhead - components communicate point-to-point
 
 ### Testing Status
 - ✅ 451 unit tests passing
@@ -835,7 +937,8 @@ This section identifies incomplete implementations, potential issues, and future
 
 ---
 
-**Document Version**: 2.0
-**Last Reviewed**: 2025-10-21
+**Document Version**: 3.0
+**Last Updated**: 2025-10-22
+**Changes**: Updated to reflect complete router removal (SubscriptionRouter, DataRouter, BootstrapRouter), direct reaction-to-query subscriptions, per-query broadcast channels, and reaction priority queues
 **Reviewers**: Claude Code
 **Next Review**: When significant architectural changes occur

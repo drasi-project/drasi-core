@@ -104,6 +104,10 @@ pub trait Query: Send + Sync {
     async fn status(&self) -> ComponentStatus;
     fn get_config(&self) -> &QueryConfig;
     fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Subscribe to query results for reactions
+    /// Returns a broadcast receiver for Arc-wrapped QueryResults
+    async fn subscribe(&self, reaction_id: String) -> Result<QuerySubscriptionResponse, String>;
 }
 
 /// Bootstrap phase tracking for each source
@@ -117,13 +121,14 @@ enum BootstrapPhase {
 pub struct DrasiQuery {
     config: QueryConfig,
     status: Arc<RwLock<ComponentStatus>>,
-    result_tx: QueryResultSender,
     event_tx: ComponentEventSender,
     #[allow(dead_code)]
     continuous_query: Option<ContinuousQuery>,
     current_results: Arc<RwLock<Vec<serde_json::Value>>>,
     task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 
+    // Broadcast channel for zero-copy query result distribution to reactions
+    broadcast_tx: QueryResultBroadcastSender,
     // Priority queue for ordered event processing
     priority_queue: PriorityQueue,
     // Reference to SourceManager for direct subscription
@@ -137,21 +142,23 @@ pub struct DrasiQuery {
 impl DrasiQuery {
     pub fn new(
         config: QueryConfig,
-        result_tx: QueryResultSender,
         event_tx: ComponentEventSender,
         source_manager: Arc<SourceManager>,
     ) -> Self {
         // Create priority queue with capacity for 10,000 events
         let priority_queue = PriorityQueue::new(10000);
 
+        // Create broadcast channel for query results (capacity: 1000)
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
+
         Self {
             config,
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            result_tx,
             event_tx,
             continuous_query: None,
             current_results: Arc::new(RwLock::new(Vec::new())),
             task_handle: Arc::new(RwLock::new(None)),
+            broadcast_tx,
             priority_queue,
             source_manager,
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
@@ -408,10 +415,12 @@ impl Query for DrasiQuery {
             let control_result =
                 QueryResult::new(self.config.id.clone(), chrono::Utc::now(), vec![], metadata);
 
-            if let Err(e) = self.result_tx.send(control_result).await {
-                error!(
-                    "Failed to send bootstrapStarted signal for query '{}': {}",
-                    self.config.id, e
+            // Broadcast the control signal to all subscribed reactions
+            let arc_result = Arc::new(control_result);
+            if let Err(_) = self.broadcast_tx.send(arc_result) {
+                debug!(
+                    "No reactions subscribed to query '{}' for bootstrapStarted signal",
+                    self.config.id
                 );
             } else {
                 info!(
@@ -422,7 +431,7 @@ impl Query for DrasiQuery {
 
             // Process bootstrap events from each source
             let continuous_query_clone = continuous_query.clone();
-            let result_tx = self.result_tx.clone();
+            let broadcast_tx = self.broadcast_tx.clone();
             let query_id = self.config.id.clone();
             let bootstrap_state = self.bootstrap_state.clone();
 
@@ -439,7 +448,7 @@ impl Query for DrasiQuery {
                 );
 
                 let continuous_query_ref = continuous_query_clone.clone();
-                let result_tx_clone = result_tx.clone();
+                let broadcast_tx_clone = broadcast_tx.clone();
                 let query_id_clone = query_id.clone();
                 let source_id_clone = source_id.clone();
                 let bootstrap_state_clone = bootstrap_state.clone();
@@ -512,10 +521,11 @@ impl Query for DrasiQuery {
                             metadata,
                         );
 
-                        if let Err(e) = result_tx_clone.send(control_result).await {
-                            error!(
-                                "Failed to send bootstrapCompleted signal for query '{}': {}",
-                                query_id_clone, e
+                        let arc_result = Arc::new(control_result);
+                        if let Err(_) = broadcast_tx_clone.send(arc_result) {
+                            debug!(
+                                "No reactions subscribed to query '{}' for bootstrapCompleted signal",
+                                query_id_clone
                             );
                         } else {
                             info!(
@@ -550,11 +560,12 @@ impl Query for DrasiQuery {
 
         // NEW: Spawn event processor task that reads from priority queue
         let continuous_query_for_processor = continuous_query.clone();
-        let result_tx = self.result_tx.clone();
+        let broadcast_tx = self.broadcast_tx.clone();
         let query_id = self.config.id.clone();
         let current_results = self.current_results.clone();
         let task_handle_clone = self.task_handle.clone();
         let priority_queue = self.priority_queue.clone();
+        let status = self.status.clone();
 
         let handle = tokio::spawn(async move {
             info!(
@@ -563,6 +574,15 @@ impl Query for DrasiQuery {
             );
 
             loop {
+                // Check if query is still running
+                if !matches!(*status.read().await, ComponentStatus::Running) {
+                    info!(
+                        "Query '{}' status changed to non-running, exiting processing loop",
+                        query_id
+                    );
+                    break;
+                }
+
                 // Dequeue events from priority queue (blocks until available)
                 let source_event_wrapper = priority_queue.dequeue().await;
 
@@ -743,9 +763,13 @@ impl Query for DrasiQuery {
                                 results.len()
                             );
 
-                            if let Err(e) = result_tx.send(query_result).await {
-                                error!("Failed to send query result: {}", e);
-                                break;
+                            // Broadcast query result to all subscribed reactions
+                            let arc_result = Arc::new(query_result);
+                            if let Err(_) = broadcast_tx.send(arc_result) {
+                                debug!(
+                                    "No reactions subscribed to query '{}', result discarded",
+                                    query_id
+                                );
                             }
                         }
                     }
@@ -819,24 +843,34 @@ impl Query for DrasiQuery {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+
+    async fn subscribe(&self, reaction_id: String) -> Result<QuerySubscriptionResponse, String> {
+        debug!(
+            "Reaction '{}' subscribing to query '{}'",
+            reaction_id, self.config.id
+        );
+
+        // Create a new receiver from the broadcast channel
+        let broadcast_receiver = self.broadcast_tx.subscribe();
+
+        Ok(QuerySubscriptionResponse {
+            query_id: self.config.id.clone(),
+            reaction_id,
+            broadcast_receiver,
+        })
+    }
 }
 
 pub struct QueryManager {
     queries: Arc<RwLock<HashMap<String, Arc<dyn Query>>>>,
-    result_tx: QueryResultSender,
     event_tx: ComponentEventSender,
     source_manager: Arc<SourceManager>,
 }
 
 impl QueryManager {
-    pub fn new(
-        result_tx: QueryResultSender,
-        event_tx: ComponentEventSender,
-        source_manager: Arc<SourceManager>,
-    ) -> Self {
+    pub fn new(event_tx: ComponentEventSender, source_manager: Arc<SourceManager>) -> Self {
         Self {
             queries: Arc::new(RwLock::new(HashMap::new())),
-            result_tx,
             event_tx,
             source_manager,
         }
@@ -850,6 +884,21 @@ impl QueryManager {
         self.add_query_internal(config).await
     }
 
+    /// Add a pre-created query instance (for testing)
+    pub async fn add_query_instance_for_test(&self, query: Arc<dyn Query>) -> Result<()> {
+        let query_id = query.get_config().id.clone();
+
+        if self.queries.read().await.contains_key(&query_id) {
+            return Err(anyhow::anyhow!(
+                "Query with id '{}' already exists",
+                query_id
+            ));
+        }
+
+        self.queries.write().await.insert(query_id, query);
+        Ok(())
+    }
+
     async fn add_query_internal(&self, config: QueryConfig) -> Result<()> {
         // Check if query with this id already exists
         if self.queries.read().await.contains_key(&config.id) {
@@ -861,7 +910,6 @@ impl QueryManager {
 
         let query = DrasiQuery::new(
             config.clone(),
-            self.result_tx.clone(),
             self.event_tx.clone(),
             self.source_manager.clone(),
         );
@@ -918,6 +966,17 @@ impl QueryManager {
             Ok(query.status().await)
         } else {
             Err(anyhow::anyhow!("Query not found: {}", id))
+        }
+    }
+
+    /// Get a query instance for subscription by reactions
+    /// Returns Arc<dyn Query> which reactions can use to subscribe to query results
+    pub async fn get_query_instance(&self, query_id: &str) -> Result<Arc<dyn Query>, String> {
+        let queries = self.queries.read().await;
+        if let Some(query) = queries.get(query_id) {
+            Ok(Arc::clone(query))
+        } else {
+            Err(format!("Query not found: {}", query_id))
         }
     }
 

@@ -16,19 +16,22 @@ use async_trait::async_trait;
 use axum::http::Method;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::{routing::get, Router};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, RwLock};
 use tokio_stream::StreamExt;
 use tower_http::cors::{Any, CorsLayer};
 
+use crate::channels::priority_queue::PriorityQueue;
 use crate::channels::{
-    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, QueryResultReceiver,
+    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, QueryResult,
 };
 use crate::config::ReactionConfig;
 use crate::reactions::Reaction;
+use crate::server_core::DrasiServerCore;
 use crate::utils::log_component_start;
 
 /// SSE reaction exposes query results to browser clients via Server-Sent Events.
@@ -42,6 +45,9 @@ pub struct SseReaction {
     heartbeat_interval_ms: u64,
     broadcaster: broadcast::Sender<String>,
     task_handles: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    subscription_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
+    priority_queue: PriorityQueue<QueryResult>,
+    processing_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl SseReaction {
@@ -79,13 +85,16 @@ impl SseReaction {
             heartbeat_interval_ms,
             broadcaster: tx,
             task_handles: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            subscription_tasks: Arc::new(RwLock::new(Vec::new())),
+            priority_queue: PriorityQueue::new(10000),
+            processing_task: Arc::new(RwLock::new(None)),
         }
     }
 }
 
 #[async_trait]
 impl Reaction for SseReaction {
-    async fn start(&self, mut result_rx: QueryResultReceiver) -> anyhow::Result<()> {
+    async fn start(&self, server_core: Arc<DrasiServerCore>) -> anyhow::Result<()> {
         log_component_start("SSE Reaction", &self.config.id);
         *self.status.write().await = ComponentStatus::Starting;
         let _ = self
@@ -98,6 +107,120 @@ impl Reaction for SseReaction {
                 message: Some("Starting SSE reaction".into()),
             })
             .await;
+
+        // Get QueryManager from server_core
+        let query_manager = server_core.query_manager();
+
+        // Subscribe to each query and spawn forwarder tasks
+        let mut subscription_tasks = self.subscription_tasks.write().await;
+        for query_id in &self.config.queries {
+            info!("[{}] Subscribing to query '{}'", self.config.id, query_id);
+
+            // Get the query instance
+            let query = query_manager
+                .get_query_instance(query_id)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to get query instance '{}': {}", query_id, e)
+                })?;
+
+            // Subscribe to it
+            let subscription_response =
+                query.subscribe(self.config.id.clone()).await.map_err(|e| {
+                    anyhow::anyhow!("Failed to subscribe to query '{}': {}", query_id, e)
+                })?;
+
+            let mut broadcast_receiver = subscription_response.broadcast_receiver;
+            let priority_queue = self.priority_queue.clone();
+            let reaction_id = self.config.id.clone();
+            let query_id_clone = query_id.clone();
+
+            // Spawn forwarder task
+            let forwarder_handle = tokio::spawn(async move {
+                info!(
+                    "[{}] Forwarder task started for query '{}'",
+                    reaction_id, query_id_clone
+                );
+                loop {
+                    match broadcast_receiver.recv().await {
+                        Ok(query_result) => {
+                            debug!(
+                                "[{}] Received result from query '{}', enqueuing to priority queue",
+                                reaction_id, query_id_clone
+                            );
+                            if !priority_queue.enqueue(query_result).await {
+                                warn!(
+                                    "[{}] Priority queue full, dropping result from query '{}'",
+                                    reaction_id, query_id_clone
+                                );
+                            }
+                        }
+                        Err(RecvError::Lagged(count)) => {
+                            warn!(
+                                "[{}] Forwarder lagged by {} messages for query '{}'",
+                                reaction_id, count, query_id_clone
+                            );
+                            continue;
+                        }
+                        Err(RecvError::Closed) => {
+                            info!(
+                                "[{}] Broadcast channel closed for query '{}', exiting forwarder",
+                                reaction_id, query_id_clone
+                            );
+                            break;
+                        }
+                    }
+                }
+            });
+
+            subscription_tasks.push(forwarder_handle);
+        }
+        drop(subscription_tasks);
+
+        // Spawn processing task
+        let status = Arc::clone(&self.status);
+        let broadcaster = self.broadcaster.clone();
+        let reaction_id = self.config.id.clone();
+        let priority_queue = self.priority_queue.clone();
+        let processing_handle = tokio::spawn(async move {
+            info!("[{}] SSE result processing task started", reaction_id);
+            loop {
+                if !matches!(*status.read().await, ComponentStatus::Running) {
+                    info!("[{}] SSE reaction not running, breaking loop", reaction_id);
+                    break;
+                }
+
+                // Dequeue the next result in timestamp order (blocking)
+                let query_result = priority_queue.dequeue().await;
+
+                info!(
+                    "[{}] Processing result from query '{}' with {} items",
+                    reaction_id,
+                    query_result.query_id,
+                    query_result.results.len()
+                );
+
+                let payload = json!({
+                    "queryId": query_result.query_id,
+                    "results": query_result.results,
+                    "timestamp": chrono::Utc::now().timestamp_millis()
+                })
+                .to_string();
+
+                match broadcaster.send(payload.clone()) {
+                    Ok(count) => info!(
+                        "[{}] Broadcast query result to {} SSE listeners",
+                        reaction_id, count
+                    ),
+                    Err(e) => debug!("[{}] no SSE listeners: {}", reaction_id, e),
+                }
+            }
+            info!("[{}] SSE result processing task ended", reaction_id);
+        });
+
+        // Store the processing task handle
+        *self.processing_task.write().await = Some(processing_handle);
+
         *self.status.write().await = ComponentStatus::Running;
         let _ = self
             .event_tx
@@ -109,50 +232,6 @@ impl Reaction for SseReaction {
                 message: Some("SSE reaction started".into()),
             })
             .await;
-
-        let status = Arc::clone(&self.status);
-        let broadcaster = self.broadcaster.clone();
-        let reaction_id = self.config.id.clone();
-        let queries = self.config.queries.clone();
-        let handle = tokio::spawn(async move {
-            info!("[{}] SSE result processing loop started", reaction_id);
-            while let Some(query_result) = result_rx.recv().await {
-                if !matches!(*status.read().await, ComponentStatus::Running) {
-                    info!("[{}] SSE reaction not running, breaking loop", reaction_id);
-                    break;
-                }
-                if !queries.contains(&query_result.query_id) {
-                    debug!(
-                        "[{}] Ignoring result from non-subscribed query '{}'",
-                        reaction_id, query_result.query_id
-                    );
-                    continue;
-                }
-                info!(
-                    "[{}] Processing result from query '{}' with {} items",
-                    reaction_id,
-                    query_result.query_id,
-                    query_result.results.len()
-                );
-                let payload = json!({
-                    "queryId": query_result.query_id,
-                    "results": query_result.results,
-                    "timestamp": chrono::Utc::now().timestamp_millis()
-                })
-                .to_string();
-                match broadcaster.send(payload.clone()) {
-                    Ok(count) => info!(
-                        "[{}] Broadcast query result to {} SSE listeners",
-                        reaction_id, count
-                    ),
-                    Err(e) => debug!("[{}] no SSE listeners: {}", reaction_id, e),
-                }
-            }
-            info!("[{}] SSE result loop ended - channel closed", reaction_id);
-        });
-
-        // Store the task handle to keep it alive
-        self.task_handles.lock().await.push(handle);
 
         // Heartbeat task
         let hb_tx = self.broadcaster.clone();
@@ -232,7 +311,31 @@ impl Reaction for SseReaction {
             })
             .await;
 
-        // Cancel all tasks
+        // Abort all subscription forwarder tasks
+        let mut subscription_tasks = self.subscription_tasks.write().await;
+        for handle in subscription_tasks.drain(..) {
+            handle.abort();
+        }
+        drop(subscription_tasks);
+
+        // Abort the processing task
+        let mut processing_task = self.processing_task.write().await;
+        if let Some(handle) = processing_task.take() {
+            handle.abort();
+        }
+        drop(processing_task);
+
+        // Drain the priority queue
+        let drained = self.priority_queue.drain().await;
+        if !drained.is_empty() {
+            info!(
+                "[{}] Drained {} pending results from priority queue",
+                self.config.id,
+                drained.len()
+            );
+        }
+
+        // Cancel all other tasks (heartbeat, HTTP server)
         let mut handles = self.task_handles.lock().await;
         for handle in handles.drain(..) {
             handle.abort();

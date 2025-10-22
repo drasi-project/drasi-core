@@ -23,22 +23,23 @@ mod manager_tests {
 
     async fn create_test_manager() -> (
         Arc<QueryManager>,
-        mpsc::Receiver<QueryResult>,
         mpsc::Receiver<ComponentEvent>,
         Arc<SourceManager>,
     ) {
-        let (query_tx, query_rx) = mpsc::channel(100);
         let (event_tx, event_rx) = mpsc::channel(100);
 
         let source_manager = Arc::new(SourceManager::new(event_tx.clone()));
-        let query_manager = Arc::new(QueryManager::new(query_tx, event_tx.clone(), source_manager.clone()));
+        let query_manager = Arc::new(QueryManager::new(
+            event_tx.clone(),
+            source_manager.clone(),
+        ));
 
-        (query_manager, query_rx, event_rx, source_manager)
+        (query_manager, event_rx, source_manager)
     }
 
     #[tokio::test]
     async fn test_add_query() {
-        let (manager, _query_rx, _event_rx, _source_manager) = create_test_manager().await;
+        let (manager, _event_rx, _source_manager) = create_test_manager().await;
 
         let config = create_test_query_config("test-query", vec!["source1".to_string()]);
         let result = manager.add_query(config.clone()).await;
@@ -53,7 +54,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_add_duplicate_query() {
-        let (manager, _query_rx, _event_rx, _source_manager) = create_test_manager().await;
+        let (manager, _event_rx, _source_manager) = create_test_manager().await;
 
         let config = create_test_query_config("test-query", vec![]);
 
@@ -68,7 +69,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_delete_query() {
-        let (manager, _query_rx, _event_rx, _source_manager) = create_test_manager().await;
+        let (manager, _event_rx, _source_manager) = create_test_manager().await;
 
         let config = create_test_query_config("test-query", vec![]);
         manager.add_query(config).await.unwrap();
@@ -84,7 +85,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_start_query() {
-        let (manager, _query_rx, mut event_rx, source_manager) = create_test_manager().await;
+        let (manager, mut event_rx, source_manager) = create_test_manager().await;
 
         // Add a source first
         let source_config = create_test_source_config("source1", "mock");
@@ -118,7 +119,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_stop_query() {
-        let (manager, _query_rx, mut event_rx, source_manager) = create_test_manager().await;
+        let (manager, mut event_rx, source_manager) = create_test_manager().await;
 
         // Add a source
         let source_config = create_test_source_config("source1", "mock");
@@ -130,10 +131,7 @@ mod manager_tests {
         // Create a channel for source changes
         // Legacy channel no longer needed - queries subscribe directly to sources
 
-        manager
-            .start_query("test-query".to_string())
-            .await
-            .unwrap();
+        manager.start_query("test-query".to_string()).await.unwrap();
 
         // Wait a bit
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -158,7 +156,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_add_gql_query() {
-        let (manager, _query_rx, _event_rx, _source_manager) = create_test_manager().await;
+        let (manager, _event_rx, _source_manager) = create_test_manager().await;
 
         let config = create_test_gql_query_config("test-gql-query", vec!["source1".to_string()]);
         let result = manager.add_query(config.clone()).await;
@@ -173,7 +171,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_start_gql_query() {
-        let (manager, _query_rx, mut event_rx, source_manager) = create_test_manager().await;
+        let (manager, mut event_rx, source_manager) = create_test_manager().await;
 
         // Add a source first
         let source_config = create_test_source_config("source1", "mock");
@@ -207,7 +205,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_mixed_language_queries() {
-        let (manager, _query_rx, _event_rx, _source_manager) = create_test_manager().await;
+        let (manager, _event_rx, _source_manager) = create_test_manager().await;
 
         // Add a Cypher query
         let cypher_config = create_test_query_config("cypher-query", vec!["source1".to_string()]);
@@ -228,7 +226,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_get_query_config() {
-        let (manager, _query_rx, _event_rx, _source_manager) = create_test_manager().await;
+        let (manager, _event_rx, _source_manager) = create_test_manager().await;
 
         let config = create_test_query_config("test-query", vec!["source1".to_string()]);
         manager.add_query(config.clone()).await.unwrap();
@@ -244,7 +242,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_update_query() {
-        let (manager, _query_rx, _event_rx, _source_manager) = create_test_manager().await;
+        let (manager, _event_rx, _source_manager) = create_test_manager().await;
 
         let mut config = create_test_query_config("test-query", vec![]);
         manager.add_query(config.clone()).await.unwrap();
@@ -264,7 +262,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_query_lifecycle() {
-        let (manager, _query_rx, _event_rx, source_manager) = create_test_manager().await;
+        let (manager, _event_rx, source_manager) = create_test_manager().await;
 
         // Add a source (but don't start it - queries can be configured before sources start)
         let source_config = create_test_source_config("source1", "mock");
@@ -285,10 +283,7 @@ mod manager_tests {
         // Legacy channel no longer needed - queries subscribe directly to sources
 
         // Start the query
-        manager
-            .start_query("test-query".to_string())
-            .await
-            .unwrap();
+        manager.start_query("test-query".to_string()).await.unwrap();
 
         // Verify query is running
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;

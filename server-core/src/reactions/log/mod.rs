@@ -16,12 +16,15 @@ use anyhow::Result;
 use async_trait::async_trait;
 use log::{debug, error, info, trace, warn};
 use std::sync::Arc;
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::RwLock;
 
+use crate::channels::priority_queue::PriorityQueue;
 use crate::channels::{
-    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, QueryResultReceiver,
+    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, QueryResult,
 };
 use crate::config::ReactionConfig;
+use crate::server_core::DrasiServerCore;
 use crate::utils::log_component_start;
 
 use crate::reactions::Reaction;
@@ -31,6 +34,9 @@ pub struct LogReaction {
     status: Arc<RwLock<ComponentStatus>>,
     event_tx: ComponentEventSender,
     log_level: String,
+    subscription_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
+    priority_queue: PriorityQueue<QueryResult>,
+    processing_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl LogReaction {
@@ -47,6 +53,9 @@ impl LogReaction {
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
             event_tx,
             log_level,
+            subscription_tasks: Arc::new(RwLock::new(Vec::new())),
+            priority_queue: PriorityQueue::new(10000),
+            processing_task: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -86,7 +95,7 @@ impl LogReaction {
 
 #[async_trait]
 impl Reaction for LogReaction {
-    async fn start(&self, mut result_rx: QueryResultReceiver) -> Result<()> {
+    async fn start(&self, server_core: Arc<DrasiServerCore>) -> Result<()> {
         log_component_start("Reaction", &self.config.id);
 
         *self.status.write().await = ComponentStatus::Starting;
@@ -101,6 +110,64 @@ impl Reaction for LogReaction {
 
         if let Err(e) = self.event_tx.send(event).await {
             error!("Failed to send component event: {}", e);
+        }
+
+        // Get QueryManager from server_core
+        let query_manager = server_core.query_manager();
+
+        // Subscribe to all configured queries and spawn forwarder tasks
+        for query_id in &self.config.queries {
+            // Get the query instance
+            let query = query_manager
+                .get_query_instance(query_id)
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
+
+            // Subscribe to the query
+            let subscription_response = query
+                .subscribe(self.config.id.clone())
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
+            let mut broadcast_receiver = subscription_response.broadcast_receiver;
+
+            // Clone necessary data for the forwarder task
+            let priority_queue = self.priority_queue.clone();
+            let query_id_clone = query_id.clone();
+            let reaction_id = self.config.id.clone();
+
+            // Spawn forwarder task to read from broadcast and enqueue to priority queue
+            let forwarder_task = tokio::spawn(async move {
+                loop {
+                    match broadcast_receiver.recv().await {
+                        Ok(query_result) => {
+                            // Enqueue to priority queue for timestamp-ordered processing
+                            if !priority_queue.enqueue(query_result).await {
+                                warn!(
+                                    "[{}] Failed to enqueue result from query '{}' - priority queue at capacity",
+                                    reaction_id, query_id_clone
+                                );
+                            }
+                        }
+                        Err(RecvError::Lagged(count)) => {
+                            warn!(
+                                "[{}] Broadcast receiver lagged by {} messages for query '{}'",
+                                reaction_id, count, query_id_clone
+                            );
+                            continue;
+                        }
+                        Err(RecvError::Closed) => {
+                            info!(
+                                "[{}] Broadcast channel closed for query '{}'",
+                                reaction_id, query_id_clone
+                            );
+                            break;
+                        }
+                    }
+                }
+            });
+
+            // Store the forwarder task handle
+            self.subscription_tasks.write().await.push(forwarder_task);
         }
 
         *self.status.write().await = ComponentStatus::Running;
@@ -122,13 +189,13 @@ impl Reaction for LogReaction {
             self.config.queries
         ));
 
-        // Spawn a task to process results asynchronously
+        // Spawn processing task to dequeue and process results in timestamp order
+        let priority_queue = self.priority_queue.clone();
         let reaction_name = self.config.id.clone();
-        let status_clone = self.status.clone();
         let log_level = self.log_level.clone();
         let config_name = self.config.id.clone();
 
-        tokio::spawn(async move {
+        let processing_task = tokio::spawn(async move {
             let log_fn = |message: &str| match log_level.as_str() {
                 "trace" => trace!("[{}] {}", config_name, message),
                 "debug" => debug!("[{}] {}", config_name, message),
@@ -138,7 +205,14 @@ impl Reaction for LogReaction {
                 _ => info!("[{}] {}", config_name, message),
             };
 
-            while let Some(mut query_result) = result_rx.recv().await {
+            loop {
+                // Dequeue next result in timestamp order (blocking)
+                let query_result_arc = priority_queue.dequeue().await;
+
+                // Get mutable access to the result for profiling
+                // Note: We need to clone and modify since Arc doesn't allow mutation
+                let mut query_result = (*query_result_arc).clone();
+
                 // Capture reaction_receive_ns timestamp
                 if let Some(ref mut profiling) = query_result.profiling {
                     profiling.reaction_receive_ns = Some(crate::profiling::timestamp_ns());
@@ -203,19 +277,41 @@ impl Reaction for LogReaction {
                     }
                 }
             }
-
-            info!(
-                "[{}] Result channel closed, stopping reaction",
-                reaction_name
-            );
-            *status_clone.write().await = ComponentStatus::Stopped;
         });
+
+        // Store the processing task handle
+        *self.processing_task.write().await = Some(processing_task);
 
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
         info!("Stopping log reaction: {}", self.config.id);
+
+        // Abort all subscription forwarder tasks
+        let mut subscription_tasks = self.subscription_tasks.write().await;
+        for task in subscription_tasks.drain(..) {
+            task.abort();
+        }
+        drop(subscription_tasks);
+
+        // Abort the processing task
+        let mut processing_task = self.processing_task.write().await;
+        if let Some(task) = processing_task.take() {
+            task.abort();
+        }
+        drop(processing_task);
+
+        // Drain the priority queue
+        let drained_events = self.priority_queue.drain().await;
+        if !drained_events.is_empty() {
+            info!(
+                "[{}] Drained {} pending events from priority queue",
+                self.config.id,
+                drained_events.len()
+            );
+        }
+
         *self.status.write().await = ComponentStatus::Stopped;
 
         let event = ComponentEvent {

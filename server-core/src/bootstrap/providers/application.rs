@@ -21,8 +21,8 @@ use log::info;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::bootstrap::{BootstrapContext, BootstrapProvider};
 use crate::bootstrap::BootstrapRequest;
+use crate::bootstrap::{BootstrapContext, BootstrapProvider};
 
 /// Bootstrap provider for application sources that replays stored insert events
 pub struct ApplicationBootstrapProvider {

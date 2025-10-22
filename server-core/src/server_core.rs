@@ -25,7 +25,6 @@ use crate::config::{DrasiServerCoreConfig, RuntimeConfig};
 use crate::queries::QueryManager;
 use crate::reactions::ApplicationReactionHandle;
 use crate::reactions::ReactionManager;
-use crate::routers::SubscriptionRouter;
 use crate::sources::{ApplicationSourceHandle, SourceManager};
 
 /// Core Drasi Server functionality without web API
@@ -34,17 +33,30 @@ pub struct DrasiServerCore {
     source_manager: Arc<SourceManager>,
     query_manager: Arc<QueryManager>,
     reaction_manager: Arc<ReactionManager>,
-    subscription_router: Arc<SubscriptionRouter>,
-    event_receivers: Option<EventReceivers>,
-    /// Query result sender kept alive to maintain channel
     #[allow(dead_code)]
-    query_result_tx: QueryResultSender,
+    event_receivers: Option<EventReceivers>,
     running: Arc<RwLock<bool>>,
     initialized: Arc<RwLock<bool>>,
     // Track components that were running before server stop
     components_running_before_stop: Arc<RwLock<ComponentsRunningState>>,
     // Handle registry for application sources and reactions
     handle_registry: HandleRegistry,
+}
+
+impl Clone for DrasiServerCore {
+    fn clone(&self) -> Self {
+        Self {
+            config: Arc::clone(&self.config),
+            source_manager: Arc::clone(&self.source_manager),
+            query_manager: Arc::clone(&self.query_manager),
+            reaction_manager: Arc::clone(&self.reaction_manager),
+            event_receivers: None, // Don't clone receivers - they're not used after initialization
+            running: Arc::clone(&self.running),
+            initialized: Arc::clone(&self.initialized),
+            components_running_before_stop: Arc::clone(&self.components_running_before_stop),
+            handle_registry: self.handle_registry.clone(),
+        }
+    }
 }
 
 #[derive(Default, Clone)]
@@ -60,28 +72,21 @@ impl DrasiServerCore {
     pub(crate) fn new(config: Arc<RuntimeConfig>) -> Self {
         let (channels, receivers) = EventChannels::new();
 
-        let source_manager = Arc::new(SourceManager::new(
-            channels.component_event_tx.clone(),
-        ));
+        let source_manager = Arc::new(SourceManager::new(channels.component_event_tx.clone()));
 
         let query_manager = Arc::new(QueryManager::new(
-            channels.query_result_tx.clone(),
             channels.component_event_tx.clone(),
             source_manager.clone(),
         ));
 
         let reaction_manager = Arc::new(ReactionManager::new(channels.component_event_tx.clone()));
 
-        let subscription_router = Arc::new(SubscriptionRouter::new());
-
         Self {
             config,
             source_manager,
             query_manager,
             reaction_manager,
-            subscription_router,
             event_receivers: Some(receivers),
-            query_result_tx: channels.query_result_tx,
             running: Arc::new(RwLock::new(false)),
             initialized: Arc::new(RwLock::new(false)),
             components_running_before_stop: Arc::new(
@@ -202,6 +207,20 @@ impl DrasiServerCore {
     /// # use drasi_server_core::DrasiServerCore;
     /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
     /// let handle = core.reaction_handle("my-reaction")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn query_manager(&self) -> &QueryManager {
+        &self.query_manager
+    }
+
+    /// Get a handle to an application reaction for programmatic interaction
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_server_core::DrasiServerCore;
+    /// # fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// let handle = core.reaction_handle("my-app-reaction")?;
     /// # Ok(())
     /// # }
     /// ```
@@ -605,24 +624,15 @@ impl DrasiServerCore {
         }
 
         // Get the reaction config to determine which queries it subscribes to
-        let config = self
+        let _config = self
             .reaction_manager
             .get_reaction_config(id)
             .await
             .ok_or_else(|| DrasiError::component_not_found("reaction", id))?;
 
-        // Create subscription to query result streams
-        let rx = self
-            .subscription_router
-            .add_reaction_subscription(id.to_string(), config.queries.clone())
-            .await
-            .map_err(|e| {
-                DrasiError::initialization(format!("Failed to add reaction subscription: {}", e))
-            })?;
-
-        // Start the reaction with the receiver
+        // Start the reaction with server core reference for query subscriptions
         self.reaction_manager
-            .start_reaction(id.to_string(), rx)
+            .start_reaction(id.to_string(), Arc::new(self.clone()))
             .await
             .map_err(|e| {
                 if e.to_string().contains("not found") {
@@ -650,7 +660,7 @@ impl DrasiServerCore {
             ));
         }
 
-        // Stop the reaction first
+        // Stop the reaction - subscriptions are managed by the reaction itself
         self.reaction_manager
             .stop_reaction(id.to_string())
             .await
@@ -661,11 +671,6 @@ impl DrasiServerCore {
                     DrasiError::invalid_state(e.to_string())
                 }
             })?;
-
-        // Remove the subscription from the subscription router
-        self.subscription_router
-            .remove_reaction_subscription(id)
-            .await;
 
         Ok(())
     }
@@ -1287,12 +1292,7 @@ impl DrasiServerCore {
             // control_signal_rx is no longer used
             drop(receivers.control_signal_rx);
 
-            // Start subscription router
-            let query_rx = receivers.query_result_rx;
-            let router = self.subscription_router.clone();
-            tokio::spawn(async move {
-                router.start(query_rx).await;
-            });
+            // SubscriptionRouter no longer needed - reactions subscribe directly to queries
         }
     }
 
@@ -1336,7 +1336,6 @@ impl DrasiServerCore {
     ) -> Result<()> {
         let reaction_id = config.id.clone();
         let should_auto_start = config.auto_start;
-        let queries = config.queries.clone();
 
         // Add the reaction (without saving during initialization)
         self.reaction_manager
@@ -1345,15 +1344,9 @@ impl DrasiServerCore {
 
         // Start if auto-start is enabled and allowed
         if should_auto_start && allow_auto_start {
-            // Add reaction subscription and get receiver
-            let rx = self
-                .subscription_router
-                .add_reaction_subscription(reaction_id.clone(), queries)
-                .await
-                .map_err(|e| anyhow!("Failed to add reaction subscription: {}", e))?;
-
+            // Pass server core to reaction for direct query subscriptions
             self.reaction_manager
-                .start_reaction(reaction_id.clone(), rx)
+                .start_reaction(reaction_id.clone(), Arc::new(self.clone()))
                 .await?;
         }
 
@@ -1450,14 +1443,10 @@ impl DrasiServerCore {
                         reaction_config.auto_start,
                         running_before.reactions.contains(id)
                     );
-                    // Get queries for this reaction
-                    let queries = reaction_config.queries.clone();
-                    let rx = self
-                        .subscription_router
-                        .add_reaction_subscription(id.clone(), queries)
-                        .await
-                        .map_err(|e| anyhow!("Failed to add reaction subscription: {}", e))?;
-                    self.reaction_manager.start_reaction(id.clone(), rx).await?;
+                    // Pass server core to reaction for direct query subscriptions
+                    self.reaction_manager
+                        .start_reaction(id.clone(), Arc::new(self.clone()))
+                        .await?;
                 } else {
                     info!(
                         "Reaction '{}' already started or starting, status: {:?}",
@@ -1512,12 +1501,8 @@ impl DrasiServerCore {
             if matches!(status, Ok(ComponentStatus::Running)) {
                 if let Err(e) = self.reaction_manager.stop_reaction(id.clone()).await {
                     error!("Error stopping reaction {}: {}", id, e);
-                } else {
-                    // Remove the subscription from the subscription router
-                    self.subscription_router
-                        .remove_reaction_subscription(&id)
-                        .await;
                 }
+                // Subscriptions are managed by the reaction itself - no router cleanup needed
             }
         }
 

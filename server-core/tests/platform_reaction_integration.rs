@@ -22,18 +22,114 @@
 mod test_support;
 
 use anyhow::Result;
-use drasi_server_core::channels::{ComponentEvent, QueryResult};
-use drasi_server_core::config::ReactionConfig;
+use async_trait::async_trait;
+use drasi_server_core::channels::{
+    ComponentEvent, ComponentStatus, QueryResult, QueryResultBroadcastSender,
+    QuerySubscriptionResponse,
+};
+use drasi_server_core::config::{QueryConfig, ReactionConfig};
+use drasi_server_core::queries::Query;
 use drasi_server_core::reactions::platform::{
     CloudEvent, ControlSignal, PlatformReaction, ResultEvent,
 };
 use drasi_server_core::reactions::Reaction;
+use drasi_server_core::server_core::DrasiServerCore;
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use test_support::*;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tokio::time::sleep;
+
+/// Mock query for testing reactions
+struct MockQuery {
+    config: QueryConfig,
+    status: Arc<RwLock<ComponentStatus>>,
+    broadcast_tx: QueryResultBroadcastSender,
+}
+
+impl MockQuery {
+    fn new(query_id: &str) -> Self {
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
+        Self {
+            config: QueryConfig {
+                id: query_id.to_string(),
+                query: "MATCH (n) RETURN n".to_string(),
+                query_language: drasi_server_core::config::QueryLanguage::Cypher,
+                sources: vec![],
+                auto_start: false,
+                properties: HashMap::new(),
+                joins: None,
+                enable_bootstrap: false,
+                bootstrap_buffer_size: 10000,
+            },
+            status: Arc::new(RwLock::new(ComponentStatus::Running)),
+            broadcast_tx,
+        }
+    }
+
+    fn get_broadcast_sender(&self) -> QueryResultBroadcastSender {
+        self.broadcast_tx.clone()
+    }
+}
+
+#[async_trait]
+impl Query for MockQuery {
+    async fn start(&self) -> Result<()> {
+        *self.status.write().await = ComponentStatus::Running;
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        *self.status.write().await = ComponentStatus::Stopped;
+        Ok(())
+    }
+
+    async fn status(&self) -> ComponentStatus {
+        self.status.read().await.clone()
+    }
+
+    fn get_config(&self) -> &QueryConfig {
+        &self.config
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    async fn subscribe(&self, reaction_id: String) -> Result<QuerySubscriptionResponse, String> {
+        let broadcast_receiver = self.broadcast_tx.subscribe();
+        Ok(QuerySubscriptionResponse {
+            query_id: self.config.id.clone(),
+            reaction_id,
+            broadcast_receiver,
+        })
+    }
+}
+
+/// Helper to create a test environment with DrasiServerCore and a mock query
+async fn create_test_server_with_query(
+    query_id: &str,
+) -> (Arc<DrasiServerCore>, QueryResultBroadcastSender) {
+    let mock_query = Arc::new(MockQuery::new(query_id));
+    let broadcast_sender = mock_query.get_broadcast_sender();
+
+    // Create DrasiServerCore using builder
+    let server_core = drasi_server_core::server_core::DrasiServerCore::builder()
+        .build()
+        .await
+        .expect("Failed to create server core");
+
+    // Add the mock query to the query manager
+    server_core
+        .query_manager()
+        .add_query_instance_for_test(mock_query)
+        .await
+        .expect("Failed to add mock query");
+
+    (Arc::new(server_core), broadcast_sender)
+}
 
 /// Helper to create a platform reaction with test configuration
 fn create_test_reaction(
@@ -153,16 +249,16 @@ async fn read_cloudevent_from_stream(
 async fn test_publish_add_results() -> Result<()> {
     let redis_url = setup_redis().await;
     let query_id = "test-query-add";
+
+    // Create test server with mock query
+    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, mut event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-    // Create result channel
-    let (result_tx, result_rx) = mpsc::channel(10);
-
-    // Start reaction - DON'T move reaction into task, just call start
-    reaction.start(result_rx).await?;
+    // Start reaction with server core (it will subscribe to the mock query)
+    reaction.start(server_core).await?;
 
     // Wait for Running status
     let mut started = false;
@@ -182,9 +278,10 @@ async fn test_publish_add_results() -> Result<()> {
         panic!("Reaction did not start");
     }
 
-    // Send add result
+    // Send add result through the query's broadcast channel
     let query_result = build_query_result_add(query_id, vec![json!({"id": "1", "name": "Alice"})]);
-    if let Err(e) = result_tx.send(query_result).await {
+    let arc_result = Arc::new(query_result);
+    if let Err(e) = broadcast_tx.send(arc_result) {
         panic!("Failed to send query result: {:?}", e);
     }
 
@@ -215,14 +312,16 @@ async fn test_publish_add_results() -> Result<()> {
 async fn test_publish_update_results() -> Result<()> {
     let redis_url = setup_redis().await;
     let query_id = "test-query-update";
+
+    // Create test server with mock query
+    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-    let (result_tx, result_rx) = mpsc::channel(10);
 
-    reaction.start(result_rx).await?;
+    reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
 
@@ -235,7 +334,7 @@ async fn test_publish_update_results() -> Result<()> {
             None,
         )],
     );
-    result_tx.send(query_result).await?;
+    broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -263,20 +362,22 @@ async fn test_publish_update_results() -> Result<()> {
 async fn test_publish_delete_results() -> Result<()> {
     let redis_url = setup_redis().await;
     let query_id = "test-query-delete";
+
+    // Create test server with mock query
+    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-    let (result_tx, result_rx) = mpsc::channel(10);
 
-    reaction.start(result_rx).await?;
+    reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
 
     // Send delete result
     let query_result = build_query_result_delete(query_id, vec![json!({"id": "2", "name": "Bob"})]);
-    result_tx.send(query_result).await?;
+    broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -297,14 +398,16 @@ async fn test_publish_delete_results() -> Result<()> {
 async fn test_mixed_result_types() -> Result<()> {
     let redis_url = setup_redis().await;
     let query_id = "test-query-mixed";
+
+    // Create test server with mock query
+    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-    let (result_tx, result_rx) = mpsc::channel(10);
 
-    reaction.start(result_rx).await?;
+    reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
 
@@ -320,7 +423,7 @@ async fn test_mixed_result_types() -> Result<()> {
         metadata: HashMap::new(),
         profiling: None,
     };
-    result_tx.send(query_result).await?;
+    broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -342,20 +445,22 @@ async fn test_mixed_result_types() -> Result<()> {
 async fn test_stream_naming_convention() -> Result<()> {
     let redis_url = setup_redis().await;
     let query_id = "my-custom-query";
+
+    // Create test server with mock query
+    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
     let expected_stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-    let (result_tx, result_rx) = mpsc::channel(10);
 
-    reaction.start(result_rx).await?;
+    reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
 
     // Send result
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    result_tx.send(query_result).await?;
+    broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -374,14 +479,16 @@ async fn test_stream_naming_convention() -> Result<()> {
 async fn test_metadata_preservation() -> Result<()> {
     let redis_url = setup_redis().await;
     let query_id = "test-query-metadata";
+
+    // Create test server with mock query
+    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-    let (result_tx, result_rx) = mpsc::channel(10);
 
-    reaction.start(result_rx).await?;
+    reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
 
@@ -397,7 +504,7 @@ async fn test_metadata_preservation() -> Result<()> {
         metadata,
         profiling: None,
     };
-    result_tx.send(query_result).await?;
+    broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -421,19 +528,21 @@ async fn test_metadata_preservation() -> Result<()> {
 async fn test_cloudevent_required_fields() -> Result<()> {
     let redis_url = setup_redis().await;
     let query_id = "test-cloudevent-fields";
+
+    // Create test server with mock query
+    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-    let (result_tx, result_rx) = mpsc::channel(10);
 
-    reaction.start(result_rx).await?;
+    reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
 
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    result_tx.send(query_result).await?;
+    broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -453,19 +562,21 @@ async fn test_cloudevent_required_fields() -> Result<()> {
 async fn test_cloudevent_topic_format() -> Result<()> {
     let redis_url = setup_redis().await;
     let query_id = "test-topic-format";
+
+    // Create test server with mock query
+    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-    let (result_tx, result_rx) = mpsc::channel(10);
 
-    reaction.start(result_rx).await?;
+    reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
 
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    result_tx.send(query_result).await?;
+    broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -481,19 +592,21 @@ async fn test_cloudevent_topic_format() -> Result<()> {
 async fn test_cloudevent_timestamp_format() -> Result<()> {
     let redis_url = setup_redis().await;
     let query_id = "test-timestamp";
+
+    // Create test server with mock query
+    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-    let (result_tx, result_rx) = mpsc::channel(10);
 
-    reaction.start(result_rx).await?;
+    reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
 
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    result_tx.send(query_result).await?;
+    broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -509,19 +622,21 @@ async fn test_cloudevent_timestamp_format() -> Result<()> {
 async fn test_cloudevent_data_content_type() -> Result<()> {
     let redis_url = setup_redis().await;
     let query_id = "test-content-type";
+
+    // Create test server with mock query
+    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-    let (result_tx, result_rx) = mpsc::channel(10);
 
-    reaction.start(result_rx).await?;
+    reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
 
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    result_tx.send(query_result).await?;
+    broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -536,19 +651,21 @@ async fn test_cloudevent_data_content_type() -> Result<()> {
 async fn test_dapr_metadata_fields() -> Result<()> {
     let redis_url = setup_redis().await;
     let query_id = "test-dapr-metadata";
+
+    // Create test server with mock query
+    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-    let (result_tx, result_rx) = mpsc::channel(10);
 
-    reaction.start(result_rx).await?;
+    reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
 
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    result_tx.send(query_result).await?;
+    broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -566,6 +683,9 @@ async fn test_dapr_metadata_fields() -> Result<()> {
 async fn test_custom_pubsub_name() -> Result<()> {
     let redis_url = setup_redis().await;
     let query_id = "test-custom-pubsub";
+
+    // Create test server with mock query
+    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) = create_test_reaction(
@@ -576,14 +696,13 @@ async fn test_custom_pubsub_name() -> Result<()> {
         Some("custom-pubsub"),
     );
 
-    let (result_tx, result_rx) = mpsc::channel(10);
 
-    reaction.start(result_rx).await?;
+    reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
 
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    result_tx.send(query_result).await?;
+    broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -600,13 +719,15 @@ async fn test_custom_pubsub_name() -> Result<()> {
 async fn test_running_control_event() -> Result<()> {
     let redis_url = setup_redis().await;
     let query_id = "test-control-running";
+
+    // Create test server with mock query
+    let (server_core, _broadcast_tx) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) = create_test_reaction(redis_url.clone(), query_id, true, None, None);
 
-    let (_result_tx, result_rx) = mpsc::channel(10);
 
-    reaction.start(result_rx).await?;
+    reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -626,14 +747,16 @@ async fn test_running_control_event() -> Result<()> {
 async fn test_control_events_disabled() -> Result<()> {
     let redis_url = setup_redis().await;
     let query_id = "test-control-disabled";
+
+    // Create test server with mock query
+    let (server_core, _broadcast_tx) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-    let (_result_tx, result_rx) = mpsc::channel(10);
 
-    reaction.start(result_rx).await?;
+    reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -653,21 +776,23 @@ async fn test_control_events_disabled() -> Result<()> {
 async fn test_sequence_numbering() -> Result<()> {
     let redis_url = setup_redis().await;
     let query_id = "test-sequence";
+
+    // Create test server with mock query
+    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-    let (result_tx, result_rx) = mpsc::channel(10);
 
-    reaction.start(result_rx).await?;
+    reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
 
     // Send 5 query results
     for i in 1..=5 {
         let query_result = build_query_result_add(query_id, vec![json!({"id": i})]);
-        result_tx.send(query_result).await?;
+        broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
         sleep(Duration::from_millis(50)).await;
     }
 
@@ -694,6 +819,9 @@ async fn test_sequence_numbering() -> Result<()> {
 async fn test_maxlen_stream_trimming() -> Result<()> {
     let redis_url = setup_redis().await;
     let query_id = "test-maxlen";
+
+    // Create test server with mock query
+    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) = create_test_reaction(
@@ -704,16 +832,15 @@ async fn test_maxlen_stream_trimming() -> Result<()> {
         None,
     );
 
-    let (result_tx, result_rx) = mpsc::channel(10);
 
-    reaction.start(result_rx).await?;
+    reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
 
     // Send 10 events
     for i in 1..=10 {
         let query_result = build_query_result_add(query_id, vec![json!({"id": i})]);
-        result_tx.send(query_result).await?;
+        broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
         sleep(Duration::from_millis(30)).await;
     }
 
@@ -742,14 +869,16 @@ async fn test_maxlen_stream_trimming() -> Result<()> {
 async fn test_update_with_grouping_keys() -> Result<()> {
     let redis_url = setup_redis().await;
     let query_id = "test-grouping-keys";
+
+    // Create test server with mock query
+    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-    let (result_tx, result_rx) = mpsc::channel(10);
 
-    reaction.start(result_rx).await?;
+    reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
 
@@ -762,7 +891,7 @@ async fn test_update_with_grouping_keys() -> Result<()> {
             Some(vec!["key1".to_string(), "key2".to_string()]),
         )],
     );
-    result_tx.send(query_result).await?;
+    broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -788,14 +917,16 @@ async fn test_update_with_grouping_keys() -> Result<()> {
 async fn test_empty_metadata_filtered() -> Result<()> {
     let redis_url = setup_redis().await;
     let query_id = "test-empty-metadata";
+
+    // Create test server with mock query
+    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-    let (result_tx, result_rx) = mpsc::channel(10);
 
-    reaction.start(result_rx).await?;
+    reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
 
@@ -807,7 +938,7 @@ async fn test_empty_metadata_filtered() -> Result<()> {
         metadata: HashMap::new(), // Empty metadata
         profiling: None,
     };
-    result_tx.send(query_result).await?;
+    broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
 
     sleep(Duration::from_millis(300)).await;
 

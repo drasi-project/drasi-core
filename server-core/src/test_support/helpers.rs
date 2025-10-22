@@ -111,9 +111,11 @@ pub mod mock_helpers {
     use tokio::sync::mpsc;
 
     /// Creates a test channel pair for query results
-    pub fn create_test_query_result_channel() -> (QueryResultSender, QueryResultReceiver) {
-        mpsc::channel(100)
-    }
+    /// NOTE: This function is deprecated - QueryResultSender/QueryResultReceiver no longer exist
+    /// in the new broadcast subscription architecture. Queries now use broadcast channels.
+    // pub fn create_test_query_result_channel() -> (QueryResultSender, QueryResultReceiver) {
+    //     mpsc::channel(100)
+    // }
 
     /// Creates a test channel pair for component events
     pub fn create_test_event_channel() -> (ComponentEventSender, ComponentEventReceiver) {

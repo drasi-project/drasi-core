@@ -20,10 +20,7 @@ mod manager_tests {
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
-    async fn create_test_manager() -> (
-        Arc<SourceManager>,
-        mpsc::Receiver<ComponentEvent>,
-    ) {
+    async fn create_test_manager() -> (Arc<SourceManager>, mpsc::Receiver<ComponentEvent>) {
         let (event_tx, event_rx) = mpsc::channel(100);
         let manager = Arc::new(SourceManager::new(event_tx));
         (manager, event_rx)

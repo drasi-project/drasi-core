@@ -250,7 +250,9 @@ impl BootstrapProvider for ScriptFileBootstrapProvider {
         );
 
         // Process records and send matching elements
-        let count = self.process_records(&mut reader, &request, context, event_tx).await?;
+        let count = self
+            .process_records(&mut reader, &request, context, event_tx)
+            .await?;
 
         info!(
             "Completed script file bootstrap for query {}: sent {} elements (requested node labels: {:?}, relation labels: {:?})",

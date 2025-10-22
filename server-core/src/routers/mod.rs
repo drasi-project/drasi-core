@@ -12,6 +12,4 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod subscription_router;
-
-pub use subscription_router::SubscriptionRouter;
+// SubscriptionRouter has been removed - reactions now subscribe directly to queries

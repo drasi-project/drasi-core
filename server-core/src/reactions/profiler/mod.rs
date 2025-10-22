@@ -14,17 +14,20 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use log::{error, info};
+use log::{error, info, warn};
 use std::collections::VecDeque;
 use std::sync::Arc;
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::RwLock;
 
+use crate::channels::priority_queue::PriorityQueue;
 use crate::channels::{
-    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, QueryResultReceiver,
+    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, QueryResult,
 };
 use crate::config::ReactionConfig;
 use crate::profiling::ProfilingMetadata;
 use crate::reactions::Reaction;
+use crate::server_core::DrasiServerCore;
 
 /// Statistics for a specific metric
 #[derive(Debug, Clone)]
@@ -353,6 +356,9 @@ pub struct ProfilerReaction {
     event_tx: ComponentEventSender,
     stats: Arc<RwLock<ProfilingStats>>,
     report_interval_secs: u64,
+    subscription_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
+    priority_queue: PriorityQueue<QueryResult>,
+    processing_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl ProfilerReaction {
@@ -375,6 +381,9 @@ impl ProfilerReaction {
             event_tx,
             stats: Arc::new(RwLock::new(ProfilingStats::new(window_size))),
             report_interval_secs,
+            subscription_tasks: Arc::new(RwLock::new(Vec::new())),
+            priority_queue: PriorityQueue::new(10000),
+            processing_task: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -396,7 +405,7 @@ impl ProfilerReaction {
 
 #[async_trait]
 impl Reaction for ProfilerReaction {
-    async fn start(&self, mut result_rx: QueryResultReceiver) -> Result<()> {
+    async fn start(&self, server_core: Arc<DrasiServerCore>) -> Result<()> {
         info!("Starting ProfilerReaction: {}", self.config.id);
 
         *self.status.write().await = ComponentStatus::Starting;
@@ -411,6 +420,75 @@ impl Reaction for ProfilerReaction {
 
         if let Err(e) = self.event_tx.send(event).await {
             error!("Failed to send component event: {}", e);
+        }
+
+        // Get QueryManager from server_core
+        let query_manager = server_core.query_manager();
+
+        // Subscribe to each query and spawn forwarder tasks
+        for query_id in &self.config.queries {
+            info!("[{}] Subscribing to query: {}", self.config.id, query_id);
+
+            // Get the query instance
+            let query = query_manager
+                .get_query_instance(query_id)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to get query instance {}: {}", query_id, e))?;
+
+            // Subscribe to the query
+            let response = query
+                .subscribe(self.config.id.clone())
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to subscribe to query {}: {}", query_id, e))?;
+
+            let mut broadcast_receiver = response.broadcast_receiver;
+            let priority_queue = self.priority_queue.clone();
+            let reaction_id = self.config.id.clone();
+            let query_id_clone = query_id.clone();
+
+            // Spawn a forwarder task for this query
+            let forwarder_task = tokio::spawn(async move {
+                info!(
+                    "[{}] Forwarder task started for query: {}",
+                    reaction_id, query_id_clone
+                );
+
+                loop {
+                    match broadcast_receiver.recv().await {
+                        Ok(query_result) => {
+                            // Enqueue the result to the priority queue
+                            if !priority_queue.enqueue(query_result.clone()).await {
+                                warn!(
+                                    "[{}] Priority queue full, dropping result from query: {}",
+                                    reaction_id, query_id_clone
+                                );
+                            }
+                        }
+                        Err(RecvError::Lagged(count)) => {
+                            warn!(
+                                "[{}] Broadcast receiver lagged by {} messages for query: {}",
+                                reaction_id, count, query_id_clone
+                            );
+                            continue;
+                        }
+                        Err(RecvError::Closed) => {
+                            info!(
+                                "[{}] Broadcast channel closed for query: {}",
+                                reaction_id, query_id_clone
+                            );
+                            break;
+                        }
+                    }
+                }
+
+                info!(
+                    "[{}] Forwarder task stopped for query: {}",
+                    reaction_id, query_id_clone
+                );
+            });
+
+            // Store the forwarder task handle
+            self.subscription_tasks.write().await.push(forwarder_task);
         }
 
         *self.status.write().await = ComponentStatus::Running;
@@ -434,21 +512,22 @@ impl Reaction for ProfilerReaction {
             self.report_interval_secs
         );
 
+        // Spawn the processing task
         let reaction_name = self.config.id.clone();
         let stats = self.stats.clone();
         let report_interval = self.report_interval_secs;
-        let status_clone = self.status.clone();
+        let priority_queue = self.priority_queue.clone();
 
-        tokio::spawn(async move {
+        let processing_task = tokio::spawn(async move {
             let mut report_timer =
                 tokio::time::interval(tokio::time::Duration::from_secs(report_interval));
             report_timer.tick().await; // Skip first immediate tick
 
             loop {
                 tokio::select! {
-                    Some(query_result) = result_rx.recv() => {
+                    query_result = priority_queue.dequeue() => {
                         // Extract and store profiling data
-                        if let Some(profiling) = query_result.profiling {
+                        if let Some(profiling) = query_result.profiling.clone() {
                             stats.write().await.add_sample(profiling);
                         }
                     }
@@ -480,15 +559,12 @@ impl Reaction for ProfilerReaction {
 
                         info!("[{}] ======================================", reaction_name);
                     }
-                    else => {
-                        break;
-                    }
                 }
             }
-
-            info!("[{}] Profiler stopped", reaction_name);
-            *status_clone.write().await = ComponentStatus::Stopped;
         });
+
+        // Store the processing task handle
+        *self.processing_task.write().await = Some(processing_task);
 
         Ok(())
     }
@@ -496,6 +572,28 @@ impl Reaction for ProfilerReaction {
     async fn stop(&self) -> Result<()> {
         info!("Stopping ProfilerReaction: {}", self.config.id);
         *self.status.write().await = ComponentStatus::Stopped;
+
+        // Abort all subscription forwarder tasks
+        let mut tasks = self.subscription_tasks.write().await;
+        for task in tasks.drain(..) {
+            task.abort();
+        }
+        drop(tasks);
+
+        // Abort the processing task
+        let mut processing_task = self.processing_task.write().await;
+        if let Some(task) = processing_task.take() {
+            task.abort();
+        }
+        drop(processing_task);
+
+        // Drain the priority queue
+        let drained = self.priority_queue.drain().await;
+        info!(
+            "[{}] Drained {} events from priority queue",
+            self.config.id,
+            drained.len()
+        );
 
         let event = ComponentEvent {
             component_id: self.config.id.clone(),

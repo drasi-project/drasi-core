@@ -15,10 +15,14 @@
 use crate::profiling::ProfilingMetadata;
 use drasi_core::models::SourceChange;
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
+
+/// Trait for types that have a timestamp, required for priority queue ordering
+pub trait Timestamped {
+    fn timestamp(&self) -> chrono::DateTime<chrono::Utc>;
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ComponentType {
@@ -118,6 +122,13 @@ impl SourceEventWrapper {
     }
 }
 
+// Implement Timestamped for SourceEventWrapper for use in generic priority queue
+impl Timestamped for SourceEventWrapper {
+    fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {
+        self.timestamp
+    }
+}
+
 /// Arc-wrapped SourceEventWrapper for zero-copy distribution
 pub type ArcSourceEvent = Arc<SourceEventWrapper>;
 
@@ -155,38 +166,11 @@ pub struct SubscriptionResponse {
     pub bootstrap_receiver: Option<BootstrapEventReceiver>,
 }
 
-/// Priority queue event wrapper with timestamp ordering
-#[derive(Debug, Clone)]
-pub struct PriorityQueueEvent {
-    pub event: ArcSourceEvent,
-}
-
-impl PriorityQueueEvent {
-    pub fn new(event: ArcSourceEvent) -> Self {
-        Self { event }
-    }
-}
-
-// Implement ordering for priority queue (oldest events first)
-impl PartialEq for PriorityQueueEvent {
-    fn eq(&self, other: &Self) -> bool {
-        self.event.timestamp == other.event.timestamp
-    }
-}
-
-impl Eq for PriorityQueueEvent {}
-
-impl PartialOrd for PriorityQueueEvent {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for PriorityQueueEvent {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse ordering for min-heap behavior (oldest first)
-        other.event.timestamp.cmp(&self.event.timestamp)
-    }
+/// Subscription response from Query to Reaction
+pub struct QuerySubscriptionResponse {
+    pub query_id: String,
+    pub reaction_id: String,
+    pub broadcast_receiver: QueryResultBroadcastReceiver,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -235,6 +219,16 @@ impl QueryResult {
     }
 }
 
+// Implement Timestamped for QueryResult for use in generic priority queue
+impl Timestamped for QueryResult {
+    fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {
+        self.timestamp
+    }
+}
+
+/// Arc-wrapped QueryResult for zero-copy distribution
+pub type ArcQueryResult = Arc<QueryResult>;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComponentEvent {
     pub component_id: String,
@@ -252,16 +246,18 @@ pub enum ControlMessage {
     Shutdown,
 }
 
-pub type QueryResultReceiver = mpsc::Receiver<QueryResult>;
-pub type QueryResultSender = mpsc::Sender<QueryResult>;
 pub type ComponentEventReceiver = mpsc::Receiver<ComponentEvent>;
 pub type ComponentEventSender = mpsc::Sender<ComponentEvent>;
 pub type ControlMessageReceiver = mpsc::Receiver<ControlMessage>;
 pub type ControlMessageSender = mpsc::Sender<ControlMessage>;
 
-// New broadcast channel types for zero-copy event distribution
+// Broadcast channel types for zero-copy event distribution
 pub type SourceBroadcastSender = broadcast::Sender<ArcSourceEvent>;
 pub type SourceBroadcastReceiver = broadcast::Receiver<ArcSourceEvent>;
+
+// Broadcast channel types for zero-copy query result distribution
+pub type QueryResultBroadcastSender = broadcast::Sender<ArcQueryResult>;
+pub type QueryResultBroadcastReceiver = broadcast::Receiver<ArcQueryResult>;
 
 // Bootstrap channel types for dedicated bootstrap data delivery
 pub type BootstrapEventSender = mpsc::Sender<BootstrapEvent>;
@@ -310,14 +306,12 @@ pub type ControlSignalReceiver = mpsc::Receiver<ControlSignalWrapper>;
 pub type ControlSignalSender = mpsc::Sender<ControlSignalWrapper>;
 
 pub struct EventChannels {
-    pub query_result_tx: QueryResultSender,
     pub component_event_tx: ComponentEventSender,
     pub _control_tx: ControlMessageSender,
     pub control_signal_tx: ControlSignalSender,
 }
 
 pub struct EventReceivers {
-    pub query_result_rx: QueryResultReceiver,
     pub component_event_rx: ComponentEventReceiver,
     pub _control_rx: ControlMessageReceiver,
     pub control_signal_rx: ControlSignalReceiver,
@@ -325,20 +319,17 @@ pub struct EventReceivers {
 
 impl EventChannels {
     pub fn new() -> (Self, EventReceivers) {
-        let (query_result_tx, query_result_rx) = mpsc::channel(1000);
         let (component_event_tx, component_event_rx) = mpsc::channel(1000);
         let (control_tx, control_rx) = mpsc::channel(100);
         let (control_signal_tx, control_signal_rx) = mpsc::channel(100);
 
         let channels = Self {
-            query_result_tx,
             component_event_tx,
             _control_tx: control_tx,
             control_signal_tx,
         };
 
         let receivers = EventReceivers {
-            query_result_rx,
             component_event_rx,
             _control_rx: control_rx,
             control_signal_rx,

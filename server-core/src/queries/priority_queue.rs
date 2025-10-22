@@ -12,164 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::channels::events::{ArcSourceEvent, PriorityQueueEvent};
-use log::{debug, warn};
-use std::collections::BinaryHeap;
-use std::sync::Arc;
-use tokio::sync::{Mutex, Notify};
+//! Priority queue for source events - now uses generic priority queue implementation
+//!
+//! This module provides a type alias to the generic priority queue for source events.
+//! The generic implementation is located in channels::priority_queue.
 
-/// Thread-safe priority queue for ordering events from multiple sources by timestamp
-pub struct PriorityQueue {
-    /// Internal heap storing events (min-heap by timestamp)
-    heap: Arc<Mutex<BinaryHeap<PriorityQueueEvent>>>,
-    /// Notification mechanism for waiting on new events
-    notify: Arc<Notify>,
-    /// Maximum queue capacity (for backpressure)
-    max_capacity: usize,
-    /// Metrics
-    metrics: Arc<Mutex<PriorityQueueMetrics>>,
-}
+use crate::channels::events::SourceEventWrapper;
 
-#[derive(Debug, Clone, Default)]
-pub struct PriorityQueueMetrics {
-    pub total_enqueued: u64,
-    pub total_dequeued: u64,
-    pub current_depth: usize,
-    pub max_depth_seen: usize,
-    pub drops_due_to_capacity: u64,
-}
+/// Priority queue specialized for SourceEvents
+/// This is now a type alias to the generic priority queue implementation
+pub type PriorityQueue = crate::channels::priority_queue::PriorityQueue<SourceEventWrapper>;
 
-impl PriorityQueue {
-    /// Create a new priority queue with the specified maximum capacity
-    pub fn new(max_capacity: usize) -> Self {
-        Self {
-            heap: Arc::new(Mutex::new(BinaryHeap::new())),
-            notify: Arc::new(Notify::new()),
-            max_capacity,
-            metrics: Arc::new(Mutex::new(PriorityQueueMetrics::default())),
-        }
-    }
-
-    /// Enqueue an event into the priority queue
-    /// Returns true if enqueued, false if queue is at capacity
-    pub async fn enqueue(&self, event: ArcSourceEvent) -> bool {
-        let mut heap = self.heap.lock().await;
-
-        // Check capacity
-        if heap.len() >= self.max_capacity {
-            warn!(
-                "Priority queue at capacity ({}), dropping event from source: {}",
-                self.max_capacity, event.source_id
-            );
-            let mut metrics = self.metrics.lock().await;
-            metrics.drops_due_to_capacity += 1;
-            drop(metrics);
-            drop(heap);
-            return false;
-        }
-
-        // Enqueue event
-        heap.push(PriorityQueueEvent::new(event));
-
-        // Update metrics
-        let mut metrics = self.metrics.lock().await;
-        metrics.total_enqueued += 1;
-        metrics.current_depth = heap.len();
-        if metrics.current_depth > metrics.max_depth_seen {
-            metrics.max_depth_seen = metrics.current_depth;
-        }
-        drop(metrics);
-        drop(heap);
-
-        // Notify waiting dequeuers
-        self.notify.notify_one();
-
-        true
-    }
-
-    /// Dequeue the oldest event from the priority queue (non-blocking)
-    /// Returns None if queue is empty
-    pub async fn try_dequeue(&self) -> Option<ArcSourceEvent> {
-        let mut heap = self.heap.lock().await;
-        let event = heap.pop().map(|pq_event| pq_event.event);
-
-        if event.is_some() {
-            let mut metrics = self.metrics.lock().await;
-            metrics.total_dequeued += 1;
-            metrics.current_depth = heap.len();
-        }
-
-        event
-    }
-
-    /// Dequeue the oldest event, waiting if the queue is empty
-    pub async fn dequeue(&self) -> ArcSourceEvent {
-        loop {
-            // Try to dequeue
-            let mut heap = self.heap.lock().await;
-            if let Some(pq_event) = heap.pop() {
-                let event = pq_event.event;
-                let mut metrics = self.metrics.lock().await;
-                metrics.total_dequeued += 1;
-                metrics.current_depth = heap.len();
-                drop(metrics);
-                drop(heap);
-                return event;
-            }
-            drop(heap);
-
-            // Wait for notification
-            self.notify.notified().await;
-        }
-    }
-
-    /// Get current queue depth
-    pub async fn depth(&self) -> usize {
-        let heap = self.heap.lock().await;
-        heap.len()
-    }
-
-    /// Check if queue is empty
-    pub async fn is_empty(&self) -> bool {
-        let heap = self.heap.lock().await;
-        heap.is_empty()
-    }
-
-    /// Get current metrics snapshot
-    pub async fn metrics(&self) -> PriorityQueueMetrics {
-        let metrics = self.metrics.lock().await;
-        metrics.clone()
-    }
-
-    /// Reset metrics
-    pub async fn reset_metrics(&self) {
-        let mut metrics = self.metrics.lock().await;
-        *metrics = PriorityQueueMetrics::default();
-    }
-
-    /// Drain all events from the queue (for shutdown)
-    pub async fn drain(&self) -> Vec<ArcSourceEvent> {
-        let mut heap = self.heap.lock().await;
-        let events: Vec<ArcSourceEvent> = heap.drain().map(|pq_event| pq_event.event).collect();
-
-        let mut metrics = self.metrics.lock().await;
-        metrics.current_depth = 0;
-
-        debug!("Drained {} events from priority queue", events.len());
-        events
-    }
-}
-
-impl Clone for PriorityQueue {
-    fn clone(&self) -> Self {
-        Self {
-            heap: Arc::clone(&self.heap),
-            notify: Arc::clone(&self.notify),
-            max_capacity: self.max_capacity,
-            metrics: Arc::clone(&self.metrics),
-        }
-    }
-}
+/// Re-export metrics type for compatibility
+pub use crate::channels::priority_queue::PriorityQueueMetrics;
 
 #[cfg(test)]
 mod tests {
@@ -177,8 +32,12 @@ mod tests {
     use crate::channels::events::{SourceEvent, SourceEventWrapper};
     use chrono::Utc;
     use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
+    use std::sync::Arc;
 
-    fn create_test_event(source_id: &str, timestamp: chrono::DateTime<Utc>) -> ArcSourceEvent {
+    fn create_test_event(
+        source_id: &str,
+        timestamp: chrono::DateTime<Utc>,
+    ) -> Arc<SourceEventWrapper> {
         let change = SourceChange::Insert {
             element: Element::Node {
                 metadata: ElementMetadata {
@@ -208,9 +67,9 @@ mod tests {
         let event3 = create_test_event("source3", now + chrono::Duration::seconds(5));
 
         // Enqueue in random order
-        pq.enqueue(event1.clone()).await;
-        pq.enqueue(event3.clone()).await;
-        pq.enqueue(event2.clone()).await;
+        pq.enqueue(event1).await;
+        pq.enqueue(event3).await;
+        pq.enqueue(event2).await;
 
         // Dequeue should return oldest first
         let dequeued1 = pq.try_dequeue().await.unwrap();

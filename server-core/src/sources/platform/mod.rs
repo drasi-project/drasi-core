@@ -24,7 +24,8 @@ use tokio::task::JoinHandle;
 
 use crate::channels::{
     ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, ControlOperation,
-    SourceBroadcastReceiver, SourceBroadcastSender, SourceControl, SourceEvent, SourceEventWrapper, SubscriptionResponse,
+    SourceBroadcastReceiver, SourceBroadcastSender, SourceControl, SourceEvent, SourceEventWrapper,
+    SubscriptionResponse,
 };
 use crate::config::SourceConfig;
 use crate::sources::manager::convert_json_to_element_properties;
@@ -89,10 +90,7 @@ pub struct PlatformSource {
 
 impl PlatformSource {
     /// Create a new platform source
-    pub fn new(
-        config: SourceConfig,
-        event_tx: ComponentEventSender,
-    ) -> Self {
+    pub fn new(config: SourceConfig, event_tx: ComponentEventSender) -> Self {
         let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
 
         Self {
@@ -108,7 +106,9 @@ impl PlatformSource {
     ///
     /// This method is intended for use in tests to receive events broadcast by the source.
     /// In production, queries subscribe to sources through the SourceManager.
-    pub fn test_subscribe(&self) -> tokio::sync::broadcast::Receiver<Arc<crate::channels::SourceEventWrapper>> {
+    pub fn test_subscribe(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<Arc<crate::channels::SourceEventWrapper>> {
         self.broadcast_tx.subscribe()
     }
 
@@ -356,7 +356,6 @@ impl PlatformSource {
                 *status.write().await = ComponentStatus::Stopped;
                 return;
             }
-
 
             // Main consumer loop
             loop {

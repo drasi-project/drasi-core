@@ -11,13 +11,16 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{mpsc, RwLock};
 
+use crate::channels::priority_queue::PriorityQueue;
 use crate::channels::{
-    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, QueryResultReceiver,
+    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, QueryResult,
 };
 use crate::config::ReactionConfig;
 use crate::reactions::Reaction;
+use crate::server_core::DrasiServerCore;
 use crate::utils::{AdaptiveBatchConfig, AdaptiveBatcher};
 
 use super::http::QueryConfig;
@@ -46,6 +49,10 @@ pub struct AdaptiveHttpReaction {
     client: Client,
     // Support batch endpoints
     batch_endpoints_enabled: bool,
+    // Subscription management
+    subscription_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
+    priority_queue: PriorityQueue<QueryResult>,
+    processing_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl AdaptiveHttpReaction {
@@ -162,6 +169,9 @@ impl AdaptiveHttpReaction {
             adaptive_config,
             client,
             batch_endpoints_enabled,
+            subscription_tasks: Arc::new(RwLock::new(Vec::new())),
+            priority_queue: PriorityQueue::new(10000),
+            processing_task: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -361,7 +371,7 @@ impl AdaptiveHttpReaction {
 
     async fn run_internal(
         reaction_name: String,
-        mut result_rx: QueryResultReceiver,
+        priority_queue: PriorityQueue<QueryResult>,
         status: Arc<RwLock<ComponentStatus>>,
         event_tx: ComponentEventSender,
         adaptive_config: AdaptiveBatchConfig,
@@ -420,8 +430,11 @@ impl AdaptiveHttpReaction {
             }
         });
 
-        // Main task: receive query results and forward to batcher
-        while let Some(query_result) = result_rx.recv().await {
+        // Main task: receive query results from priority queue and forward to batcher
+        loop {
+            let query_result_arc = priority_queue.dequeue().await;
+            let query_result = query_result_arc.as_ref();
+
             if !matches!(*status.read().await, ComponentStatus::Running) {
                 info!(
                     "[{}] Reaction status changed to non-running, exiting",
@@ -436,7 +449,7 @@ impl AdaptiveHttpReaction {
 
             // Send to batcher
             if batch_tx
-                .send((query_result.query_id, query_result.results))
+                .send((query_result.query_id.clone(), query_result.results.clone()))
                 .await
                 .is_err()
             {
@@ -467,7 +480,7 @@ impl AdaptiveHttpReaction {
 
 #[async_trait]
 impl Reaction for AdaptiveHttpReaction {
-    async fn start(&self, result_rx: QueryResultReceiver) -> Result<()> {
+    async fn start(&self, server_core: Arc<DrasiServerCore>) -> Result<()> {
         info!("[{}] Starting adaptive HTTP reaction", self.config.id);
 
         *self.status.write().await = ComponentStatus::Starting;
@@ -481,6 +494,88 @@ impl Reaction for AdaptiveHttpReaction {
             message: Some("Starting adaptive HTTP reaction".to_string()),
         };
         self.event_tx.send(event).await?;
+
+        // Get QueryManager from server_core
+        let query_manager = server_core.query_manager();
+
+        // Subscribe to each query and spawn forwarder tasks
+        let mut subscription_tasks = self.subscription_tasks.write().await;
+        for query_id in &self.config.queries {
+            info!("[{}] Subscribing to query: {}", self.config.id, query_id);
+
+            // Get the query instance
+            let query = match query_manager.get_query_instance(query_id).await {
+                Ok(q) => q,
+                Err(e) => {
+                    error!(
+                        "[{}] Failed to get query instance for '{}': {}",
+                        self.config.id, query_id, e
+                    );
+                    continue;
+                }
+            };
+
+            // Subscribe to the query
+            let subscription_response = match query.subscribe(self.config.id.clone()).await {
+                Ok(response) => response,
+                Err(e) => {
+                    error!(
+                        "[{}] Failed to subscribe to query '{}': {}",
+                        self.config.id, query_id, e
+                    );
+                    continue;
+                }
+            };
+
+            let mut broadcast_receiver = subscription_response.broadcast_receiver;
+            let priority_queue = self.priority_queue.clone();
+            let reaction_id = self.config.id.clone();
+            let query_id_clone = query_id.clone();
+
+            // Spawn forwarder task
+            let forwarder_task = tokio::spawn(async move {
+                info!(
+                    "[{}] Forwarder task started for query '{}'",
+                    reaction_id, query_id_clone
+                );
+
+                loop {
+                    match broadcast_receiver.recv().await {
+                        Ok(query_result) => {
+                            // Enqueue to priority queue
+                            if !priority_queue.enqueue(query_result).await {
+                                warn!(
+                                    "[{}] Priority queue full, dropped result from query '{}'",
+                                    reaction_id, query_id_clone
+                                );
+                            }
+                        }
+                        Err(RecvError::Lagged(count)) => {
+                            warn!(
+                                "[{}] Broadcast receiver lagged by {} messages for query '{}'",
+                                reaction_id, count, query_id_clone
+                            );
+                            // Continue processing
+                        }
+                        Err(RecvError::Closed) => {
+                            info!(
+                                "[{}] Broadcast channel closed for query '{}'",
+                                reaction_id, query_id_clone
+                            );
+                            break;
+                        }
+                    }
+                }
+
+                info!(
+                    "[{}] Forwarder task stopped for query '{}'",
+                    reaction_id, query_id_clone
+                );
+            });
+
+            subscription_tasks.push(forwarder_task);
+        }
+        drop(subscription_tasks);
 
         *self.status.write().await = ComponentStatus::Running;
 
@@ -514,21 +609,28 @@ impl Reaction for AdaptiveHttpReaction {
             adaptive_config: self.adaptive_config.clone(),
             client: self.client.clone(),
             batch_endpoints_enabled: self.batch_endpoints_enabled,
+            subscription_tasks: self.subscription_tasks.clone(),
+            priority_queue: self.priority_queue.clone(),
+            processing_task: self.processing_task.clone(),
         });
 
         let reaction_name = self.config.id.clone();
         let status = self.status.clone();
         let event_tx = self.event_tx.clone();
         let adaptive_config = self.adaptive_config.clone();
+        let priority_queue = self.priority_queue.clone();
 
-        tokio::spawn(Self::run_internal(
+        let processing_task_handle = tokio::spawn(Self::run_internal(
             reaction_name,
-            result_rx,
+            priority_queue,
             status,
             event_tx,
             adaptive_config,
             self_arc,
         ));
+
+        // Store the processing task handle
+        *self.processing_task.write().await = Some(processing_task_handle);
 
         Ok(())
     }
@@ -548,7 +650,31 @@ impl Reaction for AdaptiveHttpReaction {
         };
         self.event_tx.send(event).await?;
 
-        // Wait a moment for the reaction to stop
+        // Abort all subscription forwarder tasks
+        let mut subscription_tasks = self.subscription_tasks.write().await;
+        for task in subscription_tasks.drain(..) {
+            task.abort();
+        }
+        drop(subscription_tasks);
+
+        // Abort the processing task
+        let mut processing_task = self.processing_task.write().await;
+        if let Some(task) = processing_task.take() {
+            task.abort();
+        }
+        drop(processing_task);
+
+        // Drain the priority queue
+        let drained = self.priority_queue.drain().await;
+        if !drained.is_empty() {
+            info!(
+                "[{}] Drained {} pending results from priority queue",
+                self.config.id,
+                drained.len()
+            );
+        }
+
+        // Wait a moment for cleanup
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         *self.status.write().await = ComponentStatus::Stopped;
@@ -559,7 +685,7 @@ impl Reaction for AdaptiveHttpReaction {
             component_type: ComponentType::Reaction,
             status: ComponentStatus::Stopped,
             timestamp: chrono::Utc::now(),
-            message: Some("Adaptive HTTP reaction stopped".to_string()),
+            message: Some("Adaptive HTTP reaction stopped successfully".to_string()),
         };
         self.event_tx.send(event).await?;
 

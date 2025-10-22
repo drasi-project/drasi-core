@@ -13,8 +13,10 @@
 // limitations under the License.
 
 pub mod events;
+pub mod priority_queue;
 
 #[cfg(test)]
 mod events_test;
 
 pub use events::*;
+pub use priority_queue::{PriorityQueue, PriorityQueueMetrics};

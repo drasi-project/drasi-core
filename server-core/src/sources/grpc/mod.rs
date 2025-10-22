@@ -39,21 +39,21 @@ use proto::{
 /// gRPC source that exposes a gRPC endpoint to receive SourceChangeEvents
 pub struct GrpcSource {
     config: SourceConfig,
-    status: Arc<RwLock<ComponentStatus>>,    broadcast_tx: SourceBroadcastSender,
+    status: Arc<RwLock<ComponentStatus>>,
+    broadcast_tx: SourceBroadcastSender,
     event_tx: ComponentEventSender,
     task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     shutdown_tx: Arc<RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
 }
 
 impl GrpcSource {
-    pub fn new(
-        config: SourceConfig,        event_tx: ComponentEventSender,
-    ) -> Self {
+    pub fn new(config: SourceConfig, event_tx: ComponentEventSender) -> Self {
         let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
 
         Self {
             config,
-            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),            broadcast_tx,
+            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
+            broadcast_tx,
             event_tx,
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
@@ -245,7 +245,8 @@ impl Source for GrpcSource {
 
 /// gRPC service implementation
 struct GrpcSourceService {
-    source_id: String,    broadcast_tx: SourceBroadcastSender,
+    source_id: String,
+    broadcast_tx: SourceBroadcastSender,
 }
 
 #[tonic::async_trait]

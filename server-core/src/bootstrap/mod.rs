@@ -56,11 +56,7 @@ pub struct BootstrapContext {
 }
 
 impl BootstrapContext {
-    pub fn new(
-        server_id: String,
-        source_config: Arc<SourceConfig>,
-        source_id: String,
-    ) -> Self {
+    pub fn new(server_id: String, source_config: Arc<SourceConfig>, source_id: String) -> Self {
         Self {
             server_id,
             source_config,
@@ -91,7 +87,7 @@ impl BootstrapContext {
     }
 }
 
-use crate::channels::{BootstrapEventSender};
+use crate::channels::BootstrapEventSender;
 
 /// Trait for bootstrap providers that handle initial data delivery
 /// for newly subscribed queries

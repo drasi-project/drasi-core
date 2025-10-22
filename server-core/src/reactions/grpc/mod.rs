@@ -19,14 +19,17 @@ use rand::Rng;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
 
+use crate::channels::priority_queue::PriorityQueue;
 use crate::channels::{
-    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, QueryResultReceiver,
+    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, QueryResult,
 };
 use crate::config::ReactionConfig;
 use crate::reactions::Reaction;
+use crate::server_core::DrasiServerCore;
 use crate::utils::log_component_start;
 
 // Include generated protobuf code
@@ -74,6 +77,9 @@ pub struct GrpcReaction {
     metadata: HashMap<String, String>,
     connection_retry_attempts: u32,
     initial_connection_timeout_ms: u64,
+    subscription_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
+    priority_queue: PriorityQueue<QueryResult>,
+    processing_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl GrpcReaction {
@@ -146,6 +152,9 @@ impl GrpcReaction {
             metadata,
             connection_retry_attempts,
             initial_connection_timeout_ms,
+            subscription_tasks: Arc::new(RwLock::new(Vec::new())),
+            priority_queue: PriorityQueue::new(10000),
+            processing_task: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -434,11 +443,11 @@ impl GrpcReaction {
 
 #[async_trait]
 impl Reaction for GrpcReaction {
-    async fn start(&self, mut result_rx: QueryResultReceiver) -> Result<()> {
+    async fn start(&self, server_core: Arc<DrasiServerCore>) -> Result<()> {
         log_component_start("gRPC Reaction", &self.config.id);
 
         info!(
-            "[{}] gRPC reaction started - sending to endpoint: {}",
+            "[{}] gRPC reaction starting - sending to endpoint: {}",
             self.config.id, self.endpoint
         );
 
@@ -456,6 +465,85 @@ impl Reaction for GrpcReaction {
             error!("Failed to send component event: {}", e);
         }
 
+        // Get QueryManager from server_core
+        let query_manager = server_core.query_manager();
+
+        // Subscribe to all configured queries
+        let mut subscription_tasks = self.subscription_tasks.write().await;
+
+        for query_id in &self.config.queries {
+            info!("[{}] Subscribing to query '{}'", self.config.id, query_id);
+
+            // Get the query instance
+            let query = match query_manager.get_query_instance(query_id).await {
+                Ok(q) => q,
+                Err(e) => {
+                    error!(
+                        "[{}] Failed to get query instance '{}': {}",
+                        self.config.id, query_id, e
+                    );
+                    continue;
+                }
+            };
+
+            // Subscribe to the query
+            let subscription_response = match query.subscribe(self.config.id.clone()).await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    error!(
+                        "[{}] Failed to subscribe to query '{}': {}",
+                        self.config.id, query_id, e
+                    );
+                    continue;
+                }
+            };
+
+            let mut broadcast_receiver = subscription_response.broadcast_receiver;
+            let priority_queue = self.priority_queue.clone();
+            let reaction_id = self.config.id.clone();
+            let query_id_clone = query_id.clone();
+
+            // Spawn a forwarder task for this subscription
+            let forwarder_task = tokio::spawn(async move {
+                info!(
+                    "[{}] Forwarder task started for query '{}'",
+                    reaction_id, query_id_clone
+                );
+
+                loop {
+                    match broadcast_receiver.recv().await {
+                        Ok(query_result) => {
+                            // Enqueue to priority queue for timestamp-ordered processing
+                            if !priority_queue.enqueue(query_result).await {
+                                warn!(
+                                    "[{}] Priority queue full, dropped result from query '{}'",
+                                    reaction_id, query_id_clone
+                                );
+                            }
+                        }
+                        Err(RecvError::Lagged(count)) => {
+                            warn!(
+                                "[{}] Forwarder lagged by {} messages for query '{}'",
+                                reaction_id, count, query_id_clone
+                            );
+                            continue;
+                        }
+                        Err(RecvError::Closed) => {
+                            info!(
+                                "[{}] Broadcast channel closed for query '{}', forwarder exiting",
+                                reaction_id, query_id_clone
+                            );
+                            break;
+                        }
+                    }
+                }
+            });
+
+            subscription_tasks.push(forwarder_task);
+        }
+
+        drop(subscription_tasks);
+
         *self.status.write().await = ComponentStatus::Running;
 
         let event = ComponentEvent {
@@ -470,7 +558,7 @@ impl Reaction for GrpcReaction {
             error!("Failed to send component event: {}", e);
         }
 
-        // Start processing query results
+        // Start processing task that dequeues from priority queue
         let reaction_name = self.config.id.clone();
         let status = Arc::clone(&self.status);
         let endpoint = self.endpoint.clone();
@@ -481,8 +569,9 @@ impl Reaction for GrpcReaction {
         let timeout_ms = self.timeout_ms;
         let connection_retry_attempts = self.connection_retry_attempts;
         let initial_connection_timeout_ms = self.initial_connection_timeout_ms;
+        let priority_queue = self.priority_queue.clone();
 
-        tokio::spawn(async move {
+        let processing_task_handle = tokio::spawn(async move {
             // Lazy connection: do not establish a network connection until data arrives
             info!(
                 "gRPC reaction starting for endpoint: {} (lazy connection)",
@@ -507,7 +596,6 @@ impl Reaction for GrpcReaction {
 
             let mut batch = Vec::new();
             let mut last_query_id = String::new();
-            let mut last_batch_time = std::time::Instant::now();
             let flush_timeout = Duration::from_millis(batch_flush_timeout_ms);
 
             // Create a timer for batch flushing
@@ -515,9 +603,12 @@ impl Reaction for GrpcReaction {
             flush_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
-                tokio::select! {
-                    Some(query_result) = result_rx.recv() => {
-                debug!("Received query result with {} items for processing", query_result.results.len());
+                // Dequeue from priority queue (blocking)
+                let query_result = priority_queue.dequeue().await;
+                debug!(
+                    "Dequeued query result with {} items for processing",
+                    query_result.results.len()
+                );
 
                 if !matches!(*status.read().await, ComponentStatus::Running) {
                     info!("[{}] Reaction status changed to non-running, exiting main loop (batch has {} items)",
@@ -536,36 +627,56 @@ impl Reaction for GrpcReaction {
                 trace!("Processing results for query_id: {}", query_id);
 
                 // If query_id changes and we have a batch, send it
-                if !last_query_id.is_empty() && last_query_id != query_result.query_id && !batch.is_empty() {
+                if !last_query_id.is_empty()
+                    && last_query_id != query_result.query_id
+                    && !batch.is_empty()
+                {
                     // Ensure we have a client (lazy creation)
                     if client.is_none() || !matches!(connection_state, ConnectionState::Connected) {
                         // Check if we should wait before retrying connection
                         let time_since_last_attempt = last_connection_attempt.elapsed();
-                        let backoff_duration = base_backoff * 2u32.pow(consecutive_failures.min(10));
+                        let backoff_duration =
+                            base_backoff * 2u32.pow(consecutive_failures.min(10));
                         let backoff_duration = backoff_duration.min(max_backoff);
 
-                        if time_since_last_attempt < backoff_duration && connection_state == ConnectionState::Failed {
+                        if time_since_last_attempt < backoff_duration
+                            && connection_state == ConnectionState::Failed
+                        {
                             let wait_time = backoff_duration - time_since_last_attempt;
-                            warn!("State: {} - Waiting {:.2}s before retrying (failures: {})",
-                                  connection_state, wait_time.as_secs_f64(), consecutive_failures);
+                            warn!(
+                                "State: {} - Waiting {:.2}s before retrying (failures: {})",
+                                connection_state,
+                                wait_time.as_secs_f64(),
+                                consecutive_failures
+                            );
                             // Keep the data for next attempt
                             continue;
                         }
 
                         total_connection_attempts += 1;
                         connection_state = ConnectionState::Connecting;
-                        info!("State transition: {} -> Connecting (attempt {}, total: {})",
-                              connection_state, consecutive_failures + 1, total_connection_attempts);
+                        info!(
+                            "State transition: {} -> Connecting (attempt {}, total: {})",
+                            connection_state,
+                            consecutive_failures + 1,
+                            total_connection_attempts
+                        );
                         last_connection_attempt = std::time::Instant::now();
 
-                        match GrpcReaction::create_client_with_retry(&endpoint, initial_connection_timeout_ms, connection_retry_attempts).await {
+                        match GrpcReaction::create_client_with_retry(
+                            &endpoint,
+                            initial_connection_timeout_ms,
+                            connection_retry_attempts,
+                        )
+                        .await
+                        {
                             Ok(c) => {
                                 connection_state = ConnectionState::Connected;
                                 info!("State transition: Connecting -> Connected (after {} failures, total attempts: {})",
                                       consecutive_failures, total_connection_attempts);
-                                consecutive_failures = 0;  // Reset on success
+                                consecutive_failures = 0; // Reset on success
                                 client = Some(c);
-                            },
+                            }
                             Err(e) => {
                                 connection_state = ConnectionState::Failed;
                                 consecutive_failures += 1;
@@ -597,7 +708,9 @@ impl Reaction for GrpcReaction {
                                     Ok((needs_new_client, new_client)) => {
                                         if needs_new_client {
                                             // Check if this was due to GoAway (heuristic based on timing)
-                                            if last_successful_send.elapsed() > Duration::from_secs(5) {
+                                            if last_successful_send.elapsed()
+                                                > Duration::from_secs(5)
+                                            {
                                                 goaway_count += 1;
                                             }
 
@@ -673,31 +786,35 @@ impl Reaction for GrpcReaction {
                         data: Some(convert_json_to_proto_struct(
                             result.get("data").unwrap_or(result),
                         )),
-                        before: result
-                            .get("before")
-                            .map(convert_json_to_proto_struct),
-                        after: result
-                            .get("after")
-                            .map(convert_json_to_proto_struct),
+                        before: result.get("before").map(convert_json_to_proto_struct),
+                        after: result.get("after").map(convert_json_to_proto_struct),
                     };
 
                     batch.push(proto_item);
-                    last_batch_time = std::time::Instant::now(); // Update batch modification time
 
                     // Send batch if it reaches the configured size
                     if batch.len() >= batch_size {
-                        debug!("[{}] Batch reached size limit ({} >= {}), sending", reaction_name, batch.len(), batch_size);
+                        debug!(
+                            "[{}] Batch reached size limit ({} >= {}), sending",
+                            reaction_name,
+                            batch.len(),
+                            batch_size
+                        );
                         // Ensure we have a client
                         if client.is_none() {
                             // Check if we should wait before retrying connection
                             let time_since_last_attempt = last_connection_attempt.elapsed();
-                            let backoff_duration = base_backoff * 2u32.pow(consecutive_failures.min(10));
+                            let backoff_duration =
+                                base_backoff * 2u32.pow(consecutive_failures.min(10));
                             let backoff_duration = backoff_duration.min(max_backoff);
 
                             if time_since_last_attempt < backoff_duration {
                                 let wait_time = backoff_duration - time_since_last_attempt;
-                                warn!("Waiting {:.2}s before retrying connection (attempt {} failed)",
-                                      wait_time.as_secs_f64(), consecutive_failures);
+                                warn!(
+                                    "Waiting {:.2}s before retrying connection (attempt {} failed)",
+                                    wait_time.as_secs_f64(),
+                                    consecutive_failures
+                                );
                                 // Keep the data for next attempt
                                 continue;
                             }
@@ -707,17 +824,25 @@ impl Reaction for GrpcReaction {
                                   endpoint, consecutive_failures, total_connection_attempts);
                             last_connection_attempt = std::time::Instant::now();
 
-                            match GrpcReaction::create_client_with_retry(&endpoint, initial_connection_timeout_ms, connection_retry_attempts).await {
+                            match GrpcReaction::create_client_with_retry(
+                                &endpoint,
+                                initial_connection_timeout_ms,
+                                connection_retry_attempts,
+                            )
+                            .await
+                            {
                                 Ok(c) => {
                                     info!("Successfully created gRPC client after {} failures (total attempts: {})",
                                           consecutive_failures, total_connection_attempts);
-                                    consecutive_failures = 0;  // Reset on success
+                                    consecutive_failures = 0; // Reset on success
                                     client = Some(c);
-                                },
+                                }
                                 Err(e) => {
                                     consecutive_failures += 1;
-                                    error!("Failed to create client (attempt {}, total: {}): {}",
-                                           consecutive_failures, total_connection_attempts, e);
+                                    error!(
+                                        "Failed to create client (attempt {}, total: {}): {}",
+                                        consecutive_failures, total_connection_attempts, e
+                                    );
                                     // Don't clear batch - keep it for retry
                                     continue;
                                 }
@@ -743,7 +868,10 @@ impl Reaction for GrpcReaction {
                                         Ok((needs_new_client, new_client)) => {
                                             if needs_new_client {
                                                 if let Some(nc) = new_client {
-                                                    info!("[{}] Replaced client with new connection", reaction_name);
+                                                    info!(
+                                                        "[{}] Replaced client with new connection",
+                                                        reaction_name
+                                                    );
                                                     client = Some(nc);
                                                     consecutive_failures = 0; // Reset on successful reconnection
                                                     retry_swaps += 1;
@@ -760,7 +888,8 @@ impl Reaction for GrpcReaction {
                                                     );
                                                     client = None; // Clear the failed client
                                                     consecutive_failures += 1;
-                                                    last_connection_attempt = std::time::Instant::now();
+                                                    last_connection_attempt =
+                                                        std::time::Instant::now();
                                                     break; // keep batch
                                                 }
                                             } else {
@@ -788,72 +917,10 @@ impl Reaction for GrpcReaction {
                             }
                             if sent {
                                 batch.clear();
-                                last_batch_time = std::time::Instant::now(); // Reset timer after clearing batch
                             }
                         }
                     }
                 }
-                    } // End of query_result processing
-
-                    // Timer tick for flushing partial batches
-                    _ = flush_timer.tick() => {
-                        if !batch.is_empty() && last_batch_time.elapsed() >= flush_timeout {
-                            info!("[{}] Flush timeout elapsed ({:?}), sending partial batch with {} items",
-                                  reaction_name, flush_timeout, batch.len());
-
-                            // Send the batch using the same logic as when batch is full
-                            if !last_query_id.is_empty() {
-                                // Ensure we have a client
-                                if client.is_none() {
-                                    match GrpcReaction::create_client_with_retry(&endpoint, initial_connection_timeout_ms, connection_retry_attempts).await {
-                                        Ok(c) => {
-                                            client = Some(c);
-                                        },
-                                        Err(e) => {
-                                            error!("[{}] Failed to create client for timeout flush: {}", reaction_name, e);
-                                            continue;
-                                        }
-                                    }
-                                }
-
-                                if let Some(ref mut c) = client {
-                                    match Self::send_batch_with_retry(
-                                        c,
-                                        batch.clone(),
-                                        &last_query_id,
-                                        &metadata,
-                                        max_retries,
-                                        &endpoint,
-                                        timeout_ms,
-                                    )
-                                    .await
-                                    {
-                                        Ok((needs_new_client, new_client)) => {
-                                            if needs_new_client {
-                                                if let Some(nc) = new_client {
-                                                    client = Some(nc);
-                                                }
-                                            } else {
-                                                info!("[{}] Successfully sent timeout-flushed batch", reaction_name);
-                                                batch.clear();
-                                                last_batch_time = std::time::Instant::now();
-                                            }
-                                        }
-                                        Err(e) => {
-                                            error!("[{}] Failed to send timeout-flushed batch: {}", reaction_name, e);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    else => {
-                        // Channel closed
-                        info!("[{}] Result channel closed, exiting main loop", reaction_name);
-                        break;
-                    }
-                } // End of tokio::select!
             } // End of loop
 
             // IMPORTANT: Send any remaining items in the batch when loop exits for ANY reason
@@ -973,9 +1040,12 @@ impl Reaction for GrpcReaction {
                 );
             }
 
-            info!("[{}] gRPC reaction stopped", reaction_name);
+            info!("[{}] gRPC reaction processing task stopped", reaction_name);
             *status.write().await = ComponentStatus::Stopped;
         });
+
+        // Store the processing task handle
+        *self.processing_task.write().await = Some(processing_task_handle);
 
         Ok(())
     }
@@ -995,6 +1065,35 @@ impl Reaction for GrpcReaction {
 
         if let Err(e) = self.event_tx.send(event).await {
             error!("Failed to send component event: {}", e);
+        }
+
+        // Abort all subscription forwarder tasks
+        let mut subscription_tasks = self.subscription_tasks.write().await;
+        for task in subscription_tasks.drain(..) {
+            task.abort();
+        }
+        drop(subscription_tasks);
+        info!(
+            "[{}] Aborted all subscription forwarder tasks",
+            self.config.id
+        );
+
+        // Abort the processing task
+        let mut processing_task = self.processing_task.write().await;
+        if let Some(task) = processing_task.take() {
+            task.abort();
+            info!("[{}] Aborted processing task", self.config.id);
+        }
+        drop(processing_task);
+
+        // Drain the priority queue
+        let drained = self.priority_queue.drain().await;
+        if !drained.is_empty() {
+            warn!(
+                "[{}] Drained {} items from priority queue during stop",
+                self.config.id,
+                drained.len()
+            );
         }
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;

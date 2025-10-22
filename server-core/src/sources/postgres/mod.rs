@@ -73,10 +73,7 @@ pub struct PostgresReplicationSource {
 }
 
 impl PostgresReplicationSource {
-    pub fn new(
-        config: SourceConfig,
-        event_tx: ComponentEventSender,
-    ) -> Self {
+    pub fn new(config: SourceConfig, event_tx: ComponentEventSender) -> Self {
         let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
 
         Self {
@@ -184,7 +181,8 @@ impl Source for PostgresReplicationSource {
         let task = tokio::spawn(async move {
             if let Err(e) = run_replication(
                 source_id.clone(),
-                config,                broadcast_tx,
+                config,
+                broadcast_tx,
                 event_tx.clone(),
                 status_clone.clone(),
                 primary_keys,
@@ -286,19 +284,16 @@ impl Source for PostgresReplicationSource {
 
 async fn run_replication(
     source_id: String,
-    config: PostgresReplicationConfig,    broadcast_tx: SourceBroadcastSender,
+    config: PostgresReplicationConfig,
+    broadcast_tx: SourceBroadcastSender,
     event_tx: ComponentEventSender,
     status: Arc<RwLock<ComponentStatus>>,
     table_primary_keys: Arc<RwLock<HashMap<String, Vec<String>>>>,
 ) -> Result<()> {
     info!("Starting replication for source {}", source_id);
 
-    let mut stream = stream::ReplicationStream::new(
-        config,
-        source_id,        broadcast_tx,
-        event_tx,
-        status,
-    );
+    let mut stream =
+        stream::ReplicationStream::new(config, source_id, broadcast_tx, event_tx, status);
 
     // Set the primary keys from bootstrap
     stream.set_primary_keys(table_primary_keys);

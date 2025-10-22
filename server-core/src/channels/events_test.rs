@@ -201,11 +201,10 @@ mod tests {
         let (channels, receivers) = EventChannels::new();
 
         // Verify channel senders exist
-        assert!(channels.query_result_tx.max_capacity() > 0);
+        // NOTE: query_result_tx no longer exists - queries use broadcast channels
         assert!(channels.component_event_tx.max_capacity() > 0);
 
         // Verify receivers exist
-        drop(receivers.query_result_rx);
         drop(receivers.component_event_rx);
         drop(receivers.control_signal_rx);
     }
