@@ -79,6 +79,7 @@ impl ReactionBuilder {
             queries: self.queries,
             auto_start: self.auto_start,
             properties: self.properties,
+            priority_queue_capacity: 10000, // Default priority queue capacity
         }
     }
 }

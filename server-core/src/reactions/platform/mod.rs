@@ -135,7 +135,7 @@ impl PlatformReaction {
         let cloud_event_config = CloudEventConfig::with_values(pubsub_name, source_name);
 
         Ok(Self {
-            config,
+            config: config.clone(),
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
             event_tx,
             publisher: Arc::new(publisher),
@@ -143,7 +143,7 @@ impl PlatformReaction {
             cloud_event_config,
             emit_control_events,
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
-            priority_queue: PriorityQueue::new(10000),
+            priority_queue: PriorityQueue::new(config.priority_queue_capacity),
             processing_task: Arc::new(RwLock::new(None)),
         })
     }
@@ -504,6 +504,7 @@ mod tests {
             queries: vec!["test-query".to_string()],
             auto_start: true,
             properties,
+            priority_queue_capacity: 10000,
         }
     }
 
@@ -531,6 +532,7 @@ mod tests {
             queries: vec!["test-query".to_string()],
             auto_start: true,
             properties,
+            priority_queue_capacity: 10000,
         };
 
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -559,6 +561,7 @@ mod tests {
             queries: vec!["test-query".to_string()],
             auto_start: true,
             properties,
+            priority_queue_capacity: 10000,
         };
 
         let (event_tx, _event_rx) = mpsc::channel(100);

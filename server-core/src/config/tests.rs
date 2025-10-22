@@ -294,6 +294,7 @@ mod runtime_tests {
             joins: None,
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
+            priority_queue_capacity: 10000,
         };
 
         let runtime = QueryRuntime::from(config.clone());
@@ -311,6 +312,7 @@ mod runtime_tests {
             queries: vec!["query1".to_string()],
             auto_start: true,
             properties: HashMap::new(),
+            priority_queue_capacity: 10000,
         };
 
         let runtime = ReactionRuntime::from(config.clone());

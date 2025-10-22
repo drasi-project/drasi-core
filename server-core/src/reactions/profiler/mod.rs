@@ -376,13 +376,13 @@ impl ProfilerReaction {
             .unwrap_or(10);
 
         Self {
-            config,
+            config: config.clone(),
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
             event_tx,
             stats: Arc::new(RwLock::new(ProfilingStats::new(window_size))),
             report_interval_secs,
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
-            priority_queue: PriorityQueue::new(10000),
+            priority_queue: PriorityQueue::new(config.priority_queue_capacity),
             processing_task: Arc::new(RwLock::new(None)),
         }
     }

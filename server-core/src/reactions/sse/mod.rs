@@ -76,7 +76,7 @@ impl SseReaction {
             .unwrap_or(15_000);
         let (tx, _rx) = broadcast::channel(1024);
         Self {
-            config,
+            config: config.clone(),
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
             event_tx,
             host,
@@ -86,7 +86,7 @@ impl SseReaction {
             broadcaster: tx,
             task_handles: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
-            priority_queue: PriorityQueue::new(10000),
+            priority_queue: PriorityQueue::new(config.priority_queue_capacity),
             processing_task: Arc::new(RwLock::new(None)),
         }
     }

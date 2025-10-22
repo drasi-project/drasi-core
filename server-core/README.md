@@ -626,6 +626,13 @@ Query::cypher("my-query")
 - Initial data loaded before streaming begins
 - Configurable via source bootstrap provider
 
+**Priority Queue Configuration:**
+- Each query has an internal priority queue for ordering events by timestamp
+- Default capacity: 10,000 events
+- Can be configured per-query or globally at server level
+- Larger capacities handle burst traffic better but use more memory
+- See Performance Optimization section for tuning guidance
+
 ## Reactions
 
 Reactions respond to detected changes by triggering downstream actions.
@@ -1133,6 +1140,7 @@ Example YAML configuration (`config.yaml`):
 ```yaml
 server_core:
   id: infrastructure-monitor
+  priority_queue_capacity: 50000  # Global default for all queries and reactions
 
 sources:
   - id: infrastructure-metrics
@@ -1157,6 +1165,7 @@ queries:
     sources:
       - infrastructure-metrics
     auto_start: true
+    priority_queue_capacity: 100000  # Override for high-volume query
 
 reactions:
   - id: ops-alerts
@@ -1164,10 +1173,45 @@ reactions:
     queries:
       - vm-health-monitor
     auto_start: true
+    priority_queue_capacity: 75000  # Override for this reaction
     properties:
       endpoint: https://ops.example.com/alerts
       method: POST
 ```
+
+#### Priority Queue Configuration
+
+Priority queues maintain event ordering by timestamp before processing. You can configure capacity at three levels:
+
+**Global Default** (applies to all queries and reactions):
+```yaml
+server_core:
+  id: my-server
+  priority_queue_capacity: 50000  # Default: 10000
+```
+
+**Per-Query Override**:
+```yaml
+queries:
+  - id: high-volume-query
+    query: "MATCH (n) RETURN n"
+    sources: ["source1"]
+    priority_queue_capacity: 100000  # Overrides global default
+```
+
+**Per-Reaction Override**:
+```yaml
+reactions:
+  - id: critical-reaction
+    reaction_type: log
+    queries: ["high-volume-query"]
+    priority_queue_capacity: 150000  # Overrides global default
+```
+
+**When to Adjust:**
+- **Increase** for burst traffic scenarios (e.g., 100,000+ for data migrations)
+- **Decrease** for memory-constrained environments (e.g., 1,000 for IoT devices)
+- **Default (10,000)** works well for most production workloads
 
 ## Async Integration Patterns
 
@@ -1526,6 +1570,49 @@ async fn test_result_timing() {
 2. **Buffer Sizing**: Configure appropriate buffer sizes for throughput
 3. **Connection Pooling**: Use connection pools for database sources
 
+### Priority Queue Tuning
+
+Priority queues maintain timestamp-ordered event processing. Adjust capacity based on your workload:
+
+**Symptoms of Undersized Queues:**
+- Events dropped due to capacity (check metrics)
+- Warning logs about queue capacity reached
+- Missing data in query results during bursts
+
+**Sizing Guidelines:**
+
+| Scenario | Recommended Capacity | Rationale |
+|----------|---------------------|-----------|
+| Steady-state production | 10,000 (default) | Handles typical variations |
+| High-throughput streaming | 50,000 - 100,000 | Absorbs sustained high rates |
+| Bulk data migration | 100,000 - 1,000,000 | Handles massive bursts |
+| IoT / Edge devices | 1,000 - 5,000 | Conserves memory |
+| Testing / Development | 1,000 - 5,000 | Faster feedback |
+
+**Configuration Example:**
+```yaml
+server_core:
+  priority_queue_capacity: 50000  # Global default
+
+queries:
+  - id: data-migration-query
+    query: "MATCH (n) RETURN n"
+    sources: ["bulk-import"]
+    priority_queue_capacity: 1000000  # Temporary large capacity
+
+reactions:
+  - id: critical-alerts
+    reaction_type: http
+    queries: ["high-priority-query"]
+    priority_queue_capacity: 100000  # High capacity for critical path
+```
+
+**Memory Considerations:**
+- Each event in queue: ~1-2 KB (varies by payload)
+- 10,000 capacity ≈ 10-20 MB per component
+- 100,000 capacity ≈ 100-200 MB per component
+- Monitor actual memory usage with your data model
+
 ### Reaction Optimization
 
 1. **Enable Batching**: Use adaptive reactions for high-volume scenarios
@@ -1537,7 +1624,8 @@ async fn test_result_timing() {
 1. **Enable Profiler**: Add Profiler reaction to identify bottlenecks
 2. **Monitor p95/p99**: Focus on tail latency for SLO compliance
 3. **Compare Stages**: Identify which pipeline stage is slowest
-4. **Iterate**: Adjust configuration and measure impact
+4. **Check Queue Metrics**: Monitor priority queue drops and depth
+5. **Iterate**: Adjust configuration and measure impact
 
 ## Building from Source
 

@@ -50,6 +50,7 @@ async fn main() {
         queries: vec!["example_query".to_string()],
         auto_start: true,
         properties,
+        priority_queue_capacity: 10000,
     };
 
     println!("  window_size: 100 samples");

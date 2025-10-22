@@ -151,12 +151,12 @@ impl ApplicationReaction {
         };
 
         let reaction = Self {
-            config,
+            config: config.clone(),
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
             event_tx,
             app_tx,
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
-            priority_queue: PriorityQueue::new(10000),
+            priority_queue: PriorityQueue::new(config.priority_queue_capacity),
             processing_task: Arc::new(RwLock::new(None)),
         };
 
@@ -375,6 +375,7 @@ mod tests {
             auto_start: true,
             queries,
             properties: HashMap::new(),
+            priority_queue_capacity: 10000,
         }
     }
 

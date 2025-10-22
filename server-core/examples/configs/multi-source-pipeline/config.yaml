@@ -2,8 +2,11 @@
 # This example demonstrates a complex pipeline with multiple sources,
 # different bootstrap providers, and multiple queries and reactions.
 
-server:
+server_core:
   id: "multi-source-pipeline"
+  # Global default priority queue capacity for all queries and reactions
+  # Default is 10000 if not specified
+  priority_queue_capacity: 20000
 
 sources:
   # Mock sensor data with script file bootstrap
@@ -48,6 +51,8 @@ queries:
     query_language: "cypher"
     sources: ["sensor-stream"]
     auto_start: true
+    # High-volume query with larger priority queue
+    priority_queue_capacity: 50000
     properties:
       description: "Alert on high temperature readings"
       threshold: 80
@@ -76,6 +81,8 @@ reactions:
     reaction_type: "log"
     queries: ["high-temp-alert"]
     auto_start: true
+    # Critical reaction with larger priority queue for reliability
+    priority_queue_capacity: 100000
     properties:
       log_level: "warn"
       format: "json"

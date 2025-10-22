@@ -116,6 +116,12 @@ JSONL format uses one JSON object per line. Script files require:
 
 ## Common Patterns
 
+### Server Core Configuration
+- `id`: Unique identifier for the server instance
+- `priority_queue_capacity`: Global default priority queue capacity (default: 10000)
+  - Applies to all queries and reactions unless overridden
+  - Controls internal event buffering capacity
+
 ### Source Configuration
 - `id`: Unique identifier for the source
 - `source_type`: Type of source (e.g., "mock")
@@ -129,6 +135,7 @@ JSONL format uses one JSON object per line. Script files require:
 - `query_language`: "cypher" or "gql"
 - `sources`: List of source IDs to query
 - `auto_start`: Whether to start automatically
+- `priority_queue_capacity`: Optional override for this query's priority queue capacity
 
 ### Reaction Configuration
 - `id`: Unique identifier for the reaction
@@ -136,8 +143,50 @@ JSONL format uses one JSON object per line. Script files require:
 - `queries`: List of query IDs to react to
 - `auto_start`: Whether to start automatically
 - `properties`: Reaction-specific configuration
+- `priority_queue_capacity`: Optional override for this reaction's priority queue capacity
 
 ## Advanced Features
+
+### Priority Queue Capacity Tuning
+
+Priority queues maintain timestamp-ordered event processing for queries and reactions. You can configure capacity at three levels:
+
+**1. Global Default** (applies to all components):
+```yaml
+server_core:
+  id: my-server
+  priority_queue_capacity: 50000  # Default: 10000
+```
+
+**2. Per-Query Override**:
+```yaml
+queries:
+  - id: high-volume-query
+    query: "MATCH (n) RETURN n"
+    sources: ["source1"]
+    priority_queue_capacity: 100000  # Overrides global default
+```
+
+**3. Per-Reaction Override**:
+```yaml
+reactions:
+  - id: critical-reaction
+    reaction_type: log
+    queries: ["high-volume-query"]
+    priority_queue_capacity: 150000  # Overrides global default
+```
+
+**When to Adjust:**
+- **Increase** (50k-1M): High-volume scenarios, data migrations, burst traffic
+- **Decrease** (1k-5k): Memory-constrained environments, testing
+- **Default (10k)**: Most production workloads
+
+**Memory Impact:**
+- Each event ≈ 1-2 KB
+- 10,000 capacity ≈ 10-20 MB per component
+- 100,000 capacity ≈ 100-200 MB per component
+
+See the `multi-source-pipeline/config.yaml` example for a complete demonstration.
 
 ### Query Joins
 Multi-source queries automatically handle joins when sources are specified in the `sources` array.

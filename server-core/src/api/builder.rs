@@ -88,7 +88,10 @@ impl DrasiServerCoreBuilder {
     /// This performs all initialization and returns a ready-to-start server.
     pub async fn build(self) -> Result<DrasiServerCore> {
         let server_settings = if let Some(id) = self.server_id {
-            DrasiServerCoreSettings { id }
+            DrasiServerCoreSettings {
+                id,
+                priority_queue_capacity: 10000,
+            }
         } else {
             DrasiServerCoreSettings::default()
         };

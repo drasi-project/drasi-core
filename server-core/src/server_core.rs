@@ -1100,6 +1100,7 @@ impl DrasiServerCore {
         Ok(DrasiServerCoreConfig {
             server_core: crate::config::DrasiServerCoreSettings {
                 id: self.config.server_core.id.clone(),
+                priority_queue_capacity: self.config.server_core.priority_queue_capacity,
             },
             sources,
             queries,
@@ -1560,6 +1561,7 @@ mod tests {
         let config = Arc::new(RuntimeConfig {
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
+                priority_queue_capacity: 10000,
             },
             sources: vec![],
             queries: vec![],
@@ -1581,6 +1583,7 @@ mod tests {
         let config = Arc::new(RuntimeConfig {
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
+                priority_queue_capacity: 10000,
             },
             sources: vec![],
             queries: vec![],
@@ -1606,6 +1609,7 @@ mod tests {
         let config = Arc::new(RuntimeConfig {
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
+                priority_queue_capacity: 10000,
             },
             sources: vec![],
             queries: vec![],
@@ -1624,6 +1628,7 @@ mod tests {
         let config = Arc::new(RuntimeConfig {
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
+                priority_queue_capacity: 10000,
             },
             sources: vec![],
             queries: vec![],
@@ -1647,6 +1652,7 @@ mod tests {
         let config = Arc::new(RuntimeConfig {
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
+                priority_queue_capacity: 10000,
             },
             sources: vec![],
             queries: vec![],
@@ -1666,6 +1672,7 @@ mod tests {
         let config = Arc::new(RuntimeConfig {
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
+                priority_queue_capacity: 10000,
             },
             sources: vec![],
             queries: vec![],
@@ -1765,6 +1772,7 @@ reactions: []
         let config = Arc::new(RuntimeConfig {
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
+                priority_queue_capacity: 10000,
             },
             sources: vec![],
             queries: vec![],
@@ -1787,6 +1795,7 @@ reactions: []
         let config = Arc::new(RuntimeConfig {
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
+                priority_queue_capacity: 10000,
             },
             sources: vec![],
             queries: vec![],
@@ -1812,6 +1821,7 @@ reactions: []
         let config = Arc::new(RuntimeConfig {
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
+                priority_queue_capacity: 10000,
             },
             sources: vec![],
             queries: vec![],
@@ -1836,6 +1846,7 @@ reactions: []
         let config = Arc::new(RuntimeConfig {
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
+                priority_queue_capacity: 10000,
             },
             sources: vec![],
             queries: vec![],
@@ -1857,6 +1868,7 @@ reactions: []
         let config = Arc::new(RuntimeConfig {
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
+                priority_queue_capacity: 10000,
             },
             sources: vec![],
             queries: vec![],
@@ -1878,6 +1890,7 @@ reactions: []
         let config = Arc::new(RuntimeConfig {
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
+                priority_queue_capacity: 10000,
             },
             sources: vec![],
             queries: vec![],
@@ -1941,6 +1954,7 @@ reactions: []
         let config = Arc::new(RuntimeConfig {
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
+                priority_queue_capacity: 10000,
             },
             sources: vec![],
             queries: vec![],
@@ -2003,6 +2017,7 @@ reactions: []
         let config = Arc::new(RuntimeConfig {
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
+                priority_queue_capacity: 10000,
             },
             sources: vec![],
             queries: vec![],
@@ -2536,6 +2551,7 @@ reactions: []
         let config = Arc::new(RuntimeConfig {
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
+                priority_queue_capacity: 10000,
             },
             sources: vec![],
             queries: vec![],

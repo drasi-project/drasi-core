@@ -109,7 +109,7 @@ impl HttpReaction {
         }
 
         Self {
-            config,
+            config: config.clone(),
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
             event_tx,
             base_url,
@@ -117,7 +117,7 @@ impl HttpReaction {
             timeout_ms,
             query_configs,
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
-            priority_queue: PriorityQueue::new(10000),
+            priority_queue: PriorityQueue::new(config.priority_queue_capacity),
             processing_task: Arc::new(RwLock::new(None)),
         }
     }

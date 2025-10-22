@@ -159,7 +159,7 @@ impl AdaptiveHttpReaction {
             .unwrap_or_else(|_| Client::new());
 
         Self {
-            config,
+            config: config.clone(),
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
             event_tx,
             base_url,
@@ -170,7 +170,7 @@ impl AdaptiveHttpReaction {
             client,
             batch_endpoints_enabled,
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
-            priority_queue: PriorityQueue::new(10000),
+            priority_queue: PriorityQueue::new(config.priority_queue_capacity),
             processing_task: Arc::new(RwLock::new(None)),
         }
     }

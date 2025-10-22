@@ -45,6 +45,9 @@ pub struct DrasiServerCoreConfig {
 pub struct DrasiServerCoreSettings {
     #[serde(default = "default_id")]
     pub id: String,
+    /// Default priority queue capacity for queries and reactions (default: 10000)
+    #[serde(default = "default_priority_queue_capacity")]
+    pub priority_queue_capacity: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +96,9 @@ pub struct QueryConfig {
         rename = "bootstrapBufferSize"
     )]
     pub bootstrap_buffer_size: usize,
+    /// Priority queue capacity for this query (default: 10000)
+    #[serde(default = "default_priority_queue_capacity")]
+    pub priority_queue_capacity: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +131,9 @@ pub struct ReactionConfig {
     /// Reaction-specific configuration properties
     #[serde(default, deserialize_with = "deserialize_null_as_empty_map")]
     pub properties: HashMap<String, serde_json::Value>,
+    /// Priority queue capacity for this reaction (default: 10000)
+    #[serde(default = "default_priority_queue_capacity")]
+    pub priority_queue_capacity: usize,
 }
 
 impl DrasiServerCoreConfig {
@@ -221,6 +230,7 @@ impl Default for DrasiServerCoreSettings {
         Self {
             // Default server ID to a random UUID
             id: uuid::Uuid::new_v4().to_string(),
+            priority_queue_capacity: default_priority_queue_capacity(),
         }
     }
 }
@@ -238,6 +248,10 @@ fn default_enable_bootstrap() -> bool {
 }
 
 fn default_bootstrap_buffer_size() -> usize {
+    10000
+}
+
+fn default_priority_queue_capacity() -> usize {
     10000
 }
 

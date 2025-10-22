@@ -63,6 +63,7 @@ impl MockQuery {
                 joins: None,
                 enable_bootstrap: false,
                 bootstrap_buffer_size: 10000,
+                priority_queue_capacity: 10000,
             },
             status: Arc::new(RwLock::new(ComponentStatus::Running)),
             broadcast_tx,
@@ -162,6 +163,7 @@ fn create_test_reaction(
         queries: vec![query_id.to_string()],
         auto_start: false,
         properties,
+        priority_queue_capacity: 10000,
     };
 
     let reaction = PlatformReaction::new(config, event_tx).expect("Failed to create reaction");

@@ -2,8 +2,10 @@
 # This example demonstrates how to configure a simple mock source
 # for testing and development purposes.
 
-server:
+server_core:
   id: "basic-mock-source-server"
+  # Optional: Set custom priority queue capacity (default is 10000)
+  # priority_queue_capacity: 10000
 
 sources:
   - id: "mock-sensor-data"

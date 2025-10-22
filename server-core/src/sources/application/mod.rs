@@ -372,18 +372,20 @@ impl Source for ApplicationSource {
                 let (tx, rx) = tokio::sync::mpsc::channel(1000);
 
                 // Create bootstrap provider - if it's Application type, use shared data
-                let provider: Box<dyn crate::bootstrap::BootstrapProvider> =
-                    if matches!(provider_config, crate::bootstrap::BootstrapProviderConfig::Application { .. }) {
-                        // Create ApplicationBootstrapProvider with shared reference to our bootstrap_data
-                        Box::new(
+                let provider: Box<dyn crate::bootstrap::BootstrapProvider> = if matches!(
+                    provider_config,
+                    crate::bootstrap::BootstrapProviderConfig::Application { .. }
+                ) {
+                    // Create ApplicationBootstrapProvider with shared reference to our bootstrap_data
+                    Box::new(
                             crate::bootstrap::providers::application::ApplicationBootstrapProvider::with_shared_data(
                                 self.get_bootstrap_data()
                             )
                         )
-                    } else {
-                        // For other provider types, use the factory
-                        BootstrapProviderFactory::create_provider(provider_config)?
-                    };
+                } else {
+                    // For other provider types, use the factory
+                    BootstrapProviderFactory::create_provider(provider_config)?
+                };
 
                 // Create bootstrap context
                 let context = BootstrapContext::new(
