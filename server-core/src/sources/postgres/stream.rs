@@ -79,9 +79,9 @@ impl ReplicationStream {
         }
     }
 
-    pub fn set_primary_keys(&mut self, primary_keys: Arc<RwLock<HashMap<String, Vec<String>>>>) {
-        self.table_primary_keys = primary_keys;
-    }
+    // Note: table_primary_keys is initialized empty and remains so.
+    // Element IDs are generated from configured table_keys (in config.table_keys),
+    // or fall back to using all column values if no keys are configured.
 
     pub async fn run(&mut self) -> Result<()> {
         info!("Starting replication stream for source {}", self.source_id);

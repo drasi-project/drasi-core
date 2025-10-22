@@ -24,10 +24,10 @@ use anyhow::Result;
 use async_trait::async_trait;
 use log::{error, info};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::bootstrap::{BootstrapContext, BootstrapProviderFactory, BootstrapRequest};
 use crate::channels::*;
 use crate::config::SourceConfig;
 use crate::sources::Source;
@@ -69,7 +69,6 @@ pub struct PostgresReplicationSource {
     broadcast_tx: SourceBroadcastSender,
     event_tx: ComponentEventSender,
     task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
-    table_primary_keys: Arc<RwLock<HashMap<String, Vec<String>>>>,
 }
 
 impl PostgresReplicationSource {
@@ -82,7 +81,6 @@ impl PostgresReplicationSource {
             broadcast_tx,
             event_tx,
             task_handle: Arc::new(RwLock::new(None)),
-            table_primary_keys: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -176,7 +174,6 @@ impl Source for PostgresReplicationSource {
         let broadcast_tx = self.broadcast_tx.clone();
         let event_tx = self.event_tx.clone();
         let status_clone = self.status.clone();
-        let primary_keys = self.table_primary_keys.clone();
 
         let task = tokio::spawn(async move {
             if let Err(e) = run_replication(
@@ -185,7 +182,6 @@ impl Source for PostgresReplicationSource {
                 broadcast_tx,
                 event_tx.clone(),
                 status_clone.clone(),
-                primary_keys,
             )
             .await
             {
@@ -261,15 +257,82 @@ impl Source for PostgresReplicationSource {
     async fn subscribe(
         &self,
         query_id: String,
-        _enable_bootstrap: bool,
-        _node_labels: Vec<String>,
-        _relation_labels: Vec<String>,
+        enable_bootstrap: bool,
+        node_labels: Vec<String>,
+        relation_labels: Vec<String>,
     ) -> Result<SubscriptionResponse> {
+        info!(
+            "Query '{}' subscribing to PostgreSQL source '{}' (bootstrap: {})",
+            query_id, self.config.id, enable_bootstrap
+        );
+
+        let broadcast_receiver = self.broadcast_tx.subscribe();
+
+        // Clone query_id for later use since it will be moved into async block
+        let query_id_for_response = query_id.clone();
+
+        // Handle bootstrap if requested and bootstrap provider is configured
+        let bootstrap_receiver = if enable_bootstrap {
+            if let Some(provider_config) = &self.config.bootstrap_provider {
+                info!(
+                    "Bootstrap enabled for query '{}' with {} node labels and {} relation labels, delegating to bootstrap provider",
+                    query_id,
+                    node_labels.len(),
+                    relation_labels.len()
+                );
+
+                let (tx, rx) = tokio::sync::mpsc::channel(1000);
+
+                // Create bootstrap provider
+                let provider = BootstrapProviderFactory::create_provider(provider_config)?;
+
+                // Create bootstrap context
+                let context = BootstrapContext::new(
+                    self.config.id.clone(), // server_id (using source_id as placeholder)
+                    Arc::new(self.config.clone()),
+                    self.config.id.clone(),
+                );
+
+                // Create bootstrap request
+                let request = BootstrapRequest {
+                    query_id: query_id.clone(),
+                    node_labels,
+                    relation_labels,
+                    request_id: format!("{}-{}", query_id, uuid::Uuid::new_v4()),
+                };
+
+                // Spawn bootstrap task
+                tokio::spawn(async move {
+                    match provider.bootstrap(request, &context, tx).await {
+                        Ok(count) => {
+                            info!(
+                                "Bootstrap completed successfully for query '{}', sent {} events",
+                                query_id, count
+                            );
+                        }
+                        Err(e) => {
+                            error!("Bootstrap failed for query '{}': {}", query_id, e);
+                        }
+                    }
+                });
+
+                Some(rx)
+            } else {
+                info!(
+                    "Bootstrap requested for query '{}' but no bootstrap provider configured for source '{}'",
+                    query_id, self.config.id
+                );
+                None
+            }
+        } else {
+            None
+        };
+
         Ok(SubscriptionResponse {
-            query_id,
+            query_id: query_id_for_response,
             source_id: self.config.id.clone(),
-            broadcast_receiver: self.broadcast_tx.subscribe(),
-            bootstrap_receiver: None,
+            broadcast_receiver,
+            bootstrap_receiver,
         })
     }
 
@@ -288,15 +351,11 @@ async fn run_replication(
     broadcast_tx: SourceBroadcastSender,
     event_tx: ComponentEventSender,
     status: Arc<RwLock<ComponentStatus>>,
-    table_primary_keys: Arc<RwLock<HashMap<String, Vec<String>>>>,
 ) -> Result<()> {
     info!("Starting replication for source {}", source_id);
 
     let mut stream =
         stream::ReplicationStream::new(config, source_id, broadcast_tx, event_tx, status);
-
-    // Set the primary keys from bootstrap
-    stream.set_primary_keys(table_primary_keys);
 
     stream.run().await
 }
