@@ -23,8 +23,7 @@ use std::sync::Arc;
 
 use crate::bootstrap::script_reader::BootstrapScriptReader;
 use crate::bootstrap::script_types::{BootstrapScriptRecord, NodeRecord, RelationRecord};
-use crate::bootstrap::{BootstrapContext, BootstrapProvider};
-use crate::channels::{BootstrapRequest, SourceEvent, SourceEventWrapper};
+use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 use crate::sources::manager::convert_json_to_element_properties;
 
 /// Bootstrap provider that reads data from JSONL script files
@@ -128,6 +127,7 @@ impl ScriptFileBootstrapProvider {
         reader: &mut BootstrapScriptReader,
         request: &BootstrapRequest,
         context: &BootstrapContext,
+        event_tx: crate::channels::BootstrapEventSender,
     ) -> Result<usize> {
         let mut count = 0;
 
@@ -147,28 +147,17 @@ impl ScriptFileBootstrapProvider {
                         let source_change = SourceChange::Insert { element };
 
                         // Get next sequence number for this bootstrap event
-                        let _sequence = context.next_sequence();
+                        let sequence = context.next_sequence();
 
-                        // Create profiling metadata for bootstrap event
-                        let mut profiling = crate::profiling::ProfilingMetadata::new();
-                        let now = crate::profiling::timestamp_ns();
+                        let bootstrap_event = crate::channels::BootstrapEvent {
+                            source_id: context.source_id.clone(),
+                            change: source_change,
+                            timestamp: chrono::Utc::now(),
+                            sequence,
+                        };
 
-                        // Set timestamps as per spec for bootstrap events
-                        profiling.source_ns = Some(0); // Always 0 for bootstrap events as per spec
-                        profiling.source_send_ns = Some(now);
-                        profiling.reactivator_start_ns = Some(now);
-                        profiling.reactivator_end_ns = Some(now);
-
-                        let wrapper = SourceEventWrapper::with_profiling(
-                            context.source_id.clone(),
-                            SourceEvent::Change(source_change),
-                            chrono::Utc::now(),
-                            profiling,
-                        );
-
-                        context
-                            .source_event_tx
-                            .send(wrapper)
+                        event_tx
+                            .send(bootstrap_event)
                             .await
                             .map_err(|e| anyhow!("Failed to send node: {}", e))?;
 
@@ -191,28 +180,17 @@ impl ScriptFileBootstrapProvider {
                         let source_change = SourceChange::Insert { element };
 
                         // Get next sequence number for this bootstrap event
-                        let _sequence = context.next_sequence();
+                        let sequence = context.next_sequence();
 
-                        // Create profiling metadata for bootstrap event
-                        let mut profiling = crate::profiling::ProfilingMetadata::new();
-                        let now = crate::profiling::timestamp_ns();
+                        let bootstrap_event = crate::channels::BootstrapEvent {
+                            source_id: context.source_id.clone(),
+                            change: source_change,
+                            timestamp: chrono::Utc::now(),
+                            sequence,
+                        };
 
-                        // Set timestamps as per spec for bootstrap events
-                        profiling.source_ns = Some(0); // Always 0 for bootstrap events as per spec
-                        profiling.source_send_ns = Some(now);
-                        profiling.reactivator_start_ns = Some(now);
-                        profiling.reactivator_end_ns = Some(now);
-
-                        let wrapper = SourceEventWrapper::with_profiling(
-                            context.source_id.clone(),
-                            SourceEvent::Change(source_change),
-                            chrono::Utc::now(),
-                            profiling,
-                        );
-
-                        context
-                            .source_event_tx
-                            .send(wrapper)
+                        event_tx
+                            .send(bootstrap_event)
                             .await
                             .map_err(|e| anyhow!("Failed to send relation: {}", e))?;
 
@@ -247,6 +225,7 @@ impl BootstrapProvider for ScriptFileBootstrapProvider {
         &self,
         request: BootstrapRequest,
         context: &BootstrapContext,
+        event_tx: crate::channels::BootstrapEventSender,
     ) -> Result<usize> {
         info!(
             "Starting script file bootstrap for query {} from {} file(s)",
@@ -271,7 +250,7 @@ impl BootstrapProvider for ScriptFileBootstrapProvider {
         );
 
         // Process records and send matching elements
-        let count = self.process_records(&mut reader, &request, context).await?;
+        let count = self.process_records(&mut reader, &request, context, event_tx).await?;
 
         info!(
             "Completed script file bootstrap for query {}: sent {} elements (requested node labels: {:?}, relation labels: {:?})",

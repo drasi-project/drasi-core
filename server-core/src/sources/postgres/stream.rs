@@ -27,7 +27,8 @@ use super::protocol::BackendMessage;
 use super::types::{StandbyStatusUpdate, WalMessage};
 use super::PostgresReplicationConfig;
 use crate::channels::{
-    ComponentEventSender, ComponentStatus, SourceEvent, SourceEventSender, SourceEventWrapper,
+    ComponentEventSender, ComponentStatus, SourceBroadcastSender, SourceEvent,
+    SourceEventWrapper,
 };
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 
@@ -36,7 +37,7 @@ pub struct ReplicationStream {
     source_id: String,
     connection: Option<ReplicationConnection>,
     decoder: PgOutputDecoder,
-    source_event_tx: SourceEventSender,
+    broadcast_tx: SourceBroadcastSender,
     #[allow(dead_code)]
     event_tx: ComponentEventSender,
     status: Arc<RwLock<ComponentStatus>>,
@@ -59,7 +60,7 @@ impl ReplicationStream {
     pub fn new(
         config: PostgresReplicationConfig,
         source_id: String,
-        source_event_tx: SourceEventSender,
+        broadcast_tx: SourceBroadcastSender,
         event_tx: ComponentEventSender,
         status: Arc<RwLock<ComponentStatus>>,
     ) -> Self {
@@ -68,7 +69,7 @@ impl ReplicationStream {
             source_id,
             connection: None,
             decoder: PgOutputDecoder::new(),
-            source_event_tx,
+            broadcast_tx,
             event_tx,
             status,
             current_lsn: 0,
@@ -362,7 +363,15 @@ impl ReplicationStream {
                             chrono::Utc::now(),
                             profiling,
                         );
-                        self.source_event_tx.send(wrapper).await?;
+
+                        // Broadcast to new architecture (Arc-wrapped)
+                        let arc_wrapper = Arc::new(wrapper.clone());
+                        if let Err(e) = self.broadcast_tx.send(arc_wrapper) {
+                            debug!(
+                                "[{}] Failed to broadcast change (no subscribers): {}",
+                                self.source_id, e
+                            );
+                        }
                     }
                     debug!(
                         "Committed transaction {} with LSN {:x}",
@@ -401,7 +410,15 @@ impl ReplicationStream {
                             chrono::Utc::now(),
                             profiling,
                         );
-                        self.source_event_tx.send(wrapper).await?;
+
+                        // Broadcast to new architecture (Arc-wrapped)
+                        let arc_wrapper = Arc::new(wrapper.clone());
+                        if let Err(e) = self.broadcast_tx.send(arc_wrapper) {
+                            debug!(
+                                "[{}] Failed to broadcast change (no subscribers): {}",
+                                self.source_id, e
+                            );
+                        }
                     }
                 }
             }
@@ -426,7 +443,15 @@ impl ReplicationStream {
                             chrono::Utc::now(),
                             profiling,
                         );
-                        self.source_event_tx.send(wrapper).await?;
+
+                        // Broadcast to new architecture (Arc-wrapped)
+                        let arc_wrapper = Arc::new(wrapper.clone());
+                        if let Err(e) = self.broadcast_tx.send(arc_wrapper) {
+                            debug!(
+                                "[{}] Failed to broadcast change (no subscribers): {}",
+                                self.source_id, e
+                            );
+                        }
                     }
                 }
             }
@@ -447,7 +472,15 @@ impl ReplicationStream {
                             chrono::Utc::now(),
                             profiling,
                         );
-                        self.source_event_tx.send(wrapper).await?;
+
+                        // Broadcast to new architecture (Arc-wrapped)
+                        let arc_wrapper = Arc::new(wrapper.clone());
+                        if let Err(e) = self.broadcast_tx.send(arc_wrapper) {
+                            debug!(
+                                "[{}] Failed to broadcast change (no subscribers): {}",
+                                self.source_id, e
+                            );
+                        }
                     }
                 }
             }

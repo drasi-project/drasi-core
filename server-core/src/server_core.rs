@@ -25,7 +25,7 @@ use crate::config::{DrasiServerCoreConfig, RuntimeConfig};
 use crate::queries::QueryManager;
 use crate::reactions::ApplicationReactionHandle;
 use crate::reactions::ReactionManager;
-use crate::routers::{BootstrapRouter, DataRouter, SubscriptionRouter};
+use crate::routers::SubscriptionRouter;
 use crate::sources::{ApplicationSourceHandle, SourceManager};
 
 /// Core Drasi Server functionality without web API
@@ -35,9 +35,9 @@ pub struct DrasiServerCore {
     query_manager: Arc<QueryManager>,
     reaction_manager: Arc<ReactionManager>,
     subscription_router: Arc<SubscriptionRouter>,
-    data_router: Arc<DataRouter>,
-    bootstrap_router: Arc<BootstrapRouter>,
     event_receivers: Option<EventReceivers>,
+    /// Query result sender kept alive to maintain channel
+    #[allow(dead_code)]
     query_result_tx: QueryResultSender,
     running: Arc<RwLock<bool>>,
     initialized: Arc<RwLock<bool>>,
@@ -61,29 +61,18 @@ impl DrasiServerCore {
         let (channels, receivers) = EventChannels::new();
 
         let source_manager = Arc::new(SourceManager::new(
-            channels.source_event_tx.clone(),
             channels.component_event_tx.clone(),
         ));
 
         let query_manager = Arc::new(QueryManager::new(
             channels.query_result_tx.clone(),
             channels.component_event_tx.clone(),
-            channels.bootstrap_request_tx.clone(),
+            source_manager.clone(),
         ));
 
         let reaction_manager = Arc::new(ReactionManager::new(channels.component_event_tx.clone()));
 
         let subscription_router = Arc::new(SubscriptionRouter::new());
-
-        // Create data router and set query result sender before wrapping in Arc
-        let mut data_router = DataRouter::new();
-        data_router.set_query_result_tx(channels.query_result_tx.clone());
-        let data_router = Arc::new(data_router);
-
-        // Create bootstrap router and set control signal sender
-        let mut bootstrap_router = BootstrapRouter::new();
-        bootstrap_router.set_control_signal_sender(channels.control_signal_tx.clone());
-        let bootstrap_router = Arc::new(bootstrap_router);
 
         Self {
             config,
@@ -91,8 +80,6 @@ impl DrasiServerCore {
             query_manager,
             reaction_manager,
             subscription_router,
-            data_router,
-            bootstrap_router,
             event_receivers: Some(receivers),
             query_result_tx: channels.query_result_tx,
             running: Arc::new(RwLock::new(false)),
@@ -544,25 +531,16 @@ impl DrasiServerCore {
         }
 
         // Get the query config to determine which sources it needs
-        let config = self
+        // Verify query exists
+        let _config = self
             .query_manager
             .get_query_config(id)
             .await
             .ok_or_else(|| DrasiError::component_not_found("query", id))?;
 
-        // Create subscription to source data streams
-        let enable_bootstrap = config.enable_bootstrap;
-        let rx = self
-            .data_router
-            .add_query_subscription(id.to_string(), config.sources.clone(), enable_bootstrap)
-            .await
-            .map_err(|e| {
-                DrasiError::initialization(format!("Failed to add query subscription: {}", e))
-            })?;
-
-        // Start the query with the receiver
+        // Query will subscribe directly to sources when started
         self.query_manager
-            .start_query(id.to_string(), rx)
+            .start_query(id.to_string())
             .await
             .map_err(|e| {
                 if e.to_string().contains("not found") {
@@ -602,8 +580,7 @@ impl DrasiServerCore {
                 }
             })?;
 
-        // Remove the subscription from the data router
-        self.data_router.remove_query_subscription(id).await;
+        // Query unsubscribes from sources automatically when stopped
 
         Ok(())
     }
@@ -1306,27 +1283,15 @@ impl DrasiServerCore {
                 }
             });
 
-            // Start data router with control signal support
-            let source_event_rx = receivers.source_event_rx;
-            let control_signal_rx = receivers.control_signal_rx;
-            let data_router = self.data_router.clone();
-            tokio::spawn(async move {
-                data_router.start(source_event_rx, control_signal_rx).await;
-            });
+            // DataRouter no longer needed - queries subscribe directly to sources
+            // control_signal_rx is no longer used
+            drop(receivers.control_signal_rx);
 
             // Start subscription router
             let query_rx = receivers.query_result_rx;
             let router = self.subscription_router.clone();
             tokio::spawn(async move {
                 router.start(query_rx).await;
-            });
-
-            // Start bootstrap router
-            let bootstrap_request_rx = receivers.bootstrap_request_rx;
-            let bootstrap_router = self.bootstrap_router.clone();
-            tokio::spawn(async move {
-                info!("Starting bootstrap router");
-                bootstrap_router.start(bootstrap_request_rx).await;
             });
         }
     }
@@ -1336,34 +1301,10 @@ impl DrasiServerCore {
         config: crate::config::SourceConfig,
         allow_auto_start: bool,
     ) -> Result<()> {
-        let source_id = config.id.clone();
-        let bootstrap_provider_config = config.bootstrap_provider.clone();
-        let source_config_arc = std::sync::Arc::new(config.clone());
-
         // Add the source (without saving during initialization)
         self.source_manager
             .add_source_without_save(config, allow_auto_start)
             .await?;
-
-        // Register bootstrap provider with bootstrap router
-        let source_event_tx = self.source_manager.get_source_event_sender();
-        if let Err(e) = self
-            .bootstrap_router
-            .register_provider(
-                self.config.server_core.id.clone(),
-                source_config_arc,
-                bootstrap_provider_config,
-                source_event_tx,
-            )
-            .await
-        {
-            error!(
-                "Failed to register bootstrap provider for source '{}': {}",
-                source_id, e
-            );
-        } else {
-            info!("Registered bootstrap provider for source '{}'", source_id);
-        }
 
         Ok(())
     }
@@ -1375,31 +1316,14 @@ impl DrasiServerCore {
     ) -> Result<()> {
         let query_id = config.id.clone();
         let should_auto_start = config.auto_start;
-        let sources = config.sources.clone();
-        let enable_bootstrap = config.enable_bootstrap;
 
         // Add the query (without saving during initialization)
         self.query_manager.add_query_without_save(config).await?;
 
-        // Register with bootstrap router
-        let bootstrap_senders = self.query_manager.get_bootstrap_response_senders().await;
-        if let Some(sender) = bootstrap_senders.get(&query_id) {
-            self.bootstrap_router
-                .register_query(query_id.clone(), sender.clone())
-                .await;
-            info!("Registered query '{}' with bootstrap router", query_id);
-        }
-
         // Start if auto-start is enabled and allowed
         if should_auto_start && allow_auto_start {
-            // Add query subscription and get receiver
-            let rx = self
-                .data_router
-                .add_query_subscription(query_id.clone(), sources, enable_bootstrap)
-                .await
-                .map_err(|e| anyhow!("Failed to add query subscription: {}", e))?;
-
-            self.query_manager.start_query(query_id.clone(), rx).await?;
+            // Query will subscribe directly to sources when started
+            self.query_manager.start_query(query_id.clone()).await?;
         }
 
         Ok(())
@@ -1488,20 +1412,9 @@ impl DrasiServerCore {
                         query_config.auto_start,
                         running_before.queries.contains(id)
                     );
-                    // Get sources for this query
-                    let sources = query_config.sources.clone();
-                    let enable_bootstrap = query_config.enable_bootstrap;
-                    info!(
-                        "Creating subscription for query '{}' to sources: {:?} (bootstrap: {})",
-                        id, sources, enable_bootstrap
-                    );
-                    let rx = self
-                        .data_router
-                        .add_query_subscription(id.clone(), sources, enable_bootstrap)
-                        .await
-                        .map_err(|e| anyhow!("Failed to add query subscription: {}", e))?;
-                    info!("Subscription created, starting query '{}'", id);
-                    self.query_manager.start_query(id.clone(), rx).await?;
+                    // Query will subscribe directly to sources when started
+                    info!("Starting query '{}'", id);
+                    self.query_manager.start_query(id.clone()).await?;
                     info!("Query '{}' started successfully", id);
                 } else {
                     info!(
@@ -1623,10 +1536,8 @@ impl DrasiServerCore {
             if matches!(status, Ok(ComponentStatus::Running)) {
                 if let Err(e) = self.query_manager.stop_query(id.clone()).await {
                     error!("Error stopping query {}: {}", id, e);
-                } else {
-                    // Remove the subscription from the data router
-                    self.data_router.remove_query_subscription(&id).await;
                 }
+                // Query unsubscribes from sources automatically when stopped
             }
         }
 

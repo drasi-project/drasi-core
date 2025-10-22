@@ -14,6 +14,7 @@
 
 pub mod label_extractor;
 pub mod manager;
+pub mod priority_queue;
 
 #[cfg(test)]
 mod tests;
@@ -23,3 +24,4 @@ mod joins_test;
 
 pub use label_extractor::*;
 pub use manager::*;
+pub use priority_queue::*;

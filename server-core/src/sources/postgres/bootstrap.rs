@@ -19,9 +19,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_postgres::{Client, NoTls, Row, Transaction};
 
-use crate::channels::{
-    BootstrapRequest, SourceChangeEvent, SourceEvent, SourceEventSender, SourceEventWrapper,
-};
+use crate::bootstrap::BootstrapRequest;
+use crate::channels::SourceChangeEvent;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
@@ -32,25 +31,26 @@ use super::PostgresReplicationConfig;
 pub struct BootstrapHandler {
     config: PostgresReplicationConfig,
     source_id: String,
-    source_event_tx: SourceEventSender,
     /// Stores the LSN at bootstrap time for replication coordination
     pub snapshot_lsn: Arc<RwLock<Option<String>>>,
     /// Stores primary key information for each table
     pub table_primary_keys: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    /// Channel for sending bootstrap events
+    event_tx: crate::channels::BootstrapEventSender,
 }
 
 impl BootstrapHandler {
     pub fn new(
         config: PostgresReplicationConfig,
         source_id: String,
-        source_event_tx: SourceEventSender,
+        event_tx: crate::channels::BootstrapEventSender,
     ) -> Self {
         Self {
             config,
             source_id,
-            source_event_tx,
             snapshot_lsn: Arc::new(RwLock::new(None)),
             table_primary_keys: Arc::new(RwLock::new(HashMap::new())),
+            event_tx,
         }
     }
 
@@ -93,7 +93,7 @@ impl BootstrapHandler {
         let mut total_count = 0;
         for (label, table_name) in tables {
             let count = self
-                .bootstrap_table(&transaction, &label, &table_name)
+                .bootstrap_table(&transaction, &label, &table_name, &self.event_tx)
                 .await?;
             info!(
                 "Bootstrapped {} rows from table '{}' with label '{}'",
@@ -216,6 +216,7 @@ impl BootstrapHandler {
         transaction: &Transaction<'_>,
         label: &str,
         table_name: &str,
+        event_tx: &crate::channels::BootstrapEventSender,
     ) -> Result<usize> {
         debug!(
             "Starting bootstrap of table '{}' with label '{}'",
@@ -245,7 +246,7 @@ impl BootstrapHandler {
             });
 
             if batch.len() >= batch_size {
-                self.send_batch(&mut batch).await?;
+                self.send_batch(&mut batch, event_tx).await?;
                 count += batch_size;
             }
         }
@@ -253,7 +254,7 @@ impl BootstrapHandler {
         // Send remaining batch
         if !batch.is_empty() {
             count += batch.len();
-            self.send_batch(&mut batch).await?;
+            self.send_batch(&mut batch, event_tx).await?;
         }
 
         Ok(count)
@@ -534,16 +535,20 @@ impl BootstrapHandler {
     }
 
     /// Send a batch of changes through the channel
-    async fn send_batch(&self, batch: &mut Vec<SourceChangeEvent>) -> Result<()> {
+    async fn send_batch(
+        &self,
+        batch: &mut Vec<SourceChangeEvent>,
+        event_tx: &crate::channels::BootstrapEventSender,
+    ) -> Result<()> {
         for event in batch.drain(..) {
-            let wrapper = SourceEventWrapper {
+            let bootstrap_event = crate::channels::BootstrapEvent {
                 source_id: event.source_id,
-                event: SourceEvent::Change(event.change),
+                change: event.change,
                 timestamp: event.timestamp,
-                profiling: None,
+                sequence: 0, // Sequence tracking not implemented in this old handler
             };
-            self.source_event_tx
-                .send(wrapper)
+            event_tx
+                .send(bootstrap_event)
                 .await
                 .map_err(|e| anyhow!("Failed to send bootstrap event: {}", e))?;
         }

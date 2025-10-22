@@ -29,11 +29,9 @@ mod manager_tests {
     ) {
         let (query_tx, query_rx) = mpsc::channel(100);
         let (event_tx, event_rx) = mpsc::channel(100);
-        let (source_tx, _source_rx) = mpsc::channel(100);
 
-        let source_manager = Arc::new(SourceManager::new(source_tx.clone(), event_tx.clone()));
-        let (bootstrap_tx, _) = mpsc::channel(100);
-        let query_manager = Arc::new(QueryManager::new(query_tx, event_tx.clone(), bootstrap_tx));
+        let source_manager = Arc::new(SourceManager::new(event_tx.clone()));
+        let query_manager = Arc::new(QueryManager::new(query_tx, event_tx.clone(), source_manager.clone()));
 
         (query_manager, query_rx, event_rx, source_manager)
     }
@@ -97,9 +95,9 @@ mod manager_tests {
         manager.add_query(config).await.unwrap();
 
         // Create a channel for source changes
-        let (_tx, rx) = mpsc::channel(100);
+        // Legacy channel no longer needed - queries subscribe directly to sources
 
-        let result = manager.start_query("test-query".to_string(), rx).await;
+        let result = manager.start_query("test-query".to_string()).await;
         assert!(result.is_ok());
 
         // Check for status event
@@ -130,10 +128,10 @@ mod manager_tests {
         let config = create_test_query_config("test-query", vec!["source1".to_string()]);
         manager.add_query(config).await.unwrap();
         // Create a channel for source changes
-        let (_tx, rx) = mpsc::channel(100);
+        // Legacy channel no longer needed - queries subscribe directly to sources
 
         manager
-            .start_query("test-query".to_string(), rx)
+            .start_query("test-query".to_string())
             .await
             .unwrap();
 
@@ -186,9 +184,9 @@ mod manager_tests {
         manager.add_query(config).await.unwrap();
 
         // Create a channel for source changes
-        let (_tx, rx) = mpsc::channel(100);
+        // Legacy channel no longer needed - queries subscribe directly to sources
 
-        let result = manager.start_query("test-gql-query".to_string(), rx).await;
+        let result = manager.start_query("test-gql-query".to_string()).await;
         assert!(result.is_ok());
 
         // Check for status event
@@ -284,11 +282,11 @@ mod manager_tests {
         assert!(matches!(status, ComponentStatus::Stopped));
 
         // Create a channel for source changes (normally provided by router)
-        let (_tx, rx) = mpsc::channel(100);
+        // Legacy channel no longer needed - queries subscribe directly to sources
 
         // Start the query
         manager
-            .start_query("test-query".to_string(), rx)
+            .start_query("test-query".to_string())
             .await
             .unwrap();
 

@@ -22,18 +22,16 @@ mod manager_tests {
 
     async fn create_test_manager() -> (
         Arc<SourceManager>,
-        mpsc::Receiver<SourceEventWrapper>,
         mpsc::Receiver<ComponentEvent>,
     ) {
-        let (source_tx, source_rx) = mpsc::channel(100);
         let (event_tx, event_rx) = mpsc::channel(100);
-        let manager = Arc::new(SourceManager::new(source_tx, event_tx));
-        (manager, source_rx, event_rx)
+        let manager = Arc::new(SourceManager::new(event_tx));
+        (manager, event_rx)
     }
 
     #[tokio::test]
     async fn test_add_source() {
-        let (manager, _source_rx, _event_rx) = create_test_manager().await;
+        let (manager, _event_rx) = create_test_manager().await;
 
         let config = create_test_source_config("test-source", "mock");
         let result = manager.add_source(config.clone()).await;
@@ -48,7 +46,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_add_duplicate_source() {
-        let (manager, _source_rx, _event_rx) = create_test_manager().await;
+        let (manager, _event_rx) = create_test_manager().await;
 
         let config = create_test_source_config("test-source", "mock");
 
@@ -63,7 +61,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_remove_source() {
-        let (manager, _source_rx, _event_rx) = create_test_manager().await;
+        let (manager, _event_rx) = create_test_manager().await;
 
         let config = create_test_source_config("test-source", "mock");
         manager.add_source(config).await.unwrap();
@@ -79,7 +77,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_remove_nonexistent_source() {
-        let (manager, _source_rx, _event_rx) = create_test_manager().await;
+        let (manager, _event_rx) = create_test_manager().await;
 
         let result = manager.delete_source("nonexistent".to_string()).await;
         assert!(result.is_err());
@@ -88,7 +86,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_start_source() {
-        let (manager, _source_rx, mut event_rx) = create_test_manager().await;
+        let (manager, mut event_rx) = create_test_manager().await;
 
         let mut config = create_test_source_config("test-source", "mock");
         config.auto_start = false;
@@ -116,7 +114,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_stop_source() {
-        let (manager, _source_rx, mut event_rx) = create_test_manager().await;
+        let (manager, mut event_rx) = create_test_manager().await;
 
         let mut config = create_test_source_config("test-source", "mock");
         config.auto_start = false;
@@ -149,7 +147,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_get_source_config() {
-        let (manager, _source_rx, _event_rx) = create_test_manager().await;
+        let (manager, _event_rx) = create_test_manager().await;
 
         let config = create_test_source_config("test-source", "mock");
         manager.add_source(config.clone()).await.unwrap();
@@ -164,7 +162,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_update_source() {
-        let (manager, _source_rx, _event_rx) = create_test_manager().await;
+        let (manager, _event_rx) = create_test_manager().await;
 
         let mut config = create_test_source_config("test-source", "mock");
         config.auto_start = false;
@@ -187,7 +185,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_list_sources_with_status() {
-        let (manager, _source_rx, _event_rx) = create_test_manager().await;
+        let (manager, _event_rx) = create_test_manager().await;
 
         // Add multiple sources
         let mut config1 = create_test_source_config("source1", "mock");
@@ -238,7 +236,6 @@ mod internal_source_tests {
 
     #[tokio::test]
     async fn test_mock_source_counter() {
-        let (tx, mut rx) = mpsc::channel(100);
         let (event_tx, _event_rx) = mpsc::channel(100);
 
         let mut properties = HashMap::new();
@@ -254,7 +251,8 @@ mod internal_source_tests {
             bootstrap_provider: None,
         };
 
-        let source = MockSource::new(config, tx.clone(), event_tx);
+        let source = MockSource::new(config, event_tx);
+        let mut rx = source.test_subscribe();
 
         // Start the source
         let result = source.start().await;
@@ -263,7 +261,7 @@ mod internal_source_tests {
         // Collect changes
         let mut changes = Vec::new();
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while let Some(event) = rx.recv().await {
+            while let Ok(event) = rx.recv().await {
                 changes.push(event);
                 if changes.len() >= 3 {
                     break;
@@ -282,7 +280,6 @@ mod internal_source_tests {
 
     #[tokio::test]
     async fn test_mock_source_sensor() {
-        let (tx, mut rx) = mpsc::channel(100);
         let (event_tx, _event_rx) = mpsc::channel(100);
 
         let mut properties = HashMap::new();
@@ -297,7 +294,8 @@ mod internal_source_tests {
             bootstrap_provider: None,
         };
 
-        let source = MockSource::new(config, tx.clone(), event_tx);
+        let source = MockSource::new(config, event_tx);
+        let mut rx = source.test_subscribe();
 
         // Start the source
         source.start().await.unwrap();
@@ -305,7 +303,7 @@ mod internal_source_tests {
         // Collect a few sensor readings
         let mut readings = Vec::new();
         tokio::time::timeout(std::time::Duration::from_millis(350), async {
-            while let Some(event) = rx.recv().await {
+            while let Ok(event) = rx.recv().await {
                 readings.push(event);
                 if readings.len() >= 3 {
                     break;
@@ -323,7 +321,6 @@ mod internal_source_tests {
 
     #[tokio::test]
     async fn test_mock_source_status() {
-        let (tx, _rx) = mpsc::channel(100);
         let (event_tx, _event_rx) = mpsc::channel(100);
 
         let mut properties = HashMap::new();
@@ -337,7 +334,7 @@ mod internal_source_tests {
             bootstrap_provider: None,
         };
 
-        let source = MockSource::new(config, tx, event_tx);
+        let source = MockSource::new(config, event_tx);
 
         // Initial status
         assert_eq!(source.status().await, ComponentStatus::Stopped);

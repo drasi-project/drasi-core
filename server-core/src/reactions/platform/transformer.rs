@@ -61,7 +61,10 @@ fn build_tracking_metadata(profiling: &ProfilingMetadata, sequence: u64) -> Map<
         source.insert("reactivatorEnd_ns".to_string(), json!(source_ns));
     }
     if let Some(reactivator_start_ns) = profiling.reactivator_start_ns {
-        source.insert("reactivatorStart_ns".to_string(), json!(reactivator_start_ns));
+        source.insert(
+            "reactivatorStart_ns".to_string(),
+            json!(reactivator_start_ns),
+        );
     } else if let Some(source_ns) = profiling.source_ns {
         source.insert("reactivatorStart_ns".to_string(), json!(source_ns));
     }
@@ -558,10 +561,7 @@ mod tests {
             source.get("changeRouterStart_ns").unwrap().as_u64(),
             Some(2000)
         );
-        assert_eq!(
-            source.get("reactivatorEnd_ns").unwrap().as_u64(),
-            Some(750)
-        );
+        assert_eq!(source.get("reactivatorEnd_ns").unwrap().as_u64(), Some(750));
         assert_eq!(
             source.get("reactivatorStart_ns").unwrap().as_u64(),
             Some(500)

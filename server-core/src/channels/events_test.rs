@@ -197,61 +197,17 @@ mod tests {
     }
 
     #[test]
-    fn test_bootstrap_request() {
-        let request = BootstrapRequest {
-            query_id: "query-1".to_string(),
-            node_labels: vec!["Person".to_string()],
-            relation_labels: vec!["KNOWS".to_string()],
-            request_id: "req-123".to_string(),
-        };
-
-        assert_eq!(request.query_id, "query-1");
-        assert_eq!(request.request_id, "req-123");
-        assert_eq!(request.node_labels.len(), 1);
-        assert_eq!(request.relation_labels.len(), 1);
-    }
-
-    #[test]
-    fn test_bootstrap_response_success() {
-        let response = BootstrapResponse {
-            request_id: "req-123".to_string(),
-            status: BootstrapStatus::Completed { total_count: 100 },
-            message: Some("Bootstrap complete".to_string()),
-        };
-
-        assert!(matches!(response.status, BootstrapStatus::Completed { .. }));
-        assert_eq!(response.message, Some("Bootstrap complete".to_string()));
-    }
-
-    #[test]
-    fn test_bootstrap_response_failure() {
-        let response = BootstrapResponse {
-            request_id: "req-123".to_string(),
-            status: BootstrapStatus::Failed {
-                error: "timeout".to_string(),
-            },
-            message: Some("Bootstrap failed: timeout".to_string()),
-        };
-
-        assert!(matches!(response.status, BootstrapStatus::Failed { .. }));
-        assert!(response.message.unwrap().contains("timeout"));
-    }
-
-    #[test]
     fn test_event_channels_creation() {
         let (channels, receivers) = EventChannels::new();
 
         // Verify channel senders exist
-        assert!(channels.source_event_tx.max_capacity() > 0);
         assert!(channels.query_result_tx.max_capacity() > 0);
         assert!(channels.component_event_tx.max_capacity() > 0);
-        assert!(channels.bootstrap_request_tx.max_capacity() > 0);
 
         // Verify receivers exist
-        drop(receivers.source_event_rx);
         drop(receivers.query_result_rx);
         drop(receivers.component_event_rx);
-        drop(receivers.bootstrap_request_rx);
+        drop(receivers.control_signal_rx);
     }
 
     #[test]
@@ -323,24 +279,6 @@ mod tests {
 
         assert_eq!(received.query_id, "query-1");
         assert!(received.results.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_send_receive_bootstrap_request() {
-        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
-
-        let request = BootstrapRequest {
-            query_id: "query-1".to_string(),
-            node_labels: vec!["Person".to_string()],
-            relation_labels: vec!["KNOWS".to_string()],
-            request_id: "req-123".to_string(),
-        };
-
-        tx.send(request).await.unwrap();
-        let received = rx.recv().await.unwrap();
-
-        assert_eq!(received.query_id, "query-1");
-        assert_eq!(received.request_id, "req-123");
     }
 
     #[tokio::test]

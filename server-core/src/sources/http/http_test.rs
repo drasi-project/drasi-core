@@ -161,10 +161,9 @@ mod tests {
             bootstrap_provider: None,
         };
 
-        let (source_change_tx, _source_change_rx) = mpsc::channel(100);
         let (event_tx, _event_rx) = mpsc::channel(100);
 
-        let source = HttpSource::new(config, source_change_tx, event_tx);
+        let source = HttpSource::new(config, event_tx);
 
         // Test initial status
         assert_eq!(

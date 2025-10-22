@@ -25,8 +25,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_postgres::{Client, NoTls, Row, Transaction};
 
-use crate::bootstrap::{BootstrapContext, BootstrapProvider};
-use crate::channels::{BootstrapRequest, SourceChangeEvent, SourceEvent, SourceEventWrapper};
+use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+use crate::channels::SourceChangeEvent;
 
 /// Bootstrap provider for PostgreSQL sources
 pub struct PostgresBootstrapProvider;
@@ -43,6 +43,7 @@ impl BootstrapProvider for PostgresBootstrapProvider {
         &self,
         request: BootstrapRequest,
         context: &BootstrapContext,
+        event_tx: crate::channels::BootstrapEventSender,
     ) -> Result<usize> {
         info!(
             "Starting PostgreSQL bootstrap for query '{}' with {} node labels and {} relation labels",
@@ -61,7 +62,7 @@ impl BootstrapProvider for PostgresBootstrapProvider {
         let query_id = request.query_id.clone();
 
         // Execute bootstrap
-        let count = handler.execute(request, context).await?;
+        let count = handler.execute(request, context, event_tx).await?;
 
         info!(
             "Completed PostgreSQL bootstrap for query {}: sent {} records",
@@ -157,6 +158,7 @@ impl PostgresBootstrapHandler {
         &mut self,
         request: BootstrapRequest,
         context: &BootstrapContext,
+        event_tx: crate::channels::BootstrapEventSender,
     ) -> Result<usize> {
         info!(
             "Bootstrap: Connecting to PostgreSQL at {}:{}",
@@ -187,7 +189,7 @@ impl PostgresBootstrapHandler {
         let mut total_count = 0;
         for (label, table_name) in tables {
             let count = self
-                .bootstrap_table(&transaction, &label, &table_name, context)
+                .bootstrap_table(&transaction, &label, &table_name, context, &event_tx)
                 .await?;
             info!(
                 "Bootstrapped {} rows from table '{}' with label '{}'",
@@ -311,6 +313,7 @@ impl PostgresBootstrapHandler {
         label: &str,
         table_name: &str,
         context: &BootstrapContext,
+        event_tx: &crate::channels::BootstrapEventSender,
     ) -> Result<usize> {
         debug!(
             "Starting bootstrap of table '{}' with label '{}'",
@@ -340,7 +343,7 @@ impl PostgresBootstrapHandler {
             });
 
             if batch.len() >= batch_size {
-                self.send_batch(&mut batch, context).await?;
+                self.send_batch(&mut batch, context, event_tx).await?;
                 count += batch_size;
             }
         }
@@ -348,7 +351,7 @@ impl PostgresBootstrapHandler {
         // Send remaining batch
         if !batch.is_empty() {
             count += batch.len();
-            self.send_batch(&mut batch, context).await?;
+            self.send_batch(&mut batch, context, event_tx).await?;
         }
 
         Ok(count)
@@ -623,30 +626,20 @@ impl PostgresBootstrapHandler {
         &self,
         batch: &mut Vec<SourceChangeEvent>,
         context: &BootstrapContext,
+        event_tx: &crate::channels::BootstrapEventSender,
     ) -> Result<()> {
         for event in batch.drain(..) {
             // Get next sequence number for this bootstrap event
-            let _sequence = context.next_sequence();
+            let sequence = context.next_sequence();
 
-            // Create profiling metadata for bootstrap event
-            let mut profiling = crate::profiling::ProfilingMetadata::new();
-            let now = crate::profiling::timestamp_ns();
-
-            // Set timestamps as per spec for bootstrap events
-            profiling.source_ns = Some(0); // Always 0 for bootstrap events as per spec
-            profiling.source_send_ns = Some(now);
-            profiling.reactivator_start_ns = Some(now);
-            profiling.reactivator_end_ns = Some(now);
-
-            let wrapper = SourceEventWrapper::with_profiling(
-                event.source_id,
-                SourceEvent::Change(event.change),
-                event.timestamp,
-                profiling,
-            );
-            context
-                .source_event_tx
-                .send(wrapper)
+            let bootstrap_event = crate::channels::BootstrapEvent {
+                source_id: event.source_id,
+                change: event.change,
+                timestamp: event.timestamp,
+                sequence,
+            };
+            event_tx
+                .send(bootstrap_event)
                 .await
                 .map_err(|e| anyhow!("Failed to send bootstrap event: {}", e))?;
         }

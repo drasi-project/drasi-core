@@ -21,7 +21,7 @@ pub use property_builder::PropertyMapBuilder;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use log::{debug, error, info};
+use log::{debug, info};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
@@ -160,7 +160,7 @@ impl ApplicationSourceHandle {
 pub struct ApplicationSource {
     config: SourceConfig,
     status: Arc<RwLock<ComponentStatus>>,
-    source_event_tx: SourceEventSender,
+    broadcast_tx: SourceBroadcastSender,
     event_tx: ComponentEventSender,
     app_rx: Arc<RwLock<Option<mpsc::Receiver<SourceChange>>>>,
     task_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
@@ -170,10 +170,10 @@ pub struct ApplicationSource {
 impl ApplicationSource {
     pub fn new(
         config: SourceConfig,
-        source_event_tx: SourceEventSender,
         event_tx: ComponentEventSender,
     ) -> (Self, ApplicationSourceHandle) {
         let (app_tx, app_rx) = mpsc::channel(1000);
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
 
         let handle = ApplicationSourceHandle {
             tx: app_tx.clone(),
@@ -183,7 +183,7 @@ impl ApplicationSource {
         let source = Self {
             config,
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            source_event_tx,
+            broadcast_tx,
             event_tx,
             app_rx: Arc::new(RwLock::new(Some(app_rx))),
             task_handle: Arc::new(RwLock::new(None)),
@@ -202,7 +202,7 @@ impl ApplicationSource {
             .ok_or_else(|| anyhow::anyhow!("Receiver already taken"))?;
 
         let source_name = self.config.id.clone();
-        let source_event_tx = self.source_event_tx.clone();
+        let broadcast_tx = self.broadcast_tx.clone();
         let event_tx = self.event_tx.clone();
         let status = self.status.clone();
         let bootstrap_data = self.bootstrap_data.clone();
@@ -248,9 +248,10 @@ impl ApplicationSource {
                     profiling,
                 );
 
-                if let Err(e) = source_event_tx.send(wrapper).await {
-                    error!("Failed to send change event: {}", e);
-                    break;
+                // Broadcast (Arc-wrapped for zero-copy)
+                let arc_wrapper = Arc::new(wrapper);
+                if let Err(e) = broadcast_tx.send(arc_wrapper) {
+                    debug!("Failed to broadcast change (no subscribers): {}", e);
                 }
             }
 
@@ -331,5 +332,62 @@ impl Source for ApplicationSource {
 
     fn get_config(&self) -> &SourceConfig {
         &self.config
+    }
+
+    async fn subscribe(
+        &self,
+        query_id: String,
+        enable_bootstrap: bool,
+        _node_labels: Vec<String>,
+        _relation_labels: Vec<String>,
+    ) -> Result<SubscriptionResponse> {
+        info!(
+            "Query {} subscribing to ApplicationSource {} (bootstrap: {})",
+            query_id, self.config.id, enable_bootstrap
+        );
+
+        let broadcast_receiver = self.broadcast_tx.subscribe();
+
+        // ApplicationSource supports bootstrap via stored insert events
+        let bootstrap_receiver = if enable_bootstrap {
+            let (tx, rx) = tokio::sync::mpsc::channel(1000);
+            let bootstrap_data = self.bootstrap_data.read().await;
+
+            info!(
+                "Sending {} bootstrap events for ApplicationSource {}",
+                bootstrap_data.len(),
+                self.config.id
+            );
+
+            // Send bootstrap events
+            for (seq, change) in bootstrap_data.iter().enumerate() {
+                let event = BootstrapEvent {
+                    source_id: self.config.id.clone(),
+                    change: change.clone(),
+                    timestamp: chrono::Utc::now(),
+                    sequence: seq as u64,
+                };
+                let _ = tx.send(event).await;
+            }
+
+            Some(rx)
+        } else {
+            None
+        };
+
+        Ok(SubscriptionResponse {
+            query_id,
+            source_id: self.config.id.clone(),
+            broadcast_receiver,
+            bootstrap_receiver,
+        })
+    }
+
+    fn get_broadcast_receiver(&self) -> Result<SourceBroadcastReceiver> {
+        Ok(self.broadcast_tx.subscribe())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }

@@ -31,7 +31,7 @@ use crate::utils::*;
 pub struct MockSource {
     config: SourceConfig,
     status: Arc<RwLock<ComponentStatus>>,
-    source_event_tx: SourceEventSender,
+    broadcast_tx: SourceBroadcastSender, // Broadcast channel for zero-copy distribution
     event_tx: ComponentEventSender,
     task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 }
@@ -39,16 +39,26 @@ pub struct MockSource {
 impl MockSource {
     pub fn new(
         config: SourceConfig,
-        source_event_tx: SourceEventSender,
         event_tx: ComponentEventSender,
     ) -> Self {
+        // Create broadcast channel with capacity for 1000 events
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
+
         Self {
             config,
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            source_event_tx,
+            broadcast_tx,
             event_tx,
             task_handle: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Subscribe to source events (for testing)
+    ///
+    /// This method is intended for use in tests to receive events broadcast by the source.
+    /// In production, queries subscribe to sources through the SourceManager.
+    pub fn test_subscribe(&self) -> tokio::sync::broadcast::Receiver<Arc<crate::channels::SourceEventWrapper>> {
+        self.broadcast_tx.subscribe()
     }
 }
 
@@ -71,8 +81,8 @@ impl Source for MockSource {
             error!("Failed to send component event: {}", e);
         }
 
-        // Get source_event_tx for publishing
-        let source_event_tx = self.source_event_tx.clone();
+        // Get broadcast_tx for publishing
+        let broadcast_tx = self.broadcast_tx.clone();
         let source_id = self.config.id.clone();
 
         // Get configuration
@@ -258,9 +268,11 @@ impl Source for MockSource {
                     profiling,
                 );
 
-                if let Err(e) = source_event_tx.send(wrapper).await {
-                    error!("Failed to publish change: {}", e);
-                    break;
+                // Send to broadcast channel - wrapped in Arc for zero-copy
+                let arc_wrapper = Arc::new(wrapper);
+                if let Err(e) = broadcast_tx.send(arc_wrapper) {
+                    error!("Failed to broadcast change: {}", e);
+                    // Continue even if no subscribers
                 }
             }
 
@@ -331,5 +343,72 @@ impl Source for MockSource {
 
     fn get_config(&self) -> &SourceConfig {
         &self.config
+    }
+
+    async fn subscribe(
+        &self,
+        query_id: String,
+        enable_bootstrap: bool,
+        _node_labels: Vec<String>,
+        _relation_labels: Vec<String>,
+    ) -> Result<SubscriptionResponse> {
+        info!(
+            "Query {} subscribing to source {} (bootstrap: {})",
+            query_id, self.config.id, enable_bootstrap
+        );
+
+        // Get a broadcast receiver
+        let broadcast_receiver = self.broadcast_tx.subscribe();
+
+        // Bootstrap support for MockSource
+        // For now, MockSource doesn't provide bootstrap data
+        // This will be implemented when we update the bootstrap provider system
+        let bootstrap_receiver = if enable_bootstrap {
+            info!("Bootstrap requested for MockSource but not yet implemented");
+            None
+        } else {
+            None
+        };
+
+        Ok(SubscriptionResponse {
+            query_id,
+            source_id: self.config.id.clone(),
+            broadcast_receiver,
+            bootstrap_receiver,
+        })
+    }
+
+    fn get_broadcast_receiver(&self) -> Result<SourceBroadcastReceiver> {
+        Ok(self.broadcast_tx.subscribe())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl MockSource {
+    /// Inject a test event into the mock source for testing purposes
+    /// This allows tests to send specific events without relying on automatic generation
+    pub async fn inject_event(&self, change: SourceChange) -> Result<()> {
+        // Create profiling metadata with timestamps
+        let mut profiling = crate::profiling::ProfilingMetadata::new();
+        profiling.source_send_ns = Some(crate::profiling::timestamp_ns());
+
+        let wrapper = SourceEventWrapper::with_profiling(
+            self.config.id.clone(),
+            SourceEvent::Change(change),
+            chrono::Utc::now(),
+            profiling,
+        );
+
+        // Send to broadcast channel (new architecture) - wrapped in Arc for zero-copy
+        let arc_wrapper = Arc::new(wrapper);
+        if let Err(e) = self.broadcast_tx.send(arc_wrapper) {
+            error!("Failed to broadcast injected change: {}", e);
+            return Err(anyhow::anyhow!("Failed to broadcast event - no subscribers: {}", e));
+        }
+
+        Ok(())
     }
 }

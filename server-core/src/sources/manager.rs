@@ -38,6 +38,22 @@ pub trait Source: Send + Sync {
     async fn stop(&self) -> Result<()>;
     async fn status(&self) -> ComponentStatus;
     fn get_config(&self) -> &SourceConfig;
+
+    /// Subscribe to this source for change events
+    /// Returns a broadcast receiver for source change events and optionally a bootstrap channel
+    async fn subscribe(
+        &self,
+        query_id: String,
+        enable_bootstrap: bool,
+        node_labels: Vec<String>,
+        relation_labels: Vec<String>,
+    ) -> Result<SubscriptionResponse>;
+
+    /// Get a clone of the broadcast receiver for this source
+    fn get_broadcast_receiver(&self) -> Result<SourceBroadcastReceiver>;
+
+    /// Downcast helper for testing - allows access to concrete types
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 // Convert JSON value to ElementValue
@@ -83,17 +99,15 @@ pub fn convert_json_to_element_properties(
 
 pub struct SourceManager {
     sources: Arc<RwLock<HashMap<String, Arc<dyn Source>>>>,
-    source_event_tx: SourceEventSender,
     event_tx: ComponentEventSender,
     application_handles: Arc<RwLock<HashMap<String, ApplicationSourceHandle>>>,
 }
 
 impl SourceManager {
-    /// Create a new SourceManager with unified event sender
-    pub fn new(source_event_tx: SourceEventSender, event_tx: ComponentEventSender) -> Self {
+    /// Create a new SourceManager
+    pub fn new(event_tx: ComponentEventSender) -> Self {
         Self {
             sources: Arc::new(RwLock::new(HashMap::new())),
-            source_event_tx,
             event_tx,
             application_handles: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -105,11 +119,6 @@ impl SourceManager {
 
     pub async fn get_application_handle(&self, id: &str) -> Option<ApplicationSourceHandle> {
         self.application_handles.read().await.get(id).cloned()
-    }
-
-    /// Get the source event sender for bootstrap provider registration
-    pub fn get_source_event_sender(&self) -> SourceEventSender {
-        self.source_event_tx.clone()
     }
 
     pub async fn add_source(&self, config: SourceConfig) -> Result<()> {
@@ -149,33 +158,27 @@ impl SourceManager {
             // Internal Rust sources running as tokio tasks
             "mock" => Arc::new(MockSource::new(
                 config.clone(),
-                self.source_event_tx.clone(),
                 self.event_tx.clone(),
             )),
             "postgres" => Arc::new(super::PostgresReplicationSource::new(
                 config.clone(),
-                self.source_event_tx.clone(),
                 self.event_tx.clone(),
             )),
             "http" => Arc::new(HttpSource::new(
                 config.clone(),
-                self.source_event_tx.clone(),
                 self.event_tx.clone(),
             )),
             "grpc" => Arc::new(GrpcSource::new(
                 config.clone(),
-                self.source_event_tx.clone(),
                 self.event_tx.clone(),
             )),
             "platform" => Arc::new(PlatformSource::new(
                 config.clone(),
-                self.source_event_tx.clone(),
                 self.event_tx.clone(),
             )),
             "application" => {
                 let (app_source, handle) = ApplicationSource::new(
                     config.clone(),
-                    self.source_event_tx.clone(),
                     self.event_tx.clone(),
                 );
                 // Store the handle for the application to use

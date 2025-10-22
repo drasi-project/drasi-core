@@ -12,10 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod bootstrap_router;
-pub mod data_router;
 pub mod subscription_router;
 
-pub use bootstrap_router::BootstrapRouter;
-pub use data_router::DataRouter;
 pub use subscription_router::SubscriptionRouter;

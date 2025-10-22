@@ -98,30 +98,25 @@ mod query_joins_tests {
         mpsc::Receiver<QueryResult>,
         mpsc::Receiver<ComponentEvent>,
         Arc<SourceManager>,
-        mpsc::Sender<SourceEventWrapper>,
-        mpsc::Receiver<SourceEventWrapper>,
     ) {
         let (query_tx, query_rx) = mpsc::channel(100);
         let (event_tx, event_rx) = mpsc::channel(100);
-        let (source_tx, source_rx) = mpsc::channel(100);
-        let (bootstrap_tx, _bootstrap_rx) = mpsc::channel(100);
 
-        let source_manager = Arc::new(SourceManager::new(source_tx.clone(), event_tx.clone()));
-        let query_manager = Arc::new(QueryManager::new(query_tx, event_tx.clone(), bootstrap_tx));
+        let source_manager = Arc::new(SourceManager::new(event_tx.clone()));
+        let query_manager = Arc::new(QueryManager::new(query_tx, event_tx.clone(), source_manager.clone()));
 
         (
             query_manager,
             query_rx,
             event_rx,
             source_manager,
-            source_tx,
-            source_rx,
         )
     }
 
+
     #[tokio::test]
     async fn test_basic_join_between_two_sources() {
-        let (query_manager, mut query_rx, _event_rx, source_manager, source_tx, source_rx) =
+        let (query_manager, mut query_rx, _event_rx, source_manager) =
             create_test_environment().await;
 
         // Create two mock sources
@@ -149,14 +144,34 @@ mod query_joins_tests {
 
         query_manager.add_query(query_config).await.unwrap();
 
-        // Start the query with the source_rx channel so it receives events
+        // Start the query - it will subscribe directly to sources
         query_manager
-            .start_query("vehicle-driver-query".to_string(), source_rx)
+            .start_query("vehicle-driver-query".to_string())
             .await
             .unwrap();
 
         // Give query time to initialize
         tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Get mock source instances
+        let vehicles_mock = source_manager
+            .get_source_instance("vehicles")
+            .await
+            .expect("vehicles source should exist");
+        let drivers_mock = source_manager
+            .get_source_instance("drivers")
+            .await
+            .expect("drivers source should exist");
+
+        // Downcast to MockSource to access inject_event
+        let vehicles_source = vehicles_mock
+            .as_any()
+            .downcast_ref::<crate::sources::mock::MockSource>()
+            .expect("Should be MockSource");
+        let drivers_source = drivers_mock
+            .as_any()
+            .downcast_ref::<crate::sources::mock::MockSource>()
+            .expect("Should be MockSource");
 
         // Push vehicle data
         let vehicle1 = create_node_with_properties(
@@ -170,12 +185,10 @@ mod query_joins_tests {
             ]),
         );
 
-        source_tx
-            .send(SourceEventWrapper::new(
-                "vehicles".to_string(),
-                SourceEvent::Change(SourceChange::Insert { element: vehicle1 }),
-                chrono::Utc::now(),
-            ))
+        vehicles_source
+            .inject_event(SourceChange::Insert {
+                element: vehicle1,
+            })
             .await
             .unwrap();
 
@@ -191,12 +204,8 @@ mod query_joins_tests {
             ]),
         );
 
-        source_tx
-            .send(SourceEventWrapper::new(
-                "drivers".to_string(),
-                SourceEvent::Change(SourceChange::Insert { element: driver1 }),
-                chrono::Utc::now(),
-            ))
+        drivers_source
+            .inject_event(SourceChange::Insert { element: driver1 })
             .await
             .unwrap();
 
@@ -214,7 +223,7 @@ mod query_joins_tests {
 
     #[tokio::test]
     async fn test_dynamic_updates_with_joins() {
-        let (query_manager, mut query_rx, _event_rx, source_manager, source_tx, source_rx) =
+        let (query_manager, mut query_rx, _event_rx, source_manager) =
             create_test_environment().await;
 
         // Setup sources
@@ -245,11 +254,17 @@ mod query_joins_tests {
 
         query_manager.add_query(query_config).await.unwrap();
         query_manager
-            .start_query("order-restaurant-query".to_string(), source_rx)
+            .start_query("order-restaurant-query".to_string())
             .await
             .unwrap();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Get mock source instances
+        let restaurants_mock = source_manager.get_source_instance("restaurants").await.expect("restaurants source");
+        let orders_mock = source_manager.get_source_instance("orders").await.expect("orders source");
+        let restaurants_source = restaurants_mock.as_any().downcast_ref::<crate::sources::mock::MockSource>().expect("MockSource");
+        let orders_source = orders_mock.as_any().downcast_ref::<crate::sources::mock::MockSource>().expect("MockSource");
 
         // Add initial data
         let restaurant1 = create_node_with_properties(
@@ -258,17 +273,7 @@ mod query_joins_tests {
             vec!["Restaurant".to_string()],
             HashMap::from([("id", json!("REST001")), ("name", json!("Pizza Palace"))]),
         );
-        source_tx
-            .send(SourceEventWrapper {
-                source_id: "restaurants".to_string(),
-                event: SourceEvent::Change(SourceChange::Insert {
-                    element: restaurant1,
-                }),
-                timestamp: chrono::Utc::now(),
-                profiling: None,
-            })
-            .await
-            .unwrap();
+        restaurants_source.inject_event(SourceChange::Insert { element: restaurant1 }).await.unwrap();
 
         let order1 = create_node_with_properties(
             "orders",
@@ -280,17 +285,7 @@ mod query_joins_tests {
                 ("status", json!("pending")),
             ]),
         );
-        source_tx
-            .send(SourceEventWrapper {
-                source_id: "orders".to_string(),
-                event: SourceEvent::Change(SourceChange::Insert {
-                    element: order1.clone(),
-                }),
-                timestamp: chrono::Utc::now(),
-                profiling: None,
-            })
-            .await
-            .unwrap();
+        orders_source.inject_event(SourceChange::Insert { element: order1.clone() }).await.unwrap();
 
         // Wait for initial result
         let _initial_result = timeout(Duration::from_secs(1), query_rx.recv()).await;
@@ -306,17 +301,7 @@ mod query_joins_tests {
                 ("status", json!("completed")),
             ]),
         );
-        source_tx
-            .send(SourceEventWrapper {
-                source_id: "orders".to_string(),
-                event: SourceEvent::Change(SourceChange::Update {
-                    element: updated_order,
-                }),
-                timestamp: chrono::Utc::now(),
-                profiling: None,
-            })
-            .await
-            .unwrap();
+        orders_source.inject_event(SourceChange::Update { element: updated_order }).await.unwrap();
 
         // Check for updated result
         let update_result = timeout(Duration::from_secs(1), query_rx.recv()).await;
@@ -327,14 +312,7 @@ mod query_joins_tests {
             Element::Node { metadata, .. } => metadata,
             _ => panic!("Expected node element"),
         };
-        source_tx
-            .send(SourceEventWrapper::new(
-                "orders".to_string(),
-                SourceEvent::Change(SourceChange::Delete { metadata }),
-                chrono::Utc::now(),
-            ))
-            .await
-            .unwrap();
+        orders_source.inject_event(SourceChange::Delete { metadata }).await.unwrap();
 
         // Verify deletion affects join results
         let delete_result = timeout(Duration::from_secs(1), query_rx.recv()).await;
@@ -346,7 +324,7 @@ mod query_joins_tests {
 
     #[tokio::test]
     async fn test_multiple_joins_in_single_query() {
-        let (query_manager, mut query_rx, _event_rx, source_manager, source_tx, source_rx) =
+        let (query_manager, mut query_rx, _event_rx, source_manager) =
             create_test_environment().await;
 
         // Create three sources
@@ -389,11 +367,19 @@ mod query_joins_tests {
 
         query_manager.add_query(query_config).await.unwrap();
         query_manager
-            .start_query("full-order-query".to_string(), source_rx)
+            .start_query("full-order-query".to_string())
             .await
             .unwrap();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Get mock source instances
+        let orders_mock = source_manager.get_source_instance("orders").await.expect("orders source");
+        let drivers_mock = source_manager.get_source_instance("drivers").await.expect("drivers source");
+        let restaurants_mock = source_manager.get_source_instance("restaurants").await.expect("restaurants source");
+        let orders_source = orders_mock.as_any().downcast_ref::<crate::sources::mock::MockSource>().expect("MockSource");
+        let drivers_source = drivers_mock.as_any().downcast_ref::<crate::sources::mock::MockSource>().expect("MockSource");
+        let restaurants_source = restaurants_mock.as_any().downcast_ref::<crate::sources::mock::MockSource>().expect("MockSource");
 
         // Add data for all three sources
         let restaurant = create_node_with_properties(
@@ -402,17 +388,7 @@ mod query_joins_tests {
             vec!["Restaurant".to_string()],
             HashMap::from([("id", json!("REST001")), ("name", json!("Burger Barn"))]),
         );
-        source_tx
-            .send(SourceEventWrapper {
-                source_id: "restaurants".to_string(),
-                event: SourceEvent::Change(SourceChange::Insert {
-                    element: restaurant,
-                }),
-                timestamp: chrono::Utc::now(),
-                profiling: None,
-            })
-            .await
-            .unwrap();
+        restaurants_source.inject_event(SourceChange::Insert { element: restaurant }).await.unwrap();
 
         let driver = create_node_with_properties(
             "drivers",
@@ -420,14 +396,7 @@ mod query_joins_tests {
             vec!["Driver".to_string()],
             HashMap::from([("id", json!("DRV001")), ("name", json!("Alice Smith"))]),
         );
-        source_tx
-            .send(SourceEventWrapper::new(
-                "drivers".to_string(),
-                SourceEvent::Change(SourceChange::Insert { element: driver }),
-                chrono::Utc::now(),
-            ))
-            .await
-            .unwrap();
+        drivers_source.inject_event(SourceChange::Insert { element: driver }).await.unwrap();
 
         let order = create_node_with_properties(
             "orders",
@@ -439,14 +408,7 @@ mod query_joins_tests {
                 ("driverId", json!("DRV001")),
             ]),
         );
-        source_tx
-            .send(SourceEventWrapper::new(
-                "orders".to_string(),
-                SourceEvent::Change(SourceChange::Insert { element: order }),
-                chrono::Utc::now(),
-            ))
-            .await
-            .unwrap();
+        orders_source.inject_event(SourceChange::Insert { element: order }).await.unwrap();
 
         // Wait for query result with multiple joins
         let result = timeout(Duration::from_secs(2), query_rx.recv()).await;
@@ -458,7 +420,7 @@ mod query_joins_tests {
 
     #[tokio::test]
     async fn test_join_with_non_matching_properties() {
-        let (query_manager, mut query_rx, _event_rx, source_manager, source_tx, source_rx) =
+        let (query_manager, mut query_rx, _event_rx, source_manager) =
             create_test_environment().await;
 
         source_manager
@@ -487,11 +449,17 @@ mod query_joins_tests {
 
         query_manager.add_query(query_config).await.unwrap();
         query_manager
-            .start_query("non-matching-query".to_string(), source_rx)
+            .start_query("non-matching-query".to_string())
             .await
             .unwrap();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Get mock source instances
+        let source1_mock = source_manager.get_source_instance("source1").await.expect("source1");
+        let source2_mock = source_manager.get_source_instance("source2").await.expect("source2");
+        let source1_source = source1_mock.as_any().downcast_ref::<crate::sources::mock::MockSource>().expect("MockSource");
+        let source2_source = source2_mock.as_any().downcast_ref::<crate::sources::mock::MockSource>().expect("MockSource");
 
         // Add nodes with non-matching link IDs
         let node_a = create_node_with_properties(
@@ -500,14 +468,7 @@ mod query_joins_tests {
             vec!["NodeA".to_string()],
             HashMap::from([("linkId", json!("LINK001"))]),
         );
-        source_tx
-            .send(SourceEventWrapper::new(
-                "source1".to_string(),
-                SourceEvent::Change(SourceChange::Insert { element: node_a }),
-                chrono::Utc::now(),
-            ))
-            .await
-            .unwrap();
+        source1_source.inject_event(SourceChange::Insert { element: node_a }).await.unwrap();
 
         let node_b = create_node_with_properties(
             "source2",
@@ -515,14 +476,7 @@ mod query_joins_tests {
             vec!["NodeB".to_string()],
             HashMap::from([("linkId", json!("LINK999"))]), // Different ID - no match
         );
-        source_tx
-            .send(SourceEventWrapper::new(
-                "source2".to_string(),
-                SourceEvent::Change(SourceChange::Insert { element: node_b }),
-                chrono::Utc::now(),
-            ))
-            .await
-            .unwrap();
+        source2_source.inject_event(SourceChange::Insert { element: node_b }).await.unwrap();
 
         // Should not receive results or receive empty results
         let result = timeout(Duration::from_millis(500), query_rx.recv()).await;
@@ -532,7 +486,7 @@ mod query_joins_tests {
 
     #[tokio::test]
     async fn test_join_with_null_properties() {
-        let (query_manager, mut query_rx, _event_rx, source_manager, source_tx, source_rx) =
+        let (query_manager, mut query_rx, _event_rx, source_manager) =
             create_test_environment().await;
 
         source_manager
@@ -561,11 +515,17 @@ mod query_joins_tests {
 
         query_manager.add_query(query_config).await.unwrap();
         query_manager
-            .start_query("null-property-query".to_string(), source_rx)
+            .start_query("null-property-query".to_string())
             .await
             .unwrap();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Get mock source instances
+        let source1_mock = source_manager.get_source_instance("source1").await.expect("source1");
+        let source2_mock = source_manager.get_source_instance("source2").await.expect("source2");
+        let source1_source = source1_mock.as_any().downcast_ref::<crate::sources::mock::MockSource>().expect("MockSource");
+        let source2_source = source2_mock.as_any().downcast_ref::<crate::sources::mock::MockSource>().expect("MockSource");
 
         // Add node without the join property
         let node_a = create_node_with_properties(
@@ -574,14 +534,7 @@ mod query_joins_tests {
             vec!["NodeA".to_string()],
             HashMap::from([("otherprop", json!("value"))]), // Missing optionalId
         );
-        source_tx
-            .send(SourceEventWrapper::new(
-                "source1".to_string(),
-                SourceEvent::Change(SourceChange::Insert { element: node_a }),
-                chrono::Utc::now(),
-            ))
-            .await
-            .unwrap();
+        source1_source.inject_event(SourceChange::Insert { element: node_a }).await.unwrap();
 
         let node_b = create_node_with_properties(
             "source2",
@@ -589,14 +542,7 @@ mod query_joins_tests {
             vec!["NodeB".to_string()],
             HashMap::from([("optionalId", json!(null))]), // Null value
         );
-        source_tx
-            .send(SourceEventWrapper::new(
-                "source2".to_string(),
-                SourceEvent::Change(SourceChange::Insert { element: node_b }),
-                chrono::Utc::now(),
-            ))
-            .await
-            .unwrap();
+        source2_source.inject_event(SourceChange::Insert { element: node_b }).await.unwrap();
 
         // Test behavior with null/missing properties
         let result = timeout(Duration::from_millis(500), query_rx.recv()).await;
@@ -605,7 +551,7 @@ mod query_joins_tests {
 
     #[tokio::test]
     async fn test_join_with_duplicate_keys() {
-        let (query_manager, mut query_rx, _event_rx, source_manager, source_tx, source_rx) =
+        let (query_manager, mut query_rx, _event_rx, source_manager) =
             create_test_environment().await;
 
         source_manager
@@ -634,11 +580,17 @@ mod query_joins_tests {
 
         query_manager.add_query(query_config).await.unwrap();
         query_manager
-            .start_query("product-category-query".to_string(), source_rx)
+            .start_query("product-category-query".to_string())
             .await
             .unwrap();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Get mock source instances
+        let products_mock = source_manager.get_source_instance("products").await.expect("products");
+        let categories_mock = source_manager.get_source_instance("categories").await.expect("categories");
+        let products_source = products_mock.as_any().downcast_ref::<crate::sources::mock::MockSource>().expect("MockSource");
+        let categories_source = categories_mock.as_any().downcast_ref::<crate::sources::mock::MockSource>().expect("MockSource");
 
         // Add category
         let category = create_node_with_properties(
@@ -647,14 +599,7 @@ mod query_joins_tests {
             vec!["Category".to_string()],
             HashMap::from([("id", json!("CAT001")), ("name", json!("Electronics"))]),
         );
-        source_tx
-            .send(SourceEventWrapper::new(
-                "categories".to_string(),
-                SourceEvent::Change(SourceChange::Insert { element: category }),
-                chrono::Utc::now(),
-            ))
-            .await
-            .unwrap();
+        categories_source.inject_event(SourceChange::Insert { element: category }).await.unwrap();
 
         // Add multiple products with same category ID (duplicate keys)
         for i in 1..=3 {
@@ -667,14 +612,7 @@ mod query_joins_tests {
                     ("categoryId", json!("CAT001")), // All have same category
                 ]),
             );
-            source_tx
-                .send(SourceEventWrapper::new(
-                    "products".to_string(),
-                    SourceEvent::Change(SourceChange::Insert { element: product }),
-                    chrono::Utc::now(),
-                ))
-                .await
-                .unwrap();
+            products_source.inject_event(SourceChange::Insert { element: product }).await.unwrap();
         }
 
         // Should receive multiple results for duplicate keys
@@ -695,7 +633,7 @@ mod query_joins_tests {
 
     #[tokio::test]
     async fn test_bootstrap_with_joins() {
-        let (query_manager, mut query_rx, _event_rx, source_manager, source_tx, source_rx) =
+        let (query_manager, mut query_rx, _event_rx, source_manager) =
             create_test_environment().await;
 
         source_manager
@@ -707,6 +645,12 @@ mod query_joins_tests {
             .await
             .unwrap();
 
+        // Get mock source instances
+        let users_mock = source_manager.get_source_instance("users").await.expect("users");
+        let posts_mock = source_manager.get_source_instance("posts").await.expect("posts");
+        let users_source = users_mock.as_any().downcast_ref::<crate::sources::mock::MockSource>().expect("MockSource");
+        let posts_source = posts_mock.as_any().downcast_ref::<crate::sources::mock::MockSource>().expect("MockSource");
+
         // Pre-populate data before starting query
         let user1 = create_node_with_properties(
             "users",
@@ -714,14 +658,7 @@ mod query_joins_tests {
             vec!["User".to_string()],
             HashMap::from([("userId", json!("USER001")), ("name", json!("Bob"))]),
         );
-        source_tx
-            .send(SourceEventWrapper::new(
-                "users".to_string(),
-                SourceEvent::Change(SourceChange::Insert { element: user1 }),
-                chrono::Utc::now(),
-            ))
-            .await
-            .unwrap();
+        users_source.inject_event(SourceChange::Insert { element: user1 }).await.unwrap();
 
         let post1 = create_node_with_properties(
             "posts",
@@ -733,14 +670,7 @@ mod query_joins_tests {
                 ("title", json!("First Post")),
             ]),
         );
-        source_tx
-            .send(SourceEventWrapper::new(
-                "posts".to_string(),
-                SourceEvent::Change(SourceChange::Insert { element: post1 }),
-                chrono::Utc::now(),
-            ))
-            .await
-            .unwrap();
+        posts_source.inject_event(SourceChange::Insert { element: post1 }).await.unwrap();
 
         // Now create and start query with join
         let join_config = create_query_join_config(
@@ -762,7 +692,7 @@ mod query_joins_tests {
 
         // Start query - should trigger bootstrap
         query_manager
-            .start_query("user-posts-query".to_string(), source_rx)
+            .start_query("user-posts-query".to_string())
             .await
             .unwrap();
 
@@ -784,14 +714,7 @@ mod query_joins_tests {
                 ("title", json!("Second Post")),
             ]),
         );
-        source_tx
-            .send(SourceEventWrapper::new(
-                "posts".to_string(),
-                SourceEvent::Change(SourceChange::Insert { element: post2 }),
-                chrono::Utc::now(),
-            ))
-            .await
-            .unwrap();
+        posts_source.inject_event(SourceChange::Insert { element: post2 }).await.unwrap();
 
         // Should receive incremental update
         let incremental_result = timeout(Duration::from_secs(1), query_rx.recv()).await;

@@ -15,8 +15,10 @@
 use crate::profiling::ProfilingMetadata;
 use drasi_core::models::SourceChange;
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::collections::HashMap;
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{broadcast, mpsc};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ComponentType {
@@ -116,6 +118,77 @@ impl SourceEventWrapper {
     }
 }
 
+/// Arc-wrapped SourceEventWrapper for zero-copy distribution
+pub type ArcSourceEvent = Arc<SourceEventWrapper>;
+
+/// Bootstrap event wrapper for dedicated bootstrap channels
+#[derive(Debug, Clone)]
+pub struct BootstrapEvent {
+    pub source_id: String,
+    pub change: SourceChange,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub sequence: u64,
+}
+
+/// Bootstrap completion signal
+#[derive(Debug, Clone)]
+pub struct BootstrapComplete {
+    pub source_id: String,
+    pub total_events: u64,
+}
+
+/// Subscription request from Query to Source
+#[derive(Debug, Clone)]
+pub struct SubscriptionRequest {
+    pub query_id: String,
+    pub source_id: String,
+    pub enable_bootstrap: bool,
+    pub node_labels: Vec<String>,
+    pub relation_labels: Vec<String>,
+}
+
+/// Subscription response from Source to Query
+pub struct SubscriptionResponse {
+    pub query_id: String,
+    pub source_id: String,
+    pub broadcast_receiver: SourceBroadcastReceiver,
+    pub bootstrap_receiver: Option<BootstrapEventReceiver>,
+}
+
+/// Priority queue event wrapper with timestamp ordering
+#[derive(Debug, Clone)]
+pub struct PriorityQueueEvent {
+    pub event: ArcSourceEvent,
+}
+
+impl PriorityQueueEvent {
+    pub fn new(event: ArcSourceEvent) -> Self {
+        Self { event }
+    }
+}
+
+// Implement ordering for priority queue (oldest events first)
+impl PartialEq for PriorityQueueEvent {
+    fn eq(&self, other: &Self) -> bool {
+        self.event.timestamp == other.event.timestamp
+    }
+}
+
+impl Eq for PriorityQueueEvent {}
+
+impl PartialOrd for PriorityQueueEvent {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PriorityQueueEvent {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Reverse ordering for min-heap behavior (oldest first)
+        other.event.timestamp.cmp(&self.event.timestamp)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResult {
     pub query_id: String,
@@ -179,8 +252,6 @@ pub enum ControlMessage {
     Shutdown,
 }
 
-pub type SourceEventReceiver = mpsc::Receiver<SourceEventWrapper>;
-pub type SourceEventSender = mpsc::Sender<SourceEventWrapper>;
 pub type QueryResultReceiver = mpsc::Receiver<QueryResult>;
 pub type QueryResultSender = mpsc::Sender<QueryResult>;
 pub type ComponentEventReceiver = mpsc::Receiver<ComponentEvent>;
@@ -188,59 +259,25 @@ pub type ComponentEventSender = mpsc::Sender<ComponentEvent>;
 pub type ControlMessageReceiver = mpsc::Receiver<ControlMessage>;
 pub type ControlMessageSender = mpsc::Sender<ControlMessage>;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BootstrapRequest {
-    pub query_id: String,
-    pub node_labels: Vec<String>,
-    pub relation_labels: Vec<String>,
-    pub request_id: String,
-}
+// New broadcast channel types for zero-copy event distribution
+pub type SourceBroadcastSender = broadcast::Sender<ArcSourceEvent>;
+pub type SourceBroadcastReceiver = broadcast::Receiver<ArcSourceEvent>;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BootstrapResponse {
-    pub request_id: String,
-    pub status: BootstrapStatus,
-    pub message: Option<String>,
-}
+// Bootstrap channel types for dedicated bootstrap data delivery
+pub type BootstrapEventSender = mpsc::Sender<BootstrapEvent>;
+pub type BootstrapEventReceiver = mpsc::Receiver<BootstrapEvent>;
+pub type BootstrapCompleteSender = mpsc::Sender<BootstrapComplete>;
+pub type BootstrapCompleteReceiver = mpsc::Receiver<BootstrapComplete>;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum BootstrapStatus {
-    Started,
-    InProgress { count: usize },
-    Completed { total_count: usize },
-    Failed { error: String },
-}
-
-pub type BootstrapRequestReceiver = mpsc::Receiver<BootstrapRequest>;
-pub type BootstrapRequestSender = mpsc::Sender<BootstrapRequest>;
-pub type BootstrapResponseReceiver = mpsc::Receiver<BootstrapResponse>;
-pub type BootstrapResponseSender = mpsc::Sender<BootstrapResponse>;
-
-/// Control signals for bootstrap coordination
+/// Control signals for coordination
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlSignal {
-    /// Bootstrap has started for a query-source pair
-    BootstrapStarted {
-        query_id: String,
-        source_id: String,
-    },
-    /// Bootstrap has completed for a query-source pair
-    BootstrapCompleted {
-        query_id: String,
-        source_id: String,
-    },
     /// Query has entered running state
-    Running {
-        query_id: String,
-    },
+    Running { query_id: String },
     /// Query has stopped
-    Stopped {
-        query_id: String,
-    },
+    Stopped { query_id: String },
     /// Query has been deleted
-    Deleted {
-        query_id: String,
-    },
+    Deleted { query_id: String },
 }
 
 /// Wrapper for control signals with metadata
@@ -273,54 +310,37 @@ pub type ControlSignalReceiver = mpsc::Receiver<ControlSignalWrapper>;
 pub type ControlSignalSender = mpsc::Sender<ControlSignalWrapper>;
 
 pub struct EventChannels {
-    pub source_event_tx: SourceEventSender,
     pub query_result_tx: QueryResultSender,
     pub component_event_tx: ComponentEventSender,
     pub _control_tx: ControlMessageSender,
-    pub bootstrap_request_tx: BootstrapRequestSender,
-    #[allow(dead_code)]
-    pub bootstrap_response_tx: BootstrapResponseSender,
     pub control_signal_tx: ControlSignalSender,
 }
 
 pub struct EventReceivers {
-    pub source_event_rx: SourceEventReceiver,
     pub query_result_rx: QueryResultReceiver,
     pub component_event_rx: ComponentEventReceiver,
     pub _control_rx: ControlMessageReceiver,
-    pub bootstrap_request_rx: BootstrapRequestReceiver,
-    #[allow(dead_code)]
-    pub bootstrap_response_rx: BootstrapResponseReceiver,
     pub control_signal_rx: ControlSignalReceiver,
 }
 
 impl EventChannels {
     pub fn new() -> (Self, EventReceivers) {
-        let (source_event_tx, source_event_rx) = mpsc::channel(1000);
         let (query_result_tx, query_result_rx) = mpsc::channel(1000);
         let (component_event_tx, component_event_rx) = mpsc::channel(1000);
         let (control_tx, control_rx) = mpsc::channel(100);
-        let (bootstrap_request_tx, bootstrap_request_rx) = mpsc::channel(100);
-        let (bootstrap_response_tx, bootstrap_response_rx) = mpsc::channel(100);
         let (control_signal_tx, control_signal_rx) = mpsc::channel(100);
 
         let channels = Self {
-            source_event_tx,
             query_result_tx,
             component_event_tx,
             _control_tx: control_tx,
-            bootstrap_request_tx,
-            bootstrap_response_tx,
             control_signal_tx,
         };
 
         let receivers = EventReceivers {
-            source_event_rx,
             query_result_rx,
             component_event_rx,
             _control_rx: control_rx,
-            bootstrap_request_rx,
-            bootstrap_response_rx,
             control_signal_rx,
         };
 

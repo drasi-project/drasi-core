@@ -23,26 +23,32 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
-use crate::channels::{BootstrapRequest, SourceEventSender};
 use crate::config::SourceConfig;
 
 pub mod providers;
 pub mod script_reader;
 pub mod script_types;
 
+/// Request for bootstrap data from a query
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BootstrapRequest {
+    pub query_id: String,
+    pub node_labels: Vec<String>,
+    pub relation_labels: Vec<String>,
+    pub request_id: String,
+}
+
 /// Context passed to bootstrap providers containing source configuration
-/// and channels needed for bootstrap operations
+/// Bootstrap happens through dedicated channels created in source.subscribe().
 #[derive(Clone)]
 pub struct BootstrapContext {
     /// Unique server ID for logging and tracing
     pub server_id: String,
     /// The parent source configuration
     pub source_config: Arc<SourceConfig>,
-    /// Channel for sending bootstrap data as source events
-    pub source_event_tx: SourceEventSender,
     /// Source ID for labeling bootstrap events
     pub source_id: String,
     /// Sequence counter for bootstrap events
@@ -53,13 +59,11 @@ impl BootstrapContext {
     pub fn new(
         server_id: String,
         source_config: Arc<SourceConfig>,
-        source_event_tx: SourceEventSender,
         source_id: String,
     ) -> Self {
         Self {
             server_id,
             source_config,
-            source_event_tx,
             source_id,
             sequence_counter: Arc::new(AtomicU64::new(0)),
         }
@@ -87,16 +91,20 @@ impl BootstrapContext {
     }
 }
 
+use crate::channels::{BootstrapEventSender};
+
 /// Trait for bootstrap providers that handle initial data delivery
 /// for newly subscribed queries
 #[async_trait]
 pub trait BootstrapProvider: Send + Sync {
     /// Perform bootstrap operation for the given request
+    /// Sends bootstrap events to the provided channel
     /// Returns the number of elements sent
     async fn bootstrap(
         &self,
         request: BootstrapRequest,
         context: &BootstrapContext,
+        event_tx: BootstrapEventSender,
     ) -> Result<usize>;
 }
 

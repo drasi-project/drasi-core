@@ -17,8 +17,7 @@
 #[cfg(test)]
 mod tests {
     use super::super::*;
-    use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapProviderConfig};
-    use crate::channels::BootstrapRequest;
+    use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapProviderConfig, BootstrapRequest};
     use crate::config::SourceConfig;
     use serde_json::json;
     use std::collections::HashMap;
@@ -27,7 +26,8 @@ mod tests {
 
     fn create_test_context() -> (
         BootstrapContext,
-        mpsc::Receiver<crate::channels::SourceEventWrapper>,
+        mpsc::Receiver<crate::channels::BootstrapEvent>,
+        mpsc::Sender<crate::channels::BootstrapEvent>,
     ) {
         let (tx, rx) = mpsc::channel(100);
 
@@ -45,17 +45,16 @@ mod tests {
         let context = BootstrapContext::new(
             "test_server".to_string(),
             source_config,
-            tx,
             "test_source".to_string(),
         );
 
-        (context, rx)
+        (context, rx, tx)
     }
 
     #[tokio::test]
     async fn test_noop_provider() {
         let provider = noop::NoOpBootstrapProvider::new();
-        let (context, _rx) = create_test_context();
+        let (context, _rx, tx) = create_test_context();
 
         let request = BootstrapRequest {
             query_id: "test_query".to_string(),
@@ -64,7 +63,7 @@ mod tests {
             request_id: "test_request".to_string(),
         };
 
-        let result = provider.bootstrap(request, &context).await;
+        let result = provider.bootstrap(request, &context, tx).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 0);
     }
@@ -78,7 +77,7 @@ mod tests {
         let provider = script_file::ScriptFileBootstrapProvider::new(vec![script_path
             .to_string_lossy()
             .to_string()]);
-        let (context, mut rx) = create_test_context();
+        let (context, mut rx, tx) = create_test_context();
 
         let request = BootstrapRequest {
             query_id: "test_query".to_string(),
@@ -87,7 +86,7 @@ mod tests {
             request_id: "test_request".to_string(),
         };
 
-        let result = provider.bootstrap(request, &context).await;
+        let result = provider.bootstrap(request, &context, tx).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 3); // 3 Person nodes in person_small.jsonl
 
@@ -101,7 +100,7 @@ mod tests {
     #[tokio::test]
     async fn test_application_provider() {
         let provider = application::ApplicationBootstrapProvider::new();
-        let (context, mut rx) = create_test_context();
+        let (context, mut rx, tx) = create_test_context();
 
         // Test with empty bootstrap data
         let request = BootstrapRequest {
@@ -111,7 +110,7 @@ mod tests {
             request_id: "test_request".to_string(),
         };
 
-        let result = provider.bootstrap(request, &context).await;
+        let result = provider.bootstrap(request, &context, tx).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 0);
 
@@ -138,7 +137,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_bootstrap_context_properties() {
-        let (context, _rx) = create_test_context();
+        let (context, _rx, _tx) = create_test_context();
 
         // Test getting a property that exists
         let prop = context.get_property("test_prop");

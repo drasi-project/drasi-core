@@ -29,8 +29,7 @@ use serde_json::Map;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::bootstrap::{BootstrapContext, BootstrapProvider};
-use crate::channels::{BootstrapRequest, SourceEvent, SourceEventWrapper};
+use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 use crate::sources::manager::convert_json_to_element_properties;
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 
@@ -223,6 +222,7 @@ impl BootstrapProvider for PlatformBootstrapProvider {
         &self,
         request: BootstrapRequest,
         context: &BootstrapContext,
+        event_tx: crate::channels::BootstrapEventSender,
     ) -> Result<usize> {
         info!(
             "Starting platform bootstrap for query {} from source {}",
@@ -279,31 +279,18 @@ impl BootstrapProvider for PlatformBootstrapProvider {
             let source_change = SourceChange::Insert { element };
 
             // Get next sequence number for this bootstrap event
-            let _sequence = context.next_sequence();
+            let sequence = context.next_sequence();
 
-            // Create profiling metadata for bootstrap event
-            let mut profiling = crate::profiling::ProfilingMetadata::new();
-            let now = crate::profiling::timestamp_ns();
+            // Send via channel
+            let bootstrap_event = crate::channels::BootstrapEvent {
+                source_id: context.source_id.clone(),
+                change: source_change,
+                timestamp: Utc::now(),
+                sequence,
+            };
 
-            // Set timestamps as per spec for bootstrap events
-            profiling.source_ns = Some(0); // Always 0 for bootstrap events as per spec
-            profiling.source_send_ns = Some(now);
-            profiling.reactivator_start_ns = Some(now);
-            profiling.reactivator_end_ns = Some(now);
-
-            // Note: sequence number is tracked separately in context
-
-            // Send via channel with profiling
-            let wrapper = SourceEventWrapper::with_profiling(
-                context.source_id.clone(),
-                SourceEvent::Change(source_change),
-                Utc::now(),
-                profiling,
-            );
-
-            context
-                .source_event_tx
-                .send(wrapper)
+            event_tx
+                .send(bootstrap_event)
                 .await
                 .context("Failed to send bootstrap element via channel")?;
 

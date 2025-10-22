@@ -66,7 +66,7 @@ fn default_ssl_mode() -> String {
 pub struct PostgresReplicationSource {
     config: SourceConfig,
     status: Arc<RwLock<ComponentStatus>>,
-    source_event_tx: SourceEventSender,
+    broadcast_tx: SourceBroadcastSender,
     event_tx: ComponentEventSender,
     task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     table_primary_keys: Arc<RwLock<HashMap<String, Vec<String>>>>,
@@ -75,13 +75,14 @@ pub struct PostgresReplicationSource {
 impl PostgresReplicationSource {
     pub fn new(
         config: SourceConfig,
-        source_event_tx: SourceEventSender,
         event_tx: ComponentEventSender,
     ) -> Self {
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
+
         Self {
             config,
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            source_event_tx,
+            broadcast_tx,
             event_tx,
             task_handle: Arc::new(RwLock::new(None)),
             table_primary_keys: Arc::new(RwLock::new(HashMap::new())),
@@ -175,7 +176,7 @@ impl Source for PostgresReplicationSource {
 
         let config = self.parse_config()?;
         let source_id = self.config.id.clone();
-        let source_event_tx = self.source_event_tx.clone();
+        let broadcast_tx = self.broadcast_tx.clone();
         let event_tx = self.event_tx.clone();
         let status_clone = self.status.clone();
         let primary_keys = self.table_primary_keys.clone();
@@ -183,8 +184,7 @@ impl Source for PostgresReplicationSource {
         let task = tokio::spawn(async move {
             if let Err(e) = run_replication(
                 source_id.clone(),
-                config,
-                source_event_tx,
+                config,                broadcast_tx,
                 event_tx.clone(),
                 status_clone.clone(),
                 primary_keys,
@@ -259,20 +259,46 @@ impl Source for PostgresReplicationSource {
     fn get_config(&self) -> &SourceConfig {
         &self.config
     }
+
+    async fn subscribe(
+        &self,
+        query_id: String,
+        _enable_bootstrap: bool,
+        _node_labels: Vec<String>,
+        _relation_labels: Vec<String>,
+    ) -> Result<SubscriptionResponse> {
+        Ok(SubscriptionResponse {
+            query_id,
+            source_id: self.config.id.clone(),
+            broadcast_receiver: self.broadcast_tx.subscribe(),
+            bootstrap_receiver: None,
+        })
+    }
+
+    fn get_broadcast_receiver(&self) -> Result<SourceBroadcastReceiver> {
+        Ok(self.broadcast_tx.subscribe())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 async fn run_replication(
     source_id: String,
-    config: PostgresReplicationConfig,
-    source_event_tx: SourceEventSender,
+    config: PostgresReplicationConfig,    broadcast_tx: SourceBroadcastSender,
     event_tx: ComponentEventSender,
     status: Arc<RwLock<ComponentStatus>>,
     table_primary_keys: Arc<RwLock<HashMap<String, Vec<String>>>>,
 ) -> Result<()> {
     info!("Starting replication for source {}", source_id);
 
-    let mut stream =
-        stream::ReplicationStream::new(config, source_id, source_event_tx, event_tx, status);
+    let mut stream = stream::ReplicationStream::new(
+        config,
+        source_id,        broadcast_tx,
+        event_tx,
+        status,
+    );
 
     // Set the primary keys from bootstrap
     stream.set_primary_keys(table_primary_keys);

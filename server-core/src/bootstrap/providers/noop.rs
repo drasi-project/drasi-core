@@ -18,8 +18,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use log::info;
 
-use crate::bootstrap::{BootstrapContext, BootstrapProvider};
-use crate::channels::BootstrapRequest;
+use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 
 /// Bootstrap provider that returns no data
 pub struct NoOpBootstrapProvider;
@@ -36,6 +35,7 @@ impl BootstrapProvider for NoOpBootstrapProvider {
         &self,
         request: BootstrapRequest,
         _context: &BootstrapContext,
+        _event_tx: crate::channels::BootstrapEventSender,
     ) -> Result<usize> {
         info!(
             "No-op bootstrap for query {}: returning no data",

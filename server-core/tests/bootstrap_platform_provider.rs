@@ -15,8 +15,7 @@
 //! Integration tests for platform bootstrap provider
 
 use drasi_server_core::bootstrap::providers::PlatformBootstrapProvider;
-use drasi_server_core::bootstrap::{BootstrapContext, BootstrapProvider};
-use drasi_server_core::channels::BootstrapRequest;
+use drasi_server_core::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 use drasi_server_core::config::SourceConfig;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -66,7 +65,6 @@ async fn test_platform_bootstrap_with_mock_server() {
     let context = BootstrapContext::new(
         "test_server".to_string(),
         source_config,
-        tx.clone(),
         "test-source".to_string(),
     );
 
@@ -79,7 +77,7 @@ async fn test_platform_bootstrap_with_mock_server() {
     };
 
     // Execute bootstrap
-    let result = provider.bootstrap(request, &context).await;
+    let result = provider.bootstrap(request, &context, tx.clone()).await;
     assert!(result.is_ok());
 
     let element_count = result.unwrap();
@@ -126,7 +124,6 @@ async fn test_platform_bootstrap_label_filtering() {
     let context = BootstrapContext::new(
         "test_server".to_string(),
         source_config,
-        tx.clone(),
         "test-source".to_string(),
     );
 
@@ -138,7 +135,7 @@ async fn test_platform_bootstrap_label_filtering() {
         request_id: "req-1".to_string(),
     };
 
-    let result = provider.bootstrap(request, &context).await;
+    let result = provider.bootstrap(request, &context, tx.clone()).await;
     assert!(result.is_ok());
 
     let element_count = result.unwrap();
@@ -169,7 +166,6 @@ async fn test_platform_bootstrap_connection_failure() {
     let context = BootstrapContext::new(
         "test_server".to_string(),
         source_config,
-        tx.clone(),
         "test-source".to_string(),
     );
 
@@ -181,7 +177,7 @@ async fn test_platform_bootstrap_connection_failure() {
     };
 
     // Should fail due to connection error
-    let result = provider.bootstrap(request, &context).await;
+    let result = provider.bootstrap(request, &context, tx.clone()).await;
     assert!(result.is_err());
 }
 
@@ -217,7 +213,6 @@ this is not valid json
     let context = BootstrapContext::new(
         "test_server".to_string(),
         source_config,
-        tx.clone(),
         "test-source".to_string(),
     );
 
@@ -228,7 +223,7 @@ this is not valid json
         request_id: "req-1".to_string(),
     };
 
-    let result = provider.bootstrap(request, &context).await;
+    let result = provider.bootstrap(request, &context, tx.clone()).await;
     assert!(result.is_ok());
 
     // Should have 2 elements (malformed line skipped)

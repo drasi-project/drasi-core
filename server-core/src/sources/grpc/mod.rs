@@ -39,8 +39,7 @@ use proto::{
 /// gRPC source that exposes a gRPC endpoint to receive SourceChangeEvents
 pub struct GrpcSource {
     config: SourceConfig,
-    status: Arc<RwLock<ComponentStatus>>,
-    source_event_tx: SourceEventSender,
+    status: Arc<RwLock<ComponentStatus>>,    broadcast_tx: SourceBroadcastSender,
     event_tx: ComponentEventSender,
     task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     shutdown_tx: Arc<RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
@@ -48,14 +47,13 @@ pub struct GrpcSource {
 
 impl GrpcSource {
     pub fn new(
-        config: SourceConfig,
-        source_event_tx: SourceEventSender,
-        event_tx: ComponentEventSender,
+        config: SourceConfig,        event_tx: ComponentEventSender,
     ) -> Self {
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
+
         Self {
             config,
-            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            source_event_tx,
+            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),            broadcast_tx,
             event_tx,
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
@@ -108,7 +106,7 @@ impl Source for GrpcSource {
         // Create gRPC service
         let service = GrpcSourceService {
             source_id: self.config.id.clone(),
-            source_event_tx: self.source_event_tx.clone(),
+            broadcast_tx: self.broadcast_tx.clone(),
         };
 
         let svc = SourceServiceServer::new(service);
@@ -205,12 +203,49 @@ impl Source for GrpcSource {
     fn get_config(&self) -> &SourceConfig {
         &self.config
     }
+
+    async fn subscribe(
+        &self,
+        query_id: String,
+        enable_bootstrap: bool,
+        _node_labels: Vec<String>,
+        _relation_labels: Vec<String>,
+    ) -> Result<SubscriptionResponse> {
+        info!(
+            "Query {} subscribing to GrpcSource {} (bootstrap: {})",
+            query_id, self.config.id, enable_bootstrap
+        );
+
+        let broadcast_receiver = self.broadcast_tx.subscribe();
+
+        // GrpcSource doesn't support bootstrap
+        let bootstrap_receiver = if enable_bootstrap {
+            info!("Bootstrap requested for GrpcSource but not supported");
+            None
+        } else {
+            None
+        };
+
+        Ok(SubscriptionResponse {
+            query_id,
+            source_id: self.config.id.clone(),
+            broadcast_receiver,
+            bootstrap_receiver,
+        })
+    }
+
+    fn get_broadcast_receiver(&self) -> Result<SourceBroadcastReceiver> {
+        Ok(self.broadcast_tx.subscribe())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// gRPC service implementation
 struct GrpcSourceService {
-    source_id: String,
-    source_event_tx: SourceEventSender,
+    source_id: String,    broadcast_tx: SourceBroadcastSender,
 }
 
 #[tonic::async_trait]
@@ -237,15 +272,13 @@ impl SourceService for GrpcSourceService {
 
                     debug!("[{}] Processing gRPC event: {:?}", self.source_id, &wrapper);
 
-                    // Send to channel
-                    if let Err(e) = self.source_event_tx.send(wrapper).await {
-                        error!("[{}] Failed to send source event: {}", self.source_id, e);
-                        return Ok(Response::new(SubmitEventResponse {
-                            success: false,
-                            message: "Failed to process event".to_string(),
-                            error: "Internal channel error".to_string(),
-                            event_id: String::new(),
-                        }));
+                    // Broadcast (Arc-wrapped for zero-copy)
+                    let arc_wrapper = Arc::new(wrapper);
+                    if let Err(e) = self.broadcast_tx.send(arc_wrapper) {
+                        debug!(
+                            "[{}] Failed to broadcast (no subscribers): {}",
+                            self.source_id, e
+                        );
                     }
 
                     debug!("[{}] Successfully processed gRPC event", self.source_id);
@@ -285,7 +318,7 @@ impl SourceService for GrpcSourceService {
     ) -> Result<Response<Self::StreamEventsStream>, Status> {
         let mut stream = request.into_inner();
         let source_id = self.source_id.clone();
-        let source_event_tx = self.source_event_tx.clone();
+        let broadcast_tx = self.broadcast_tx.clone();
 
         let (tx, rx) = tokio::sync::mpsc::channel(128);
 
@@ -306,7 +339,17 @@ impl SourceService for GrpcSourceService {
                             profiling,
                         );
 
-                        if let Err(e) = source_event_tx.send(wrapper).await {
+                        // Broadcast to new architecture
+                        let arc_wrapper = Arc::new(wrapper.clone());
+                        if let Err(e) = broadcast_tx.send(arc_wrapper) {
+                            debug!(
+                                "[{}] Failed to broadcast (no subscribers): {}",
+                                source_id, e
+                            );
+                        }
+
+                        // Send to legacy channel
+                        if let Err(e) = broadcast_tx.send(Arc::new(wrapper)) {
                             error!("[{}] Failed to send source event: {}", source_id, e);
                             let _ = tx
                                 .send(Ok(StreamEventResponse {

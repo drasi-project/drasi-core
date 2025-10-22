@@ -24,7 +24,7 @@ use tokio::task::JoinHandle;
 
 use crate::channels::{
     ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, ControlOperation,
-    SourceControl, SourceEvent, SourceEventSender, SourceEventWrapper,
+    SourceBroadcastReceiver, SourceBroadcastSender, SourceControl, SourceEvent, SourceEventWrapper, SubscriptionResponse,
 };
 use crate::config::SourceConfig;
 use crate::sources::manager::convert_json_to_element_properties;
@@ -82,7 +82,7 @@ impl Default for PlatformConfig {
 pub struct PlatformSource {
     config: SourceConfig,
     status: Arc<RwLock<ComponentStatus>>,
-    source_event_tx: SourceEventSender,
+    broadcast_tx: SourceBroadcastSender,
     event_tx: ComponentEventSender,
     task_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
 }
@@ -91,16 +91,25 @@ impl PlatformSource {
     /// Create a new platform source
     pub fn new(
         config: SourceConfig,
-        source_event_tx: SourceEventSender,
         event_tx: ComponentEventSender,
     ) -> Self {
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
+
         Self {
             config,
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            source_event_tx,
+            broadcast_tx,
             event_tx,
             task_handle: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Subscribe to source events (for testing)
+    ///
+    /// This method is intended for use in tests to receive events broadcast by the source.
+    /// In production, queries subscribe to sources through the SourceManager.
+    pub fn test_subscribe(&self) -> tokio::sync::broadcast::Receiver<Arc<crate::channels::SourceEventWrapper>> {
+        self.broadcast_tx.subscribe()
     }
 
     /// Parse configuration from properties
@@ -289,7 +298,7 @@ impl PlatformSource {
     async fn start_consumer_task(
         source_id: String,
         platform_config: PlatformConfig,
-        source_event_tx: SourceEventSender,
+        broadcast_tx: SourceBroadcastSender,
         event_tx: ComponentEventSender,
         status: Arc<RwLock<ComponentStatus>>,
     ) -> JoinHandle<()> {
@@ -348,7 +357,6 @@ impl PlatformSource {
                 return;
             }
 
-            // No need for separate publishers - use source_event_tx directly
 
             // Main consumer loop
             loop {
@@ -410,14 +418,14 @@ impl PlatformSource {
                                                                         chrono::Utc::now(),
                                                                         profiling,
                                                                     );
-                                                                    if let Err(e) = source_event_tx
-                                                                        .send(wrapper)
-                                                                        .await
+
+                                                                    // Broadcast to new architecture (Arc-wrapped)
+                                                                    let arc_wrapper =
+                                                                        Arc::new(wrapper);
+                                                                    if let Err(e) = broadcast_tx
+                                                                        .send(arc_wrapper)
                                                                     {
-                                                                        error!(
-                                                                            "Failed to publish control event: {}",
-                                                                            e
-                                                                        );
+                                                                        debug!("[{}] Failed to broadcast control event (no subscribers): {}", source_id, e);
                                                                     } else {
                                                                         debug!(
                                                                             "Published control event for stream {}",
@@ -442,18 +450,25 @@ impl PlatformSource {
                                                         ) {
                                                             Ok(source_changes_with_timestamps) => {
                                                                 // Publish source changes
-                                                                for item in source_changes_with_timestamps
+                                                                for item in
+                                                                    source_changes_with_timestamps
                                                                 {
                                                                     // Create profiling metadata with timestamps
                                                                     let mut profiling = crate::profiling::ProfilingMetadata::new();
                                                                     profiling.source_send_ns = Some(crate::profiling::timestamp_ns());
 
                                                                     // Extract source_ns from SourceChange transaction time
-                                                                    profiling.source_ns = Some(item.source_change.get_transaction_time());
+                                                                    profiling.source_ns = Some(
+                                                                        item.source_change
+                                                                            .get_transaction_time(),
+                                                                    );
 
                                                                     // Set reactivator timestamps from event
-                                                                    profiling.reactivator_start_ns = item.reactivator_start_ns;
-                                                                    profiling.reactivator_end_ns = item.reactivator_end_ns;
+                                                                    profiling
+                                                                        .reactivator_start_ns =
+                                                                        item.reactivator_start_ns;
+                                                                    profiling.reactivator_end_ns =
+                                                                        item.reactivator_end_ns;
 
                                                                     let wrapper = SourceEventWrapper::with_profiling(
                                                                         source_id.clone(),
@@ -461,14 +476,14 @@ impl PlatformSource {
                                                                         chrono::Utc::now(),
                                                                         profiling,
                                                                     );
-                                                                    if let Err(e) = source_event_tx
-                                                                        .send(wrapper)
-                                                                        .await
+
+                                                                    // Broadcast to new architecture (Arc-wrapped)
+                                                                    let arc_wrapper =
+                                                                        Arc::new(wrapper);
+                                                                    if let Err(e) = broadcast_tx
+                                                                        .send(arc_wrapper)
                                                                     {
-                                                                        error!(
-                                                                            "Failed to publish source change: {}",
-                                                                            e
-                                                                        );
+                                                                        debug!("[{}] Failed to broadcast change (no subscribers): {}", source_id, e);
                                                                     } else {
                                                                         debug!(
                                                                             "Published source change for event {}",
@@ -584,7 +599,7 @@ impl Source for PlatformSource {
         let task = Self::start_consumer_task(
             self.config.id.clone(),
             platform_config,
-            self.source_event_tx.clone(),
+            self.broadcast_tx.clone(),
             self.event_tx.clone(),
             self.status.clone(),
         )
@@ -615,6 +630,29 @@ impl Source for PlatformSource {
 
     fn get_config(&self) -> &SourceConfig {
         &self.config
+    }
+
+    async fn subscribe(
+        &self,
+        query_id: String,
+        _enable_bootstrap: bool,
+        _node_labels: Vec<String>,
+        _relation_labels: Vec<String>,
+    ) -> Result<SubscriptionResponse> {
+        Ok(SubscriptionResponse {
+            query_id,
+            source_id: self.config.id.clone(),
+            broadcast_receiver: self.broadcast_tx.subscribe(),
+            bootstrap_receiver: None,
+        })
+    }
+
+    fn get_broadcast_receiver(&self) -> Result<SourceBroadcastReceiver> {
+        Ok(self.broadcast_tx.subscribe())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
@@ -693,7 +731,10 @@ struct SourceChangeWithTimestamps {
 ///
 /// Handles events in CloudEvent format with a data array containing change events.
 /// Each event in the data array has: op, payload.after/before, payload.source
-fn transform_platform_event(cloud_event: Value, source_id: &str) -> Result<Vec<SourceChangeWithTimestamps>> {
+fn transform_platform_event(
+    cloud_event: Value,
+    source_id: &str,
+) -> Result<Vec<SourceChangeWithTimestamps>> {
     let mut source_changes = Vec::new();
 
     // Extract the data array from CloudEvent wrapper

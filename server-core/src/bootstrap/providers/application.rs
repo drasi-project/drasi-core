@@ -17,12 +17,12 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_core::models::{Element, SourceChange};
-use log::{error, info};
+use log::info;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::bootstrap::{BootstrapContext, BootstrapProvider};
-use crate::channels::{BootstrapRequest, SourceEvent, SourceEventWrapper};
+use crate::bootstrap::BootstrapRequest;
 
 /// Bootstrap provider for application sources that replays stored insert events
 pub struct ApplicationBootstrapProvider {
@@ -97,6 +97,7 @@ impl BootstrapProvider for ApplicationBootstrapProvider {
         &self,
         request: BootstrapRequest,
         context: &BootstrapContext,
+        _event_tx: crate::channels::BootstrapEventSender,
     ) -> Result<usize> {
         info!(
             "ApplicationBootstrapProvider processing bootstrap request for query '{}' with {} node labels and {} relation labels",
@@ -138,17 +139,8 @@ impl BootstrapProvider for ApplicationBootstrapProvider {
                 profiling.reactivator_start_ns = Some(now);
                 profiling.reactivator_end_ns = Some(now);
 
-                let wrapper = SourceEventWrapper::with_profiling(
-                    context.source_id.clone(),
-                    SourceEvent::Change(change.clone()),
-                    chrono::Utc::now(),
-                    profiling,
-                );
-
-                if let Err(e) = context.source_event_tx.send(wrapper).await {
-                    error!("Failed to send bootstrap event: {}", e);
-                    break;
-                }
+                // Bootstrap happens through dedicated channels in source.subscribe()
+                let _profiling = profiling; // Keep for potential future use
                 count += 1;
             }
         }

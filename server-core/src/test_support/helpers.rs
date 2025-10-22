@@ -110,11 +110,6 @@ pub mod mock_helpers {
     use crate::channels::*;
     use tokio::sync::mpsc;
 
-    /// Creates a test channel pair for source changes
-    pub fn create_test_source_change_channel() -> (SourceEventSender, SourceEventReceiver) {
-        mpsc::channel(100)
-    }
-
     /// Creates a test channel pair for query results
     pub fn create_test_query_result_channel() -> (QueryResultSender, QueryResultReceiver) {
         mpsc::channel(100)
@@ -138,10 +133,9 @@ pub async fn create_test_application_source(
     use tokio::sync::mpsc;
 
     let config = create_test_source_config(id, "application");
-    let (source_event_tx, _source_event_rx) = mpsc::channel(100);
     let (event_tx, _event_rx) = mpsc::channel(100);
 
-    ApplicationSource::new(config, source_event_tx, event_tx)
+    ApplicationSource::new(config, event_tx)
 }
 
 /// Helper function for creating test application reactions

@@ -23,7 +23,7 @@ mod test_support;
 
 use anyhow::Result;
 use drasi_core::models::SourceChange;
-use drasi_server_core::channels::{ComponentEvent, SourceEvent, SourceEventWrapper};
+use drasi_server_core::channels::SourceEvent;
 use drasi_server_core::config::SourceConfig;
 use drasi_server_core::sources::platform::PlatformSource;
 use drasi_server_core::sources::Source;
@@ -40,10 +40,9 @@ fn create_test_source(
     stream_key: &str,
 ) -> (
     PlatformSource,
-    mpsc::Receiver<SourceEventWrapper>,
-    mpsc::Receiver<ComponentEvent>,
+    tokio::sync::broadcast::Receiver<std::sync::Arc<drasi_server_core::channels::SourceEventWrapper>>,
+    mpsc::Receiver<drasi_server_core::channels::ComponentEvent>,
 ) {
-    let (source_change_tx, source_change_rx) = mpsc::channel(100);
     let (event_tx, event_rx) = mpsc::channel(100);
 
     let mut properties = HashMap::new();
@@ -62,7 +61,8 @@ fn create_test_source(
         bootstrap_provider: None,
     };
 
-    let source = PlatformSource::new(config, source_change_tx, event_tx);
+    let source = PlatformSource::new(config, event_tx);
+    let source_change_rx = source.test_subscribe();
 
     (source, source_change_rx, event_rx)
 }
@@ -97,7 +97,7 @@ async fn test_basic_insert_event_consumption() -> Result<()> {
 
     // Verify
     assert_eq!(wrapper.source_id, "test-source");
-    match wrapper.event {
+    match &wrapper.event {
         SourceEvent::Change(SourceChange::Insert { element }) => {
             assert_eq!(element.get_reference().element_id.as_ref(), "1");
             assert_eq!(
@@ -146,7 +146,7 @@ async fn test_basic_update_event_consumption() -> Result<()> {
         .expect("Should receive source change");
 
     // Verify
-    match wrapper.event {
+    match &wrapper.event {
         SourceEvent::Change(SourceChange::Update { element }) => {
             assert_eq!(element.get_reference().element_id.as_ref(), "1");
             // Properties should exist
@@ -182,7 +182,7 @@ async fn test_basic_delete_event_consumption() -> Result<()> {
         .expect("Should receive source change");
 
     // Verify
-    match wrapper.event {
+    match &wrapper.event {
         SourceEvent::Change(SourceChange::Delete { metadata }) => {
             assert_eq!(metadata.reference.element_id.as_ref(), "2");
             assert_eq!(metadata.labels.first(), Some(&"Person".into()));
@@ -226,7 +226,7 @@ async fn test_node_element_transformation() -> Result<()> {
         .expect("Should receive source change");
 
     // Verify node structure
-    match wrapper.event {
+    match &wrapper.event {
         SourceEvent::Change(SourceChange::Insert { element }) => {
             // Check labels
             let labels = &element.get_metadata().labels;
@@ -284,7 +284,7 @@ async fn test_relation_element_transformation() -> Result<()> {
         .expect("Should receive source change");
 
     // Verify relation structure
-    match wrapper.event {
+    match &wrapper.event {
         SourceEvent::Change(SourceChange::Insert { element }) => {
             use drasi_core::models::{Element, ElementValue};
             if let Element::Relation {
@@ -347,7 +347,7 @@ async fn test_multiple_events_in_batch() -> Result<()> {
             .await?
             .expect("Should receive source change");
 
-        if let SourceEvent::Change(SourceChange::Insert { element }) = wrapper.event {
+        if let SourceEvent::Change(SourceChange::Insert { element }) = &wrapper.event {
             received_ids.push(element.get_reference().element_id.as_ref().to_string());
         }
     }
@@ -470,7 +470,7 @@ async fn test_resume_from_position() -> Result<()> {
         .await?
         .expect("Should receive second event");
 
-    match wrapper.event {
+    match &wrapper.event {
         SourceEvent::Change(SourceChange::Insert { element }) => {
             assert_eq!(element.get_reference().element_id.as_ref(), "second");
         }
@@ -515,7 +515,7 @@ async fn test_malformed_json_event() -> Result<()> {
         .await?
         .expect("Should receive valid event despite malformed one");
 
-    match wrapper.event {
+    match &wrapper.event {
         SourceEvent::Change(SourceChange::Insert { element }) => {
             assert_eq!(element.get_reference().element_id.as_ref(), "valid-1");
         }
@@ -566,7 +566,7 @@ async fn test_missing_required_fields() -> Result<()> {
         .await?
         .expect("Should receive valid event");
 
-    match wrapper.event {
+    match &wrapper.event {
         SourceEvent::Change(SourceChange::Insert { element }) => {
             assert_eq!(element.get_reference().element_id.as_ref(), "valid-2");
         }
@@ -617,7 +617,7 @@ async fn test_invalid_operation_type() -> Result<()> {
         .await?
         .expect("Should receive valid event");
 
-    match wrapper.event {
+    match &wrapper.event {
         SourceEvent::Change(SourceChange::Insert { element }) => {
             assert_eq!(element.get_reference().element_id.as_ref(), "valid-3");
         }
@@ -720,7 +720,7 @@ async fn test_multiple_events_in_cloudevent_data_array() -> Result<()> {
             .await?
             .expect("Should receive event");
 
-        if let SourceEvent::Change(SourceChange::Insert { element }) = wrapper.event {
+        if let SourceEvent::Change(SourceChange::Insert { element }) = &wrapper.event {
             received_ids.push(element.get_reference().element_id.as_ref().to_string());
         }
     }
@@ -788,7 +788,7 @@ async fn test_graceful_shutdown() -> Result<()> {
 
     // Start receiving
     let first = timeout(Duration::from_secs(5), source_change_rx.recv()).await?;
-    assert!(first.is_some());
+    assert!(first.is_ok());
 
     // Stop while events may still be in flight
     source.stop().await?;
@@ -845,7 +845,7 @@ async fn test_restart_and_resume() -> Result<()> {
         .await?
         .expect("Should receive second");
 
-    match wrapper.event {
+    match &wrapper.event {
         SourceEvent::Change(SourceChange::Insert { element }) => {
             assert_eq!(element.get_reference().element_id.as_ref(), "restart-2");
         }

@@ -103,8 +103,8 @@ impl QueryBuilder {
             auto_start: self.auto_start,
             properties: self.properties,
             joins: self.joins,
-            enable_bootstrap: true,          // Default: bootstrap enabled
-            bootstrap_buffer_size: 10000,    // Default buffer size
+            enable_bootstrap: true,       // Default: bootstrap enabled
+            bootstrap_buffer_size: 10000, // Default buffer size
         }
     }
 }

@@ -42,7 +42,7 @@ use super::{
 pub struct AdaptiveHttpSource {
     config: SourceConfig,
     status: Arc<RwLock<ComponentStatus>>,
-    source_event_tx: SourceEventSender,
+    broadcast_tx: SourceBroadcastSender,
     event_tx: ComponentEventSender,
     task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     shutdown_tx: Arc<RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
@@ -67,7 +67,6 @@ struct AdaptiveAppState {
 impl AdaptiveHttpSource {
     pub fn new(
         config: SourceConfig,
-        source_event_tx: SourceEventSender,
         event_tx: ComponentEventSender,
     ) -> Self {
         // Configure adaptive batching
@@ -119,10 +118,12 @@ impl AdaptiveHttpSource {
             adaptive_config.adaptive_enabled = enabled;
         }
 
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
+
         Self {
             config,
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            source_event_tx,
+            broadcast_tx,
             event_tx,
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
@@ -243,8 +244,7 @@ impl AdaptiveHttpSource {
     }
 
     async fn run_adaptive_batcher(
-        batch_rx: mpsc::Receiver<SourceChangeEvent>,
-        source_event_tx: SourceEventSender,
+        batch_rx: mpsc::Receiver<SourceChangeEvent>,        broadcast_tx: SourceBroadcastSender,
         adaptive_config: AdaptiveBatchConfig,
         source_id: String,
     ) {
@@ -280,7 +280,18 @@ impl AdaptiveHttpSource {
                     event.timestamp,
                     profiling,
                 );
-                if let Err(e) = source_event_tx.send(wrapper).await {
+
+                // Broadcast to new architecture (Arc-wrapped for zero-copy)
+                let arc_wrapper = Arc::new(wrapper.clone());
+                if let Err(e) = broadcast_tx.send(arc_wrapper) {
+                    debug!(
+                        "[{}] Failed to broadcast (no subscribers): {}",
+                        source_id, e
+                    );
+                }
+
+                // Also send to legacy mpsc channel for backward compatibility
+                if let Err(e) = broadcast_tx.send(Arc::new(wrapper)) {
                     error!("[{}] Failed to send batched event: {}", source_id, e);
                 }
             }
@@ -338,14 +349,12 @@ impl Source for AdaptiveHttpSource {
         // Create batch channel
         let (batch_tx, batch_rx) = mpsc::channel(1000);
 
-        // Start adaptive batcher task
-        let source_event_tx = self.source_event_tx.clone();
+        // Start adaptive batcher task        let broadcast_tx = self.broadcast_tx.clone();
         let adaptive_config = self.adaptive_config.clone();
         let source_id = self.config.id.clone();
 
         tokio::spawn(Self::run_adaptive_batcher(
-            batch_rx,
-            source_event_tx,
+            batch_rx,            self.broadcast_tx.clone(),
             adaptive_config,
             source_id.clone(),
         ));
@@ -455,5 +464,28 @@ impl Source for AdaptiveHttpSource {
 
     fn get_config(&self) -> &SourceConfig {
         &self.config
+    }
+
+    async fn subscribe(
+        &self,
+        query_id: String,
+        _enable_bootstrap: bool,
+        _node_labels: Vec<String>,
+        _relation_labels: Vec<String>,
+    ) -> Result<SubscriptionResponse> {
+        Ok(SubscriptionResponse {
+            query_id,
+            source_id: self.config.id.clone(),
+            broadcast_receiver: self.broadcast_tx.subscribe(),
+            bootstrap_receiver: None,
+        })
+    }
+
+    fn get_broadcast_receiver(&self) -> Result<SourceBroadcastReceiver> {
+        Ok(self.broadcast_tx.subscribe())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
