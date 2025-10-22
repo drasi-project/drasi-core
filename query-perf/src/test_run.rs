@@ -104,9 +104,9 @@ impl TestRunConfig {
 
 #[derive(Debug)]
 pub struct TestRunResult {
-    scenario_name: String,
-    element_index_type: IndexType,
-    result_index_type: IndexType,
+    _scenario_name: String,
+    _element_index_type: IndexType,
+    _result_index_type: IndexType,
     bootstrap_start_time: u128,
     bootstrap_end_time: u128,
     bootstrap_duration_ms: u128,
@@ -135,9 +135,9 @@ impl TestRunResult {
         result_index_type: IndexType,
     ) -> TestRunResult {
         TestRunResult {
-            scenario_name,
-            element_index_type,
-            result_index_type,
+            _scenario_name: scenario_name,
+            _element_index_type: element_index_type,
+            _result_index_type: result_index_type,
             bootstrap_start_time: 0,
             bootstrap_end_time: 0,
             bootstrap_duration_ms: 0,
