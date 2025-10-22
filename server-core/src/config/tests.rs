@@ -16,7 +16,6 @@
 mod schema_tests {
     use super::super::schema::*;
     use serde_json::json;
-    use std::collections::HashMap;
 
     #[test]
     fn test_server_settings_defaults() {
