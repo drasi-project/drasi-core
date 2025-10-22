@@ -101,18 +101,14 @@ mod query_joins_tests {
         let (event_tx, event_rx) = mpsc::channel(100);
 
         let source_manager = Arc::new(SourceManager::new(event_tx.clone()));
-        let query_manager = Arc::new(QueryManager::new(
-            event_tx.clone(),
-            source_manager.clone(),
-        ));
+        let query_manager = Arc::new(QueryManager::new(event_tx.clone(), source_manager.clone()));
 
         (query_manager, event_rx, source_manager)
     }
 
     #[tokio::test]
     async fn test_basic_join_between_two_sources() {
-        let (query_manager, _event_rx, source_manager) =
-            create_test_environment().await;
+        let (query_manager, _event_rx, source_manager) = create_test_environment().await;
 
         // Create two mock sources
         let vehicles_source = create_test_source_config("vehicles", "mock");
@@ -208,14 +204,15 @@ mod query_joins_tests {
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Verify query is running
-        let status = query_manager.get_query_status("vehicle-driver-query".to_string()).await;
+        let status = query_manager
+            .get_query_status("vehicle-driver-query".to_string())
+            .await;
         assert!(status.is_ok(), "Should be able to get query status");
     }
 
     #[tokio::test]
     async fn test_dynamic_updates_with_joins() {
-        let (query_manager, _event_rx, source_manager) =
-            create_test_environment().await;
+        let (query_manager, _event_rx, source_manager) = create_test_environment().await;
 
         // Setup sources
         source_manager
@@ -336,14 +333,15 @@ mod query_joins_tests {
 
         // Verify query is still running after updates and deletes
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let status = query_manager.get_query_status("order-restaurant-query".to_string()).await;
+        let status = query_manager
+            .get_query_status("order-restaurant-query".to_string())
+            .await;
         assert!(status.is_ok(), "Query should still be running");
     }
 
     #[tokio::test]
     async fn test_multiple_joins_in_single_query() {
-        let (query_manager, _event_rx, source_manager) =
-            create_test_environment().await;
+        let (query_manager, _event_rx, source_manager) = create_test_environment().await;
 
         // Create three sources
         source_manager
@@ -459,14 +457,18 @@ mod query_joins_tests {
 
         // NOTE: In the new broadcast architecture, would need subscription to verify results
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let status = query_manager.get_query_status("full-order-query".to_string()).await;
-        assert!(status.is_ok(), "Query with multiple joins should be running");
+        let status = query_manager
+            .get_query_status("full-order-query".to_string())
+            .await;
+        assert!(
+            status.is_ok(),
+            "Query with multiple joins should be running"
+        );
     }
 
     #[tokio::test]
     async fn test_join_with_non_matching_properties() {
-        let (query_manager, _event_rx, source_manager) =
-            create_test_environment().await;
+        let (query_manager, _event_rx, source_manager) = create_test_environment().await;
 
         source_manager
             .add_source(create_test_source_config("source1", "mock"))
@@ -543,14 +545,15 @@ mod query_joins_tests {
 
         // NOTE: Testing non-matching join behavior - query should still run
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let status = query_manager.get_query_status("non-matching-query".to_string()).await;
+        let status = query_manager
+            .get_query_status("non-matching-query".to_string())
+            .await;
         assert!(status.is_ok(), "Query should handle non-matching joins");
     }
 
     #[tokio::test]
     async fn test_join_with_null_properties() {
-        let (query_manager, _event_rx, source_manager) =
-            create_test_environment().await;
+        let (query_manager, _event_rx, source_manager) = create_test_environment().await;
 
         source_manager
             .add_source(create_test_source_config("source1", "mock"))
@@ -627,14 +630,15 @@ mod query_joins_tests {
 
         // NOTE: Testing null property handling - query should still run
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let status = query_manager.get_query_status("null-property-query".to_string()).await;
+        let status = query_manager
+            .get_query_status("null-property-query".to_string())
+            .await;
         assert!(status.is_ok(), "Query should handle null properties");
     }
 
     #[tokio::test]
     async fn test_join_with_duplicate_keys() {
-        let (query_manager, _event_rx, source_manager) =
-            create_test_environment().await;
+        let (query_manager, _event_rx, source_manager) = create_test_environment().await;
 
         source_manager
             .add_source(create_test_source_config("products", "mock"))
@@ -717,14 +721,15 @@ mod query_joins_tests {
 
         // NOTE: Testing duplicate key handling - query should process all products
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let status = query_manager.get_query_status("product-category-query".to_string()).await;
+        let status = query_manager
+            .get_query_status("product-category-query".to_string())
+            .await;
         assert!(status.is_ok(), "Query should handle duplicate keys");
     }
 
     #[tokio::test]
     async fn test_bootstrap_with_joins() {
-        let (query_manager, _event_rx, source_manager) =
-            create_test_environment().await;
+        let (query_manager, _event_rx, source_manager) = create_test_environment().await;
 
         source_manager
             .add_source(create_test_source_config("users", "mock"))
@@ -826,7 +831,9 @@ mod query_joins_tests {
 
         // Verify query continues processing after bootstrap
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let status = query_manager.get_query_status("user-posts-query".to_string()).await;
+        let status = query_manager
+            .get_query_status("user-posts-query".to_string())
+            .await;
         assert!(status.is_ok(), "Query should handle bootstrap with joins");
     }
 }

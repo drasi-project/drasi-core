@@ -306,5 +306,4 @@ mod tests {
             _ => panic!("Expected Platform bootstrap provider"),
         }
     }
-
 }

@@ -38,7 +38,6 @@ mod tests {
         assert_eq!(event.message, Some("Starting source".to_string()));
     }
 
-
     #[test]
     fn test_source_event_change() {
         let metadata = ElementMetadata {

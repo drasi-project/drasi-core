@@ -320,7 +320,6 @@ async fn test_publish_update_results() -> Result<()> {
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-
     reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
@@ -334,7 +333,9 @@ async fn test_publish_update_results() -> Result<()> {
             None,
         )],
     );
-    broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+    broadcast_tx
+        .send(Arc::new(query_result))
+        .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -370,14 +371,15 @@ async fn test_publish_delete_results() -> Result<()> {
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-
     reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
 
     // Send delete result
     let query_result = build_query_result_delete(query_id, vec![json!({"id": "2", "name": "Bob"})]);
-    broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+    broadcast_tx
+        .send(Arc::new(query_result))
+        .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -406,7 +408,6 @@ async fn test_mixed_result_types() -> Result<()> {
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-
     reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
@@ -423,7 +424,9 @@ async fn test_mixed_result_types() -> Result<()> {
         metadata: HashMap::new(),
         profiling: None,
     };
-    broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+    broadcast_tx
+        .send(Arc::new(query_result))
+        .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -453,14 +456,15 @@ async fn test_stream_naming_convention() -> Result<()> {
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-
     reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
 
     // Send result
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+    broadcast_tx
+        .send(Arc::new(query_result))
+        .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -487,7 +491,6 @@ async fn test_metadata_preservation() -> Result<()> {
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-
     reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
@@ -504,7 +507,9 @@ async fn test_metadata_preservation() -> Result<()> {
         metadata,
         profiling: None,
     };
-    broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+    broadcast_tx
+        .send(Arc::new(query_result))
+        .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -536,13 +541,14 @@ async fn test_cloudevent_required_fields() -> Result<()> {
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-
     reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
 
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+    broadcast_tx
+        .send(Arc::new(query_result))
+        .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -570,13 +576,14 @@ async fn test_cloudevent_topic_format() -> Result<()> {
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-
     reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
 
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+    broadcast_tx
+        .send(Arc::new(query_result))
+        .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -600,13 +607,14 @@ async fn test_cloudevent_timestamp_format() -> Result<()> {
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-
     reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
 
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+    broadcast_tx
+        .send(Arc::new(query_result))
+        .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -630,13 +638,14 @@ async fn test_cloudevent_data_content_type() -> Result<()> {
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-
     reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
 
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+    broadcast_tx
+        .send(Arc::new(query_result))
+        .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -659,13 +668,14 @@ async fn test_dapr_metadata_fields() -> Result<()> {
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-
     reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
 
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+    broadcast_tx
+        .send(Arc::new(query_result))
+        .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -696,13 +706,14 @@ async fn test_custom_pubsub_name() -> Result<()> {
         Some("custom-pubsub"),
     );
 
-
     reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
 
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+    broadcast_tx
+        .send(Arc::new(query_result))
+        .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -725,7 +736,6 @@ async fn test_running_control_event() -> Result<()> {
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) = create_test_reaction(redis_url.clone(), query_id, true, None, None);
-
 
     reaction.start(server_core.clone()).await?;
 
@@ -755,7 +765,6 @@ async fn test_control_events_disabled() -> Result<()> {
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-
     reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(300)).await;
@@ -784,7 +793,6 @@ async fn test_sequence_numbering() -> Result<()> {
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-
     reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
@@ -792,7 +800,9 @@ async fn test_sequence_numbering() -> Result<()> {
     // Send 5 query results
     for i in 1..=5 {
         let query_result = build_query_result_add(query_id, vec![json!({"id": i})]);
-        broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+        broadcast_tx
+            .send(Arc::new(query_result))
+            .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
         sleep(Duration::from_millis(50)).await;
     }
 
@@ -832,7 +842,6 @@ async fn test_maxlen_stream_trimming() -> Result<()> {
         None,
     );
 
-
     reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
@@ -840,7 +849,9 @@ async fn test_maxlen_stream_trimming() -> Result<()> {
     // Send 10 events
     for i in 1..=10 {
         let query_result = build_query_result_add(query_id, vec![json!({"id": i})]);
-        broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+        broadcast_tx
+            .send(Arc::new(query_result))
+            .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
         sleep(Duration::from_millis(30)).await;
     }
 
@@ -877,7 +888,6 @@ async fn test_update_with_grouping_keys() -> Result<()> {
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-
     reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
@@ -891,7 +901,9 @@ async fn test_update_with_grouping_keys() -> Result<()> {
             Some(vec!["key1".to_string(), "key2".to_string()]),
         )],
     );
-    broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+    broadcast_tx
+        .send(Arc::new(query_result))
+        .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -925,7 +937,6 @@ async fn test_empty_metadata_filtered() -> Result<()> {
     let (reaction, _event_rx) =
         create_test_reaction(redis_url.clone(), query_id, false, None, None);
 
-
     reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(150)).await;
@@ -938,7 +949,9 @@ async fn test_empty_metadata_filtered() -> Result<()> {
         metadata: HashMap::new(), // Empty metadata
         profiling: None,
     };
-    broadcast_tx.send(Arc::new(query_result)).map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+    broadcast_tx
+        .send(Arc::new(query_result))
+        .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
 
     sleep(Duration::from_millis(300)).await;
 

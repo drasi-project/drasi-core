@@ -91,9 +91,7 @@ mod manager_tests {
         }
     }
 
-    async fn create_test_server_with_query(
-        query_id: &str,
-    ) -> Result<Arc<DrasiServerCore>> {
+    async fn create_test_server_with_query(query_id: &str) -> Result<Arc<DrasiServerCore>> {
         let mock_query = Arc::new(MockQuery::new(query_id));
         let server_core = DrasiServerCore::builder().build().await?;
         server_core
@@ -395,9 +393,7 @@ mod log_reaction_tests {
         }
     }
 
-    async fn create_test_server_with_query(
-        query_id: &str,
-    ) -> Result<Arc<DrasiServerCore>> {
+    async fn create_test_server_with_query(query_id: &str) -> Result<Arc<DrasiServerCore>> {
         let mock_query = Arc::new(MockQuery::new(query_id));
         let server_core = DrasiServerCore::builder().build().await?;
         server_core

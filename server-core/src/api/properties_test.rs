@@ -109,7 +109,6 @@ mod tests {
         assert_eq!(map.len(), 3);
     }
 
-
     #[test]
     fn test_properties_from_map() {
         let mut original = HashMap::new();
@@ -147,8 +146,6 @@ mod tests {
         assert_eq!(map.get("host").unwrap(), &json!("localhost"));
         assert_eq!(map.get("port").unwrap(), &json!(5432));
     }
-
-
 
     #[test]
     fn test_properties_complex_nested_value() {

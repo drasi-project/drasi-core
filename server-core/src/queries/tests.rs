@@ -29,10 +29,7 @@ mod manager_tests {
         let (event_tx, event_rx) = mpsc::channel(100);
 
         let source_manager = Arc::new(SourceManager::new(event_tx.clone()));
-        let query_manager = Arc::new(QueryManager::new(
-            event_tx.clone(),
-            source_manager.clone(),
-        ));
+        let query_manager = Arc::new(QueryManager::new(event_tx.clone(), source_manager.clone()));
 
         (query_manager, event_rx, source_manager)
     }

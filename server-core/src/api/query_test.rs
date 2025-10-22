@@ -337,7 +337,6 @@ mod tests {
         assert_eq!(joins[0].id, "join-2");
     }
 
-
     #[test]
     fn test_query_overwrite_query_string() {
         // Later query() call should replace earlier one

@@ -27,7 +27,6 @@ mod tests {
         assert!(!registry.has_reaction_handle("any-id").await);
     }
 
-
     #[tokio::test]
     async fn test_register_and_get_source_handle() {
         let registry = HandleRegistry::new();
@@ -59,7 +58,6 @@ mod tests {
             "Should retrieve registered reaction handle"
         );
     }
-
 
     #[tokio::test]
     async fn test_remove_source_handle() {
@@ -96,7 +94,6 @@ mod tests {
             "Should not have handle after removal"
         );
     }
-
 
     #[tokio::test]
     async fn test_overwrite_source_handle() {
@@ -135,7 +132,6 @@ mod tests {
             "Should still have handle after overwrite"
         );
     }
-
 
     #[tokio::test]
     async fn test_concurrent_source_registration() {

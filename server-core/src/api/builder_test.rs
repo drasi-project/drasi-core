@@ -197,7 +197,6 @@ mod tests {
         assert!(core.is_ok(), "Chained builder methods should work");
     }
 
-
     #[tokio::test]
     async fn test_builder_multi_source_pipeline() {
         let core = DrasiServerCoreBuilder::new()

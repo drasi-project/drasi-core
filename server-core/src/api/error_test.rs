@@ -125,7 +125,6 @@ mod tests {
         assert!(matches!(err, DrasiError::Serialization(_)));
     }
 
-
     #[test]
     fn test_result_type_ok() {
         let result: crate::api::Result<i32> = Ok(42);
@@ -137,7 +136,6 @@ mod tests {
         let result: crate::api::Result<i32> = Err(DrasiError::configuration("test"));
         assert!(result.is_err());
     }
-
 
     #[test]
     fn test_component_not_found_various_kinds() {

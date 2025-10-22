@@ -28,7 +28,6 @@ mod schema_tests {
         assert_eq!(settings.id, "default-server"); // default
     }
 
-
     #[test]
     fn test_query_config_validation() {
         // Valid query config
@@ -90,7 +89,6 @@ mod schema_tests {
         let config: QueryConfig = serde_json::from_value(json).unwrap();
         assert_eq!(config.query_language, QueryLanguage::GQL);
     }
-
 
     #[test]
     fn test_query_config_missing_required_fields() {

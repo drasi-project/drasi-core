@@ -280,7 +280,6 @@ mod tests {
         assert_eq!(reaction.queries, vec!["query-1", "query-2", "query-3"]);
     }
 
-
     #[test]
     fn test_reaction_no_queries() {
         // Reaction without queries should still be valid (might subscribe later)
