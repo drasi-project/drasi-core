@@ -92,9 +92,6 @@ mod manager_tests {
         let config = create_test_query_config("test-query", vec!["source1".to_string()]);
         manager.add_query(config).await.unwrap();
 
-        // Create a channel for source changes
-        // Legacy channel no longer needed - queries subscribe directly to sources
-
         let result = manager.start_query("test-query".to_string()).await;
         assert!(result.is_ok());
 
@@ -125,8 +122,6 @@ mod manager_tests {
         // Add and start a query
         let config = create_test_query_config("test-query", vec!["source1".to_string()]);
         manager.add_query(config).await.unwrap();
-        // Create a channel for source changes
-        // Legacy channel no longer needed - queries subscribe directly to sources
 
         manager.start_query("test-query".to_string()).await.unwrap();
 
@@ -177,9 +172,6 @@ mod manager_tests {
         // Add and start a GQL query
         let config = create_test_gql_query_config("test-gql-query", vec!["source1".to_string()]);
         manager.add_query(config).await.unwrap();
-
-        // Create a channel for source changes
-        // Legacy channel no longer needed - queries subscribe directly to sources
 
         let result = manager.start_query("test-gql-query".to_string()).await;
         assert!(result.is_ok());
@@ -275,9 +267,6 @@ mod manager_tests {
             .await
             .unwrap();
         assert!(matches!(status, ComponentStatus::Stopped));
-
-        // Create a channel for source changes (normally provided by router)
-        // Legacy channel no longer needed - queries subscribe directly to sources
 
         // Start the query
         manager.start_query("test-query".to_string()).await.unwrap();

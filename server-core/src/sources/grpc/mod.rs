@@ -403,20 +403,6 @@ impl SourceService for GrpcSourceService {
                             );
                         }
 
-                        // Send to legacy channel
-                        if let Err(e) = broadcast_tx.send(Arc::new(wrapper)) {
-                            error!("[{}] Failed to send source event: {}", source_id, e);
-                            let _ = tx
-                                .send(Ok(StreamEventResponse {
-                                    success: false,
-                                    message: "Failed to process event".to_string(),
-                                    error: e.to_string(),
-                                    events_processed,
-                                }))
-                                .await;
-                            break;
-                        }
-
                         events_processed += 1;
 
                         // Send periodic updates

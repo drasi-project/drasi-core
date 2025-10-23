@@ -289,11 +289,6 @@ impl AdaptiveHttpSource {
                         source_id, e
                     );
                 }
-
-                // Also send to legacy mpsc channel for backward compatibility
-                if let Err(e) = broadcast_tx.send(Arc::new(wrapper)) {
-                    error!("[{}] Failed to send batched event: {}", source_id, e);
-                }
             }
 
             if total_batches % 100 == 0 {
