@@ -2,8 +2,8 @@
 
 This document provides a comprehensive overview of the drasi-core server-core architecture, including the relationships between components, channel communication patterns, lifecycle management, and bootstrap processes.
 
-**Last Updated:** 2025-10-22
-**Version:** 3.0 - Router-free architecture with direct subscriptions throughout
+**Last Updated:** 2025-10-23
+**Version:** 4.0 - Router-free architecture with configurable channel and queue capacities
 
 ---
 
@@ -12,12 +12,14 @@ This document provides a comprehensive overview of the drasi-core server-core ar
 1. [Overview](#overview)
 2. [Component Relationships](#component-relationships)
 3. [Channel Architecture](#channel-architecture)
-4. [Component Lifecycle](#component-lifecycle)
-5. [Subscription Process](#subscription-process)
-6. [Bootstrap Process](#bootstrap-process)
-7. [Event Flow](#event-flow)
-8. [Code References](#code-references)
-9. [Areas of Concern](#areas-of-concern)
+4. [Configuration System](#configuration-system)
+5. [Component Lifecycle](#component-lifecycle)
+6. [Subscription Process](#subscription-process)
+7. [Bootstrap Process](#bootstrap-process)
+8. [Event Flow](#event-flow)
+9. [Code References](#code-references)
+10. [Areas of Concern](#areas-of-concern)
+11. [Completed Migrations](#completed-migrations)
 
 ---
 
@@ -33,11 +35,12 @@ The server-core implements a reactive, event-driven architecture for continuous 
   - No centralized routers (SubscriptionRouter, DataRouter, BootstrapRouter all removed)
 - **Zero-Copy Distribution**: All event distribution uses broadcast channels with Arc-wrapped data
 - **Priority Queue Processing**:
-  - Each Query maintains a priority queue for ordered source event processing
-  - Each Reaction maintains a priority queue for ordered query result processing
+  - Each Query maintains a priority queue for ordered source event processing (configurable capacity)
+  - Each Reaction maintains a priority queue for ordered query result processing (configurable capacity)
 - **Pluggable Bootstrap**: Bootstrap providers execute during source subscription
 - **Dual Channel Architecture per Source**: Broadcast channels for live events, dedicated mpsc for bootstrap
 - **Silent Bootstrap**: Bootstrap results are processed but not sent to reactions (only live changes trigger reactions)
+- **Three-Level Configuration Hierarchy**: Component-specific → Global defaults → Hardcoded fallbacks for all capacities
 
 ---
 
@@ -124,12 +127,16 @@ pub struct EventChannels {
 Each source maintains its own broadcast channel for distributing events to multiple subscribers:
 
 ```rust
-// Created in source constructor
-let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
+// Created in source constructor with configurable capacity
+let capacity = config.broadcast_channel_capacity.unwrap_or(1000);
+let (broadcast_tx, _) = tokio::sync::broadcast::channel(capacity);
 ```
 
 - **Type**: `tokio::sync::broadcast::Sender<Arc<SourceEventWrapper>>`
-- **Capacity**: 1000 (hardcoded)
+- **Capacity**: Configurable via three-level hierarchy (default: 1000)
+  - Component level: `source_config.broadcast_channel_capacity`
+  - Global level: `server_core.broadcast_channel_capacity`
+  - Hardcoded fallback: 1000
 - **Purpose**: Zero-copy distribution of SourceChange events to multiple queries
 - **Event Format**: `Arc<SourceEventWrapper>` containing:
   - `source_id`: String
@@ -147,12 +154,16 @@ let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
 Each query maintains its own broadcast channel for distributing results to multiple reactions:
 
 ```rust
-// Created in query constructor
-let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
+// Created in query constructor with configurable capacity
+let capacity = config.broadcast_channel_capacity.unwrap_or(1000);
+let (broadcast_tx, _) = tokio::sync::broadcast::channel(capacity);
 ```
 
 - **Type**: `tokio::sync::broadcast::Sender<Arc<QueryResult>>`
-- **Capacity**: 1000 (hardcoded)
+- **Capacity**: Configurable via three-level hierarchy (default: 1000)
+  - Component level: `query_config.broadcast_channel_capacity`
+  - Global level: `server_core.broadcast_channel_capacity`
+  - Hardcoded fallback: 1000
 - **Purpose**: Zero-copy distribution of QueryResult to multiple reactions
 - **Event Format**: `Arc<QueryResult>` containing:
   - `query_id`: String
@@ -194,6 +205,177 @@ let (bootstrap_tx, bootstrap_rx) = mpsc::channel(1000);
 
 ---
 
+## Configuration System
+
+The server-core implements a **three-level configuration hierarchy** for channel and queue capacities, providing flexible control over memory usage and performance characteristics.
+
+### Configuration Hierarchy
+
+All capacity configurations follow this precedence order:
+
+1. **Component-Specific Configuration** (highest priority)
+   - Set at the individual source, query, or reaction level
+   - Overrides all other settings for that specific component
+
+2. **Global Server Configuration** (medium priority)
+   - Set in `server_core` section of configuration
+   - Applies to all components unless overridden at component level
+
+3. **Hardcoded Defaults** (lowest priority)
+   - Built-in fallback values when no configuration is provided
+   - Ensures system always has valid capacities
+
+### Capacity Configuration Options
+
+#### Priority Queue Capacity
+
+Controls the size of priority queues used for event ordering:
+
+- **Default**: 10,000 events
+- **Configuration Levels**:
+  - Component: `priority_queue_capacity` in QueryConfig or ReactionConfig
+  - Global: `server_core.priority_queue_capacity` in DrasiServerCoreSettings
+  - Fallback: 10,000 (hardcoded)
+- **Applies To**:
+  - Queries: Orders source events by timestamp
+  - Reactions: Orders query results by timestamp
+
+#### Broadcast Channel Capacity
+
+Controls the buffer size for broadcast channels:
+
+- **Default**: 1,000 events
+- **Configuration Levels**:
+  - Component: `broadcast_channel_capacity` in SourceConfig or QueryConfig
+  - Global: `server_core.broadcast_channel_capacity` in DrasiServerCoreSettings
+  - Fallback: 1,000 (hardcoded)
+- **Applies To**:
+  - Sources: Broadcasting events to multiple queries
+  - Queries: Broadcasting results to multiple reactions
+
+### Configuration Examples
+
+#### Component-Specific Override
+
+```yaml
+server_core:
+  # Global defaults
+  priority_queue_capacity: 5000
+  broadcast_channel_capacity: 500
+
+sources:
+  - id: high_volume_source
+    source_type: postgres
+    # Override for this specific source
+    broadcast_channel_capacity: 10000  # Higher capacity for high-volume source
+    properties:
+      # ... source properties
+
+queries:
+  - id: complex_query
+    # Override for this specific query
+    priority_queue_capacity: 20000     # Larger queue for complex processing
+    broadcast_channel_capacity: 2000   # More buffer for results
+    # ... query definition
+
+reactions:
+  - id: critical_reaction
+    # Override for this specific reaction
+    priority_queue_capacity: 15000     # Ensure no drops for critical reaction
+    # ... reaction definition
+```
+
+#### Global Configuration Only
+
+```yaml
+server_core:
+  # These apply to all components unless overridden
+  priority_queue_capacity: 8000
+  broadcast_channel_capacity: 1500
+
+# Components will use global settings
+sources:
+  - id: source1
+    # Uses global broadcast_channel_capacity: 1500
+
+queries:
+  - id: query1
+    # Uses global priority_queue_capacity: 8000
+    # Uses global broadcast_channel_capacity: 1500
+
+reactions:
+  - id: reaction1
+    # Uses global priority_queue_capacity: 8000
+```
+
+### Configuration Resolution Process
+
+The configuration resolution happens in two phases:
+
+1. **Schema to Runtime Conversion** (`config/runtime.rs`)
+   - DrasiServerCoreConfig (schema) → RuntimeConfig conversion
+   - Global defaults are applied to components without specific overrides
+   - Ensures consistent configuration before component creation
+
+2. **Component Instantiation**
+   - Components read from RuntimeConfig
+   - Apply `unwrap_or()` with hardcoded fallback as final safety net
+   - Guarantees valid capacity even with missing configuration
+
+### Memory Implications
+
+#### Priority Queue Memory Usage
+
+Approximate memory per queue:
+- 10,000 capacity ≈ 2-5 MB (depending on event size)
+- 50,000 capacity ≈ 10-25 MB
+- 100,000 capacity ≈ 20-50 MB
+
+#### Broadcast Channel Memory Usage
+
+Approximate memory per channel:
+- 1,000 capacity ≈ 200 KB - 1 MB (depending on event size)
+- 5,000 capacity ≈ 1-5 MB
+- 10,000 capacity ≈ 2-10 MB
+
+### Performance Considerations
+
+#### When to Increase Capacities
+
+**Priority Queue Capacity**:
+- Source produces events faster than query processes
+- Query produces results faster than reaction processes
+- Bursty workloads with temporary spikes
+- Complex queries requiring more buffering
+
+**Broadcast Channel Capacity**:
+- Multiple slow subscribers
+- Network latency between components
+- Large event batches
+- High-frequency event streams
+
+#### When to Decrease Capacities
+
+- Memory-constrained environments
+- Predictable, steady workloads
+- Fast processing with minimal buffering needs
+- Preference for backpressure over buffering
+
+### Testing Configuration
+
+Comprehensive test coverage ensures configuration hierarchy works correctly:
+
+- **Priority Queue Tests**: `tests/priority_queue_hierarchy_test.rs`
+- **Broadcast Channel Tests**: `tests/broadcast_capacity_hierarchy_test.rs`
+
+These tests validate:
+- Component overrides take precedence
+- Global defaults apply when no override exists
+- Hardcoded fallbacks work when all configuration is missing
+- Mixed scenarios with partial configuration
+
+---
+
 ## Component Lifecycle
 
 All components (Sources, Queries, Reactions) follow a consistent lifecycle managed by their respective managers.
@@ -230,10 +412,13 @@ Each manager maintains a `HashMap<String, Arc<ComponentType>>` for component sto
 - **QueryManager**: `HashMap<String, Arc<Query>>`
 - **ReactionManager**: `HashMap<String, Arc<dyn Reaction>>`
 
+**Configuration Resolution**: During component creation, managers use `RuntimeConfig` which has already resolved the three-level configuration hierarchy (component → global → hardcoded) for all capacity settings.
+
 **File References**:
 - `server-core/src/sources/manager.rs:68`
 - `server-core/src/queries/manager.rs:45`
 - `server-core/src/reactions/manager.rs`
+- `server-core/src/config/runtime.rs:116-179` (configuration resolution)
 
 ---
 
@@ -555,7 +740,7 @@ If reactions need initial results, they must either:
       ▼
 ┌──────────────────┐
 │ Query Priority   │ Orders events by timestamp
-│ Queue (10000)    │
+│ Queue            │ (Configurable, default: 10000)
 └─────┬────────────┘
       │
       │ Processing Task dequeues events
@@ -591,7 +776,7 @@ If reactions need initial results, they must either:
       ▼
 ┌──────────────────┐
 │ Reaction Priority│ Orders results by timestamp
-│ Queue (10000)    │
+│ Queue            │ (Configurable, default: 10000)
 └─────┬────────────┘
       │
       │ Processing Task dequeues results
@@ -705,6 +890,16 @@ If reactions need initial results, they must either:
   - **Processing task**: `server-core/src/reactions/log/mod.rs:172-240` (dequeues and processes results)
 - **Reaction priority queue**: Uses generic `PriorityQueue<QueryResult>` from `server-core/src/channels/priority_queue.rs`
 
+#### Configuration
+- **DrasiServerCoreSettings**: `server-core/src/config/schema.rs:45-54` (global configuration)
+- **SourceConfig**: `server-core/src/config/schema.rs:57-74` (source-level configuration)
+- **QueryConfig**: `server-core/src/config/schema.rs:77-111` (query-level configuration)
+- **ReactionConfig**: `server-core/src/config/schema.rs:130-146` (reaction-level configuration)
+- **RuntimeConfig**: `server-core/src/config/runtime.rs:116-179` (configuration resolution)
+- **Configuration Hierarchy Tests**:
+  - **Priority Queue Tests**: `server-core/tests/priority_queue_hierarchy_test.rs`
+  - **Broadcast Capacity Tests**: `server-core/tests/broadcast_capacity_hierarchy_test.rs`
+
 ---
 
 ## Areas of Concern
@@ -730,20 +925,10 @@ This section identifies incomplete implementations, potential issues, and future
 - **Impact**: Unused channel consuming 100 slots of capacity
 - **Action**: Remove deprecated channel entirely from EventChannels struct
 
-#### 3. **Priority Queue Capacity Hardcoded**
-- **Issue**: Both query and reaction priority queues have hardcoded capacity of 10,000
-- **Files**:
-  - `server-core/src/queries/manager.rs:146` - Query priority queue
-  - `server-core/src/reactions/log/mod.rs:57` - Reaction priority queue
-- **Impact**:
-  - May drop events if source produces faster than query processes
-  - May drop results if query produces faster than reaction processes
-  - No configuration option for tuning based on workload
-- **Action**: Make capacity configurable per query/reaction or globally
 
 ### 🟡 Medium Concerns
 
-#### 4. **Subscription Task Cleanup**
+#### 3. **Subscription Task Cleanup**
 - **Issue**: Both queries and reactions store subscription_tasks but may not explicitly abort them on stop
 - **Files**:
   - `server-core/src/queries/manager.rs:132` - Query subscription tasks
@@ -752,7 +937,7 @@ This section identifies incomplete implementations, potential issues, and future
 - **Impact**: Tasks may continue briefly after component stop, consuming resources
 - **Action**: Abort subscription tasks explicitly in `Query::stop()` and `Reaction::stop()`
 
-#### 5. **Broadcast Receiver Lagging**
+#### 4. **Broadcast Receiver Lagging**
 - **Issue**: If a query's priority queue is full or processing is slow, broadcast receivers may lag
 - **Current Handling**: Logs warning about skipped events but continues
 - **File**: `server-core/src/queries/manager.rs:358-362`
@@ -762,16 +947,8 @@ This section identifies incomplete implementations, potential issues, and future
   - Consider backpressure mechanism or circuit breaker
   - Make lag handling configurable (fail-fast vs. continue)
 
-#### 5. **Hardcoded Channel Capacities**
-- **Issue**: All channel capacities are hardcoded:
-  - Broadcast channels: 1000
-  - Bootstrap channels: 1000
-  - System channels: 1000 or 100
-- **Files**: Throughout source implementations and `events.rs:327-331`
-- **Impact**: No tuning for different workloads
-- **Action**: Make capacities configurable via RuntimeConfig
 
-#### 6. **Label Extraction Best Effort**
+#### 5. **Label Extraction Best Effort**
 - **Issue**: Label extraction from queries is "best effort" and may fail for complex queries
 - **File**: `server-core/src/queries/manager.rs:267`
 - **Current Behavior**: Falls back to empty label lists on failure
@@ -780,7 +957,7 @@ This section identifies incomplete implementations, potential issues, and future
 
 ### 🟢 Minor Concerns
 
-#### 7. **Bootstrap Results Silent**
+#### 6. **Bootstrap Results Silent**
 - **Issue**: Bootstrap processing results are discarded (not sent to reactions)
 - **File**: `server-core/src/queries/manager.rs:458-464`
 - **Current Behavior**: Documented as intentional (silent bootstrap)
@@ -788,14 +965,14 @@ This section identifies incomplete implementations, potential issues, and future
 - **Question**: Is this the desired behavior? Should there be an option to send bootstrap results?
 - **Workaround**: Reactions can query for initial state after bootstrapCompleted
 
-#### 8. **MockSource Bootstrap Not Implemented**
+#### 7. **MockSource Bootstrap Not Implemented**
 - **Issue**: MockSource.subscribe() returns None for bootstrap_receiver
 - **File**: `server-core/src/sources/mock/mod.rs:363-370`
 - **Current State**: Comment says "Bootstrap not yet implemented for MockSource"
 - **Impact**: Can't easily test bootstrap flow with MockSource in unit tests
 - **Action**: Implement simple mock bootstrap for testing (e.g., generate N test elements)
 
-#### 9. **Test Helper Method Naming**
+#### 8. **Test Helper Method Naming**
 - **Issue**: `test_subscribe()` method added to sources for testing (MockSource, PlatformSource)
 - **Files**:
   - `server-core/src/sources/mock/mod.rs:60`
@@ -804,14 +981,51 @@ This section identifies incomplete implementations, potential issues, and future
 - **Current**: Documented as "for testing" in doc comments
 - **Consideration**: Use `#[cfg(test)]` attribute to limit compilation to test builds
 
-#### 10. **Bootstrap Event Sequence Tracking**
+#### 9. **Bootstrap Event Sequence Tracking**
 - **Issue**: Each bootstrap provider tracks its own sequence numbers independently
 - **Current**: BootstrapContext provides sequence_counter (AtomicU64)
 - **Behavior**: Sequences start from 0 for each bootstrap session
 - **Impact**: Minimal - sequences are only used for ordering within bootstrap phase
 - **Note**: Live events use separate sequencing from sources
 
-### ✅ Completed Migrations
+---
+
+## Completed Migrations
+
+This section documents successfully completed architectural improvements and migrations.
+
+### ✅ Capacity Configuration System (2025-10-22 to 2025-10-23)
+
+#### **Priority Queue Capacity Configuration**
+- **Status**: ✅ Complete (Commit a8c4300, 2025-10-22)
+- **Implementation**:
+  - Added `priority_queue_capacity` field to QueryConfig and ReactionConfig
+  - Added global default in DrasiServerCoreSettings
+  - Three-level hierarchy: Component → Global → Hardcoded (10,000)
+- **Files Modified**: 27 files updated
+- **Testing**: `tests/priority_queue_hierarchy_test.rs` (262 lines)
+- **Default Behavior**: 10,000 if not specified
+
+#### **Broadcast Channel Capacity Configuration**
+- **Status**: ✅ Complete (Commit e012574, 2025-10-23)
+- **Implementation**:
+  - Added `broadcast_channel_capacity` to SourceConfig and QueryConfig
+  - Added global default in DrasiServerCoreSettings
+  - Three-level hierarchy: Component → Global → Hardcoded (1,000)
+- **Files Modified**: 28 files updated
+- **Testing**: `tests/broadcast_capacity_hierarchy_test.rs` (421 lines)
+- **Default Behavior**: 1,000 if not specified
+
+#### **Configuration Resolution Process**
+- **Status**: ✅ Complete (Commit d67ff24, 2025-10-22)
+- **Implementation**:
+  - RuntimeConfig::from() applies three-level hierarchy
+  - Global defaults propagate to components without overrides
+  - Hardcoded fallbacks ensure safe operation
+- **Location**: `config/runtime.rs:116-179`
+- **Documentation**: Comprehensive README.md sections added
+
+### ✅ All Routers Removed (2025-10-21 and earlier)
 
 #### **All Routers Removed - Complete**
 - **Status**: ✅ Migration complete (2025-10-21 and earlier)
@@ -856,9 +1070,15 @@ This section identifies incomplete implementations, potential issues, and future
   - Reactions subscribe directly to queries via per-query broadcast channels
   - No centralized routers - all components removed
 - **Zero-Copy Distribution**: Arc-wrapped events for efficient multi-subscriber access
+- **Configurable Capacity System**: ✨ NEW
+  - Three-level hierarchy for all capacities (component → global → hardcoded)
+  - Priority queue capacities fully configurable
+  - Broadcast channel capacities fully configurable
+  - Comprehensive test coverage for configuration hierarchy
 - **Priority Queue Processing**:
   - Each query has a priority queue for timestamp-ordered source event processing
   - Each reaction has a priority queue for timestamp-ordered query result processing
+  - Both with configurable capacities for workload tuning
 - **Bootstrap via Subscription**: Bootstrap integrated into source.subscribe() flow with dedicated mpsc channels
 - **All 5 Bootstrap Provider Types**: postgres, platform, script_file, application, noop - all working
 - **Component Lifecycle Management**: Consistent start/stop/delete across all components
@@ -872,7 +1092,6 @@ This section identifies incomplete implementations, potential issues, and future
 ### What Needs Attention ⚠️
 - Control signal infrastructure exists but is unused (remove or implement?)
 - Legacy _control_tx channel deprecated but still exists (remove entirely?)
-- Hardcoded capacity limits for all channels and priority queues (make configurable)
 - No active bootstrap in MockSource (implement for testing)
 - Subscription tasks not explicitly aborted on component stop (both queries and reactions)
 - Lagging subscriber handling needs metrics and policy options
@@ -937,8 +1156,9 @@ This section identifies incomplete implementations, potential issues, and future
 
 ---
 
-**Document Version**: 3.0
-**Last Updated**: 2025-10-22
-**Changes**: Updated to reflect complete router removal (SubscriptionRouter, DataRouter, BootstrapRouter), direct reaction-to-query subscriptions, per-query broadcast channels, and reaction priority queues
+**Document Version**: 4.0
+**Last Updated**: 2025-10-23
+**Changes**: Added comprehensive Configuration System section, documented three-level capacity configuration hierarchy, moved resolved concerns to Completed Migrations, updated all diagrams to show configurable capacities
+**Previous Version**: 3.0 - Complete router removal and direct subscriptions
 **Reviewers**: Claude Code
 **Next Review**: When significant architectural changes occur
