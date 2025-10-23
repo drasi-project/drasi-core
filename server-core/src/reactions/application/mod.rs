@@ -156,7 +156,7 @@ impl ApplicationReaction {
             event_tx,
             app_tx,
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
-            priority_queue: PriorityQueue::new(config.priority_queue_capacity),
+            priority_queue: PriorityQueue::new(config.priority_queue_capacity.unwrap_or(10000)),
             processing_task: Arc::new(RwLock::new(None)),
         };
 
@@ -375,7 +375,7 @@ mod tests {
             auto_start: true,
             queries,
             properties: HashMap::new(),
-            priority_queue_capacity: 10000,
+            priority_queue_capacity: None,
         }
     }
 

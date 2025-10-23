@@ -105,7 +105,7 @@ impl QueryBuilder {
             joins: self.joins,
             enable_bootstrap: true,         // Default: bootstrap enabled
             bootstrap_buffer_size: 10000,   // Default buffer size
-            priority_queue_capacity: 10000, // Default priority queue capacity
+            priority_queue_capacity: None, // Default: inherit from server global setting
         }
     }
 }

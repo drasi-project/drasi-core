@@ -25,7 +25,7 @@ pub mod test_fixtures {
         DrasiServerCoreConfig {
             server_core: DrasiServerCoreSettings {
                 id: "test-server".to_string(),
-                priority_queue_capacity: 10000,
+                priority_queue_capacity: None,
             },
             sources: vec![],
             queries: vec![],
@@ -71,7 +71,7 @@ pub mod test_fixtures {
             joins: None,
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
-            priority_queue_capacity: 10000,
+            priority_queue_capacity: None,
         }
     }
 
@@ -88,7 +88,7 @@ pub mod test_fixtures {
             joins: None,
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
-            priority_queue_capacity: 10000,
+            priority_queue_capacity: None,
         }
     }
 
@@ -103,7 +103,7 @@ pub mod test_fixtures {
             queries,
             auto_start: true,
             properties,
-            priority_queue_capacity: 10000,
+            priority_queue_capacity: None,
         }
     }
 }

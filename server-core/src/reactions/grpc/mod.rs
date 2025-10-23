@@ -153,7 +153,7 @@ impl GrpcReaction {
             connection_retry_attempts,
             initial_connection_timeout_ms,
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
-            priority_queue: PriorityQueue::new(config.priority_queue_capacity),
+            priority_queue: PriorityQueue::new(config.priority_queue_capacity.unwrap_or(10000)),
             processing_task: Arc::new(RwLock::new(None)),
         }
     }

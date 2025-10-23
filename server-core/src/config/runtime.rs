@@ -123,11 +123,38 @@ pub struct RuntimeConfig {
 
 impl From<super::schema::DrasiServerCoreConfig> for RuntimeConfig {
     fn from(config: super::schema::DrasiServerCoreConfig) -> Self {
+        // Get the global default priority queue capacity (or hardcoded 10000)
+        let global_default = config.server_core.priority_queue_capacity.unwrap_or(10000);
+
+        // Apply global default to queries that don't specify their own capacity
+        let queries = config
+            .queries
+            .into_iter()
+            .map(|mut q| {
+                if q.priority_queue_capacity.is_none() {
+                    q.priority_queue_capacity = Some(global_default);
+                }
+                q
+            })
+            .collect();
+
+        // Apply global default to reactions that don't specify their own capacity
+        let reactions = config
+            .reactions
+            .into_iter()
+            .map(|mut r| {
+                if r.priority_queue_capacity.is_none() {
+                    r.priority_queue_capacity = Some(global_default);
+                }
+                r
+            })
+            .collect();
+
         Self {
             server_core: config.server_core,
             sources: config.sources,
-            queries: config.queries,
-            reactions: config.reactions,
+            queries,
+            reactions,
         }
     }
 }

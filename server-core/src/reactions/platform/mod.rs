@@ -143,7 +143,7 @@ impl PlatformReaction {
             cloud_event_config,
             emit_control_events,
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
-            priority_queue: PriorityQueue::new(config.priority_queue_capacity),
+            priority_queue: PriorityQueue::new(config.priority_queue_capacity.unwrap_or(10000)),
             processing_task: Arc::new(RwLock::new(None)),
         })
     }
@@ -504,7 +504,7 @@ mod tests {
             queries: vec!["test-query".to_string()],
             auto_start: true,
             properties,
-            priority_queue_capacity: 10000,
+            priority_queue_capacity: None,
         }
     }
 
@@ -532,7 +532,7 @@ mod tests {
             queries: vec!["test-query".to_string()],
             auto_start: true,
             properties,
-            priority_queue_capacity: 10000,
+            priority_queue_capacity: None,
         };
 
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -561,7 +561,7 @@ mod tests {
             queries: vec!["test-query".to_string()],
             auto_start: true,
             properties,
-            priority_queue_capacity: 10000,
+            priority_queue_capacity: None,
         };
 
         let (event_tx, _event_rx) = mpsc::channel(100);

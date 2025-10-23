@@ -145,8 +145,9 @@ impl DrasiQuery {
         event_tx: ComponentEventSender,
         source_manager: Arc<SourceManager>,
     ) -> Self {
-        // Create priority queue with configured capacity
-        let priority_queue = PriorityQueue::new(config.priority_queue_capacity);
+        // Create priority queue with configured capacity (fallback to 10000 if not set)
+        let capacity = config.priority_queue_capacity.unwrap_or(10000);
+        let priority_queue = PriorityQueue::new(capacity);
 
         // Create broadcast channel for query results (capacity: 1000)
         let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);

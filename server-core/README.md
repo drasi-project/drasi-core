@@ -618,6 +618,7 @@ Query::cypher("my-query")
     .query("MATCH (n) RETURN n")
     .from_source("source1")
     .auto_start(true)  // Auto-start on server start (default: true)
+    .with_property("priority_queue_capacity", json!(50000))  // Optional override
     .build()
 ```
 
@@ -628,10 +629,11 @@ Query::cypher("my-query")
 
 **Priority Queue Configuration:**
 - Each query has an internal priority queue for ordering events by timestamp
-- Default capacity: 10,000 events
-- Can be configured per-query or globally at server level
+- Uses **three-level hierarchy**: component override → global default → hardcoded 10,000
+- Configure globally via `server_core.priority_queue_capacity` in config
+- Override per-query for high-volume scenarios
 - Larger capacities handle burst traffic better but use more memory
-- See Performance Optimization section for tuning guidance
+- See [Priority Queue Configuration](#priority-queue-configuration) and [Priority Queue Tuning](#priority-queue-tuning) sections for complete details
 
 ## Reactions
 
@@ -1181,37 +1183,89 @@ reactions:
 
 #### Priority Queue Configuration
 
-Priority queues maintain event ordering by timestamp before processing. You can configure capacity at three levels:
+Priority queues maintain event ordering by timestamp before processing. DrasiServerCore uses a **three-level configuration hierarchy** that allows fine-grained control while providing sensible defaults:
 
-**Global Default** (applies to all queries and reactions):
-```yaml
-server_core:
-  id: my-server
-  priority_queue_capacity: 50000  # Default: 10000
-```
-
-**Per-Query Override**:
+**Level 1: Component-Specific Override** (highest priority)
 ```yaml
 queries:
   - id: high-volume-query
     query: "MATCH (n) RETURN n"
     sources: ["source1"]
-    priority_queue_capacity: 100000  # Overrides global default
-```
+    priority_queue_capacity: 100000  # This query uses 100,000
 
-**Per-Reaction Override**:
-```yaml
 reactions:
   - id: critical-reaction
     reaction_type: log
     queries: ["high-volume-query"]
-    priority_queue_capacity: 150000  # Overrides global default
+    priority_queue_capacity: 150000  # This reaction uses 150,000
+```
+
+**Level 2: Global Server Default**
+```yaml
+server_core:
+  id: my-server
+  priority_queue_capacity: 50000  # All queries/reactions without overrides use 50,000
+```
+
+**Level 3: Hardcoded Fallback** (lowest priority)
+- If neither component nor global capacity is specified, the hardcoded default of **10,000** is used
+
+**How the Hierarchy Works:**
+
+The system resolves capacity using this precedence order:
+1. If a query/reaction specifies `priority_queue_capacity` → use that value
+2. Else if server_core specifies `priority_queue_capacity` → use that value
+3. Else → use hardcoded default of 10,000
+
+**Example with Mixed Configuration:**
+```yaml
+server_core:
+  priority_queue_capacity: 30000  # Global default
+
+queries:
+  - id: query1
+    query: "MATCH (n) RETURN n"
+    sources: ["source1"]
+    priority_queue_capacity: 75000  # Uses 75,000 (component override)
+
+  - id: query2
+    query: "MATCH (m) RETURN m"
+    sources: ["source1"]
+    # No override → uses 30,000 (global default)
+
+reactions:
+  - id: reaction1
+    reaction_type: log
+    queries: ["query1"]
+    priority_queue_capacity: 100000  # Uses 100,000 (component override)
+
+  - id: reaction2
+    reaction_type: log
+    queries: ["query2"]
+    # No override → uses 30,000 (global default)
+```
+
+**Builder API:**
+```rust
+DrasiServerCore::builder()
+    // Component overrides take precedence
+    .add_query(
+        Query::cypher("high-volume")
+            .query("MATCH (n) RETURN n")
+            .from_source("source1")
+            .with_property("priority_queue_capacity", json!(100000))
+            .build()
+    )
+    .build()
+    .await?
 ```
 
 **When to Adjust:**
 - **Increase** for burst traffic scenarios (e.g., 100,000+ for data migrations)
 - **Decrease** for memory-constrained environments (e.g., 1,000 for IoT devices)
 - **Default (10,000)** works well for most production workloads
+- **Use global setting** to set a consistent baseline across all components
+- **Use component overrides** for specific high-volume or critical paths
 
 ## Async Integration Patterns
 
@@ -1572,7 +1626,7 @@ async fn test_result_timing() {
 
 ### Priority Queue Tuning
 
-Priority queues maintain timestamp-ordered event processing. Adjust capacity based on your workload:
+Priority queues maintain timestamp-ordered event processing. DrasiServerCore uses a **three-level hierarchy** (component override → global default → hardcoded 10,000) for configuring capacity. See the [Priority Queue Configuration](#priority-queue-configuration) section for complete details.
 
 **Symptoms of Undersized Queues:**
 - Events dropped due to capacity (check metrics)
@@ -1581,30 +1635,40 @@ Priority queues maintain timestamp-ordered event processing. Adjust capacity bas
 
 **Sizing Guidelines:**
 
-| Scenario | Recommended Capacity | Rationale |
-|----------|---------------------|-----------|
-| Steady-state production | 10,000 (default) | Handles typical variations |
-| High-throughput streaming | 50,000 - 100,000 | Absorbs sustained high rates |
-| Bulk data migration | 100,000 - 1,000,000 | Handles massive bursts |
-| IoT / Edge devices | 1,000 - 5,000 | Conserves memory |
-| Testing / Development | 1,000 - 5,000 | Faster feedback |
+| Scenario | Recommended Capacity | Configuration Level |
+|----------|---------------------|---------------------|
+| Steady-state production | 10,000 (default) | No configuration needed |
+| High-throughput streaming | 50,000 - 100,000 | Global default |
+| Bulk data migration | 100,000 - 1,000,000 | Per-query override |
+| IoT / Edge devices | 1,000 - 5,000 | Global default |
+| Testing / Development | 1,000 - 5,000 | Global default |
 
-**Configuration Example:**
+**Configuration Example (Using Hierarchy):**
 ```yaml
 server_core:
-  priority_queue_capacity: 50000  # Global default
+  priority_queue_capacity: 50000  # Global default for all components
 
 queries:
+  - id: steady-state-query
+    query: "MATCH (n:Regular) RETURN n"
+    sources: ["standard"]
+    # No override → uses 50,000 (global default)
+
   - id: data-migration-query
     query: "MATCH (n) RETURN n"
     sources: ["bulk-import"]
-    priority_queue_capacity: 1000000  # Temporary large capacity
+    priority_queue_capacity: 1000000  # Temporary override for migration
 
 reactions:
+  - id: standard-webhook
+    reaction_type: http
+    queries: ["steady-state-query"]
+    # No override → uses 50,000 (global default)
+
   - id: critical-alerts
     reaction_type: http
     queries: ["high-priority-query"]
-    priority_queue_capacity: 100000  # High capacity for critical path
+    priority_queue_capacity: 100000  # Override for critical path
 ```
 
 **Memory Considerations:**
@@ -1612,6 +1676,12 @@ reactions:
 - 10,000 capacity ≈ 10-20 MB per component
 - 100,000 capacity ≈ 100-200 MB per component
 - Monitor actual memory usage with your data model
+
+**Best Practices:**
+- Set a **global default** that works for most of your workload
+- Use **component overrides** only for outliers (very high volume or critical paths)
+- Start with defaults and adjust based on observed metrics
+- Temporarily increase capacity for known burst scenarios (migrations, batch imports)
 
 ### Reaction Optimization
 

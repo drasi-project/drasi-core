@@ -326,7 +326,7 @@ mod query_core_tests {
                 joins: None,
                 enable_bootstrap: true,
                 bootstrap_buffer_size: 10000,
-                priority_queue_capacity: 10000,
+                priority_queue_capacity: None,
             };
 
             // Just verify the config can be created
@@ -346,7 +346,7 @@ mod query_core_tests {
             joins: None,
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
-            priority_queue_capacity: 10000,
+            priority_queue_capacity: None,
         };
 
         // Empty queries should be caught during validation

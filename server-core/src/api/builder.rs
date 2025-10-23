@@ -16,7 +16,8 @@
 
 use crate::api::Result;
 use crate::config::{
-    DrasiServerCoreSettings, QueryConfig, ReactionConfig, RuntimeConfig, SourceConfig,
+    DrasiServerCoreConfig, DrasiServerCoreSettings, QueryConfig, ReactionConfig, RuntimeConfig,
+    SourceConfig,
 };
 use crate::server_core::DrasiServerCore;
 use std::sync::Arc;
@@ -90,18 +91,22 @@ impl DrasiServerCoreBuilder {
         let server_settings = if let Some(id) = self.server_id {
             DrasiServerCoreSettings {
                 id,
-                priority_queue_capacity: 10000,
+                priority_queue_capacity: None,
             }
         } else {
             DrasiServerCoreSettings::default()
         };
 
-        let config = Arc::new(RuntimeConfig {
+        // Create DrasiServerCoreConfig first, then convert to RuntimeConfig
+        // This ensures the From implementation applies the priority queue hierarchy
+        let core_config = DrasiServerCoreConfig {
             server_core: server_settings,
             sources: self.sources,
             queries: self.queries,
             reactions: self.reactions,
-        });
+        };
+
+        let config = Arc::new(RuntimeConfig::from(core_config));
 
         // Create and initialize the server
         let mut core = DrasiServerCore::new(config);

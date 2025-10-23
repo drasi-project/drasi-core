@@ -47,7 +47,7 @@ mod manager_tests {
                     joins: None,
                     enable_bootstrap: false,
                     bootstrap_buffer_size: 10000,
-                    priority_queue_capacity: 10000,
+                    priority_queue_capacity: None,
                 },
                 status: Arc::new(RwLock::new(ComponentStatus::Running)),
                 broadcast_tx,
@@ -350,7 +350,7 @@ mod log_reaction_tests {
                     joins: None,
                     enable_bootstrap: false,
                     bootstrap_buffer_size: 10000,
-                    priority_queue_capacity: 10000,
+                    priority_queue_capacity: None,
                 },
                 status: Arc::new(RwLock::new(ComponentStatus::Running)),
                 broadcast_tx,
@@ -418,7 +418,7 @@ mod log_reaction_tests {
             queries: vec!["query1".to_string()],
             auto_start: false,
             properties,
-            priority_queue_capacity: 10000,
+            priority_queue_capacity: None,
         };
 
         let reaction = LogReaction::new(config.clone(), event_tx);
@@ -435,7 +435,7 @@ mod log_reaction_tests {
             queries: vec!["query1".to_string()],
             auto_start: false,
             properties: HashMap::new(),
-            priority_queue_capacity: 10000,
+            priority_queue_capacity: None,
         };
 
         let reaction = LogReaction::new(config, event_tx);
