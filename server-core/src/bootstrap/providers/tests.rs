@@ -42,6 +42,7 @@ mod tests {
             auto_start: true,
             properties,
             bootstrap_provider: None,
+            broadcast_channel_capacity: None,
         });
 
         let context = BootstrapContext::new(

@@ -59,6 +59,7 @@ async fn test_platform_bootstrap_with_mock_server() {
         auto_start: true,
         properties,
         bootstrap_provider: None,
+        broadcast_channel_capacity: None,
     });
 
     // Create bootstrap context
@@ -119,6 +120,7 @@ async fn test_platform_bootstrap_label_filtering() {
         auto_start: true,
         properties: HashMap::new(),
         bootstrap_provider: None,
+        broadcast_channel_capacity: None,
     });
 
     let context = BootstrapContext::new(
@@ -161,6 +163,7 @@ async fn test_platform_bootstrap_connection_failure() {
         auto_start: true,
         properties: HashMap::new(),
         bootstrap_provider: None,
+        broadcast_channel_capacity: None,
     });
 
     let context = BootstrapContext::new(
@@ -208,6 +211,7 @@ this is not valid json
         auto_start: true,
         properties: HashMap::new(),
         bootstrap_provider: None,
+        broadcast_channel_capacity: None,
     });
 
     let context = BootstrapContext::new(

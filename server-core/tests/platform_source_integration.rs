@@ -61,6 +61,7 @@ fn create_test_source(
         auto_start: false,
         properties,
         bootstrap_provider: None,
+        broadcast_channel_capacity: None,
     };
 
     let source = PlatformSource::new(config, event_tx);

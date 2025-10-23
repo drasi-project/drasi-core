@@ -104,6 +104,6 @@ pub use channels::ComponentStatus;
 
 /// Configuration types for YAML/JSON config files
 pub use config::{
-    DrasiServerCoreConfig, QueryConfig, QueryRuntime, ReactionConfig, ReactionRuntime,
-    RuntimeConfig, SourceConfig, SourceRuntime,
+    DrasiServerCoreConfig, DrasiServerCoreSettings, QueryConfig, QueryLanguage, QueryRuntime,
+    ReactionConfig, ReactionRuntime, RuntimeConfig, SourceConfig, SourceRuntime,
 };

@@ -116,7 +116,8 @@ impl AdaptiveHttpSource {
             adaptive_config.adaptive_enabled = enabled;
         }
 
-        let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
+        let capacity = config.broadcast_channel_capacity.unwrap_or(1000);
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel(capacity);
 
         Self {
             config,

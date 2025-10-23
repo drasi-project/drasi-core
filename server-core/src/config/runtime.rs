@@ -123,16 +123,35 @@ pub struct RuntimeConfig {
 
 impl From<super::schema::DrasiServerCoreConfig> for RuntimeConfig {
     fn from(config: super::schema::DrasiServerCoreConfig) -> Self {
-        // Get the global default priority queue capacity (or hardcoded 10000)
-        let global_default = config.server_core.priority_queue_capacity.unwrap_or(10000);
+        // Get the global defaults (or hardcoded fallbacks)
+        let global_priority_queue = config.server_core.priority_queue_capacity.unwrap_or(10000);
+        let global_broadcast_capacity = config
+            .server_core
+            .broadcast_channel_capacity
+            .unwrap_or(1000);
 
-        // Apply global default to queries that don't specify their own capacity
+        // Apply global defaults to sources that don't specify their own broadcast capacity
+        let sources = config
+            .sources
+            .into_iter()
+            .map(|mut s| {
+                if s.broadcast_channel_capacity.is_none() {
+                    s.broadcast_channel_capacity = Some(global_broadcast_capacity);
+                }
+                s
+            })
+            .collect();
+
+        // Apply global defaults to queries
         let queries = config
             .queries
             .into_iter()
             .map(|mut q| {
                 if q.priority_queue_capacity.is_none() {
-                    q.priority_queue_capacity = Some(global_default);
+                    q.priority_queue_capacity = Some(global_priority_queue);
+                }
+                if q.broadcast_channel_capacity.is_none() {
+                    q.broadcast_channel_capacity = Some(global_broadcast_capacity);
                 }
                 q
             })
@@ -144,7 +163,7 @@ impl From<super::schema::DrasiServerCoreConfig> for RuntimeConfig {
             .into_iter()
             .map(|mut r| {
                 if r.priority_queue_capacity.is_none() {
-                    r.priority_queue_capacity = Some(global_default);
+                    r.priority_queue_capacity = Some(global_priority_queue);
                 }
                 r
             })
@@ -152,7 +171,7 @@ impl From<super::schema::DrasiServerCoreConfig> for RuntimeConfig {
 
         Self {
             server_core: config.server_core,
-            sources: config.sources,
+            sources,
             queries,
             reactions,
         }

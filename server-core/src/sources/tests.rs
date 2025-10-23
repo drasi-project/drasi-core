@@ -246,6 +246,7 @@ mod internal_source_tests {
             auto_start: false,
             properties,
             bootstrap_provider: None,
+            broadcast_channel_capacity: None,
         };
 
         let source = MockSource::new(config, event_tx);
@@ -289,6 +290,7 @@ mod internal_source_tests {
             auto_start: false,
             properties,
             bootstrap_provider: None,
+            broadcast_channel_capacity: None,
         };
 
         let source = MockSource::new(config, event_tx);
@@ -329,6 +331,7 @@ mod internal_source_tests {
             auto_start: false,
             properties,
             bootstrap_provider: None,
+            broadcast_channel_capacity: None,
         };
 
         let source = MockSource::new(config, event_tx);

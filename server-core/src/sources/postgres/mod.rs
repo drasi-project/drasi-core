@@ -73,7 +73,8 @@ pub struct PostgresReplicationSource {
 
 impl PostgresReplicationSource {
     pub fn new(config: SourceConfig, event_tx: ComponentEventSender) -> Self {
-        let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
+        let capacity = config.broadcast_channel_capacity.unwrap_or(1000);
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel(capacity);
 
         Self {
             config,

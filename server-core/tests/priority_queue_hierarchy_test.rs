@@ -140,8 +140,16 @@ reactions:
     // Find configs by ID (HashMap doesn't preserve order)
     let query1 = config.queries.iter().find(|q| q.id == "query1").unwrap();
     let query2 = config.queries.iter().find(|q| q.id == "query2").unwrap();
-    let reaction1 = config.reactions.iter().find(|r| r.id == "reaction1").unwrap();
-    let reaction2 = config.reactions.iter().find(|r| r.id == "reaction2").unwrap();
+    let reaction1 = config
+        .reactions
+        .iter()
+        .find(|r| r.id == "reaction1")
+        .unwrap();
+    let reaction2 = config
+        .reactions
+        .iter()
+        .find(|r| r.id == "reaction2")
+        .unwrap();
 
     // query1 has explicit override
     assert_eq!(

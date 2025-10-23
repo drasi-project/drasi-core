@@ -92,6 +92,7 @@ impl DrasiServerCoreBuilder {
             DrasiServerCoreSettings {
                 id,
                 priority_queue_capacity: None,
+                broadcast_channel_capacity: None,
             }
         } else {
             DrasiServerCoreSettings::default()

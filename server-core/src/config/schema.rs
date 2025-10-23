@@ -48,6 +48,9 @@ pub struct DrasiServerCoreSettings {
     /// Default priority queue capacity for queries and reactions (default: 10000 if not specified)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority_queue_capacity: Option<usize>,
+    /// Default broadcast channel capacity for sources and queries (default: 1000 if not specified)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broadcast_channel_capacity: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +68,9 @@ pub struct SourceConfig {
     /// Optional bootstrap provider configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bootstrap_provider: Option<BootstrapProviderConfig>,
+    /// Broadcast channel capacity for this source (default: server global, or 1000 if not specified)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broadcast_channel_capacity: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +105,9 @@ pub struct QueryConfig {
     /// Priority queue capacity for this query (default: server global, or 10000 if not specified)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority_queue_capacity: Option<usize>,
+    /// Broadcast channel capacity for this query (default: server global, or 1000 if not specified)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broadcast_channel_capacity: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,6 +240,7 @@ impl Default for DrasiServerCoreSettings {
             // Default server ID to a random UUID
             id: uuid::Uuid::new_v4().to_string(),
             priority_queue_capacity: None,
+            broadcast_channel_capacity: None,
         }
     }
 }

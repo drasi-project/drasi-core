@@ -327,6 +327,7 @@ mod query_core_tests {
                 enable_bootstrap: true,
                 bootstrap_buffer_size: 10000,
                 priority_queue_capacity: None,
+                broadcast_channel_capacity: None,
             };
 
             // Just verify the config can be created
@@ -347,6 +348,7 @@ mod query_core_tests {
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
+            broadcast_channel_capacity: None,
         };
 
         // Empty queries should be caught during validation

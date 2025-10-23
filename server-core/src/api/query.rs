@@ -103,9 +103,10 @@ impl QueryBuilder {
             auto_start: self.auto_start,
             properties: self.properties,
             joins: self.joins,
-            enable_bootstrap: true,         // Default: bootstrap enabled
-            bootstrap_buffer_size: 10000,   // Default buffer size
-            priority_queue_capacity: None, // Default: inherit from server global setting
+            enable_bootstrap: true,           // Default: bootstrap enabled
+            bootstrap_buffer_size: 10000,     // Default buffer size
+            priority_queue_capacity: None,    // Default: inherit from server global setting
+            broadcast_channel_capacity: None, // Default: inherit from server global setting
         }
     }
 }

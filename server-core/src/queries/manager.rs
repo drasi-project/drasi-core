@@ -146,11 +146,12 @@ impl DrasiQuery {
         source_manager: Arc<SourceManager>,
     ) -> Self {
         // Create priority queue with configured capacity (fallback to 10000 if not set)
-        let capacity = config.priority_queue_capacity.unwrap_or(10000);
-        let priority_queue = PriorityQueue::new(capacity);
+        let priority_capacity = config.priority_queue_capacity.unwrap_or(10000);
+        let priority_queue = PriorityQueue::new(priority_capacity);
 
-        // Create broadcast channel for query results (capacity: 1000)
-        let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
+        // Create broadcast channel for query results with configured capacity (fallback to 1000 if not set)
+        let broadcast_capacity = config.broadcast_channel_capacity.unwrap_or(1000);
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel(broadcast_capacity);
 
         Self {
             config,

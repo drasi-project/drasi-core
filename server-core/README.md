@@ -1267,6 +1267,84 @@ DrasiServerCore::builder()
 - **Use global setting** to set a consistent baseline across all components
 - **Use component overrides** for specific high-volume or critical paths
 
+#### Broadcast Channel Configuration
+
+Broadcast channels distribute events from sources to queries, and from queries to reactions. DrasiServerCore uses the same **three-level configuration hierarchy**:
+
+**Level 1: Component-Specific Override** (highest priority)
+```yaml
+sources:
+  - id: high-volume-source
+    source_type: postgres
+    broadcast_channel_capacity: 10000  # This source uses 10,000
+
+queries:
+  - id: high-throughput-query
+    query: "MATCH (n) RETURN n"
+    sources: ["high-volume-source"]
+    broadcast_channel_capacity: 5000  # This query uses 5,000
+```
+
+**Level 2: Global Server Default**
+```yaml
+server_core:
+  id: my-server
+  broadcast_channel_capacity: 2000  # All sources/queries without overrides use 2,000
+```
+
+**Level 3: Hardcoded Fallback**
+- Default value: **1,000** (optimized for typical event distribution patterns)
+
+**When to Adjust:**
+- **Increase** for high fan-out scenarios (one source → many queries, or one query → many reactions)
+- **Increase** for burst traffic where consumers may lag temporarily
+- **Default (1,000)** works well for most production workloads
+- Larger capacities help prevent lagging subscribers from losing events
+
+**Memory Considerations:**
+- Each broadcast channel buffers recent events for late subscribers
+- 1,000 capacity ≈ 1-10 MB depending on event size
+- 10,000 capacity ≈ 10-100 MB per component
+
+**Complete Configuration Example:**
+```yaml
+server_core:
+  id: production-server
+  priority_queue_capacity: 50000          # Global default for queries/reactions
+  broadcast_channel_capacity: 2000        # Global default for sources/queries
+
+sources:
+  - id: high-volume-postgres
+    source_type: postgres
+    broadcast_channel_capacity: 10000     # Override: high fan-out to many queries
+    properties:
+      host: localhost
+      database: mydb
+
+  - id: standard-source
+    source_type: http
+    # No override → uses 2000 (global default)
+
+queries:
+  - id: high-throughput-query
+    query: "MATCH (n:Event) RETURN n"
+    sources: ["high-volume-postgres"]
+    priority_queue_capacity: 100000       # Override: large buffer for processing
+    broadcast_channel_capacity: 5000      # Override: many reactions subscribe
+
+  - id: standard-query
+    query: "MATCH (n:Alert) RETURN n"
+    sources: ["standard-source"]
+    # No overrides → uses global defaults (50000 for priority, 2000 for broadcast)
+
+reactions:
+  - id: critical-webhook
+    reaction_type: http
+    queries: ["high-throughput-query"]
+    priority_queue_capacity: 150000       # Override: critical path
+    # Note: Reactions don't create broadcast channels, so no broadcast_channel_capacity
+```
+
 ## Async Integration Patterns
 
 DrasiServerCore is built on Tokio and requires proper async runtime setup.

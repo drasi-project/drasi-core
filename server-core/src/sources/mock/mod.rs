@@ -39,8 +39,9 @@ pub struct MockSource {
 
 impl MockSource {
     pub fn new(config: SourceConfig, event_tx: ComponentEventSender) -> Self {
-        // Create broadcast channel with capacity for 1000 events
-        let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
+        // Create broadcast channel with configurable capacity (default: 1000)
+        let capacity = config.broadcast_channel_capacity.unwrap_or(1000);
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel(capacity);
 
         Self {
             config,

@@ -241,6 +241,7 @@ reactions: []
             auto_start: true,
             properties: HashMap::new(),
             bootstrap_provider: None,
+            broadcast_channel_capacity: None,
         });
 
         // Save config
@@ -273,6 +274,7 @@ mod runtime_tests {
             auto_start: true,
             properties: HashMap::from([("key".to_string(), json!("value"))]),
             bootstrap_provider: None,
+            broadcast_channel_capacity: None,
         };
 
         let runtime = SourceRuntime::from(config.clone());
@@ -295,6 +297,7 @@ mod runtime_tests {
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
+            broadcast_channel_capacity: None,
         };
 
         let runtime = QueryRuntime::from(config.clone());

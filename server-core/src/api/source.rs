@@ -102,6 +102,7 @@ impl SourceBuilder {
             auto_start: self.auto_start,
             properties: self.properties,
             bootstrap_provider: self.bootstrap_provider,
+            broadcast_channel_capacity: None, // Default: inherit from server global setting
         }
     }
 }

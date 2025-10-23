@@ -1101,6 +1101,7 @@ impl DrasiServerCore {
             server_core: crate::config::DrasiServerCoreSettings {
                 id: self.config.server_core.id.clone(),
                 priority_queue_capacity: self.config.server_core.priority_queue_capacity,
+                broadcast_channel_capacity: self.config.server_core.broadcast_channel_capacity,
             },
             sources,
             queries,
@@ -1562,6 +1563,7 @@ mod tests {
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
                 priority_queue_capacity: None,
+                broadcast_channel_capacity: None,
             },
             sources: vec![],
             queries: vec![],
@@ -1584,6 +1586,7 @@ mod tests {
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
                 priority_queue_capacity: None,
+                broadcast_channel_capacity: None,
             },
             sources: vec![],
             queries: vec![],
@@ -1610,6 +1613,7 @@ mod tests {
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
                 priority_queue_capacity: None,
+                broadcast_channel_capacity: None,
             },
             sources: vec![],
             queries: vec![],
@@ -1629,6 +1633,7 @@ mod tests {
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
                 priority_queue_capacity: None,
+                broadcast_channel_capacity: None,
             },
             sources: vec![],
             queries: vec![],
@@ -1653,6 +1658,7 @@ mod tests {
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
                 priority_queue_capacity: None,
+                broadcast_channel_capacity: None,
             },
             sources: vec![],
             queries: vec![],
@@ -1673,6 +1679,7 @@ mod tests {
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
                 priority_queue_capacity: None,
+                broadcast_channel_capacity: None,
             },
             sources: vec![],
             queries: vec![],
@@ -1773,6 +1780,7 @@ reactions: []
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
                 priority_queue_capacity: None,
+                broadcast_channel_capacity: None,
             },
             sources: vec![],
             queries: vec![],
@@ -1796,6 +1804,7 @@ reactions: []
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
                 priority_queue_capacity: None,
+                broadcast_channel_capacity: None,
             },
             sources: vec![],
             queries: vec![],
@@ -1822,6 +1831,7 @@ reactions: []
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
                 priority_queue_capacity: None,
+                broadcast_channel_capacity: None,
             },
             sources: vec![],
             queries: vec![],
@@ -1847,6 +1857,7 @@ reactions: []
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
                 priority_queue_capacity: None,
+                broadcast_channel_capacity: None,
             },
             sources: vec![],
             queries: vec![],
@@ -1869,6 +1880,7 @@ reactions: []
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
                 priority_queue_capacity: None,
+                broadcast_channel_capacity: None,
             },
             sources: vec![],
             queries: vec![],
@@ -1891,6 +1903,7 @@ reactions: []
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
                 priority_queue_capacity: None,
+                broadcast_channel_capacity: None,
             },
             sources: vec![],
             queries: vec![],
@@ -1955,6 +1968,7 @@ reactions: []
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
                 priority_queue_capacity: None,
+                broadcast_channel_capacity: None,
             },
             sources: vec![],
             queries: vec![],
@@ -2018,6 +2032,7 @@ reactions: []
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
                 priority_queue_capacity: None,
+                broadcast_channel_capacity: None,
             },
             sources: vec![],
             queries: vec![],
@@ -2552,6 +2567,7 @@ reactions: []
             server_core: crate::config::DrasiServerCoreSettings {
                 id: "test-server".to_string(),
                 priority_queue_capacity: None,
+                broadcast_channel_capacity: None,
             },
             sources: vec![],
             queries: vec![],

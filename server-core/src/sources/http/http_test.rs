@@ -159,6 +159,7 @@ mod tests {
                 props
             },
             bootstrap_provider: None,
+            broadcast_channel_capacity: None,
         };
 
         let (event_tx, _event_rx) = mpsc::channel(100);

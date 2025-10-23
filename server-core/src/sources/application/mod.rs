@@ -174,7 +174,8 @@ impl ApplicationSource {
         event_tx: ComponentEventSender,
     ) -> (Self, ApplicationSourceHandle) {
         let (app_tx, app_rx) = mpsc::channel(1000);
-        let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
+        let capacity = config.broadcast_channel_capacity.unwrap_or(1000);
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel(capacity);
 
         let handle = ApplicationSourceHandle {
             tx: app_tx.clone(),
