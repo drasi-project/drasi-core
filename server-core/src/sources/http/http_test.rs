@@ -164,7 +164,7 @@ mod tests {
 
         let (event_tx, _event_rx) = mpsc::channel(100);
 
-        let source = HttpSource::new(config, event_tx);
+        let source = HttpSource::new(config, event_tx).unwrap();
 
         // Test initial status
         assert_eq!(

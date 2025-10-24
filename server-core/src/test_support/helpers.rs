@@ -145,7 +145,7 @@ pub async fn create_test_application_source(
     let config = create_test_source_config(id, "application");
     let (event_tx, _event_rx) = mpsc::channel(100);
 
-    ApplicationSource::new(config, event_tx)
+    ApplicationSource::new(config, event_tx).unwrap()
 }
 
 /// Helper function for creating test application reactions

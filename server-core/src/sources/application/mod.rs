@@ -24,11 +24,11 @@ use async_trait::async_trait;
 use log::{debug, info};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
-use tokio::task::JoinHandle;
 
 use crate::bootstrap::{BootstrapContext, BootstrapProviderFactory, BootstrapRequest};
 use crate::channels::{ComponentStatus, ComponentType, *};
 use crate::config::SourceConfig;
+use crate::sources::base::SourceBase;
 use crate::sources::Source;
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 
@@ -159,12 +159,8 @@ impl ApplicationSourceHandle {
 
 /// A source that allows applications to programmatically inject events
 pub struct ApplicationSource {
-    config: SourceConfig,
-    status: Arc<RwLock<ComponentStatus>>,
-    broadcast_tx: SourceBroadcastSender,
-    event_tx: ComponentEventSender,
+    base: SourceBase,
     app_rx: Arc<RwLock<Option<mpsc::Receiver<SourceChange>>>>,
-    task_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
     bootstrap_data: Arc<RwLock<Vec<SourceChange>>>,
 }
 
@@ -172,10 +168,8 @@ impl ApplicationSource {
     pub fn new(
         config: SourceConfig,
         event_tx: ComponentEventSender,
-    ) -> (Self, ApplicationSourceHandle) {
+    ) -> Result<(Self, ApplicationSourceHandle)> {
         let (app_tx, app_rx) = mpsc::channel(1000);
-        let capacity = config.broadcast_channel_capacity.unwrap_or(1000);
-        let (broadcast_tx, _) = tokio::sync::broadcast::channel(capacity);
 
         let handle = ApplicationSourceHandle {
             tx: app_tx.clone(),
@@ -183,16 +177,12 @@ impl ApplicationSource {
         };
 
         let source = Self {
-            config,
-            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            broadcast_tx,
-            event_tx,
+            base: SourceBase::new(config, event_tx)?,
             app_rx: Arc::new(RwLock::new(Some(app_rx))),
-            task_handle: Arc::new(RwLock::new(None)),
             bootstrap_data: Arc::new(RwLock::new(Vec::new())),
         };
 
-        (source, handle)
+        Ok((source, handle))
     }
 
     /// Get a clone of the bootstrap data Arc for sharing with ApplicationBootstrapProvider
@@ -209,10 +199,10 @@ impl ApplicationSource {
             .take()
             .ok_or_else(|| anyhow::anyhow!("Receiver already taken"))?;
 
-        let source_name = self.config.id.clone();
-        let broadcast_tx = self.broadcast_tx.clone();
-        let event_tx = self.event_tx.clone();
-        let status = self.status.clone();
+        let source_name = self.base.config.id.clone();
+        let broadcast_tx = self.base.broadcast_tx.clone();
+        let event_tx = self.base.event_tx.clone();
+        let status = self.base.status.clone();
         let bootstrap_data = self.bootstrap_data.clone();
 
         let handle = tokio::spawn(async move {
@@ -269,7 +259,7 @@ impl ApplicationSource {
             );
         });
 
-        *self.task_handle.write().await = Some(handle);
+        *self.base.task_handle.write().await = Some(handle);
         Ok(())
     }
 }
@@ -277,14 +267,15 @@ impl ApplicationSource {
 #[async_trait]
 impl Source for ApplicationSource {
     async fn start(&self) -> Result<()> {
-        info!("Starting ApplicationSource '{}'", self.config.id);
+        info!("Starting ApplicationSource '{}'", self.base.config.id);
 
-        *self.status.write().await = ComponentStatus::Starting;
+        *self.base.status.write().await = ComponentStatus::Starting;
 
         let _ = self
+            .base
             .event_tx
             .send(ComponentEvent {
-                component_id: self.config.id.clone(),
+                component_id: self.base.config.id.clone(),
                 component_type: ComponentType::Source,
                 status: ComponentStatus::Starting,
                 timestamp: chrono::Utc::now(),
@@ -298,14 +289,15 @@ impl Source for ApplicationSource {
     }
 
     async fn stop(&self) -> Result<()> {
-        info!("Stopping ApplicationSource '{}'", self.config.id);
+        info!("Stopping ApplicationSource '{}'", self.base.config.id);
 
-        *self.status.write().await = ComponentStatus::Stopping;
+        *self.base.status.write().await = ComponentStatus::Stopping;
 
         let _ = self
+            .base
             .event_tx
             .send(ComponentEvent {
-                component_id: self.config.id.clone(),
+                component_id: self.base.config.id.clone(),
                 component_type: ComponentType::Source,
                 status: ComponentStatus::Stopping,
                 timestamp: chrono::Utc::now(),
@@ -314,16 +306,17 @@ impl Source for ApplicationSource {
             .await;
 
         // Cancel the processing task
-        if let Some(handle) = self.task_handle.write().await.take() {
+        if let Some(handle) = self.base.task_handle.write().await.take() {
             handle.abort();
         }
 
-        *self.status.write().await = ComponentStatus::Stopped;
+        *self.base.status.write().await = ComponentStatus::Stopped;
 
         let _ = self
+            .base
             .event_tx
             .send(ComponentEvent {
-                component_id: self.config.id.clone(),
+                component_id: self.base.config.id.clone(),
                 component_type: ComponentType::Source,
                 status: ComponentStatus::Stopped,
                 timestamp: chrono::Utc::now(),
@@ -335,11 +328,11 @@ impl Source for ApplicationSource {
     }
 
     async fn status(&self) -> ComponentStatus {
-        self.status.read().await.clone()
+        self.base.status.read().await.clone()
     }
 
     fn get_config(&self) -> &SourceConfig {
-        &self.config
+        &self.base.config
     }
 
     async fn subscribe(
@@ -351,10 +344,10 @@ impl Source for ApplicationSource {
     ) -> Result<SubscriptionResponse> {
         info!(
             "Query '{}' subscribing to ApplicationSource '{}' (bootstrap: {})",
-            query_id, self.config.id, enable_bootstrap
+            query_id, self.base.config.id, enable_bootstrap
         );
 
-        let broadcast_receiver = self.broadcast_tx.subscribe();
+        let broadcast_receiver = self.base.broadcast_tx.subscribe();
 
         // Clone query_id for later use since it will be moved into async block
         let query_id_for_response = query_id.clone();
@@ -362,7 +355,7 @@ impl Source for ApplicationSource {
         // Handle bootstrap if requested
         let bootstrap_receiver = if enable_bootstrap {
             // Check if bootstrap provider is configured
-            if let Some(provider_config) = &self.config.bootstrap_provider {
+            if let Some(provider_config) = &self.base.config.bootstrap_provider {
                 info!(
                     "Bootstrap enabled for query '{}' with {} node labels and {} relation labels, delegating to bootstrap provider",
                     query_id,
@@ -390,9 +383,9 @@ impl Source for ApplicationSource {
 
                 // Create bootstrap context
                 let context = BootstrapContext::new(
-                    self.config.id.clone(), // server_id (using source_id as placeholder)
-                    Arc::new(self.config.clone()),
-                    self.config.id.clone(),
+                    self.base.config.id.clone(), // server_id (using source_id as placeholder)
+                    Arc::new(self.base.config.clone()),
+                    self.base.config.id.clone(),
                 );
 
                 // Create bootstrap request
@@ -432,13 +425,13 @@ impl Source for ApplicationSource {
                 info!(
                     "Sending {} bootstrap events for ApplicationSource '{}' (internal)",
                     bootstrap_data.len(),
-                    self.config.id
+                    self.base.config.id
                 );
 
                 // Send bootstrap events
                 for (seq, change) in bootstrap_data.iter().enumerate() {
                     let event = BootstrapEvent {
-                        source_id: self.config.id.clone(),
+                        source_id: self.base.config.id.clone(),
                         change: change.clone(),
                         timestamp: chrono::Utc::now(),
                         sequence: seq as u64,
@@ -454,14 +447,14 @@ impl Source for ApplicationSource {
 
         Ok(SubscriptionResponse {
             query_id: query_id_for_response,
-            source_id: self.config.id.clone(),
+            source_id: self.base.config.id.clone(),
             broadcast_receiver,
             bootstrap_receiver,
         })
     }
 
     fn get_broadcast_receiver(&self) -> Result<SourceBroadcastReceiver> {
-        Ok(self.broadcast_tx.subscribe())
+        self.base.get_broadcast_receiver()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

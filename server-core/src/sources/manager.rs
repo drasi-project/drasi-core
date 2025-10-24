@@ -156,17 +156,17 @@ impl SourceManager {
 
         let source: Arc<dyn Source> = match config.source_type.as_str() {
             // Internal Rust sources running as tokio tasks
-            "mock" => Arc::new(MockSource::new(config.clone(), self.event_tx.clone())),
+            "mock" => Arc::new(MockSource::new(config.clone(), self.event_tx.clone())?),
             "postgres" => Arc::new(super::PostgresReplicationSource::new(
                 config.clone(),
                 self.event_tx.clone(),
-            )),
-            "http" => Arc::new(HttpSource::new(config.clone(), self.event_tx.clone())),
-            "grpc" => Arc::new(GrpcSource::new(config.clone(), self.event_tx.clone())),
-            "platform" => Arc::new(PlatformSource::new(config.clone(), self.event_tx.clone())),
+            )?),
+            "http" => Arc::new(HttpSource::new(config.clone(), self.event_tx.clone())?),
+            "grpc" => Arc::new(GrpcSource::new(config.clone(), self.event_tx.clone())?),
+            "platform" => Arc::new(PlatformSource::new(config.clone(), self.event_tx.clone())?),
             "application" => {
                 let (app_source, handle) =
-                    ApplicationSource::new(config.clone(), self.event_tx.clone());
+                    ApplicationSource::new(config.clone(), self.event_tx.clone())?;
                 // Store the handle for the application to use
                 self.application_handles
                     .write()

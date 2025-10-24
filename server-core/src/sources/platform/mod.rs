@@ -22,13 +22,13 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
-use crate::bootstrap::{BootstrapContext, BootstrapProviderFactory, BootstrapRequest};
 use crate::channels::{
     ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, ControlOperation,
     SourceBroadcastReceiver, SourceBroadcastSender, SourceControl, SourceEvent, SourceEventWrapper,
     SubscriptionResponse,
 };
 use crate::config::SourceConfig;
+use crate::sources::base::SourceBase;
 use crate::sources::manager::convert_json_to_element_properties;
 use crate::sources::Source;
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
@@ -82,26 +82,15 @@ impl Default for PlatformConfig {
 
 /// Platform source that reads events from Redis Streams
 pub struct PlatformSource {
-    config: SourceConfig,
-    status: Arc<RwLock<ComponentStatus>>,
-    broadcast_tx: SourceBroadcastSender,
-    event_tx: ComponentEventSender,
-    task_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
+    base: SourceBase,
 }
 
 impl PlatformSource {
     /// Create a new platform source
-    pub fn new(config: SourceConfig, event_tx: ComponentEventSender) -> Self {
-        let capacity = config.broadcast_channel_capacity.unwrap_or(1000);
-        let (broadcast_tx, _) = tokio::sync::broadcast::channel(capacity);
-
-        Self {
-            config,
-            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            broadcast_tx,
-            event_tx,
-            task_handle: Arc::new(RwLock::new(None)),
-        }
+    pub fn new(config: SourceConfig, event_tx: ComponentEventSender) -> Result<Self> {
+        Ok(Self {
+            base: SourceBase::new(config, event_tx)?,
+        })
     }
 
     /// Subscribe to source events (for testing)
@@ -111,7 +100,7 @@ impl PlatformSource {
     pub fn test_subscribe(
         &self,
     ) -> tokio::sync::broadcast::Receiver<Arc<crate::channels::SourceEventWrapper>> {
-        self.broadcast_tx.subscribe()
+        self.base.broadcast_tx.subscribe()
     }
 
     /// Parse configuration from properties
@@ -588,49 +577,49 @@ impl PlatformSource {
 #[async_trait::async_trait]
 impl Source for PlatformSource {
     async fn start(&self) -> Result<()> {
-        info!("Starting platform source: {}", self.config.id);
+        info!("Starting platform source: {}", self.base.config.id);
 
         // Parse configuration
-        let platform_config = Self::parse_config(&self.config.properties)?;
+        let platform_config = Self::parse_config(&self.base.config.properties)?;
 
         // Update status
-        *self.status.write().await = ComponentStatus::Running;
+        *self.base.status.write().await = ComponentStatus::Running;
 
         // Start consumer task
         let task = Self::start_consumer_task(
-            self.config.id.clone(),
+            self.base.config.id.clone(),
             platform_config,
-            self.broadcast_tx.clone(),
-            self.event_tx.clone(),
-            self.status.clone(),
+            self.base.broadcast_tx.clone(),
+            self.base.event_tx.clone(),
+            self.base.status.clone(),
         )
         .await;
 
-        *self.task_handle.write().await = Some(task);
+        *self.base.task_handle.write().await = Some(task);
 
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        info!("Stopping platform source: {}", self.config.id);
+        info!("Stopping platform source: {}", self.base.config.id);
 
         // Cancel the task
-        if let Some(handle) = self.task_handle.write().await.take() {
+        if let Some(handle) = self.base.task_handle.write().await.take() {
             handle.abort();
         }
 
         // Update status
-        *self.status.write().await = ComponentStatus::Stopped;
+        *self.base.status.write().await = ComponentStatus::Stopped;
 
         Ok(())
     }
 
     async fn status(&self) -> ComponentStatus {
-        self.status.read().await.clone()
+        self.base.status.read().await.clone()
     }
 
     fn get_config(&self) -> &SourceConfig {
-        &self.config
+        &self.base.config
     }
 
     async fn subscribe(
@@ -640,83 +629,19 @@ impl Source for PlatformSource {
         node_labels: Vec<String>,
         relation_labels: Vec<String>,
     ) -> Result<SubscriptionResponse> {
-        info!(
-            "Query '{}' subscribing to platform source '{}' (bootstrap: {})",
-            query_id, self.config.id, enable_bootstrap
-        );
-
-        let broadcast_receiver = self.broadcast_tx.subscribe();
-
-        // Clone query_id for later use since it will be moved into async block
-        let query_id_for_response = query_id.clone();
-
-        // Handle bootstrap if requested and bootstrap provider is configured
-        let bootstrap_receiver = if enable_bootstrap {
-            if let Some(provider_config) = &self.config.bootstrap_provider {
-                info!(
-                    "Bootstrap enabled for query '{}' with {} node labels and {} relation labels, delegating to bootstrap provider",
-                    query_id,
-                    node_labels.len(),
-                    relation_labels.len()
-                );
-
-                let (tx, rx) = tokio::sync::mpsc::channel(1000);
-
-                // Create bootstrap provider
-                let provider = BootstrapProviderFactory::create_provider(provider_config)?;
-
-                // Create bootstrap context
-                let context = BootstrapContext::new(
-                    self.config.id.clone(), // server_id (using source_id as placeholder)
-                    Arc::new(self.config.clone()),
-                    self.config.id.clone(),
-                );
-
-                // Create bootstrap request
-                let request = BootstrapRequest {
-                    query_id: query_id.clone(),
-                    node_labels,
-                    relation_labels,
-                    request_id: format!("{}-{}", query_id, uuid::Uuid::new_v4()),
-                };
-
-                // Spawn bootstrap task
-                tokio::spawn(async move {
-                    match provider.bootstrap(request, &context, tx).await {
-                        Ok(count) => {
-                            info!(
-                                "Bootstrap completed successfully for query '{}', sent {} events",
-                                query_id, count
-                            );
-                        }
-                        Err(e) => {
-                            error!("Bootstrap failed for query '{}': {}", query_id, e);
-                        }
-                    }
-                });
-
-                Some(rx)
-            } else {
-                info!(
-                    "Bootstrap requested for query '{}' but no bootstrap provider configured for source '{}'",
-                    query_id, self.config.id
-                );
-                None
-            }
-        } else {
-            None
-        };
-
-        Ok(SubscriptionResponse {
-            query_id: query_id_for_response,
-            source_id: self.config.id.clone(),
-            broadcast_receiver,
-            bootstrap_receiver,
-        })
+        self.base
+            .subscribe_with_bootstrap(
+                query_id,
+                enable_bootstrap,
+                node_labels,
+                relation_labels,
+                "Platform",
+            )
+            .await
     }
 
     fn get_broadcast_receiver(&self) -> Result<SourceBroadcastReceiver> {
-        Ok(self.broadcast_tx.subscribe())
+        self.base.get_broadcast_receiver()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

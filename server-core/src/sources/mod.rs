@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod application;
+pub mod base;
 pub mod grpc;
 pub mod http;
 pub mod manager;

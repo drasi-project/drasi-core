@@ -25,13 +25,12 @@ use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc;
 use tokio::time::timeout;
 
-use crate::bootstrap::{BootstrapContext, BootstrapProviderFactory, BootstrapRequest};
 use crate::channels::*;
 use crate::config::SourceConfig;
-use crate::sources::Source;
+use crate::sources::{base::SourceBase, Source};
 use crate::utils::{AdaptiveBatchConfig, AdaptiveBatcher};
 
 use super::{
@@ -41,12 +40,7 @@ use super::{
 
 /// Adaptive HTTP source that batches incoming events
 pub struct AdaptiveHttpSource {
-    config: SourceConfig,
-    status: Arc<RwLock<ComponentStatus>>,
-    broadcast_tx: SourceBroadcastSender,
-    event_tx: ComponentEventSender,
-    task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
-    shutdown_tx: Arc<RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
+    base: SourceBase,
     // Adaptive batching configuration
     adaptive_config: AdaptiveBatchConfig,
 }
@@ -66,7 +60,7 @@ struct AdaptiveAppState {
 }
 
 impl AdaptiveHttpSource {
-    pub fn new(config: SourceConfig, event_tx: ComponentEventSender) -> Self {
+    pub fn new(config: SourceConfig, event_tx: ComponentEventSender) -> Result<Self> {
         // Configure adaptive batching
         let mut adaptive_config = AdaptiveBatchConfig::default();
 
@@ -116,18 +110,10 @@ impl AdaptiveHttpSource {
             adaptive_config.adaptive_enabled = enabled;
         }
 
-        let capacity = config.broadcast_channel_capacity.unwrap_or(1000);
-        let (broadcast_tx, _) = tokio::sync::broadcast::channel(capacity);
-
-        Self {
-            config,
-            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            broadcast_tx,
-            event_tx,
-            task_handle: Arc::new(RwLock::new(None)),
-            shutdown_tx: Arc::new(RwLock::new(None)),
+        Ok(Self {
+            base: SourceBase::new(config, event_tx)?,
             adaptive_config,
-        }
+        })
     }
 
     async fn handle_single_event(
@@ -312,22 +298,19 @@ impl AdaptiveHttpSource {
 #[async_trait]
 impl Source for AdaptiveHttpSource {
     async fn start(&self) -> Result<()> {
-        info!("[{}] Starting adaptive HTTP source", self.config.id);
+        info!("[{}] Starting adaptive HTTP source", self.base.config.id);
 
-        *self.status.write().await = ComponentStatus::Starting;
-
-        // Send start event
-        let event = ComponentEvent {
-            component_id: self.config.id.clone(),
-            component_type: ComponentType::Source,
-            status: ComponentStatus::Starting,
-            timestamp: chrono::Utc::now(),
-            message: Some("Starting adaptive HTTP source".to_string()),
-        };
-        self.event_tx.send(event).await?;
+        self.base.set_status(ComponentStatus::Starting).await;
+        self.base
+            .send_component_event(
+                ComponentStatus::Starting,
+                Some("Starting adaptive HTTP source".to_string()),
+            )
+            .await?;
 
         // Extract configuration
         let host = self
+            .base
             .config
             .properties
             .get("host")
@@ -335,6 +318,7 @@ impl Source for AdaptiveHttpSource {
             .unwrap_or("0.0.0.0")
             .to_string();
         let port = self
+            .base
             .config
             .properties
             .get("port")
@@ -344,20 +328,20 @@ impl Source for AdaptiveHttpSource {
         // Create batch channel
         let (batch_tx, batch_rx) = mpsc::channel(1000);
 
-        // Start adaptive batcher task        let broadcast_tx = self.broadcast_tx.clone();
+        // Start adaptive batcher task
         let adaptive_config = self.adaptive_config.clone();
-        let source_id = self.config.id.clone();
+        let source_id = self.base.config.id.clone();
 
         tokio::spawn(Self::run_adaptive_batcher(
             batch_rx,
-            self.broadcast_tx.clone(),
+            self.base.broadcast_tx.clone(),
             adaptive_config,
             source_id.clone(),
         ));
 
         // Create app state
         let state = AdaptiveAppState {
-            source_id: self.config.id.clone(),
+            source_id: self.base.config.id.clone(),
             batch_tx,
         };
 
@@ -394,72 +378,63 @@ impl Source for AdaptiveHttpSource {
                 .unwrap();
         });
 
-        *self.task_handle.write().await = Some(server_handle);
-        *self.shutdown_tx.write().await = Some(shutdown_tx);
-        *self.status.write().await = ComponentStatus::Running;
+        *self.base.task_handle.write().await = Some(server_handle);
+        *self.base.shutdown_tx.write().await = Some(shutdown_tx);
+        self.base.set_status(ComponentStatus::Running).await;
 
         // Send running event
-        let event = ComponentEvent {
-            component_id: self.config.id.clone(),
-            component_type: ComponentType::Source,
-            status: ComponentStatus::Running,
-            timestamp: chrono::Utc::now(),
-            message: Some(format!(
-                "Adaptive HTTP source running on {}:{} with batch support",
-                host_clone, port
-            )),
-        };
-        self.event_tx.send(event).await?;
+        self.base
+            .send_component_event(
+                ComponentStatus::Running,
+                Some(format!(
+                    "Adaptive HTTP source running on {}:{} with batch support",
+                    host_clone, port
+                )),
+            )
+            .await?;
 
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        info!("[{}] Stopping adaptive HTTP source", self.config.id);
+        info!("[{}] Stopping adaptive HTTP source", self.base.config.id);
 
-        *self.status.write().await = ComponentStatus::Stopping;
-
-        // Send stop event
-        let event = ComponentEvent {
-            component_id: self.config.id.clone(),
-            component_type: ComponentType::Source,
-            status: ComponentStatus::Stopping,
-            timestamp: chrono::Utc::now(),
-            message: Some("Stopping adaptive HTTP source".to_string()),
-        };
-        self.event_tx.send(event).await?;
+        // Use a custom stop with timeout for the HTTP server
+        self.base.set_status(ComponentStatus::Stopping).await;
+        self.base
+            .send_component_event(
+                ComponentStatus::Stopping,
+                Some("Stopping adaptive HTTP source".to_string()),
+            )
+            .await?;
 
         // Send shutdown signal
-        if let Some(shutdown_tx) = self.shutdown_tx.write().await.take() {
-            let _ = shutdown_tx.send(());
+        if let Some(tx) = self.base.shutdown_tx.write().await.take() {
+            let _ = tx.send(());
         }
 
-        // Wait for server to stop
-        if let Some(handle) = self.task_handle.write().await.take() {
+        // Wait for task to complete with timeout
+        if let Some(handle) = self.base.task_handle.write().await.take() {
             let _ = timeout(Duration::from_secs(5), handle).await;
         }
 
-        *self.status.write().await = ComponentStatus::Stopped;
-
-        // Send stopped event
-        let event = ComponentEvent {
-            component_id: self.config.id.clone(),
-            component_type: ComponentType::Source,
-            status: ComponentStatus::Stopped,
-            timestamp: chrono::Utc::now(),
-            message: Some("Adaptive HTTP source stopped".to_string()),
-        };
-        self.event_tx.send(event).await?;
+        self.base.set_status(ComponentStatus::Stopped).await;
+        self.base
+            .send_component_event(
+                ComponentStatus::Stopped,
+                Some("Adaptive HTTP source stopped".to_string()),
+            )
+            .await?;
 
         Ok(())
     }
 
     async fn status(&self) -> ComponentStatus {
-        self.status.read().await.clone()
+        self.base.get_status().await
     }
 
     fn get_config(&self) -> &SourceConfig {
-        &self.config
+        &self.base.config
     }
 
     async fn subscribe(
@@ -469,83 +444,19 @@ impl Source for AdaptiveHttpSource {
         node_labels: Vec<String>,
         relation_labels: Vec<String>,
     ) -> Result<SubscriptionResponse> {
-        info!(
-            "Query '{}' subscribing to HTTP source '{}' (bootstrap: {})",
-            query_id, self.config.id, enable_bootstrap
-        );
-
-        let broadcast_receiver = self.broadcast_tx.subscribe();
-
-        // Clone query_id for later use since it will be moved into async block
-        let query_id_for_response = query_id.clone();
-
-        // Handle bootstrap if requested and bootstrap provider is configured
-        let bootstrap_receiver = if enable_bootstrap {
-            if let Some(provider_config) = &self.config.bootstrap_provider {
-                info!(
-                    "Bootstrap enabled for query '{}' with {} node labels and {} relation labels, delegating to bootstrap provider",
-                    query_id,
-                    node_labels.len(),
-                    relation_labels.len()
-                );
-
-                let (tx, rx) = tokio::sync::mpsc::channel(1000);
-
-                // Create bootstrap provider
-                let provider = BootstrapProviderFactory::create_provider(provider_config)?;
-
-                // Create bootstrap context
-                let context = BootstrapContext::new(
-                    self.config.id.clone(), // server_id (using source_id as placeholder)
-                    Arc::new(self.config.clone()),
-                    self.config.id.clone(),
-                );
-
-                // Create bootstrap request
-                let request = BootstrapRequest {
-                    query_id: query_id.clone(),
-                    node_labels,
-                    relation_labels,
-                    request_id: format!("{}-{}", query_id, uuid::Uuid::new_v4()),
-                };
-
-                // Spawn bootstrap task
-                tokio::spawn(async move {
-                    match provider.bootstrap(request, &context, tx).await {
-                        Ok(count) => {
-                            info!(
-                                "Bootstrap completed successfully for query '{}', sent {} events",
-                                query_id, count
-                            );
-                        }
-                        Err(e) => {
-                            error!("Bootstrap failed for query '{}': {}", query_id, e);
-                        }
-                    }
-                });
-
-                Some(rx)
-            } else {
-                info!(
-                    "Bootstrap requested for query '{}' but no bootstrap provider configured for source '{}'",
-                    query_id, self.config.id
-                );
-                None
-            }
-        } else {
-            None
-        };
-
-        Ok(SubscriptionResponse {
-            query_id: query_id_for_response,
-            source_id: self.config.id.clone(),
-            broadcast_receiver,
-            bootstrap_receiver,
-        })
+        self.base
+            .subscribe_with_bootstrap(
+                query_id,
+                enable_bootstrap,
+                node_labels,
+                relation_labels,
+                "HTTP",
+            )
+            .await
     }
 
     fn get_broadcast_receiver(&self) -> Result<SourceBroadcastReceiver> {
-        Ok(self.broadcast_tx.subscribe())
+        self.base.get_broadcast_receiver()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

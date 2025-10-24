@@ -16,13 +16,11 @@ use anyhow::Result;
 use async_trait::async_trait;
 use log::{debug, error, info};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use tonic::{transport::Server, Request, Response, Status};
 
-use crate::bootstrap::{BootstrapContext, BootstrapProviderFactory, BootstrapRequest};
 use crate::channels::*;
 use crate::config::SourceConfig;
-use crate::sources::Source;
+use crate::sources::{base::SourceBase, Source};
 use crate::utils::*;
 
 // Include generated protobuf code
@@ -39,51 +37,33 @@ use proto::{
 
 /// gRPC source that exposes a gRPC endpoint to receive SourceChangeEvents
 pub struct GrpcSource {
-    config: SourceConfig,
-    status: Arc<RwLock<ComponentStatus>>,
-    broadcast_tx: SourceBroadcastSender,
-    event_tx: ComponentEventSender,
-    task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
-    shutdown_tx: Arc<RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
+    base: SourceBase,
 }
 
 impl GrpcSource {
-    pub fn new(config: SourceConfig, event_tx: ComponentEventSender) -> Self {
-        let capacity = config.broadcast_channel_capacity.unwrap_or(1000);
-        let (broadcast_tx, _) = tokio::sync::broadcast::channel(capacity);
-
-        Self {
-            config,
-            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            broadcast_tx,
-            event_tx,
-            task_handle: Arc::new(RwLock::new(None)),
-            shutdown_tx: Arc::new(RwLock::new(None)),
-        }
+    pub fn new(config: SourceConfig, event_tx: ComponentEventSender) -> Result<Self> {
+        Ok(Self {
+            base: SourceBase::new(config, event_tx)?,
+        })
     }
 }
 
 #[async_trait]
 impl Source for GrpcSource {
     async fn start(&self) -> Result<()> {
-        log_component_start("gRPC Source", &self.config.id);
+        log_component_start("gRPC Source", &self.base.config.id);
 
-        *self.status.write().await = ComponentStatus::Starting;
-
-        let event = ComponentEvent {
-            component_id: self.config.id.clone(),
-            component_type: ComponentType::Source,
-            status: ComponentStatus::Starting,
-            timestamp: chrono::Utc::now(),
-            message: Some("Starting gRPC source".to_string()),
-        };
-
-        if let Err(e) = self.event_tx.send(event).await {
-            error!("Failed to send component event: {}", e);
-        }
+        self.base.set_status(ComponentStatus::Starting).await;
+        self.base
+            .send_component_event(
+                ComponentStatus::Starting,
+                Some("Starting gRPC source".to_string()),
+            )
+            .await?;
 
         // Get configuration
         let port = self
+            .base
             .config
             .properties
             .get("port")
@@ -91,6 +71,7 @@ impl Source for GrpcSource {
             .unwrap_or(50051) as u16;
 
         let host = self
+            .base
             .config
             .properties
             .get("host")
@@ -99,24 +80,27 @@ impl Source for GrpcSource {
 
         let addr = format!("{}:{}", host, port).parse()?;
 
-        info!("gRPC source '{}' listening on {}", self.config.id, addr);
+        info!(
+            "gRPC source '{}' listening on {}",
+            self.base.config.id, addr
+        );
 
         // Create shutdown channel
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        *self.shutdown_tx.write().await = Some(shutdown_tx);
+        *self.base.shutdown_tx.write().await = Some(shutdown_tx);
 
         // Create gRPC service
         let service = GrpcSourceService {
-            source_id: self.config.id.clone(),
-            broadcast_tx: self.broadcast_tx.clone(),
+            source_id: self.base.config.id.clone(),
+            broadcast_tx: self.base.broadcast_tx.clone(),
         };
 
         let svc = SourceServiceServer::new(service);
 
         // Start the gRPC server
-        let status = Arc::clone(&self.status);
-        let source_id = self.config.id.clone();
-        let event_tx = self.event_tx.clone();
+        let status = Arc::clone(&self.base.status);
+        let source_id = self.base.config.id.clone();
+        let event_tx = self.base.event_tx.clone();
 
         let task = tokio::spawn(async move {
             *status.write().await = ComponentStatus::Running;
@@ -148,62 +132,23 @@ impl Source for GrpcSource {
             *status.write().await = ComponentStatus::Stopped;
         });
 
-        *self.task_handle.write().await = Some(task);
-        *self.status.write().await = ComponentStatus::Running;
+        *self.base.task_handle.write().await = Some(task);
+        self.base.set_status(ComponentStatus::Running).await;
 
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        log_component_stop("gRPC Source", &self.config.id);
-
-        *self.status.write().await = ComponentStatus::Stopping;
-
-        let event = ComponentEvent {
-            component_id: self.config.id.clone(),
-            component_type: ComponentType::Source,
-            status: ComponentStatus::Stopping,
-            timestamp: chrono::Utc::now(),
-            message: Some("Stopping gRPC source".to_string()),
-        };
-
-        if let Err(e) = self.event_tx.send(event).await {
-            error!("Failed to send component event: {}", e);
-        }
-
-        // Send shutdown signal
-        if let Some(tx) = self.shutdown_tx.write().await.take() {
-            let _ = tx.send(());
-        }
-
-        // Wait for task to complete
-        if let Some(handle) = self.task_handle.write().await.take() {
-            let _ = handle.await;
-        }
-
-        *self.status.write().await = ComponentStatus::Stopped;
-
-        let stopped_event = ComponentEvent {
-            component_id: self.config.id.clone(),
-            component_type: ComponentType::Source,
-            status: ComponentStatus::Stopped,
-            timestamp: chrono::Utc::now(),
-            message: Some("gRPC source stopped".to_string()),
-        };
-
-        if let Err(e) = self.event_tx.send(stopped_event).await {
-            error!("Failed to send component event: {}", e);
-        }
-
-        Ok(())
+        log_component_stop("gRPC Source", &self.base.config.id);
+        self.base.stop_common("gRPC").await
     }
 
     async fn status(&self) -> ComponentStatus {
-        self.status.read().await.clone()
+        self.base.get_status().await
     }
 
     fn get_config(&self) -> &SourceConfig {
-        &self.config
+        &self.base.config
     }
 
     async fn subscribe(
@@ -213,83 +158,19 @@ impl Source for GrpcSource {
         node_labels: Vec<String>,
         relation_labels: Vec<String>,
     ) -> Result<SubscriptionResponse> {
-        info!(
-            "Query '{}' subscribing to gRPC source '{}' (bootstrap: {})",
-            query_id, self.config.id, enable_bootstrap
-        );
-
-        let broadcast_receiver = self.broadcast_tx.subscribe();
-
-        // Clone query_id for later use since it will be moved into async block
-        let query_id_for_response = query_id.clone();
-
-        // Handle bootstrap if requested and bootstrap provider is configured
-        let bootstrap_receiver = if enable_bootstrap {
-            if let Some(provider_config) = &self.config.bootstrap_provider {
-                info!(
-                    "Bootstrap enabled for query '{}' with {} node labels and {} relation labels, delegating to bootstrap provider",
-                    query_id,
-                    node_labels.len(),
-                    relation_labels.len()
-                );
-
-                let (tx, rx) = tokio::sync::mpsc::channel(1000);
-
-                // Create bootstrap provider
-                let provider = BootstrapProviderFactory::create_provider(provider_config)?;
-
-                // Create bootstrap context
-                let context = BootstrapContext::new(
-                    self.config.id.clone(), // server_id (using source_id as placeholder)
-                    Arc::new(self.config.clone()),
-                    self.config.id.clone(),
-                );
-
-                // Create bootstrap request
-                let request = BootstrapRequest {
-                    query_id: query_id.clone(),
-                    node_labels,
-                    relation_labels,
-                    request_id: format!("{}-{}", query_id, uuid::Uuid::new_v4()),
-                };
-
-                // Spawn bootstrap task
-                tokio::spawn(async move {
-                    match provider.bootstrap(request, &context, tx).await {
-                        Ok(count) => {
-                            info!(
-                                "Bootstrap completed successfully for query '{}', sent {} events",
-                                query_id, count
-                            );
-                        }
-                        Err(e) => {
-                            error!("Bootstrap failed for query '{}': {}", query_id, e);
-                        }
-                    }
-                });
-
-                Some(rx)
-            } else {
-                info!(
-                    "Bootstrap requested for query '{}' but no bootstrap provider configured for source '{}'",
-                    query_id, self.config.id
-                );
-                None
-            }
-        } else {
-            None
-        };
-
-        Ok(SubscriptionResponse {
-            query_id: query_id_for_response,
-            source_id: self.config.id.clone(),
-            broadcast_receiver,
-            bootstrap_receiver,
-        })
+        self.base
+            .subscribe_with_bootstrap(
+                query_id,
+                enable_bootstrap,
+                node_labels,
+                relation_labels,
+                "gRPC",
+            )
+            .await
     }
 
     fn get_broadcast_receiver(&self) -> Result<SourceBroadcastReceiver> {
-        Ok(self.broadcast_tx.subscribe())
+        self.base.get_broadcast_receiver()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

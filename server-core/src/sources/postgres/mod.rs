@@ -27,10 +27,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::bootstrap::{BootstrapContext, BootstrapProviderFactory, BootstrapRequest};
 use crate::channels::*;
 use crate::config::SourceConfig;
-use crate::sources::Source;
+use crate::sources::{base::SourceBase, Source};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableKeyConfig {
@@ -64,29 +63,18 @@ fn default_ssl_mode() -> String {
 }
 
 pub struct PostgresReplicationSource {
-    config: SourceConfig,
-    status: Arc<RwLock<ComponentStatus>>,
-    broadcast_tx: SourceBroadcastSender,
-    event_tx: ComponentEventSender,
-    task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+    base: SourceBase,
 }
 
 impl PostgresReplicationSource {
-    pub fn new(config: SourceConfig, event_tx: ComponentEventSender) -> Self {
-        let capacity = config.broadcast_channel_capacity.unwrap_or(1000);
-        let (broadcast_tx, _) = tokio::sync::broadcast::channel(capacity);
-
-        Self {
-            config,
-            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            broadcast_tx,
-            event_tx,
-            task_handle: Arc::new(RwLock::new(None)),
-        }
+    pub fn new(config: SourceConfig, event_tx: ComponentEventSender) -> Result<Self> {
+        Ok(Self {
+            base: SourceBase::new(config, event_tx)?,
+        })
     }
 
     fn parse_config(&self) -> Result<PostgresReplicationConfig> {
-        let props = &self.config.properties;
+        let props = &self.base.config.properties;
 
         Ok(PostgresReplicationConfig {
             host: props
@@ -162,19 +150,21 @@ impl PostgresReplicationSource {
 #[async_trait]
 impl Source for PostgresReplicationSource {
     async fn start(&self) -> Result<()> {
-        let mut status = self.status.write().await;
-        if *status == ComponentStatus::Running {
+        if self.base.get_status().await == ComponentStatus::Running {
             return Ok(());
         }
 
-        *status = ComponentStatus::Starting;
-        info!("Starting PostgreSQL replication source: {}", self.config.id);
+        self.base.set_status(ComponentStatus::Starting).await;
+        info!(
+            "Starting PostgreSQL replication source: {}",
+            self.base.config.id
+        );
 
         let config = self.parse_config()?;
-        let source_id = self.config.id.clone();
-        let broadcast_tx = self.broadcast_tx.clone();
-        let event_tx = self.event_tx.clone();
-        let status_clone = self.status.clone();
+        let source_id = self.base.config.id.clone();
+        let broadcast_tx = self.base.broadcast_tx.clone();
+        let event_tx = self.base.event_tx.clone();
+        let status_clone = self.base.status.clone();
 
         let task = tokio::spawn(async move {
             if let Err(e) = run_replication(
@@ -200,59 +190,53 @@ impl Source for PostgresReplicationSource {
             }
         });
 
-        *self.task_handle.write().await = Some(task);
-        *status = ComponentStatus::Running;
+        *self.base.task_handle.write().await = Some(task);
+        self.base.set_status(ComponentStatus::Running).await;
 
-        let _ = self
-            .event_tx
-            .send(ComponentEvent {
-                component_id: self.config.id.clone(),
-                component_type: ComponentType::Source,
-                status: ComponentStatus::Running,
-                timestamp: chrono::Utc::now(),
-                message: Some("PostgreSQL replication started".to_string()),
-            })
-            .await;
+        self.base
+            .send_component_event(
+                ComponentStatus::Running,
+                Some("PostgreSQL replication started".to_string()),
+            )
+            .await?;
 
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        let mut status = self.status.write().await;
-        if *status != ComponentStatus::Running {
+        if self.base.get_status().await != ComponentStatus::Running {
             return Ok(());
         }
 
-        *status = ComponentStatus::Stopping;
-        info!("Stopping PostgreSQL replication source: {}", self.config.id);
+        info!(
+            "Stopping PostgreSQL replication source: {}",
+            self.base.config.id
+        );
+
+        self.base.set_status(ComponentStatus::Stopping).await;
 
         // Cancel the replication task
-        if let Some(task) = self.task_handle.write().await.take() {
+        if let Some(task) = self.base.task_handle.write().await.take() {
             task.abort();
         }
 
-        *status = ComponentStatus::Stopped;
-
-        let _ = self
-            .event_tx
-            .send(ComponentEvent {
-                component_id: self.config.id.clone(),
-                component_type: ComponentType::Source,
-                status: ComponentStatus::Stopped,
-                timestamp: chrono::Utc::now(),
-                message: Some("PostgreSQL replication stopped".to_string()),
-            })
-            .await;
+        self.base.set_status(ComponentStatus::Stopped).await;
+        self.base
+            .send_component_event(
+                ComponentStatus::Stopped,
+                Some("PostgreSQL replication stopped".to_string()),
+            )
+            .await?;
 
         Ok(())
     }
 
     async fn status(&self) -> ComponentStatus {
-        self.status.read().await.clone()
+        self.base.get_status().await
     }
 
     fn get_config(&self) -> &SourceConfig {
-        &self.config
+        &self.base.config
     }
 
     async fn subscribe(
@@ -262,83 +246,19 @@ impl Source for PostgresReplicationSource {
         node_labels: Vec<String>,
         relation_labels: Vec<String>,
     ) -> Result<SubscriptionResponse> {
-        info!(
-            "Query '{}' subscribing to PostgreSQL source '{}' (bootstrap: {})",
-            query_id, self.config.id, enable_bootstrap
-        );
-
-        let broadcast_receiver = self.broadcast_tx.subscribe();
-
-        // Clone query_id for later use since it will be moved into async block
-        let query_id_for_response = query_id.clone();
-
-        // Handle bootstrap if requested and bootstrap provider is configured
-        let bootstrap_receiver = if enable_bootstrap {
-            if let Some(provider_config) = &self.config.bootstrap_provider {
-                info!(
-                    "Bootstrap enabled for query '{}' with {} node labels and {} relation labels, delegating to bootstrap provider",
-                    query_id,
-                    node_labels.len(),
-                    relation_labels.len()
-                );
-
-                let (tx, rx) = tokio::sync::mpsc::channel(1000);
-
-                // Create bootstrap provider
-                let provider = BootstrapProviderFactory::create_provider(provider_config)?;
-
-                // Create bootstrap context
-                let context = BootstrapContext::new(
-                    self.config.id.clone(), // server_id (using source_id as placeholder)
-                    Arc::new(self.config.clone()),
-                    self.config.id.clone(),
-                );
-
-                // Create bootstrap request
-                let request = BootstrapRequest {
-                    query_id: query_id.clone(),
-                    node_labels,
-                    relation_labels,
-                    request_id: format!("{}-{}", query_id, uuid::Uuid::new_v4()),
-                };
-
-                // Spawn bootstrap task
-                tokio::spawn(async move {
-                    match provider.bootstrap(request, &context, tx).await {
-                        Ok(count) => {
-                            info!(
-                                "Bootstrap completed successfully for query '{}', sent {} events",
-                                query_id, count
-                            );
-                        }
-                        Err(e) => {
-                            error!("Bootstrap failed for query '{}': {}", query_id, e);
-                        }
-                    }
-                });
-
-                Some(rx)
-            } else {
-                info!(
-                    "Bootstrap requested for query '{}' but no bootstrap provider configured for source '{}'",
-                    query_id, self.config.id
-                );
-                None
-            }
-        } else {
-            None
-        };
-
-        Ok(SubscriptionResponse {
-            query_id: query_id_for_response,
-            source_id: self.config.id.clone(),
-            broadcast_receiver,
-            bootstrap_receiver,
-        })
+        self.base
+            .subscribe_with_bootstrap(
+                query_id,
+                enable_bootstrap,
+                node_labels,
+                relation_labels,
+                "PostgreSQL",
+            )
+            .await
     }
 
     fn get_broadcast_receiver(&self) -> Result<SourceBroadcastReceiver> {
-        Ok(self.broadcast_tx.subscribe())
+        self.base.get_broadcast_receiver()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

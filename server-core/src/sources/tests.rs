@@ -249,7 +249,7 @@ mod internal_source_tests {
             broadcast_channel_capacity: None,
         };
 
-        let source = MockSource::new(config, event_tx);
+        let source = MockSource::new(config, event_tx).unwrap();
         let mut rx = source.test_subscribe();
 
         // Start the source
@@ -293,7 +293,7 @@ mod internal_source_tests {
             broadcast_channel_capacity: None,
         };
 
-        let source = MockSource::new(config, event_tx);
+        let source = MockSource::new(config, event_tx).unwrap();
         let mut rx = source.test_subscribe();
 
         // Start the source
@@ -334,7 +334,7 @@ mod internal_source_tests {
             broadcast_channel_capacity: None,
         };
 
-        let source = MockSource::new(config, event_tx);
+        let source = MockSource::new(config, event_tx).unwrap();
 
         // Initial status
         assert_eq!(source.status().await, ComponentStatus::Stopped);

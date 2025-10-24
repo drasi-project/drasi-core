@@ -64,7 +64,7 @@ fn create_test_source(
         broadcast_channel_capacity: None,
     };
 
-    let source = PlatformSource::new(config, event_tx);
+    let source = PlatformSource::new(config, event_tx).unwrap();
     let source_change_rx = source.test_subscribe();
 
     (source, source_change_rx, event_rx)
