@@ -39,7 +39,11 @@ pub struct SourceBase {
     /// Current component status
     pub status: Arc<RwLock<ComponentStatus>>,
     /// Dispatchers for sending source events to subscribers
-    pub dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    ///
+    /// Note: This field is `pub(crate)` to limit access to within the crate.
+    /// External code should use the public methods like `dispatch_event()` or `test_subscribe()`.
+    /// Internal source implementations may access this for spawned tasks that need the Arc.
+    pub(crate) dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     /// Channel for sending component lifecycle events
     pub event_tx: ComponentEventSender,
     /// Handle to the source's main task
@@ -272,6 +276,63 @@ impl SourceBase {
             chrono::Utc::now(),
         );
         self.dispatch_event(wrapper).await
+    }
+
+    /// Create a test subscription to this source (synchronous wrapper)
+    ///
+    /// This method is intended for use in tests to receive events from the source.
+    /// It properly handles both Broadcast and Channel dispatch modes by delegating
+    /// to `create_streaming_receiver()`, making the dispatch mode transparent to tests.
+    ///
+    /// Note: This is a synchronous wrapper that uses `tokio::task::block_in_place` internally.
+    /// For async contexts, prefer calling `create_streaming_receiver()` directly.
+    ///
+    /// # Returns
+    /// A receiver that will receive all events dispatched by this source
+    ///
+    /// # Panics
+    /// Panics if the receiver cannot be created (e.g., internal error)
+    pub fn test_subscribe(&self) -> Box<dyn ChangeReceiver<SourceEventWrapper>> {
+        // Use block_in_place to avoid nested executor issues in async tests
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.create_streaming_receiver())
+        })
+        .expect("Failed to create test subscription receiver")
+    }
+
+    /// Helper function to dispatch events from spawned tasks
+    ///
+    /// This is a static helper that can be used from spawned async tasks that don't
+    /// have access to `self`. It manually iterates through dispatchers and sends the event.
+    ///
+    /// For code that has access to `&self`, prefer using `dispatch_event()` instead.
+    ///
+    /// # Arguments
+    /// * `dispatchers` - Arc to the dispatchers list (from `self.base.dispatchers.clone()`)
+    /// * `wrapper` - The event wrapper to dispatch
+    /// * `source_id` - Source ID for logging
+    pub async fn dispatch_from_task(
+        dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+        wrapper: SourceEventWrapper,
+        source_id: &str,
+    ) -> Result<()> {
+        debug!("[{}] Dispatching event from task: {:?}", source_id, &wrapper);
+
+        // Arc-wrap for zero-copy sharing across dispatchers
+        let arc_wrapper = Arc::new(wrapper);
+
+        // Send to all dispatchers
+        let dispatchers_guard = dispatchers.read().await;
+        for dispatcher in dispatchers_guard.iter() {
+            if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
+                debug!(
+                    "[{}] Failed to dispatch event from task: {}",
+                    source_id, e
+                );
+            }
+        }
+
+        Ok(())
     }
 
     /// Handle common stop functionality

@@ -35,7 +35,7 @@ use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout};
 
 /// Helper to create a platform source with test configuration
-fn create_test_source(
+async fn create_test_source(
     redis_url: String,
     stream_key: &str,
 ) -> (
@@ -64,7 +64,7 @@ fn create_test_source(
     };
 
     let source = PlatformSource::new(config, event_tx).unwrap();
-    let source_change_rx = source.test_subscribe();
+    let source_change_rx = source.test_subscribe_async().await;
 
     (source, source_change_rx, event_rx)
 }
@@ -78,7 +78,7 @@ async fn test_basic_insert_event_consumption() -> Result<()> {
 
     // Create and start source
     let (source, mut source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key);
+        create_test_source(redis_url.clone(), stream_key).await;
     source.start().await?;
 
     // Give source time to set up consumer group
@@ -120,7 +120,7 @@ async fn test_basic_update_event_consumption() -> Result<()> {
     let stream_key = "test-update-stream";
 
     let (source, mut source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key);
+        create_test_source(redis_url.clone(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -167,7 +167,7 @@ async fn test_basic_delete_event_consumption() -> Result<()> {
     let stream_key = "test-delete-stream";
 
     let (source, mut source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key);
+        create_test_source(redis_url.clone(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -202,7 +202,7 @@ async fn test_node_element_transformation() -> Result<()> {
     let stream_key = "test-node-transform";
 
     let (source, mut source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key);
+        create_test_source(redis_url.clone(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -267,7 +267,7 @@ async fn test_relation_element_transformation() -> Result<()> {
     let stream_key = "test-relation-transform";
 
     let (source, mut source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key);
+        create_test_source(redis_url.clone(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -322,7 +322,7 @@ async fn test_multiple_events_in_batch() -> Result<()> {
     let stream_key = "test-batch-stream";
 
     let (source, mut source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key);
+        create_test_source(redis_url.clone(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -371,7 +371,7 @@ async fn test_consumer_group_creation() -> Result<()> {
     let redis_url = setup_redis().await;
     let stream_key = "test-group-creation";
 
-    let (source, _source_change_rx, _event_rx) = create_test_source(redis_url.clone(), stream_key);
+    let (source, _source_change_rx, _event_rx) = create_test_source(redis_url.clone(), stream_key).await;
     source.start().await?;
 
     // Give source time to create consumer group
@@ -404,7 +404,7 @@ async fn test_event_acknowledgment() -> Result<()> {
     let stream_key = "test-ack-stream";
 
     let (source, mut source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key);
+        create_test_source(redis_url.clone(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -437,7 +437,7 @@ async fn test_resume_from_position() -> Result<()> {
 
     // Start source and process one event
     let (source, mut source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key);
+        create_test_source(redis_url.clone(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -464,7 +464,7 @@ async fn test_resume_from_position() -> Result<()> {
 
     // Restart source with same consumer group
     let (source2, mut source_change_rx2, _event_rx2) =
-        create_test_source(redis_url.clone(), stream_key);
+        create_test_source(redis_url.clone(), stream_key).await;
     source2.start().await?;
 
     // Should receive only the second event (resume from position)
@@ -491,7 +491,7 @@ async fn test_malformed_json_event() -> Result<()> {
     let stream_key = "test-malformed-stream";
 
     let (source, mut source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key);
+        create_test_source(redis_url.clone(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -534,7 +534,7 @@ async fn test_missing_required_fields() -> Result<()> {
     let stream_key = "test-missing-fields";
 
     let (source, mut source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key);
+        create_test_source(redis_url.clone(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -585,7 +585,7 @@ async fn test_invalid_operation_type() -> Result<()> {
     let stream_key = "test-invalid-op";
 
     let (source, mut source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key);
+        create_test_source(redis_url.clone(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -636,7 +636,7 @@ async fn test_stream_creation_if_not_exists() -> Result<()> {
     let stream_key = "non-existent-stream";
 
     // Start source on non-existent stream
-    let (source, _source_change_rx, _event_rx) = create_test_source(redis_url.clone(), stream_key);
+    let (source, _source_change_rx, _event_rx) = create_test_source(redis_url.clone(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(200)).await;
 
@@ -661,7 +661,7 @@ async fn test_multiple_events_in_cloudevent_data_array() -> Result<()> {
     let stream_key = "test-multi-event-array";
 
     let (source, mut source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key);
+        create_test_source(redis_url.clone(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -745,7 +745,7 @@ async fn test_source_start_and_stop() -> Result<()> {
     let redis_url = setup_redis().await;
     let stream_key = "test-lifecycle";
 
-    let (source, _source_change_rx, _event_rx) = create_test_source(redis_url, stream_key);
+    let (source, _source_change_rx, _event_rx) = create_test_source(redis_url, stream_key).await;
 
     // Start source
     source.start().await?;
@@ -769,7 +769,7 @@ async fn test_graceful_shutdown() -> Result<()> {
     let stream_key = "test-shutdown";
 
     let (source, mut source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key);
+        create_test_source(redis_url.clone(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -814,7 +814,7 @@ async fn test_restart_and_resume() -> Result<()> {
     let stream_key = "test-restart";
 
     // First run
-    let (source1, mut rx1, _event_rx1) = create_test_source(redis_url.clone(), stream_key);
+    let (source1, mut rx1, _event_rx1) = create_test_source(redis_url.clone(), stream_key).await;
     source1.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -839,7 +839,7 @@ async fn test_restart_and_resume() -> Result<()> {
     publish_platform_event(&redis_url, stream_key, event2).await?;
 
     // Restart with same group
-    let (source2, mut rx2, _event_rx2) = create_test_source(redis_url.clone(), stream_key);
+    let (source2, mut rx2, _event_rx2) = create_test_source(redis_url.clone(), stream_key).await;
     source2.start().await?;
 
     // Should resume and get second event

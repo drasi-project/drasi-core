@@ -242,14 +242,15 @@ impl Source for MockSource {
                     profiling,
                 );
 
-                // Dispatch to all subscribers via dispatchers
-                let arc_wrapper = Arc::new(wrapper);
-                let dispatchers = base_dispatchers.read().await;
-                for dispatcher in dispatchers.iter() {
-                    if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
-                        debug!("Failed to dispatch change: {}", e);
-                        // Continue even if no subscribers
-                    }
+                // Dispatch to all subscribers via helper
+                if let Err(e) = SourceBase::dispatch_from_task(
+                    base_dispatchers.clone(),
+                    wrapper,
+                    &source_id,
+                )
+                .await
+                {
+                    debug!("Failed to dispatch change: {}", e);
                 }
             }
 
@@ -336,14 +337,10 @@ impl MockSource {
         self.base.dispatch_source_change(change).await
     }
 
-    /// For testing purposes - get a receiver that gets all events from this source
-    pub fn test_subscribe(&self) -> Box<dyn ChangeReceiver<SourceEventWrapper>> {
-        // Create a receiver from the first dispatcher (should be broadcast in tests)
-        let dispatchers = futures::executor::block_on(self.base.dispatchers.read());
-        if let Some(dispatcher) = dispatchers.first() {
-            dispatcher.create_receiver().unwrap()
-        } else {
-            panic!("No dispatchers available for test subscription");
-        }
+    /// Create a test subscription to this source
+    ///
+    /// This method delegates to SourceBase and is provided for convenience in tests.
+    pub fn test_subscribe(&self) -> Box<dyn crate::channels::ChangeReceiver<crate::channels::SourceEventWrapper>> {
+        self.base.test_subscribe()
     }
 }

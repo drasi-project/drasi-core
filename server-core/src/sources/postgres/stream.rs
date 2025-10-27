@@ -29,6 +29,7 @@ use super::PostgresReplicationConfig;
 use crate::channels::{
     ComponentEventSender, ComponentStatus, SourceEvent, SourceEventWrapper,
 };
+use crate::sources::base::SourceBase;
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 
 pub struct ReplicationStream {
@@ -363,16 +364,18 @@ impl ReplicationStream {
                             profiling,
                         );
 
-                        // Dispatch to new architecture (Arc-wrapped for zero-copy)
-                        let arc_wrapper = Arc::new(wrapper.clone());
-                        let dispatchers_guard = self.dispatchers.read().await;
-                        for dispatcher in dispatchers_guard.iter() {
-                            if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
-                                debug!(
-                                    "[{}] Failed to dispatch change (no subscribers): {}",
-                                    self.source_id, e
-                                );
-                            }
+                        // Dispatch via helper
+                        if let Err(e) = SourceBase::dispatch_from_task(
+                            self.dispatchers.clone(),
+                            wrapper.clone(),
+                            &self.source_id,
+                        )
+                        .await
+                        {
+                            debug!(
+                                "[{}] Failed to dispatch change (no subscribers): {}",
+                                self.source_id, e
+                            );
                         }
                     }
                     debug!(
@@ -413,16 +416,18 @@ impl ReplicationStream {
                             profiling,
                         );
 
-                        // Dispatch to new architecture (Arc-wrapped for zero-copy)
-                        let arc_wrapper = Arc::new(wrapper.clone());
-                        let dispatchers_guard = self.dispatchers.read().await;
-                        for dispatcher in dispatchers_guard.iter() {
-                            if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
-                                debug!(
-                                    "[{}] Failed to dispatch change (no subscribers): {}",
-                                    self.source_id, e
-                                );
-                            }
+                        // Dispatch via helper
+                        if let Err(e) = SourceBase::dispatch_from_task(
+                            self.dispatchers.clone(),
+                            wrapper.clone(),
+                            &self.source_id,
+                        )
+                        .await
+                        {
+                            debug!(
+                                "[{}] Failed to dispatch change (no subscribers): {}",
+                                self.source_id, e
+                            );
                         }
                     }
                 }
@@ -449,16 +454,18 @@ impl ReplicationStream {
                             profiling,
                         );
 
-                        // Dispatch to new architecture (Arc-wrapped for zero-copy)
-                        let arc_wrapper = Arc::new(wrapper.clone());
-                        let dispatchers_guard = self.dispatchers.read().await;
-                        for dispatcher in dispatchers_guard.iter() {
-                            if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
-                                debug!(
-                                    "[{}] Failed to dispatch change (no subscribers): {}",
-                                    self.source_id, e
-                                );
-                            }
+                        // Dispatch via helper
+                        if let Err(e) = SourceBase::dispatch_from_task(
+                            self.dispatchers.clone(),
+                            wrapper.clone(),
+                            &self.source_id,
+                        )
+                        .await
+                        {
+                            debug!(
+                                "[{}] Failed to dispatch change (no subscribers): {}",
+                                self.source_id, e
+                            );
                         }
                     }
                 }
@@ -481,16 +488,18 @@ impl ReplicationStream {
                             profiling,
                         );
 
-                        // Dispatch to new architecture (Arc-wrapped for zero-copy)
-                        let arc_wrapper = Arc::new(wrapper.clone());
-                        let dispatchers_guard = self.dispatchers.read().await;
-                        for dispatcher in dispatchers_guard.iter() {
-                            if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
-                                debug!(
-                                    "[{}] Failed to dispatch change (no subscribers): {}",
-                                    self.source_id, e
-                                );
-                            }
+                        // Dispatch via helper
+                        if let Err(e) = SourceBase::dispatch_from_task(
+                            self.dispatchers.clone(),
+                            wrapper.clone(),
+                            &self.source_id,
+                        )
+                        .await
+                        {
+                            debug!(
+                                "[{}] Failed to dispatch change (no subscribers): {}",
+                                self.source_id, e
+                            );
                         }
                     }
                 }

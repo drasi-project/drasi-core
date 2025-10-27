@@ -23,7 +23,7 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
 use crate::channels::{
-    ChangeReceiver, ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType,
+    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType,
     ControlOperation, SourceControl, SourceEvent, SourceEventWrapper, SubscriptionResponse,
 };
 use crate::config::SourceConfig;
@@ -403,19 +403,20 @@ impl PlatformSource {
                                                                         profiling,
                                                                     );
 
-                                                                    // Dispatch to new architecture (Arc-wrapped)
-                                                                    let arc_wrapper =
-                                                                        Arc::new(wrapper);
-                                                                    let dispatchers_guard = dispatchers.read().await;
-                                                                    for dispatcher in dispatchers_guard.iter() {
-                                                                        if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
-                                                                            debug!("[{}] Failed to dispatch control event (no subscribers): {}", source_id, e);
-                                                                        } else {
-                                                                            debug!(
-                                                                                "Published control event for stream {}",
-                                                                                stream_id.id
-                                                                            );
-                                                                        }
+                                                                    // Dispatch via helper
+                                                                    if let Err(e) = SourceBase::dispatch_from_task(
+                                                                        dispatchers.clone(),
+                                                                        wrapper,
+                                                                        &source_id,
+                                                                    )
+                                                                    .await
+                                                                    {
+                                                                        debug!("[{}] Failed to dispatch control event (no subscribers): {}", source_id, e);
+                                                                    } else {
+                                                                        debug!(
+                                                                            "Published control event for stream {}",
+                                                                            stream_id.id
+                                                                        );
                                                                     }
                                                                 }
                                                             }
@@ -462,19 +463,20 @@ impl PlatformSource {
                                                                         profiling,
                                                                     );
 
-                                                                    // Dispatch to new architecture (Arc-wrapped for zero-copy)
-                                                                    let arc_wrapper =
-                                                                        Arc::new(wrapper);
-                                                                    let dispatchers_guard = dispatchers.read().await;
-                                                                    for dispatcher in dispatchers_guard.iter() {
-                                                                        if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
-                                                                            debug!("[{}] Failed to dispatch change (no subscribers): {}", source_id, e);
-                                                                        } else {
-                                                                            debug!(
-                                                                                "Published source change for event {}",
-                                                                                stream_id.id
-                                                                            );
-                                                                        }
+                                                                    // Dispatch via helper
+                                                                    if let Err(e) = SourceBase::dispatch_from_task(
+                                                                        dispatchers.clone(),
+                                                                        wrapper,
+                                                                        &source_id,
+                                                                    )
+                                                                    .await
+                                                                    {
+                                                                        debug!("[{}] Failed to dispatch change (no subscribers): {}", source_id, e);
+                                                                    } else {
+                                                                        debug!(
+                                                                            "Published source change for event {}",
+                                                                            stream_id.id
+                                                                        );
                                                                     }
                                                                 }
                                                             }
@@ -643,15 +645,20 @@ impl Source for PlatformSource {
 }
 
 impl PlatformSource {
-    /// For testing purposes - get a receiver that gets all events from this source
-    pub fn test_subscribe(&self) -> Box<dyn ChangeReceiver<SourceEventWrapper>> {
-        // Create a receiver from the first dispatcher (should be broadcast in tests)
-        let dispatchers = futures::executor::block_on(self.base.dispatchers.read());
-        if let Some(dispatcher) = dispatchers.first() {
-            dispatcher.create_receiver().unwrap()
-        } else {
-            panic!("No dispatchers available for test subscription");
-        }
+    /// Create a test subscription to this source (synchronous)
+    ///
+    /// This method delegates to SourceBase and is provided for convenience in tests.
+    /// Note: Use test_subscribe_async() in async contexts to avoid runtime issues.
+    pub fn test_subscribe(&self) -> Box<dyn crate::channels::ChangeReceiver<crate::channels::SourceEventWrapper>> {
+        self.base.test_subscribe()
+    }
+
+    /// Create a test subscription to this source (async)
+    ///
+    /// This method delegates to SourceBase and is provided for convenience in async tests.
+    /// Prefer this method over test_subscribe() in async contexts.
+    pub async fn test_subscribe_async(&self) -> Box<dyn crate::channels::ChangeReceiver<crate::channels::SourceEventWrapper>> {
+        self.base.create_streaming_receiver().await.expect("Failed to create test subscription")
     }
 }
 

@@ -246,13 +246,15 @@ impl ApplicationSource {
                     profiling,
                 );
 
-                // Dispatch to all subscribers via dispatchers
-                let arc_wrapper = Arc::new(wrapper);
-                let dispatchers = base_dispatchers.read().await;
-                for dispatcher in dispatchers.iter() {
-                    if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
-                        debug!("Failed to dispatch change (no subscribers): {}", e);
-                    }
+                // Dispatch to all subscribers via helper
+                if let Err(e) = SourceBase::dispatch_from_task(
+                    base_dispatchers.clone(),
+                    wrapper,
+                    &source_name,
+                )
+                .await
+                {
+                    debug!("Failed to dispatch change (no subscribers): {}", e);
                 }
             }
 

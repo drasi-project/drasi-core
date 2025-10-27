@@ -231,7 +231,7 @@ mod internal_source_tests {
     use std::collections::HashMap;
     use tokio::sync::mpsc;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_mock_source_counter() {
         let (event_tx, _event_rx) = mpsc::channel(100);
 
@@ -277,7 +277,7 @@ mod internal_source_tests {
         source.stop().await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_mock_source_sensor() {
         let (event_tx, _event_rx) = mpsc::channel(100);
 

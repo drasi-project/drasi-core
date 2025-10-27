@@ -206,16 +206,16 @@ impl SourceService for GrpcSourceService {
 
                     debug!("[{}] Processing gRPC event: {:?}", self.source_id, &wrapper);
 
-                    // Dispatch to all subscribers (Arc-wrapped for zero-copy)
-                    let arc_wrapper = Arc::new(wrapper);
-                    let dispatchers = futures::executor::block_on(self.dispatchers.read());
-                    for dispatcher in dispatchers.iter() {
-                        if let Err(e) = futures::executor::block_on(dispatcher.dispatch_change(arc_wrapper.clone())) {
-                            debug!(
-                                "[{}] Failed to dispatch (no subscribers): {}",
-                                self.source_id, e
-                            );
-                        }
+                    // Dispatch via helper (using block_on for sync context)
+                    if let Err(e) = futures::executor::block_on(SourceBase::dispatch_from_task(
+                        self.dispatchers.clone(),
+                        wrapper,
+                        &self.source_id,
+                    )) {
+                        debug!(
+                            "[{}] Failed to dispatch (no subscribers): {}",
+                            self.source_id, e
+                        );
                     }
 
                     debug!("[{}] Successfully processed gRPC event", self.source_id);
@@ -276,16 +276,18 @@ impl SourceService for GrpcSourceService {
                             profiling,
                         );
 
-                        // Dispatch to new architecture
-                        let arc_wrapper = Arc::new(wrapper.clone());
-                        let dispatchers_guard = dispatchers.read().await;
-                        for dispatcher in dispatchers_guard.iter() {
-                            if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
-                                debug!(
-                                    "[{}] Failed to dispatch (no subscribers): {}",
-                                    source_id, e
-                                );
-                            }
+                        // Dispatch via helper
+                        if let Err(e) = SourceBase::dispatch_from_task(
+                            dispatchers.clone(),
+                            wrapper.clone(),
+                            &source_id,
+                        )
+                        .await
+                        {
+                            debug!(
+                                "[{}] Failed to dispatch (no subscribers): {}",
+                                source_id, e
+                            );
                         }
 
                         events_processed += 1;
