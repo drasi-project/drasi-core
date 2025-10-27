@@ -221,4 +221,86 @@ mod tests {
             "Multi-source pipeline should build successfully"
         );
     }
+
+    #[tokio::test]
+    async fn test_builder_with_priority_queue_capacity() {
+        let core = DrasiServerCoreBuilder::new()
+            .with_priority_queue_capacity(20000)
+            .add_source(Source::application("source-1").build())
+            .add_query(
+                Query::cypher("query-1")
+                    .query("MATCH (n) RETURN n")
+                    .from_source("source-1")
+                    .build(),
+            )
+            .build()
+            .await;
+
+        assert!(core.is_ok(), "Builder with priority_queue_capacity should work");
+
+        // Verify the capacity was set in the config
+        let core = core.unwrap();
+        let config = core.get_config();
+        assert_eq!(
+            config.server_core.priority_queue_capacity,
+            Some(20000),
+            "Priority queue capacity should be set to 20000"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_builder_with_dispatch_buffer_capacity() {
+        let core = DrasiServerCoreBuilder::new()
+            .with_dispatch_buffer_capacity(5000)
+            .add_source(Source::application("source-1").build())
+            .add_query(
+                Query::cypher("query-1")
+                    .query("MATCH (n) RETURN n")
+                    .from_source("source-1")
+                    .build(),
+            )
+            .build()
+            .await;
+
+        assert!(core.is_ok(), "Builder with dispatch_buffer_capacity should work");
+
+        // Verify the capacity was set in the config
+        let core = core.unwrap();
+        let config = core.get_config();
+        assert_eq!(
+            config.server_core.dispatch_buffer_capacity,
+            Some(5000),
+            "Dispatch buffer capacity should be set to 5000"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_builder_with_all_capacity_settings() {
+        let core = DrasiServerCoreBuilder::new()
+            .with_id("capacity-test")
+            .with_priority_queue_capacity(15000)
+            .with_dispatch_buffer_capacity(3000)
+            .add_source(Source::application("source-1").build())
+            .add_query(
+                Query::cypher("query-1")
+                    .query("MATCH (n) RETURN n")
+                    .from_source("source-1")
+                    .build(),
+            )
+            .add_reaction(Reaction::log("reaction-1").subscribe_to("query-1").build())
+            .build()
+            .await;
+
+        assert!(
+            core.is_ok(),
+            "Builder with all capacity settings should work"
+        );
+
+        // Verify all settings were applied
+        let core = core.unwrap();
+        let config = core.get_config();
+        assert_eq!(config.server_core.id, "capacity-test");
+        assert_eq!(config.server_core.priority_queue_capacity, Some(15000));
+        assert_eq!(config.server_core.dispatch_buffer_capacity, Some(3000));
+    }
 }

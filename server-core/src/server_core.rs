@@ -1200,6 +1200,11 @@ impl DrasiServerCore {
         *self.running.read().await
     }
 
+    /// Get the runtime configuration
+    pub fn get_config(&self) -> &RuntimeConfig {
+        &self.config
+    }
+
     // ============================================================================
     // Internal Methods
     // ============================================================================

@@ -247,7 +247,7 @@ mod internal_source_tests {
             properties,
             bootstrap_provider: None,
             dispatch_buffer_capacity: None,
-            dispatch_mode: None,
+            dispatch_mode: Some(crate::channels::DispatchMode::Broadcast),
         };
 
         let source = MockSource::new(config, event_tx).unwrap();
@@ -292,7 +292,7 @@ mod internal_source_tests {
             properties,
             bootstrap_provider: None,
             dispatch_buffer_capacity: None,
-            dispatch_mode: None,
+            dispatch_mode: Some(crate::channels::DispatchMode::Broadcast),
         };
 
         let source = MockSource::new(config, event_tx).unwrap();

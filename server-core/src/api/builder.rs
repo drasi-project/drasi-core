@@ -26,6 +26,8 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct DrasiServerCoreBuilder {
     server_id: Option<String>,
+    priority_queue_capacity: Option<usize>,
+    dispatch_buffer_capacity: Option<usize>,
     sources: Vec<SourceConfig>,
     queries: Vec<QueryConfig>,
     reactions: Vec<ReactionConfig>,
@@ -36,6 +38,8 @@ impl DrasiServerCoreBuilder {
     pub fn new() -> Self {
         Self {
             server_id: None,
+            priority_queue_capacity: None,
+            dispatch_buffer_capacity: None,
             sources: Vec::new(),
             queries: Vec::new(),
             reactions: Vec::new(),
@@ -45,6 +49,28 @@ impl DrasiServerCoreBuilder {
     /// Set the server ID (default: auto-generated UUID)
     pub fn with_id(mut self, id: impl Into<String>) -> Self {
         self.server_id = Some(id.into());
+        self
+    }
+
+    /// Set global default priority queue capacity for queries and reactions
+    ///
+    /// This sets the default capacity for priority queues used by queries and reactions.
+    /// Individual components can override this value in their configuration.
+    ///
+    /// Default: 10000 if not specified
+    pub fn with_priority_queue_capacity(mut self, capacity: usize) -> Self {
+        self.priority_queue_capacity = Some(capacity);
+        self
+    }
+
+    /// Set global default dispatch buffer capacity for sources and queries
+    ///
+    /// This sets the default capacity for dispatch channels (both broadcast and mpsc)
+    /// used by sources and queries. Individual components can override this value.
+    ///
+    /// Default: 1000 if not specified
+    pub fn with_dispatch_buffer_capacity(mut self, capacity: usize) -> Self {
+        self.dispatch_buffer_capacity = Some(capacity);
         self
     }
 
@@ -88,14 +114,10 @@ impl DrasiServerCoreBuilder {
     ///
     /// This performs all initialization and returns a ready-to-start server.
     pub async fn build(self) -> Result<DrasiServerCore> {
-        let server_settings = if let Some(id) = self.server_id {
-            DrasiServerCoreSettings {
-                id,
-                priority_queue_capacity: None,
-                dispatch_buffer_capacity: None,
-            }
-        } else {
-            DrasiServerCoreSettings::default()
+        let server_settings = DrasiServerCoreSettings {
+            id: self.server_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            priority_queue_capacity: self.priority_queue_capacity,
+            dispatch_buffer_capacity: self.dispatch_buffer_capacity,
         };
 
         // Create DrasiServerCoreConfig first, then convert to RuntimeConfig
