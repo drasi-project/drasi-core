@@ -350,32 +350,8 @@ impl Source for ApplicationSource {
             query_id, self.base.config.id, enable_bootstrap
         );
 
-        // Create receiver based on dispatch mode
-        let dispatch_mode = self.base.config.dispatch_mode.unwrap_or_default();
-
-        let receiver: Box<dyn crate::channels::ChangeReceiver<crate::channels::SourceEventWrapper>> = match dispatch_mode {
-            crate::channels::DispatchMode::Broadcast => {
-                // For broadcast mode, use the single dispatcher
-                let dispatchers = self.base.dispatchers.read().await;
-                if let Some(dispatcher) = dispatchers.first() {
-                    dispatcher.create_receiver()?
-                } else {
-                    return Err(anyhow::anyhow!("No broadcast dispatcher available"));
-                }
-            }
-            crate::channels::DispatchMode::Channel => {
-                // For channel mode, create a new dispatcher for this subscription
-                let capacity = self.base.config.dispatch_buffer_capacity.unwrap_or(1000);
-                let dispatcher = crate::channels::ChannelChangeDispatcher::<crate::channels::SourceEventWrapper>::new(capacity);
-                let receiver = dispatcher.create_receiver()?;
-
-                // Add the new dispatcher to our list
-                let mut dispatchers = self.base.dispatchers.write().await;
-                dispatchers.push(Box::new(dispatcher));
-
-                receiver
-            }
-        };
+        // Create streaming receiver using SourceBase helper method
+        let receiver = self.base.create_streaming_receiver().await?;
 
         // Clone query_id for later use since it will be moved into async block
         let query_id_for_response = query_id.clone();

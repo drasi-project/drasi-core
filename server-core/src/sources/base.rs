@@ -75,29 +75,18 @@ impl SourceBase {
         })
     }
 
-    /// Subscribe to this source with optional bootstrap
+    /// Create a streaming receiver for a query subscription
     ///
-    /// This is the standard subscribe implementation that all sources can use.
-    /// It handles:
-    /// - Creating a receiver for streaming events (based on dispatch mode)
-    /// - Setting up bootstrap if requested and a provider is configured
-    /// - Returning the appropriate SubscriptionResponse
-    pub async fn subscribe_with_bootstrap(
+    /// This creates the appropriate receiver based on the configured dispatch mode:
+    /// - Broadcast mode: Returns a receiver from the shared broadcast dispatcher
+    /// - Channel mode: Creates a new dedicated dispatcher and returns its receiver
+    ///
+    /// This is a helper method that can be used by sources with custom subscribe logic.
+    pub async fn create_streaming_receiver(
         &self,
-        query_id: String,
-        enable_bootstrap: bool,
-        node_labels: Vec<String>,
-        relation_labels: Vec<String>,
-        source_type: &str,
-    ) -> Result<SubscriptionResponse> {
-        info!(
-            "Query '{}' subscribing to {} source '{}' (bootstrap: {})",
-            query_id, source_type, self.config.id, enable_bootstrap
-        );
-
+    ) -> Result<Box<dyn ChangeReceiver<SourceEventWrapper>>> {
         let dispatch_mode = self.config.dispatch_mode.unwrap_or_default();
 
-        // Create receiver based on dispatch mode
         let receiver: Box<dyn ChangeReceiver<SourceEventWrapper>> = match dispatch_mode {
             DispatchMode::Broadcast => {
                 // For broadcast mode, use the single dispatcher
@@ -121,6 +110,32 @@ impl SourceBase {
                 receiver
             }
         };
+
+        Ok(receiver)
+    }
+
+    /// Subscribe to this source with optional bootstrap
+    ///
+    /// This is the standard subscribe implementation that all sources can use.
+    /// It handles:
+    /// - Creating a receiver for streaming events (based on dispatch mode)
+    /// - Setting up bootstrap if requested and a provider is configured
+    /// - Returning the appropriate SubscriptionResponse
+    pub async fn subscribe_with_bootstrap(
+        &self,
+        query_id: String,
+        enable_bootstrap: bool,
+        node_labels: Vec<String>,
+        relation_labels: Vec<String>,
+        source_type: &str,
+    ) -> Result<SubscriptionResponse> {
+        info!(
+            "Query '{}' subscribing to {} source '{}' (bootstrap: {})",
+            query_id, source_type, self.config.id, enable_bootstrap
+        );
+
+        // Create streaming receiver using helper method
+        let receiver = self.create_streaming_receiver().await?;
 
         let query_id_for_response = query_id.clone();
 
