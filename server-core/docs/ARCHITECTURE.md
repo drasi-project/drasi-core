@@ -1,117 +1,92 @@
 # Drasi Server-Core Architecture
 
-This document provides a comprehensive overview of the drasi-core server-core architecture, including the relationships between components, channel communication patterns, lifecycle management, and bootstrap processes.
+This document provides a comprehensive overview of the drasi-core server-core architecture as it exists today.
 
 **Last Updated:** 2025-10-27
-**Version:** 5.0 - Dispatcher-based architecture with configurable dispatch modes
+**Version:** 6.0 - Current Architecture Snapshot
 
 ---
 
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Component Relationships](#component-relationships)
-3. [Dispatcher Architecture](#dispatcher-architecture)
-4. [Channel Architecture](#channel-architecture)
+2. [Core Abstractions](#core-abstractions)
+3. [Component Types](#component-types)
+4. [Communication Patterns](#communication-patterns)
 5. [Configuration System](#configuration-system)
-6. [Component Lifecycle](#component-lifecycle)
-7. [Subscription Process](#subscription-process)
-8. [Bootstrap Process](#bootstrap-process)
-9. [Event Flow](#event-flow)
-10. [Code References](#code-references)
-11. [Areas of Concern](#areas-of-concern)
-12. [Completed Migrations](#completed-migrations)
+6. [Bootstrap Architecture](#bootstrap-architecture)
+7. [Component Lifecycle](#component-lifecycle)
+8. [File Structure](#file-structure)
+9. [Design Rationale](#design-rationale)
 
 ---
 
 ## Overview
 
-The server-core implements a reactive, event-driven architecture for continuous query processing over streaming data. The system consists of three primary component types (**Sources**, **Queries**, **Reactions**), three managers (**SourceManager**, **QueryManager**, **ReactionManager**), and a **trait-based dispatcher infrastructure** for configurable event distribution patterns.
+The server-core is a library for reactive, event-driven continuous query processing over streaming graph data. It is designed to be embedded in applications and provides programmatic APIs for event injection and result consumption.
 
-### Key Design Principles
-
-- **Trait-Based Dispatching**: ✨ **NEW**
-  - All event distribution uses `ChangeDispatcher` and `ChangeReceiver` traits
-  - Configurable dispatch modes: Broadcast (1-to-N) or Channel (1-to-1)
-  - Zero-copy distribution maintained through Arc wrapping
-- **Direct Subscriptions**:
-  - Queries subscribe directly to Sources via dispatcher-created receivers
-  - Reactions subscribe directly to Queries via dispatcher-created receivers
-  - No centralized routers (SubscriptionRouter, DataRouter, BootstrapRouter all removed)
-- **Priority Queue Processing**:
-  - Each Query maintains a priority queue for ordered source event processing
-  - Each Reaction maintains a priority queue for ordered query result processing
-- **Pluggable Bootstrap**: Bootstrap providers execute during source subscription
-- **Silent Bootstrap**: Bootstrap results are processed but not sent to reactions
-- **Three-Level Configuration Hierarchy**: Component-specific → Global defaults → Hardcoded fallbacks
-
----
-
-## Component Relationships
+### System Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                     DrasiServerCore                              │
-│                                                                   │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐             │
-│  │   Source    │  │    Query    │  │  Reaction   │             │
-│  │   Manager   │  │   Manager   │  │   Manager   │             │
-│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘             │
-│         │                 │                 │                     │
-│         │manages          │manages          │manages              │
-│         │                 │                 │                     │
-│  ┌──────▼──────┐   ┌─────▼──────┐  ┌──────▼──────┐             │
-│  │  Sources    │   │  Queries   │  │ Reactions   │             │
-│  │  (HashMap)  │   │ (HashMap)  │  │ (HashMap)   │             │
-│  │             │   │            │  │             │             │
-│  │ Each Source │   │ Each Query │  │ Each Reaction│             │
-│  │  contains:  │   │ contains:  │  │  contains:  │             │
-│  │             │   │            │  │             │             │
-│  │ - Vec of    │   │ - Vec of   │  │ - Priority  │             │
-│  │   Change    │   │   Change   │  │   Queue     │             │
-│  │   Dispatch- │   │   Dispatch-│  │ - Subscr.   │             │
-│  │   ers       │   │   ers      │  │   Tasks     │             │
-│  │ - Bootstrap │   │ - Priority │  │             │             │
-│  │   Provider  │   │   Queue    │  │             │             │
-│  │             │   │ - Subscr.  │  └──────▲──────┘             │
-│  └──────┬──────┘   │   Tasks    │         │                     │
-│         │          │ - Bootstrap│         │                     │
-│         │          │   State    │         │                     │
-│         │          └──────┬─────┘         │                     │
-│         │                 │               │                     │
-│         │ dispatcher      │ dispatcher    │ direct              │
-│         │ .create_        │ .create_      │ subscribe()         │
-│         │ receiver()      │ receiver()    │                     │
-│         └────────────────►│               │                     │
-│                           └───────────────┘                     │
-│                                                                   │
-│  ┌───────────────────────────────────────────────────┐         │
-│  │  System Event Channels (EventChannels)            │         │
-│  │  - component_event_tx (lifecycle events)          │         │
-│  │  - control_signal_tx (coordination signals)       │         │
-│  │  - _control_tx (deprecated)                       │         │
-│  └───────────────────────────────────────────────────┘         │
+│  ┌────────────┐  ┌────────────┐  ┌────────────┐                │
+│  │  Source    │  │   Query    │  │  Reaction  │                │
+│  │  Manager   │  │  Manager   │  │  Manager   │                │
+│  └────────────┘  └────────────┘  └────────────┘                │
 └─────────────────────────────────────────────────────────────────┘
+        │                  │                  │
+   ┌────▼────┐       ┌─────▼─────┐    ┌──────▼──────┐
+   │ Sources │──────▶│  Queries  │───▶│  Reactions  │
+   └─────────┘       └───────────┘    └─────────────┘
+        │                  │                  │
+    Dispatchers       Dispatchers       Priority Queues
 ```
 
-**File References**:
-- `server-core/src/server_core.rs:32` - DrasiServerCore struct
-- `server-core/src/sources/manager.rs:36` - Source trait
-- `server-core/src/queries/manager.rs:45` - QueryManager
-- `server-core/src/reactions/manager.rs` - ReactionManager
+### Component Types
+
+- **Sources**: Ingest data changes from various sources (Postgres, HTTP, gRPC, Redis, Application API, Mock)
+- **Queries**: Process changes through continuous Cypher/GQL queries, emit results
+- **Reactions**: Consume query results and take actions (Application API, HTTP, gRPC, SSE, Log, Platform)
+
+### Key Principles
+
+1. **Direct Subscriptions**: Queries subscribe directly to Sources; Reactions subscribe directly to Queries
+2. **Trait-Based Dispatching**: All event distribution uses `ChangeDispatcher` and `ChangeReceiver` traits
+3. **Configurable Dispatch Modes**: Channel (1-to-1, default) or Broadcast (1-to-N)
+4. **Zero-Copy Messaging**: Events shared via `Arc<T>` to avoid serialization
+5. **Priority Queue Processing**: Timestamp-ordered event processing in Queries and Reactions
+6. **Pluggable Bootstrap**: Universal bootstrap provider system, completely separate from streaming
+7. **Three-Level Configuration**: Component override → Global default → Hardcoded fallback
 
 ---
 
-## Dispatcher Architecture
+## Core Abstractions
 
-✨ **NEW in Version 5.0**: The system now uses a **trait-based dispatcher pattern** that abstracts the underlying channel implementation, allowing configurable dispatch modes and improved code reuse.
+### Dispatcher System
 
-### Core Traits
+The dispatcher system provides flexible event distribution patterns through trait abstractions.
 
-The dispatcher system is built on two fundamental traits:
+**File**: `src/channels/dispatcher.rs`
+
+#### DispatchMode Enum
 
 ```rust
-// Sends changes to receivers
+pub enum DispatchMode {
+    Broadcast,  // 1-to-N fanout, single shared channel
+    Channel,    // 1-to-1 dedicated channels (DEFAULT)
+}
+
+impl Default for DispatchMode {
+    fn default() -> Self {
+        DispatchMode::Channel
+    }
+}
+```
+
+#### Core Traits
+
+```rust
 #[async_trait]
 pub trait ChangeDispatcher<T>: Send + Sync {
     async fn dispatch_change(&self, change: Arc<T>) -> Result<()>;
@@ -119,563 +94,764 @@ pub trait ChangeDispatcher<T>: Send + Sync {
     fn create_receiver(&self) -> Result<Box<dyn ChangeReceiver<T>>>;
 }
 
-// Receives changes from dispatchers
 #[async_trait]
 pub trait ChangeReceiver<T>: Send + Sync {
     async fn recv(&mut self) -> Result<Arc<T>>;
 }
 ```
 
-**File**: `server-core/src/channels/dispatcher.rs:26-53`
+#### Implementations
 
-### Dispatch Modes
+**BroadcastChangeDispatcher** (Broadcast Mode):
+- Uses Tokio `broadcast::channel`
+- Single channel shared by all subscribers
+- All receivers get all messages
+- Handles lag gracefully (logs warning, continues)
+- Created once at component initialization
+- Memory efficient for many subscribers
 
-```rust
-pub enum DispatchMode {
-    /// Single broadcast channel with multiple receivers (1-to-N fanout)
-    Broadcast,
-    /// Dedicated channel per subscriber (1-to-1 communication)
-    Channel,
-}
-```
+**ChannelChangeDispatcher** (Channel Mode):
+- Uses Tokio `mpsc::channel`
+- Dedicated channel per subscriber
+- One-to-one communication
+- No lag concerns
+- Created on-demand during subscription (lazy)
+- Better isolation between subscribers
 
-**File**: `server-core/src/channels/dispatcher.rs:9-16`
+### Base Classes
 
-### Dispatcher Implementations
+Common functionality for sources and queries is extracted into base classes.
 
-#### BroadcastChangeDispatcher
+**SourceBase** (`src/sources/base.rs`):
+- Dispatcher lifecycle management
+- Bootstrap subscription delegation
+- Event dispatching with profiling
+- Component status tracking
+- Common start/stop functionality
 
-- **Pattern**: 1-to-N fanout using tokio broadcast channels
-- **Use Case**: Multiple subscribers receiving identical data
-- **Memory**: Single buffer shared across all receivers
-- **Capacity**: Configurable via `dispatch_buffer_capacity`
-- **Lag Handling**: Logs warning and continues (non-fatal)
+**QueryBase** (`src/queries/base.rs`):
+- Dispatcher lifecycle management
+- Subscription handling for reactions
+- Result dispatching with Arc wrapping
+- Component status tracking
+- Common lifecycle management
 
-**Key Characteristics**:
-- Created once during component initialization
-- All subscribers share same channel
-- Efficient for read-heavy workloads
-- Handles receiver lag gracefully
+### Channel Types
 
-**File**: `server-core/src/channels/dispatcher.rs:56-93`
+**Broadcast Channels**:
+- Type: `broadcast::Sender<Arc<T>>` / `broadcast::Receiver<Arc<T>>`
+- Use: Dispatcher-based event distribution (when mode = Broadcast)
+- Capacity: Configurable via `dispatch_buffer_capacity`
 
-#### ChannelChangeDispatcher
+**MPSC Channels**:
+- Type: `mpsc::Sender<Arc<T>>` / `mpsc::Receiver<Arc<T>>`
+- Use: Dispatcher-based event distribution (when mode = Channel)
+- Capacity: Configurable via `dispatch_buffer_capacity`
 
-- **Pattern**: 1-to-1 dedicated communication using tokio mpsc channels
-- **Use Case**: Individual subscribers with different processing rates
-- **Memory**: Separate buffer per subscriber
-- **Capacity**: Configurable via `dispatch_buffer_capacity`
-- **Creation**: Lazy - created on-demand during subscription
+**Bootstrap Channels**:
+- Type: `mpsc::Sender<BootstrapEvent>` / `mpsc::Receiver<BootstrapEvent>`
+- Use: Dedicated bootstrap event delivery
+- Capacity: Hardcoded to 1000
+- Separate from streaming channels
 
-**Key Characteristics**:
-- Created per subscription
-- Each subscriber gets dedicated channel
-- Better backpressure control
-- No lag between subscribers
-
-**File**: `server-core/src/channels/dispatcher.rs:125-171`
-
-### Integration with Components
-
-#### SourceBase and QueryBase
-
-Both `SourceBase` and `QueryBase` use identical patterns:
-
-```rust
-pub struct SourceBase {
-    pub config: SourceConfig,
-    pub status: Arc<RwLock<ComponentStatus>>,
-    // NEW: Collection of dispatchers instead of single broadcast_tx
-    pub dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<T> + Send + Sync>>>>,
-    pub event_tx: ComponentEventSender,
-    // ... other fields
-}
-```
-
-**Initialization Logic**:
-
-```rust
-// Broadcast mode: Create single dispatcher upfront
-if dispatch_mode == DispatchMode::Broadcast {
-    let dispatcher = BroadcastChangeDispatcher::new(capacity);
-    dispatchers.push(Box::new(dispatcher));
-}
-// Channel mode: Dispatchers created lazily during subscription
-```
-
-**File References**:
-- `server-core/src/sources/base.rs:36-76` - SourceBase with dispatchers
-- `server-core/src/queries/base.rs:36-101` - QueryBase with dispatchers
-
-### Zero-Copy Event Distribution
-
-The dispatcher pattern maintains zero-copy semantics through Arc wrapping:
-
-```rust
-// Event dispatch pattern used throughout
-pub async fn dispatch_event(&self, wrapper: EventWrapper) -> Result<()> {
-    // Arc-wrap once for zero-copy sharing
-    let arc_wrapper = Arc::new(wrapper);
-
-    // Send to all dispatchers (cheap Arc::clone)
-    let dispatchers = self.dispatchers.read().await;
-    for dispatcher in dispatchers.iter() {
-        dispatcher.dispatch_change(arc_wrapper.clone()).await?;
-    }
-    Ok(())
-}
-```
-
-**Benefits**:
-- Event data allocated once
-- Only Arc pointers (8 bytes) are cloned
-- Identical memory layout across all receivers
-- No data copying regardless of subscriber count
+**Priority Queues** (`src/channels/priority_queue.rs`):
+- Generic `PriorityQueue<T where T: Timestamped>`
+- Min-heap (oldest events first)
+- Bounded capacity with backpressure
+- Used by Queries and Reactions for ordered processing
+- Capacity: Configurable via `priority_queue_capacity`
 
 ---
 
-## Channel Architecture
+## Component Types
 
-The system uses a combination of **trait-based dispatchers** (for data distribution) and **system-wide channels** (for control and lifecycle events).
+### Sources
 
-### System-Wide Channels (EventChannels)
-
-Created once by `EventChannels::new()` and distributed to all components:
+All sources implement the `Source` trait:
 
 ```rust
-pub struct EventChannels {
-    pub component_event_tx: ComponentEventSender,  // mpsc
-    pub _control_tx: ControlMessageSender,         // mpsc (deprecated)
-    pub control_signal_tx: ControlSignalSender,    // mpsc
+#[async_trait]
+pub trait Source: Send + Sync {
+    async fn start(&mut self) -> Result<()>;
+    async fn stop(&mut self) -> Result<()>;
+    async fn status(&self) -> ComponentStatus;
+    async fn subscribe(&self, ...) -> Result<SubscriptionResponse>;
+    fn get_config(&self) -> SourceConfig;
 }
 ```
 
-**File**: `server-core/src/channels/events.rs:308-312`
+**Available Source Types**:
 
-| Channel | Type | Purpose | Capacity | Status |
-|---------|------|---------|----------|--------|
-| `component_event_tx/rx` | mpsc | Component lifecycle events | 1000 | ✅ Active |
-| `_control_tx/rx` | mpsc | Legacy control messages | 100 | ⚠️ Deprecated |
-| `control_signal_tx/rx` | mpsc | Control signals | 100 | ⚠️ No consumers |
+| Type | File | Description |
+|------|------|-------------|
+| **PostgresReplicationSource** | `src/sources/postgres` | PostgreSQL logical replication (WAL decoding) |
+| **HttpSource** | `src/sources/http` | HTTP POST endpoint for change events |
+| **GrpcSource** | `src/sources/grpc` | gRPC streaming for change events |
+| **MockSource** | `src/sources/mock` | Test source with synthetic data |
+| **PlatformSource** | `src/sources/platform` | Redis Streams consumer (platform SDK integration) |
+| **ApplicationSource** | `src/sources/application` | Programmatic event injection via API |
 
-### Per-Component Dispatchers
+**Common Characteristics**:
+- All use `SourceBase` for dispatcher management
+- All support configurable bootstrap providers
+- All dispatch `Arc<SourceEventWrapper>` to subscribers
+- Dispatch mode configurable per source (default: Channel)
 
-Each source and query maintains its own collection of dispatchers:
+### Queries
 
-#### Source Dispatchers
+**DrasiQuery** (`src/queries/manager.rs`):
 
-- **Type**: `Vec<Box<dyn ChangeDispatcher<SourceEventWrapper>>>`
-- **Dispatch Modes**:
-  - **Broadcast**: Single `BroadcastChangeDispatcher` created at initialization
-  - **Channel**: Multiple `ChannelChangeDispatcher` created on subscription
-- **Event Format**: `Arc<SourceEventWrapper>` containing:
-  - `source_id`: String
-  - `event`: SourceEvent (Change/Control)
-  - `timestamp`: DateTime<Utc>
-  - `profiling`: Optional profiling metadata
+Core components:
+- **QueryBase**: Common functionality (dispatchers, subscriptions, lifecycle)
+- **ContinuousQuery**: drasi-core query evaluation engine
+- **PriorityQueue**: Timestamp-ordered event processing
+- **Source Subscriptions**: Direct subscriptions to each configured source
+- **Bootstrap Tracking**: Per-source bootstrap phase tracking
 
-#### Query Dispatchers
+**Query Languages**:
+- **Cypher** (default): Graph pattern matching
+- **GQL**: GraphQL queries compiled to Cypher
 
-- **Type**: `Vec<Box<dyn ChangeDispatcher<QueryResult>>>`
-- **Dispatch Modes**: Same as sources
-- **Event Format**: `Arc<QueryResult>` containing:
-  - `query_id`: String
-  - `timestamp`: DateTime<Utc>
-  - `results`: QueryResult data
-  - `metadata`: HashMap<String, String>
-  - `profiling`: Optional profiling metadata
+**Processing Flow**:
+1. Subscribe to all configured sources (direct, no router)
+2. Receive events from source dispatchers
+3. Enqueue to priority queue (timestamp-ordered)
+4. Dequeue and process through ContinuousQuery engine
+5. Dispatch results to reactions via query dispatchers
 
-### Subscription Pattern
+**Bootstrap Integration**:
+- Separate bootstrap receiver per source subscription
+- Phases: NotStarted → InProgress → Completed
+- All sources must complete bootstrap before streaming begins
+- Bootstrap events processed with priority
 
-The new subscription flow through dispatchers:
+**Synthetic Joins**:
+- Configured via `joins` in query config
+- Allows relationships between nodes from different sources
+- Implemented at query evaluation level
+
+### Reactions
+
+All reactions implement the `Reaction` trait:
 
 ```rust
-// Query subscribing to Source
-async fn subscribe(&self, ...) -> Result<SubscriptionResponse> {
-    let receiver = match self.config.dispatch_mode {
-        DispatchMode::Broadcast => {
-            // Get receiver from existing dispatcher
-            self.dispatchers.read().await
-                .first()
-                .ok_or_else(|| anyhow!("No dispatcher"))?
-                .create_receiver()?
-        }
-        DispatchMode::Channel => {
-            // Create new dispatcher for this subscription
-            let dispatcher = ChannelChangeDispatcher::new(capacity);
-            let receiver = dispatcher.create_receiver()?;
-            self.dispatchers.write().await.push(Box::new(dispatcher));
-            receiver
-        }
-    };
-
-    // Return receiver (trait object, not concrete type)
-    Ok(SubscriptionResponse { receiver, ... })
+#[async_trait]
+pub trait Reaction: Send + Sync {
+    async fn start(&mut self, server_core: Arc<RwLock<DrasiServerCore>>) -> Result<()>;
+    async fn stop(&mut self) -> Result<()>;
+    async fn status(&self) -> ComponentStatus;
+    fn get_config(&self) -> ReactionConfig;
 }
 ```
+
+**Available Reaction Types**:
+
+| Type | File | Description |
+|------|------|-------------|
+| **ApplicationReaction** | `src/reactions/application` | Programmatic result consumption via API |
+| **LogReaction** | `src/reactions/log` | Log results to stdout |
+| **HttpReaction** | `src/reactions/http` | Send results via HTTP POST |
+| **GrpcReaction** | `src/reactions/grpc` | Send results via gRPC |
+| **SseReaction** | `src/reactions/sse` | Server-Sent Events for browsers |
+| **PlatformReaction** | `src/reactions/platform` | Platform SDK integration |
+| **ProfilerReaction** | `src/reactions/profiler` | Performance metrics |
+
+**Common Characteristics**:
+- All use priority queues for ordered result processing
+- All subscribe directly to queries (no router)
+- Receive `Arc<QueryResult>` from query dispatchers
+
+---
+
+## Communication Patterns
+
+### Sources → Queries
+
+**Direct Subscription Model**:
+
+```
+┌────────┐                                  ┌────────┐
+│ Source │                                  │ Query  │
+│        │◀─────── subscribe() ─────────────│        │
+│        │                                  │        │
+│        │──── SubscriptionResponse ───────▶│        │
+│        │  (receiver + bootstrap_receiver) │        │
+│        │                                  │        │
+│        │                                  │        │
+│ Dispatch                                  │ Receive│
+│  Mode? │                                  │        │
+└───┬────┘                                  └────────┘
+    │
+    ├─ Broadcast: Use shared BroadcastChangeDispatcher
+    │             Returns receiver from shared channel
+    │
+    └─ Channel:   Create new ChannelChangeDispatcher
+                  Returns receiver from dedicated channel
+```
+
+**Event Flow**:
+```
+Source Event → Arc::new(SourceEventWrapper)
+            → dispatcher.dispatch_change(arc)
+            → Dispatcher (broadcast or mpsc)
+            → Receiver
+            → Query Priority Queue
+            → ContinuousQuery Processing
+```
+
+### Queries → Reactions
+
+**Direct Subscription Model**:
+
+```
+┌────────┐                                  ┌──────────┐
+│ Query  │                                  │ Reaction │
+│        │◀───── subscribe() ───────────────│          │
+│        │                                  │          │
+│        │──── Receiver ────────────────────▶│          │
+│        │                                  │          │
+│        │                                  │          │
+│ Dispatch                                  │ Receive  │
+│  Mode? │                                  │          │
+└───┬────┘                                  └──────────┘
+    │
+    ├─ Broadcast: Use shared BroadcastChangeDispatcher
+    │             Returns receiver from shared channel
+    │
+    └─ Channel:   Create new ChannelChangeDispatcher
+                  Returns receiver from dedicated channel
+```
+
+**Event Flow**:
+```
+Query Result → Arc::new(QueryResult)
+            → dispatcher.dispatch_change(arc)
+            → Dispatcher (broadcast or mpsc)
+            → Receiver
+            → Reaction Priority Queue
+            → Reaction Processing
+```
+
+### Bootstrap Flow (Separate)
+
+```
+┌────────┐         ┌──────────────────┐        ┌────────┐
+│ Source │────────▶│ Bootstrap        │───────▶│ Query  │
+│        │ spawn   │ Provider Task    │ mpsc   │        │
+│        │         │ (async)          │        │        │
+└────────┘         └──────────────────┘        └────────┘
+                           │
+                           │ BootstrapContext
+                           ▼
+                   ┌─────────────────┐
+                   │ Any Provider:   │
+                   │ - Postgres      │
+                   │ - ScriptFile    │
+                   │ - Platform      │
+                   │ - Application   │
+                   │ - NoOp          │
+                   └─────────────────┘
+```
+
+Bootstrap is **completely separate** from streaming:
+- Dedicated `mpsc` channel per query subscription
+- Processed before streaming events
+- All sources must complete before streaming begins
+- Never mixed with streaming events
 
 ---
 
 ## Configuration System
 
-The configuration system now includes dispatch mode selection alongside capacity configuration.
+### Configuration Schema
 
-### Dispatch Mode Configuration
+**File**: `src/config/schema.rs`
 
 ```yaml
-# Global default (optional)
 server_core:
-  priority_queue_capacity: 10000
-  dispatch_buffer_capacity: 1000
+  id: "server-uuid"                    # Server identifier
+  priority_queue_capacity: 10000       # Global default for queries/reactions
+  dispatch_buffer_capacity: 1000       # Global default for sources/queries
 
-# Component-specific
 sources:
-  - id: high_volume_source
-    source_type: postgres
-    dispatch_mode: broadcast        # NEW: Choose dispatch pattern
-    dispatch_buffer_capacity: 5000
-
-  - id: dedicated_source
-    source_type: http
-    dispatch_mode: channel          # NEW: 1-to-1 channels
-    dispatch_buffer_capacity: 500
+  - id: "source1"
+    source_type: "postgres"             # postgres | http | grpc | mock | platform | application
+    auto_start: true                    # Start automatically (default: true)
+    dispatch_buffer_capacity: 2000      # Override global
+    dispatch_mode: "channel"            # channel | broadcast (default: channel)
+    bootstrap_provider:                 # Optional
+      type: postgres                    # postgres | scriptfile | platform | application | noop
+    properties: {}                      # Source-specific config
 
 queries:
-  - id: aggregation_query
-    dispatch_mode: broadcast        # Multiple reactions get same data
-    dispatch_buffer_capacity: 2000
-    priority_queue_capacity: 20000
+  - id: "query1"
+    query: "MATCH (n) RETURN n"
+    query_language: "Cypher"            # Cypher | GQL
+    sources: ["source1"]
+    auto_start: true
+    enable_bootstrap: true              # Default: true
+    bootstrap_buffer_size: 10000        # Default: 10000
+    priority_queue_capacity: 15000      # Override global
+    dispatch_buffer_capacity: 2000      # Override global
+    dispatch_mode: "channel"            # channel | broadcast (default: channel)
+    joins: []                           # Optional synthetic joins
+
+reactions:
+  - id: "reaction1"
+    reaction_type: "log"                # log | http | grpc | sse | application | platform | profiler
+    queries: ["query1"]
+    auto_start: true
+    priority_queue_capacity: 20000      # Override global
+    properties: {}                      # Reaction-specific config
 ```
 
 ### Configuration Hierarchy
 
-All configurations follow this three-level precedence:
+Three-level hierarchy for capacity configuration:
 
-1. **Component-Specific** (highest priority)
-   - `dispatch_mode`: Broadcast or Channel
-   - `dispatch_buffer_capacity`: Buffer size
-   - `priority_queue_capacity`: Queue size
+1. **Component-Specific Override** (highest priority)
+   - Set in individual source/query/reaction config
+   - Takes precedence over all defaults
 
 2. **Global Server Configuration** (medium priority)
-   - Applied to components without specific overrides
    - Set in `server_core` section
+   - Applied to components without specific overrides
 
 3. **Hardcoded Defaults** (lowest priority)
-   - `dispatch_mode`: Channel (default)
+   - `dispatch_mode`: Channel
    - `dispatch_buffer_capacity`: 1000
    - `priority_queue_capacity`: 10000
+   - `auto_start`: true
+   - `enable_bootstrap`: true
+   - `bootstrap_buffer_size`: 10000
 
-### Memory Implications by Dispatch Mode
+### Runtime Configuration
 
-#### Broadcast Mode Memory
+**File**: `src/config/runtime.rs`
 
-- **Single buffer** shared by all subscribers
-- Memory usage: O(capacity × event_size)
-- Example: 1000 capacity × 1KB events = ~1MB total
+The `RuntimeConfig` is created from `DrasiServerCoreConfig`:
 
-#### Channel Mode Memory
+```rust
+impl From<DrasiServerCoreConfig> for RuntimeConfig {
+    fn from(config: DrasiServerCoreConfig) -> Self {
+        // Extract global defaults
+        let global_priority_queue = config.server_core
+            .priority_queue_capacity
+            .unwrap_or(10000);
+        let global_dispatch_capacity = config.server_core
+            .dispatch_buffer_capacity
+            .unwrap_or(1000);
 
-- **Separate buffer** per subscriber
-- Memory usage: O(subscribers × capacity × event_size)
-- Example: 10 subscribers × 500 capacity × 1KB = ~5MB total
+        // Apply to sources
+        sources.map(|mut s| {
+            if s.dispatch_buffer_capacity.is_none() {
+                s.dispatch_buffer_capacity = Some(global_dispatch_capacity);
+            }
+            s
+        })
 
-### Performance Characteristics
+        // Apply to queries (both capacities)
+        // Apply to reactions (priority queue only)
+    }
+}
+```
 
-| Aspect | Broadcast Mode | Channel Mode |
-|--------|---------------|--------------|
-| **Dispatch Cost** | O(1) - single send | O(n) - send to each |
-| **Receiver Creation** | O(n) - clone receiver | O(1) - new channel |
-| **Memory Usage** | Shared buffer | Per-subscriber buffer |
-| **Lag Impact** | Affects all receivers | Isolated per receiver |
-| **Backpressure** | Limited control | Per-subscriber control |
-| **Best For** | Many identical consumers | Varied processing rates |
+### API Builder Pattern
+
+**Files**: `src/api/builder.rs`, `src/api/source.rs`, `src/api/query.rs`
+
+Programmatic configuration:
+
+```rust
+let core = DrasiServerCore::builder()
+    .with_id("my-server")
+    .with_priority_queue_capacity(20000)
+    .with_dispatch_buffer_capacity(2000)
+    .add_source(
+        Source::postgres("pg-source")
+            .host("localhost")
+            .database("mydb")
+            .bootstrap_provider(BootstrapProvider::postgres())
+            .build()
+    )
+    .add_query(
+        Query::cypher("query1")
+            .query("MATCH (n) RETURN n")
+            .from_source("pg-source")
+            .enable_bootstrap(true)
+            .build()
+    )
+    .add_reaction(
+        Reaction::application("reaction1")
+            .subscribe_to("query1")
+            .build()
+    )
+    .build()
+    .await?;
+
+core.initialize().await?;
+core.start().await?;
+```
+
+---
+
+## Bootstrap Architecture
+
+### Universal Bootstrap Provider System
+
+**File**: `src/bootstrap/mod.rs`
+
+**Key Principle**: Bootstrap is completely separate from source type. ANY source can use ANY bootstrap provider.
+
+### Architecture
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  Source (any type)                                       │
+│    │                                                      │
+│    └── bootstrap_provider: Option<BootstrapProviderConfig>│
+└──────────────────────────────────────────────────────────┘
+                        │
+                        ▼
+┌──────────────────────────────────────────────────────────┐
+│  BootstrapProviderFactory                                 │
+│    creates provider based on config.type                 │
+└──────────────────────────────────────────────────────────┘
+                        │
+                        ▼
+┌──────────────────────────────────────────────────────────┐
+│  BootstrapProvider Trait                                  │
+│    async fn bootstrap(                                    │
+│        request: BootstrapRequest,                         │
+│        context: BootstrapContext,                         │
+│        event_tx: BootstrapEventSender                     │
+│    ) -> Result<usize>                                     │
+└──────────────────────────────────────────────────────────┘
+```
+
+### Provider Implementations
+
+**File**: `src/bootstrap/providers/`
+
+| Provider | File | Description |
+|----------|------|-------------|
+| **PostgresBootstrapProvider** | `postgres.rs` | PostgreSQL snapshot via `COPY` with LSN coordination |
+| **ScriptFileBootstrapProvider** | `script_file.rs` | JSONL files with nodes/relations (ideal for testing) |
+| **ApplicationBootstrapProvider** | `application.rs` | Replays stored insert events from ApplicationSource |
+| **PlatformBootstrapProvider** | `platform.rs` | Bootstraps from remote Query API via HTTP streaming |
+| **NoOpBootstrapProvider** | `noop.rs` | Returns no data (default when no provider configured) |
+
+### Bootstrap Context
+
+```rust
+pub struct BootstrapContext {
+    pub source_config: SourceConfig,      // Full source configuration
+    pub source_properties: HashMap<...>,  // Source-specific properties
+    pub sequence_counter: Arc<AtomicU64>, // Global sequence counter
+}
+```
+
+Context provides access to source configuration so providers can use source properties (e.g., database credentials for PostgreSQL provider).
+
+### Mix-and-Match Example
+
+```yaml
+# HTTP source with PostgreSQL bootstrap
+sources:
+  - id: http_with_pg_bootstrap
+    source_type: http                # Streams changes via HTTP
+    bootstrap_provider:
+      type: postgres                 # Bootstraps from PostgreSQL
+    properties:
+      host: localhost
+      database: mydb                 # Used by postgres bootstrap provider
+      port: 9000                     # Used by http source
+      user: dbuser
+      password: dbpass
+```
+
+### Bootstrap Event Types
+
+**ScriptFile Format** (JSONL):
+
+```jsonl
+{"record_type": "Header", "sequence_number": 0}
+{"record_type": "Node", "labels": ["Person"], "properties": {"id": "1", "name": "Alice"}}
+{"record_type": "Relation", "type": "KNOWS", "start_node_id": "1", "end_node_id": "2"}
+{"record_type": "Comment", "comment": "Ignored line"}
+{"record_type": "Label", "label": "Checkpoint 1"}
+{"record_type": "Finish"}
+```
+
+### Bootstrap Flow
+
+1. Query subscribes to source with `enable_bootstrap=true`
+2. Source creates dedicated bootstrap channel for this query
+3. Source spawns bootstrap task (async, if provider configured)
+4. Bootstrap provider sends events to `bootstrap_tx`
+5. Query receives on `bootstrap_rx`, processes separately from streaming
+6. Query tracks bootstrap completion per source
+7. Streaming begins only after ALL sources complete bootstrap
 
 ---
 
 ## Component Lifecycle
 
-All components follow the same lifecycle, now with dispatcher management integrated:
+### Two-Phase Lifecycle
 
-### Lifecycle States
+**Initialization** (one-time):
+```rust
+let mut core = DrasiServerCore::new(config);
+core.initialize().await?;
+```
+
+Steps:
+1. Create managers (SourceManager, QueryManager, ReactionManager)
+2. Load sources/queries/reactions from config
+3. Start event processors
+4. Mark as initialized
+
+**Start/Stop** (repeatable):
+```rust
+core.start().await?;   // Start auto_start components
+// ... running ...
+core.stop().await?;    // Stop all running
+core.start().await?;   // Can restart
+```
+
+Start steps:
+1. Start sources (auto_start=true)
+2. Start queries (auto_start=true, subscribes to sources)
+3. Start reactions (auto_start=true, subscribes to queries)
+4. Mark as running
+
+Stop steps:
+1. Stop reactions (unsubscribes from queries)
+2. Stop queries (unsubscribes from sources)
+3. Stop sources
+4. Mark as stopped
+
+### Component Status States
 
 ```rust
 pub enum ComponentStatus {
-    Starting,  // Initializing dispatchers
-    Running,   // Dispatchers active
-    Stopping,  // Closing dispatchers
-    Stopped,   // Dispatchers closed
+    Starting,
+    Running,
+    Stopping,
+    Stopped,
     Error,
 }
 ```
 
-### Dispatcher Lifecycle
+Transitions:
+- Stopped → Starting → Running (normal start)
+- Running → Stopping → Stopped (normal stop)
+- Any → Error (on failure)
 
-1. **Creation Phase**:
-   - Broadcast: Dispatcher created during component initialization
-   - Channel: No dispatchers created initially
+### Dynamic Component Management
 
-2. **Subscription Phase**:
-   - Broadcast: Receivers created from existing dispatcher
-   - Channel: New dispatcher created per subscription
+Runtime operations:
 
-3. **Running Phase**:
-   - Events dispatched to all active dispatchers
-   - Failed dispatches logged but don't affect others
+```rust
+// Add components (can auto-start)
+core.create_source(source_config).await?;
+core.create_query(query_config).await?;
+core.create_reaction(reaction_config).await?;
 
-4. **Shutdown Phase**:
-   - Subscription tasks aborted
-   - Dispatchers naturally close when dropped
-   - Receivers detect closed channels
+// Remove components (stops if running)
+core.remove_source("source-id").await?;
+core.remove_query("query-id").await?;
+core.remove_reaction("reaction-id").await?;
 
----
-
-## Subscription Process
-
-The subscription process now uses dispatcher-created receivers:
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│ 1. Query.start() initiates subscription                          │
-└──────────────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌──────────────────────────────────────────────────────────────────┐
-│ 2. For each source, call:                                        │
-│    source.subscribe(query_id, enable_bootstrap, labels)          │
-└──────────────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌──────────────────────────────────────────────────────────────────┐
-│ 3. Source determines dispatch mode from config                   │
-│    - Broadcast: Use existing dispatcher                          │
-│    - Channel: Create new dispatcher                              │
-└──────────────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌──────────────────────────────────────────────────────────────────┐
-│ 4. Create receiver through dispatcher:                           │
-│    let receiver = dispatcher.create_receiver()?                  │
-│    Returns: Box<dyn ChangeReceiver<SourceEventWrapper>>          │
-└──────────────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌──────────────────────────────────────────────────────────────────┐
-│ 5. If bootstrap enabled, create dedicated channel                │
-│    (unchanged - still uses mpsc directly)                        │
-└──────────────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌──────────────────────────────────────────────────────────────────┐
-│ 6. Return SubscriptionResponse with trait-based receiver         │
-└──────────────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌──────────────────────────────────────────────────────────────────┐
-│ 7. Query spawns forwarder task:                                  │
-│    - Calls receiver.recv() (trait method)                        │
-│    - Forwards Arc<SourceEventWrapper> to priority queue          │
-│    - Continues until channel closed                              │
-└──────────────────────────────────────────────────────────────────┘
+// Individual start/stop
+core.start_source("source-id").await?;
+core.stop_query("query-id").await?;
+core.start_reaction("reaction-id").await?;
 ```
 
 ---
 
-## Bootstrap Process
+## File Structure
 
-The bootstrap process remains unchanged - it still uses dedicated mpsc channels directly, not dispatchers:
-
-- Bootstrap providers execute during subscription
-- Dedicated mpsc channel per bootstrap session
-- Results processed but not dispatched (silent bootstrap)
-- Uses direct channels for simplicity and isolation
-
----
-
-## Event Flow
-
-### Source to Query Event Flow (with Dispatchers)
+### Key Directories
 
 ```
-┌──────────┐
-│ Source   │ Generates SourceChange
-└─────┬────┘
-      │
-      │ Wraps in SourceEventWrapper
-      │ Wraps in Arc<SourceEventWrapper>
-      │
-      ▼
-┌──────────────────┐
-│ Source           │ for dispatcher in dispatchers:
-│ Dispatchers      │   dispatcher.dispatch_change(arc_wrapper.clone())
-└─────┬────────────┘
-      │
-      │ Dispatch Mode determines distribution
-      ├────────────────┬────────────────┐
-      ▼                ▼                ▼
-  BROADCAST:      or  CHANNEL:
-  Single channel      Dedicated channels
-  Multiple receivers  One receiver each
-      │                │
-      ├──────┬─────────┤
-      ▼      ▼         ▼
-  ┌────────┐ ┌────────┐ ┌────────┐
-  │Query 1 │ │Query 2 │ │Query N │
-  │Receiver│ │Receiver│ │Receiver│
-  └───┬────┘ └───┬────┘ └───┬────┘
-      │          │          │
-      │ receiver.recv() (trait method)
-      │ Returns Arc<SourceEventWrapper>
-      │
-      ▼
-┌──────────────────┐
-│ Query Priority   │ Orders by timestamp
-│ Queue            │
-└─────┬────────────┘
-      │
-      │ Process through ContinuousQuery
-      │
-      ▼
-┌──────────────────┐
-│ Query            │ Dispatches results
-│ Dispatchers      │ (same pattern as sources)
-└──────────────────┘
+src/
+├── channels/
+│   ├── dispatcher.rs          # ChangeDispatcher/ChangeReceiver traits & impls
+│   ├── events.rs              # Event type definitions
+│   └── priority_queue.rs      # Generic priority queue
+├── sources/
+│   ├── base.rs                # SourceBase abstraction
+│   ├── manager.rs             # SourceManager
+│   ├── postgres/              # PostgreSQL replication source
+│   ├── http/                  # HTTP source
+│   ├── grpc/                  # gRPC source
+│   ├── mock/                  # Mock test source
+│   ├── platform/              # Platform (Redis Streams) source
+│   └── application/           # Application API source
+├── queries/
+│   ├── base.rs                # QueryBase abstraction
+│   └── manager.rs             # QueryManager & DrasiQuery
+├── reactions/
+│   ├── manager.rs             # ReactionManager
+│   ├── application/           # Application API reaction
+│   ├── log/                   # Log reaction
+│   ├── http/                  # HTTP reaction
+│   ├── grpc/                  # gRPC reaction
+│   ├── sse/                   # Server-Sent Events reaction
+│   ├── platform/              # Platform reaction
+│   └── profiler/              # Profiler reaction
+├── bootstrap/
+│   ├── mod.rs                 # BootstrapProvider trait, factory
+│   └── providers/
+│       ├── postgres.rs        # PostgreSQL bootstrap
+│       ├── script_file.rs     # JSONL file bootstrap
+│       ├── application.rs     # Application data bootstrap
+│       ├── platform.rs        # Platform query API bootstrap
+│       └── noop.rs            # No-op bootstrap
+├── config/
+│   ├── schema.rs              # Configuration schema
+│   └── runtime.rs             # Runtime config processing
+├── api/
+│   ├── builder.rs             # DrasiServerCore builder
+│   ├── source.rs              # Source builders
+│   └── query.rs               # Query builders
+└── server_core.rs             # Main orchestration
 ```
 
 ---
 
-## Code References
+## Design Rationale
 
-### Dispatcher System (NEW)
-- **Trait Definitions**: `server-core/src/channels/dispatcher.rs:26-53`
-- **DispatchMode Enum**: `server-core/src/channels/dispatcher.rs:9-16`
-- **BroadcastChangeDispatcher**: `server-core/src/channels/dispatcher.rs:56-93`
-- **ChannelChangeDispatcher**: `server-core/src/channels/dispatcher.rs:125-171`
-- **Dispatcher Tests**: `server-core/src/channels/dispatcher.rs:202-347`
+### Why Channel Mode is Default
 
-### Base Abstractions (UPDATED)
-- **SourceBase**: `server-core/src/sources/base.rs:36-330`
-  - Dispatcher initialization: lines 53-76
-  - Subscribe with dispatchers: lines 85-141
-  - Event dispatch: lines 232-250
-- **QueryBase**: `server-core/src/queries/base.rs:36-200`
-  - Same pattern as SourceBase
-  - Dispatcher management: lines 78-174
+**Channel Mode Advantages**:
+1. **Better Isolation**: Each subscriber has dedicated channel, failures don't affect others
+2. **No Lag Concerns**: MPSC channels never lag, guaranteed delivery order
+3. **Lazy Creation**: Channels created only when needed, minimal overhead
+4. **Simpler Reasoning**: 1-to-1 mapping easier to debug
+5. **Production Ready**: Preferred for production deployments
 
-### Configuration (UPDATED)
-- **DispatchMode in Schema**: `server-core/src/config/schema.rs:72-73, 109-110`
-- **Serialization Tests**: `server-core/src/config/schema.rs:350-365`
+**Broadcast Mode Use Cases**:
+- Many subscribers (100+ reactions) to same source/query
+- Memory efficiency more important than isolation
+- Can tolerate lag (non-critical monitoring)
 
-### Source Implementations (SIMPLIFIED)
-All sources now use SourceBase for dispatcher management:
-- **MockSource**: `server-core/src/sources/mock/mod.rs` (~150 lines, was 400+)
-- **HttpSource**: `server-core/src/sources/http/adaptive.rs` (~120 lines)
-- **GrpcSource**: `server-core/src/sources/grpc/mod.rs` (~100 lines)
-- **PlatformSource**: `server-core/src/sources/platform/mod.rs` (~200 lines)
+### Zero-Copy Message Sharing
+
+**Pattern**:
+```rust
+// Wrap once at dispatch point
+let event = Arc::new(SourceEventWrapper { ... });
+
+// Share Arc across all dispatchers (zero-copy)
+for dispatcher in dispatchers.iter() {
+    dispatcher.dispatch_change(event.clone()).await?;
+}
+```
+
+**Benefits**:
+- Single allocation per event
+- Cheap Arc clones (atomic reference count increment only)
+- No serialization/deserialization
+- Shared ownership across subscribers
+
+**Types using Arc**:
+- `Arc<SourceEventWrapper>`
+- `Arc<QueryResult>`
+- `Arc<BootstrapEvent>` (wrapped in event types)
+
+### Lazy Dispatcher Creation (Channel Mode)
+
+**Implementation**:
+```rust
+// Initialization (Channel mode)
+if dispatch_mode == DispatchMode::Broadcast {
+    // Create dispatcher upfront
+    dispatchers.push(BroadcastChangeDispatcher::new(capacity));
+}
+// For channel mode: dispatchers vector starts empty
+
+// Subscription (Channel mode)
+DispatchMode::Channel => {
+    // Create dispatcher on-demand
+    let dispatcher = ChannelChangeDispatcher::new(capacity);
+    let receiver = dispatcher.create_receiver()?;
+    dispatchers.push(dispatcher);  // Add to list
+    receiver
+}
+```
+
+**Advantages**:
+- No overhead if component never has subscribers
+- Each subscription gets fresh dedicated channel
+- Clear ownership: one dispatcher per subscriber
+
+### Separation of Bootstrap vs Streaming
+
+**Design Philosophy**:
+- Bootstrap = initial data load (complete snapshot)
+- Streaming = ongoing change events
+- Never mix in same channel
+
+**Implementation**:
+- Bootstrap: Dedicated `mpsc::Sender<BootstrapEvent>` per query subscription
+- Streaming: Dispatcher-based `ChangeReceiver<SourceEventWrapper>`
+- Query receives both, processes bootstrap first
+
+**Benefits**:
+- Clear semantics: bootstrap complete before streaming
+- Prevents out-of-order processing
+- Different buffer sizes (bootstrap_buffer_size vs dispatch_buffer_capacity)
+- Bootstrap can be retried without affecting streaming
+
+### Base Classes for Code Reuse
+
+**SourceBase** and **QueryBase** extract 50%+ of common functionality:
+- Dispatcher lifecycle management
+- Subscription handling
+- Event dispatching with profiling
+- Component status tracking
+- Common start/stop patterns
+
+**Benefits**:
+- Reduced code duplication
+- Consistent behavior across implementations
+- Easier to maintain and test
+- Simpler implementation of new sources/queries
+
+### Direct Subscriptions (No Routers)
+
+Previous architecture had centralized routers (SubscriptionRouter, DataRouter, BootstrapRouter). Current architecture uses **direct subscriptions**:
+
+```rust
+// Query subscribes directly to Source
+let response = source.subscribe(query_id, ...).await?;
+
+// Reaction subscribes directly to Query
+let receiver = query.subscribe(reaction_id).await?;
+```
+
+**Advantages**:
+- Simpler code paths
+- Easier to trace event flow
+- No centralized bottlenecks
+- Better encapsulation (components own their dispatchers)
 
 ---
 
-## Areas of Concern
+## Summary
 
-### 🔴 Critical Concerns
+The drasi-core server-core architecture provides:
 
-#### 1. **Control Signals Still Not Consumed**
-- Control signal channel exists but unused
-- Should either implement consumers or remove entirely
-
-#### 2. **Legacy Control Channel Still Present**
-- `_control_tx` marked deprecated but not removed
-- Consuming resources unnecessarily
-
-### 🟡 Medium Concerns
-
-#### 3. **Channel Mode Dispatcher Cleanup**
-- Channel mode creates new dispatchers per subscription
-- No explicit cleanup mechanism when subscriptions end
-- Dispatchers remain in Vec until component stops
-- **Impact**: Memory growth with many subscribe/unsubscribe cycles
-- **Solution**: Add unsubscribe mechanism to remove unused dispatchers
-
-#### 4. **Dispatch Mode Runtime Changes**
-- Dispatch mode is set at component creation
-- Cannot change mode without recreating component
-- **Impact**: Requires component restart for mode changes
-- **Solution**: Consider if runtime mode switching is needed
-
-### 🟢 Minor Concerns
-
-#### 5. **Test Helper Methods**
-- `test_subscribe()` methods exposed in public API
-- Should be `#[cfg(test)]` only
-
----
-
-## Completed Migrations
-
-### ✅ Dispatcher Abstraction Implementation (2025-10-27)
-
-#### **Change Dispatcher Pattern**
-- **Status**: ✅ Complete
-- **Implementation**:
-  - Created `ChangeDispatcher` and `ChangeReceiver` traits
-  - Implemented `BroadcastChangeDispatcher` and `ChannelChangeDispatcher`
-  - Added `DispatchMode` enum with Broadcast/Channel options
-  - Migrated all sources from `broadcast_tx` to dispatcher collections
-  - Created `SourceBase` and `QueryBase` with shared dispatcher logic
-- **Benefits**:
-  - 50%+ code reduction in source implementations
-  - Configurable dispatch patterns per component
-  - Maintained zero-copy semantics
-  - Improved testability through trait abstraction
-- **Files Modified**: 40+ files
-- **Testing**: Unit tests for both dispatcher implementations
-
-### ✅ Capacity Configuration System (2025-10-22 to 2025-10-23)
-
-[Previous completed migrations remain unchanged...]
-
----
-
-## Summary of Current State
-
-### What Works Well ✅
-
-- **Trait-Based Dispatcher System**: ✨ **NEW**
-  - Clean abstraction over channel implementations
-  - Configurable dispatch modes (Broadcast vs Channel)
-  - Maintained zero-copy through Arc wrapping
-  - 50%+ code reduction in sources
-- **Direct Subscriptions**: No routers, components connect directly
-- **Configurable Capacities**: Three-level hierarchy for all settings
+- **Flexible Event Distribution**: Trait-based dispatchers with configurable modes (Channel/Broadcast)
+- **Zero-Copy Messaging**: Arc-based sharing for performance
+- **Pluggable Bootstrap**: Universal provider system, any source can use any provider
+- **Direct Subscriptions**: Simple, traceable event flow
 - **Priority Queue Processing**: Timestamp-ordered event processing
-- **Bootstrap System**: All 5 providers working with dedicated channels
-- **Component Lifecycle**: Consistent across all components
+- **Three-Level Configuration**: Component → Global → Hardcoded defaults
+- **Dynamic Management**: Runtime component add/remove/start/stop
+- **Library Design**: Embedded in applications via programmatic APIs
 
-### What Needs Attention ⚠️
-
-- Control signal infrastructure unused
-- Legacy _control_tx channel still present
-- Channel mode dispatcher cleanup strategy needed
-- Test helper methods in public API
-
-### Architecture Decisions ✔️
-
-- **Dispatcher Pattern**: Trait-based abstraction for flexibility
-- **Dispatch Modes**: Broadcast (1-to-N) and Channel (1-to-1)
-- **Lazy Creation**: Channel dispatchers created on-demand
-- **Zero-Copy**: Enforced through Arc<T> in trait signatures
-- **Base Classes**: SourceBase and QueryBase for code reuse
-
-### Performance Characteristics
-
-- **Broadcast Mode**: O(1) dispatch, shared buffer, best for identical consumers
-- **Channel Mode**: O(n) dispatch, isolated buffers, best for varied rates
-- **Zero-Copy**: Arc wrapping ensures no data duplication
-- **Type Safety**: Generic traits allow type-specific dispatchers
-
----
-
-**Document Version**: 5.0
-**Last Updated**: 2025-10-27
-**Changes**: Added comprehensive Dispatcher Architecture section documenting the new trait-based dispatcher pattern, updated all diagrams to show dispatcher collections instead of broadcast_tx, documented dispatch modes and their trade-offs, updated code references for new base abstractions
-**Previous Version**: 4.0 - Router-free architecture with configurable capacities
-**Next Review**: When significant architectural changes occur
+The system is production-ready with sensible defaults (Channel mode, capacity limits) and comprehensive lifecycle management.
