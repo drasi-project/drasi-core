@@ -26,7 +26,7 @@ pub mod test_fixtures {
             server_core: DrasiServerCoreSettings {
                 id: "test-server".to_string(),
                 priority_queue_capacity: None,
-                broadcast_channel_capacity: None,
+                dispatch_buffer_capacity: None,
             },
             sources: vec![],
             queries: vec![],
@@ -56,7 +56,7 @@ pub mod test_fixtures {
             auto_start: true,
             properties,
             bootstrap_provider: None,
-            broadcast_channel_capacity: None,
+            dispatch_buffer_capacity: None,
             dispatch_mode: None,
         }
     }
@@ -75,7 +75,7 @@ pub mod test_fixtures {
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
-            broadcast_channel_capacity: None,
+            dispatch_buffer_capacity: None,
             dispatch_mode: None,
         }
     }
@@ -94,7 +94,7 @@ pub mod test_fixtures {
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
-            broadcast_channel_capacity: None,
+            dispatch_buffer_capacity: None,
             dispatch_mode: None,
         }
     }

@@ -159,7 +159,7 @@ mod tests {
                 props
             },
             bootstrap_provider: None,
-            broadcast_channel_capacity: None,
+            dispatch_buffer_capacity: None,
             dispatch_mode: None,
         };
 

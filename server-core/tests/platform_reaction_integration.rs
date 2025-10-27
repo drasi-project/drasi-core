@@ -25,7 +25,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use drasi_server_core::channels::{
     ChangeDispatcher, ComponentEvent, ComponentStatus, QueryResult,
-    QueryResultBroadcastSender, QuerySubscriptionResponse,
+    QuerySubscriptionResponse,
 };
 use drasi_server_core::config::{QueryConfig, ReactionConfig};
 use drasi_server_core::queries::Query;
@@ -64,7 +64,7 @@ impl MockQuery {
                 enable_bootstrap: false,
                 bootstrap_buffer_size: 10000,
                 priority_queue_capacity: None,
-                broadcast_channel_capacity: None,
+                dispatch_buffer_capacity: None,
                 dispatch_mode: None,
             },
             status: Arc::new(RwLock::new(ComponentStatus::Running)),

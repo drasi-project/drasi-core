@@ -17,7 +17,7 @@ pub enum DispatchMode {
 
 impl Default for DispatchMode {
     fn default() -> Self {
-        DispatchMode::Broadcast
+        DispatchMode::Channel
     }
 }
 
@@ -344,7 +344,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_mode_default() {
-        assert_eq!(DispatchMode::default(), DispatchMode::Broadcast);
+        assert_eq!(DispatchMode::default(), DispatchMode::Channel);
     }
 
     #[tokio::test]

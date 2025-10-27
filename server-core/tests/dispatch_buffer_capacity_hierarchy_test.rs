@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Integration tests for broadcast channel capacity three-level hierarchy:
+//! Integration tests for dispatch buffer capacity three-level hierarchy:
 //! 1. Component-specific override (highest priority)
 //! 2. Server global setting
 //! 3. Hardcoded default (1000)
@@ -25,12 +25,12 @@ use std::collections::HashMap;
 
 /// Test that without any config, all use hardcoded default of 1000
 #[tokio::test]
-async fn test_broadcast_capacity_hierarchy_all_defaults() {
+async fn test_dispatch_buffer_capacity_hierarchy_all_defaults() {
     let config = DrasiServerCoreConfig {
         server_core: DrasiServerCoreSettings {
             id: "test-server".to_string(),
             priority_queue_capacity: None,
-            broadcast_channel_capacity: None, // No global override
+            dispatch_buffer_capacity: None, // No global override
         },
         sources: vec![
             SourceConfig {
@@ -39,7 +39,7 @@ async fn test_broadcast_capacity_hierarchy_all_defaults() {
                 auto_start: true,
                 properties: HashMap::new(),
                 bootstrap_provider: None,
-                broadcast_channel_capacity: None, // No component override,
+                dispatch_buffer_capacity: None, // No component override,
                 dispatch_mode: None,
             },
             SourceConfig {
@@ -48,7 +48,7 @@ async fn test_broadcast_capacity_hierarchy_all_defaults() {
                 auto_start: true,
                 properties: HashMap::new(),
                 bootstrap_provider: None,
-                broadcast_channel_capacity: None, // No component override,
+                dispatch_buffer_capacity: None, // No component override,
                 dispatch_mode: None,
             },
         ],
@@ -64,7 +64,7 @@ async fn test_broadcast_capacity_hierarchy_all_defaults() {
                 enable_bootstrap: true,
                 bootstrap_buffer_size: 10000,
                 priority_queue_capacity: None,
-                broadcast_channel_capacity: None, // No component override,
+                dispatch_buffer_capacity: None, // No component override,
                 dispatch_mode: None,
             },
             QueryConfig {
@@ -78,7 +78,7 @@ async fn test_broadcast_capacity_hierarchy_all_defaults() {
                 enable_bootstrap: true,
                 bootstrap_buffer_size: 10000,
                 priority_queue_capacity: None,
-                broadcast_channel_capacity: None, // No component override,
+                dispatch_buffer_capacity: None, // No component override,
                 dispatch_mode: None,
             },
         ],
@@ -89,24 +89,24 @@ async fn test_broadcast_capacity_hierarchy_all_defaults() {
 
     // All sources should use the hardcoded default of 1000
     assert_eq!(
-        runtime_config.sources[0].broadcast_channel_capacity,
+        runtime_config.sources[0].dispatch_buffer_capacity,
         Some(1000),
         "Source 1 should use hardcoded default"
     );
     assert_eq!(
-        runtime_config.sources[1].broadcast_channel_capacity,
+        runtime_config.sources[1].dispatch_buffer_capacity,
         Some(1000),
         "Source 2 should use hardcoded default"
     );
 
     // All queries should use the hardcoded default of 1000
     assert_eq!(
-        runtime_config.queries[0].broadcast_channel_capacity,
+        runtime_config.queries[0].dispatch_buffer_capacity,
         Some(1000),
         "Query 1 should use hardcoded default"
     );
     assert_eq!(
-        runtime_config.queries[1].broadcast_channel_capacity,
+        runtime_config.queries[1].dispatch_buffer_capacity,
         Some(1000),
         "Query 2 should use hardcoded default"
     );
@@ -114,12 +114,12 @@ async fn test_broadcast_capacity_hierarchy_all_defaults() {
 
 /// Test that global setting applies to all components without overrides
 #[tokio::test]
-async fn test_broadcast_capacity_hierarchy_global_override() {
+async fn test_dispatch_buffer_capacity_hierarchy_global_override() {
     let config = DrasiServerCoreConfig {
         server_core: DrasiServerCoreSettings {
             id: "test-server".to_string(),
             priority_queue_capacity: None,
-            broadcast_channel_capacity: Some(5000), // Global override
+            dispatch_buffer_capacity: Some(5000), // Global override
         },
         sources: vec![
             SourceConfig {
@@ -128,7 +128,7 @@ async fn test_broadcast_capacity_hierarchy_global_override() {
                 auto_start: true,
                 properties: HashMap::new(),
                 bootstrap_provider: None,
-                broadcast_channel_capacity: None, // No component override,
+                dispatch_buffer_capacity: None, // No component override,
                 dispatch_mode: None,
             },
             SourceConfig {
@@ -137,7 +137,7 @@ async fn test_broadcast_capacity_hierarchy_global_override() {
                 auto_start: true,
                 properties: HashMap::new(),
                 bootstrap_provider: None,
-                broadcast_channel_capacity: None, // No component override,
+                dispatch_buffer_capacity: None, // No component override,
                 dispatch_mode: None,
             },
         ],
@@ -152,7 +152,7 @@ async fn test_broadcast_capacity_hierarchy_global_override() {
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
-            broadcast_channel_capacity: None, // No component override,
+            dispatch_buffer_capacity: None, // No component override,
                 dispatch_mode: None,        }],
         reactions: vec![],
     };
@@ -161,19 +161,19 @@ async fn test_broadcast_capacity_hierarchy_global_override() {
 
     // All sources should use the global override of 5000
     assert_eq!(
-        runtime_config.sources[0].broadcast_channel_capacity,
+        runtime_config.sources[0].dispatch_buffer_capacity,
         Some(5000),
         "Source 1 should use global override"
     );
     assert_eq!(
-        runtime_config.sources[1].broadcast_channel_capacity,
+        runtime_config.sources[1].dispatch_buffer_capacity,
         Some(5000),
         "Source 2 should use global override"
     );
 
     // All queries should use the global override of 5000
     assert_eq!(
-        runtime_config.queries[0].broadcast_channel_capacity,
+        runtime_config.queries[0].dispatch_buffer_capacity,
         Some(5000),
         "Query 1 should use global override"
     );
@@ -181,12 +181,12 @@ async fn test_broadcast_capacity_hierarchy_global_override() {
 
 /// Test that component overrides take precedence over global setting
 #[tokio::test]
-async fn test_broadcast_capacity_hierarchy_component_override() {
+async fn test_dispatch_buffer_capacity_hierarchy_component_override() {
     let config = DrasiServerCoreConfig {
         server_core: DrasiServerCoreSettings {
             id: "test-server".to_string(),
             priority_queue_capacity: None,
-            broadcast_channel_capacity: Some(2000), // Global override
+            dispatch_buffer_capacity: Some(2000), // Global override
         },
         sources: vec![
             SourceConfig {
@@ -195,7 +195,7 @@ async fn test_broadcast_capacity_hierarchy_component_override() {
                 auto_start: true,
                 properties: HashMap::new(),
                 bootstrap_provider: None,
-                broadcast_channel_capacity: Some(10000), // Component override,
+                dispatch_buffer_capacity: Some(10000), // Component override,
                 dispatch_mode: None,
             },
             SourceConfig {
@@ -204,7 +204,7 @@ async fn test_broadcast_capacity_hierarchy_component_override() {
                 auto_start: true,
                 properties: HashMap::new(),
                 bootstrap_provider: None,
-                broadcast_channel_capacity: None, // No component override,
+                dispatch_buffer_capacity: None, // No component override,
                 dispatch_mode: None,
             },
         ],
@@ -220,7 +220,7 @@ async fn test_broadcast_capacity_hierarchy_component_override() {
                 enable_bootstrap: true,
                 bootstrap_buffer_size: 10000,
                 priority_queue_capacity: None,
-                broadcast_channel_capacity: Some(8000), // Component override,
+                dispatch_buffer_capacity: Some(8000), // Component override,
                 dispatch_mode: None,
             },
             QueryConfig {
@@ -234,7 +234,7 @@ async fn test_broadcast_capacity_hierarchy_component_override() {
                 enable_bootstrap: true,
                 bootstrap_buffer_size: 10000,
                 priority_queue_capacity: None,
-                broadcast_channel_capacity: None, // No component override,
+                dispatch_buffer_capacity: None, // No component override,
                 dispatch_mode: None,
             },
         ],
@@ -245,28 +245,28 @@ async fn test_broadcast_capacity_hierarchy_component_override() {
 
     // Source 1 should use its component override
     assert_eq!(
-        runtime_config.sources[0].broadcast_channel_capacity,
+        runtime_config.sources[0].dispatch_buffer_capacity,
         Some(10000),
         "Source 1 should use component override"
     );
 
     // Source 2 should use the global override
     assert_eq!(
-        runtime_config.sources[1].broadcast_channel_capacity,
+        runtime_config.sources[1].dispatch_buffer_capacity,
         Some(2000),
         "Source 2 should use global override"
     );
 
     // Query 1 should use its component override
     assert_eq!(
-        runtime_config.queries[0].broadcast_channel_capacity,
+        runtime_config.queries[0].dispatch_buffer_capacity,
         Some(8000),
         "Query 1 should use component override"
     );
 
     // Query 2 should use the global override
     assert_eq!(
-        runtime_config.queries[1].broadcast_channel_capacity,
+        runtime_config.queries[1].dispatch_buffer_capacity,
         Some(2000),
         "Query 2 should use global override"
     );
@@ -274,12 +274,12 @@ async fn test_broadcast_capacity_hierarchy_component_override() {
 
 /// Test mix of all three levels
 #[tokio::test]
-async fn test_broadcast_capacity_hierarchy_mixed() {
+async fn test_dispatch_buffer_capacity_hierarchy_mixed() {
     let config = DrasiServerCoreConfig {
         server_core: DrasiServerCoreSettings {
             id: "test-server".to_string(),
             priority_queue_capacity: Some(50000),
-            broadcast_channel_capacity: Some(3000), // Global override
+            dispatch_buffer_capacity: Some(3000), // Global override
         },
         sources: vec![
             SourceConfig {
@@ -288,7 +288,7 @@ async fn test_broadcast_capacity_hierarchy_mixed() {
                 auto_start: true,
                 properties: HashMap::new(),
                 bootstrap_provider: None,
-                broadcast_channel_capacity: Some(20000), // High volume, needs large capacity,
+                dispatch_buffer_capacity: Some(20000), // High volume, needs large capacity,
                 dispatch_mode: None,
             },
             SourceConfig {
@@ -297,7 +297,7 @@ async fn test_broadcast_capacity_hierarchy_mixed() {
                 auto_start: true,
                 properties: HashMap::new(),
                 bootstrap_provider: None,
-                broadcast_channel_capacity: None, // Uses global (3000),
+                dispatch_buffer_capacity: None, // Uses global (3000),
                 dispatch_mode: None,
             },
             SourceConfig {
@@ -306,7 +306,7 @@ async fn test_broadcast_capacity_hierarchy_mixed() {
                 auto_start: true,
                 properties: HashMap::new(),
                 bootstrap_provider: None,
-                broadcast_channel_capacity: Some(500), // Low volume, small capacity,
+                dispatch_buffer_capacity: Some(500), // Low volume, small capacity,
                 dispatch_mode: None,
             },
         ],
@@ -322,7 +322,7 @@ async fn test_broadcast_capacity_hierarchy_mixed() {
                 enable_bootstrap: true,
                 bootstrap_buffer_size: 10000,
                 priority_queue_capacity: Some(100000),
-                broadcast_channel_capacity: Some(15000), // Many reactions subscribe,
+                dispatch_buffer_capacity: Some(15000), // Many reactions subscribe,
                 dispatch_mode: None,
             },
             QueryConfig {
@@ -336,7 +336,7 @@ async fn test_broadcast_capacity_hierarchy_mixed() {
                 enable_bootstrap: true,
                 bootstrap_buffer_size: 10000,
                 priority_queue_capacity: None,    // Uses global (50000)
-                broadcast_channel_capacity: None, // Uses global (3000),
+                dispatch_buffer_capacity: None, // Uses global (3000),
                 dispatch_mode: None,
             },
         ],
@@ -347,29 +347,29 @@ async fn test_broadcast_capacity_hierarchy_mixed() {
 
     // Verify source capacity hierarchy
     assert_eq!(
-        runtime_config.sources[0].broadcast_channel_capacity,
+        runtime_config.sources[0].dispatch_buffer_capacity,
         Some(20000),
         "High volume source should use its override"
     );
     assert_eq!(
-        runtime_config.sources[1].broadcast_channel_capacity,
+        runtime_config.sources[1].dispatch_buffer_capacity,
         Some(3000),
         "Standard source should use global"
     );
     assert_eq!(
-        runtime_config.sources[2].broadcast_channel_capacity,
+        runtime_config.sources[2].dispatch_buffer_capacity,
         Some(500),
         "Low volume source should use its override"
     );
 
     // Verify query capacity hierarchy
     assert_eq!(
-        runtime_config.queries[0].broadcast_channel_capacity,
+        runtime_config.queries[0].dispatch_buffer_capacity,
         Some(15000),
         "High fanout query should use its override"
     );
     assert_eq!(
-        runtime_config.queries[1].broadcast_channel_capacity,
+        runtime_config.queries[1].dispatch_buffer_capacity,
         Some(3000),
         "Standard query should use global"
     );
@@ -389,12 +389,12 @@ async fn test_broadcast_capacity_hierarchy_mixed() {
 
 /// Test that no global setting and no component override results in default
 #[tokio::test]
-async fn test_broadcast_capacity_hierarchy_nil_global_nil_component() {
+async fn test_dispatch_buffer_capacity_hierarchy_nil_global_nil_component() {
     let config = DrasiServerCoreConfig {
         server_core: DrasiServerCoreSettings {
             id: "test-server".to_string(),
             priority_queue_capacity: None,
-            broadcast_channel_capacity: None, // No global
+            dispatch_buffer_capacity: None, // No global
         },
         sources: vec![SourceConfig {
             id: "source1".to_string(),
@@ -402,7 +402,7 @@ async fn test_broadcast_capacity_hierarchy_nil_global_nil_component() {
             auto_start: true,
             properties: HashMap::new(),
             bootstrap_provider: None,
-            broadcast_channel_capacity: None, // No component override,
+            dispatch_buffer_capacity: None, // No component override,
                 dispatch_mode: None,        }],
         queries: vec![QueryConfig {
             id: "query1".to_string(),
@@ -415,7 +415,7 @@ async fn test_broadcast_capacity_hierarchy_nil_global_nil_component() {
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
-            broadcast_channel_capacity: None, // No component override,
+            dispatch_buffer_capacity: None, // No component override,
                 dispatch_mode: None,        }],
         reactions: vec![],
     };
@@ -424,12 +424,12 @@ async fn test_broadcast_capacity_hierarchy_nil_global_nil_component() {
 
     // Should fall back to hardcoded default of 1000
     assert_eq!(
-        runtime_config.sources[0].broadcast_channel_capacity,
+        runtime_config.sources[0].dispatch_buffer_capacity,
         Some(1000),
         "Should use hardcoded default when no overrides exist"
     );
     assert_eq!(
-        runtime_config.queries[0].broadcast_channel_capacity,
+        runtime_config.queries[0].dispatch_buffer_capacity,
         Some(1000),
         "Should use hardcoded default when no overrides exist"
     );

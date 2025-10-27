@@ -1276,20 +1276,20 @@ Broadcast channels distribute events from sources to queries, and from queries t
 sources:
   - id: high-volume-source
     source_type: postgres
-    broadcast_channel_capacity: 10000  # This source uses 10,000
+    dispatch_buffer_capacity: 10000  # This source uses 10,000
 
 queries:
   - id: high-throughput-query
     query: "MATCH (n) RETURN n"
     sources: ["high-volume-source"]
-    broadcast_channel_capacity: 5000  # This query uses 5,000
+    dispatch_buffer_capacity: 5000  # This query uses 5,000
 ```
 
 **Level 2: Global Server Default**
 ```yaml
 server_core:
   id: my-server
-  broadcast_channel_capacity: 2000  # All sources/queries without overrides use 2,000
+  dispatch_buffer_capacity: 2000  # All sources/queries without overrides use 2,000
 ```
 
 **Level 3: Hardcoded Fallback**
@@ -1311,12 +1311,12 @@ server_core:
 server_core:
   id: production-server
   priority_queue_capacity: 50000          # Global default for queries/reactions
-  broadcast_channel_capacity: 2000        # Global default for sources/queries
+  dispatch_buffer_capacity: 2000        # Global default for sources/queries
 
 sources:
   - id: high-volume-postgres
     source_type: postgres
-    broadcast_channel_capacity: 10000     # Override: high fan-out to many queries
+    dispatch_buffer_capacity: 10000     # Override: high fan-out to many queries
     properties:
       host: localhost
       database: mydb
@@ -1330,7 +1330,7 @@ queries:
     query: "MATCH (n:Event) RETURN n"
     sources: ["high-volume-postgres"]
     priority_queue_capacity: 100000       # Override: large buffer for processing
-    broadcast_channel_capacity: 5000      # Override: many reactions subscribe
+    dispatch_buffer_capacity: 5000      # Override: many reactions subscribe
 
   - id: standard-query
     query: "MATCH (n:Alert) RETURN n"
@@ -1342,7 +1342,7 @@ reactions:
     reaction_type: http
     queries: ["high-throughput-query"]
     priority_queue_capacity: 150000       # Override: critical path
-    # Note: Reactions don't create broadcast channels, so no broadcast_channel_capacity
+    # Note: Reactions don't create dispatch channels, so no dispatch_buffer_capacity
 ```
 
 ## Async Integration Patterns

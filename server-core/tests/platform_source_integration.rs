@@ -59,7 +59,7 @@ fn create_test_source(
         auto_start: false,
         properties,
         bootstrap_provider: None,
-        broadcast_channel_capacity: None,
+        dispatch_buffer_capacity: None,
         dispatch_mode: None,
     };
 

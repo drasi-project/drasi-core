@@ -76,15 +76,15 @@ pub struct QueryBase {
 impl QueryBase {
     /// Create a new QueryBase with the given configuration
     pub fn new(config: QueryConfig, event_tx: ComponentEventSender) -> Result<Self> {
-        // Determine dispatch mode (default to Broadcast if not specified)
-        let dispatch_mode = config.dispatch_mode.unwrap_or(DispatchMode::Broadcast);
+        // Determine dispatch mode (default to Channel if not specified)
+        let dispatch_mode = config.dispatch_mode.unwrap_or_default();
 
         // Set up initial dispatchers based on dispatch mode
         let mut dispatchers: Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>> = Vec::new();
 
         if dispatch_mode == DispatchMode::Broadcast {
             // For broadcast mode, create a single broadcast dispatcher
-            let capacity = config.broadcast_channel_capacity.unwrap_or(1000);
+            let capacity = config.dispatch_buffer_capacity.unwrap_or(1000);
             let dispatcher = BroadcastChangeDispatcher::<QueryResult>::new(capacity);
             dispatchers.push(Box::new(dispatcher));
         }
@@ -110,7 +110,7 @@ impl QueryBase {
             self.config.id, reaction_id
         );
 
-        let dispatch_mode = self.config.dispatch_mode.unwrap_or(DispatchMode::Broadcast);
+        let dispatch_mode = self.config.dispatch_mode.unwrap_or_default();
 
         let receiver: Box<dyn ChangeReceiver<QueryResult>> = match dispatch_mode {
             DispatchMode::Broadcast => {
@@ -124,7 +124,7 @@ impl QueryBase {
             }
             DispatchMode::Channel => {
                 // For channel mode, create a new dispatcher for this subscription
-                let capacity = self.config.broadcast_channel_capacity.unwrap_or(1000);
+                let capacity = self.config.dispatch_buffer_capacity.unwrap_or(1000);
                 let dispatcher = ChannelChangeDispatcher::<QueryResult>::new(capacity);
                 let receiver = dispatcher.create_receiver()?;
 
@@ -245,7 +245,7 @@ mod tests {
             enable_bootstrap: false,
             bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
-            broadcast_channel_capacity: Some(100),
+            dispatch_buffer_capacity: Some(100),
             dispatch_mode: Some(DispatchMode::Broadcast),
         };
 
@@ -291,7 +291,7 @@ mod tests {
             enable_bootstrap: false,
             bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
-            broadcast_channel_capacity: Some(100),
+            dispatch_buffer_capacity: Some(100),
             dispatch_mode: Some(DispatchMode::Channel),
         };
 

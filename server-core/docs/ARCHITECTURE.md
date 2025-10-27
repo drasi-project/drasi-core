@@ -148,7 +148,7 @@ pub enum DispatchMode {
 - **Pattern**: 1-to-N fanout using tokio broadcast channels
 - **Use Case**: Multiple subscribers receiving identical data
 - **Memory**: Single buffer shared across all receivers
-- **Capacity**: Configurable via `broadcast_channel_capacity`
+- **Capacity**: Configurable via `dispatch_buffer_capacity`
 - **Lag Handling**: Logs warning and continues (non-fatal)
 
 **Key Characteristics**:
@@ -164,7 +164,7 @@ pub enum DispatchMode {
 - **Pattern**: 1-to-1 dedicated communication using tokio mpsc channels
 - **Use Case**: Individual subscribers with different processing rates
 - **Memory**: Separate buffer per subscriber
-- **Capacity**: Configurable via `broadcast_channel_capacity` (despite name)
+- **Capacity**: Configurable via `dispatch_buffer_capacity`
 - **Creation**: Lazy - created on-demand during subscription
 
 **Key Characteristics**:
@@ -326,24 +326,24 @@ The configuration system now includes dispatch mode selection alongside capacity
 # Global default (optional)
 server_core:
   priority_queue_capacity: 10000
-  broadcast_channel_capacity: 1000
+  dispatch_buffer_capacity: 1000
 
 # Component-specific
 sources:
   - id: high_volume_source
     source_type: postgres
     dispatch_mode: broadcast        # NEW: Choose dispatch pattern
-    broadcast_channel_capacity: 5000
+    dispatch_buffer_capacity: 5000
 
   - id: dedicated_source
     source_type: http
     dispatch_mode: channel          # NEW: 1-to-1 channels
-    broadcast_channel_capacity: 500
+    dispatch_buffer_capacity: 500
 
 queries:
   - id: aggregation_query
     dispatch_mode: broadcast        # Multiple reactions get same data
-    broadcast_channel_capacity: 2000
+    dispatch_buffer_capacity: 2000
     priority_queue_capacity: 20000
 ```
 
@@ -353,7 +353,7 @@ All configurations follow this three-level precedence:
 
 1. **Component-Specific** (highest priority)
    - `dispatch_mode`: Broadcast or Channel
-   - `broadcast_channel_capacity`: Buffer size
+   - `dispatch_buffer_capacity`: Buffer size
    - `priority_queue_capacity`: Queue size
 
 2. **Global Server Configuration** (medium priority)
@@ -361,8 +361,8 @@ All configurations follow this three-level precedence:
    - Set in `server_core` section
 
 3. **Hardcoded Defaults** (lowest priority)
-   - `dispatch_mode`: Broadcast (default)
-   - `broadcast_channel_capacity`: 1000
+   - `dispatch_mode`: Channel (default)
+   - `dispatch_buffer_capacity`: 1000
    - `priority_queue_capacity`: 10000
 
 ### Memory Implications by Dispatch Mode
@@ -603,13 +603,7 @@ All sources now use SourceBase for dispatcher management:
 
 ### 🟢 Minor Concerns
 
-#### 5. **Naming Inconsistency**
-- Config field `broadcast_channel_capacity` used for both modes
-- In channel mode, it configures mpsc capacity
-- **Impact**: Potential confusion
-- **Solution**: Consider renaming to `channel_capacity`
-
-#### 6. **Test Helper Methods**
+#### 5. **Test Helper Methods**
 - `test_subscribe()` methods exposed in public API
 - Should be `#[cfg(test)]` only
 
@@ -661,7 +655,6 @@ All sources now use SourceBase for dispatcher management:
 - Control signal infrastructure unused
 - Legacy _control_tx channel still present
 - Channel mode dispatcher cleanup strategy needed
-- Config field naming (`broadcast_channel_capacity` for both modes)
 - Test helper methods in public API
 
 ### Architecture Decisions ✔️

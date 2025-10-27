@@ -125,18 +125,18 @@ impl From<super::schema::DrasiServerCoreConfig> for RuntimeConfig {
     fn from(config: super::schema::DrasiServerCoreConfig) -> Self {
         // Get the global defaults (or hardcoded fallbacks)
         let global_priority_queue = config.server_core.priority_queue_capacity.unwrap_or(10000);
-        let global_broadcast_capacity = config
+        let global_dispatch_capacity = config
             .server_core
-            .broadcast_channel_capacity
+            .dispatch_buffer_capacity
             .unwrap_or(1000);
 
-        // Apply global defaults to sources that don't specify their own broadcast capacity
+        // Apply global defaults to sources that don't specify their own dispatch capacity
         let sources = config
             .sources
             .into_iter()
             .map(|mut s| {
-                if s.broadcast_channel_capacity.is_none() {
-                    s.broadcast_channel_capacity = Some(global_broadcast_capacity);
+                if s.dispatch_buffer_capacity.is_none() {
+                    s.dispatch_buffer_capacity = Some(global_dispatch_capacity);
                 }
                 s
             })
@@ -150,8 +150,8 @@ impl From<super::schema::DrasiServerCoreConfig> for RuntimeConfig {
                 if q.priority_queue_capacity.is_none() {
                     q.priority_queue_capacity = Some(global_priority_queue);
                 }
-                if q.broadcast_channel_capacity.is_none() {
-                    q.broadcast_channel_capacity = Some(global_broadcast_capacity);
+                if q.dispatch_buffer_capacity.is_none() {
+                    q.dispatch_buffer_capacity = Some(global_dispatch_capacity);
                 }
                 q
             })

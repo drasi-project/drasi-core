@@ -351,7 +351,7 @@ impl Source for ApplicationSource {
         );
 
         // Create receiver based on dispatch mode
-        let dispatch_mode = self.base.config.dispatch_mode.unwrap_or(crate::channels::DispatchMode::Broadcast);
+        let dispatch_mode = self.base.config.dispatch_mode.unwrap_or_default();
 
         let receiver: Box<dyn crate::channels::ChangeReceiver<crate::channels::SourceEventWrapper>> = match dispatch_mode {
             crate::channels::DispatchMode::Broadcast => {
@@ -365,7 +365,7 @@ impl Source for ApplicationSource {
             }
             crate::channels::DispatchMode::Channel => {
                 // For channel mode, create a new dispatcher for this subscription
-                let capacity = self.base.config.broadcast_channel_capacity.unwrap_or(1000);
+                let capacity = self.base.config.dispatch_buffer_capacity.unwrap_or(1000);
                 let dispatcher = crate::channels::ChannelChangeDispatcher::<crate::channels::SourceEventWrapper>::new(capacity);
                 let receiver = dispatcher.create_receiver()?;
 

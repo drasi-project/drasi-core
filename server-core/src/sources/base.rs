@@ -51,15 +51,15 @@ pub struct SourceBase {
 impl SourceBase {
     /// Create a new SourceBase with the given configuration
     pub fn new(config: SourceConfig, event_tx: ComponentEventSender) -> Result<Self> {
-        // Determine dispatch mode (default to Broadcast if not specified)
-        let dispatch_mode = config.dispatch_mode.unwrap_or(DispatchMode::Broadcast);
+        // Determine dispatch mode (default to Channel if not specified)
+        let dispatch_mode = config.dispatch_mode.unwrap_or_default();
 
         // Set up initial dispatchers based on dispatch mode
         let mut dispatchers: Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>> = Vec::new();
 
         if dispatch_mode == DispatchMode::Broadcast {
             // For broadcast mode, create a single broadcast dispatcher
-            let capacity = config.broadcast_channel_capacity.unwrap_or(1000);
+            let capacity = config.dispatch_buffer_capacity.unwrap_or(1000);
             let dispatcher = BroadcastChangeDispatcher::<SourceEventWrapper>::new(capacity);
             dispatchers.push(Box::new(dispatcher));
         }
@@ -95,7 +95,7 @@ impl SourceBase {
             query_id, source_type, self.config.id, enable_bootstrap
         );
 
-        let dispatch_mode = self.config.dispatch_mode.unwrap_or(DispatchMode::Broadcast);
+        let dispatch_mode = self.config.dispatch_mode.unwrap_or_default();
 
         // Create receiver based on dispatch mode
         let receiver: Box<dyn ChangeReceiver<SourceEventWrapper>> = match dispatch_mode {
@@ -110,7 +110,7 @@ impl SourceBase {
             }
             DispatchMode::Channel => {
                 // For channel mode, create a new dispatcher for this subscription
-                let capacity = self.config.broadcast_channel_capacity.unwrap_or(1000);
+                let capacity = self.config.dispatch_buffer_capacity.unwrap_or(1000);
                 let dispatcher = ChannelChangeDispatcher::<SourceEventWrapper>::new(capacity);
                 let receiver = dispatcher.create_receiver()?;
 
