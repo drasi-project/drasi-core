@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use log::{error, info, warn};
 use std::collections::VecDeque;
 use std::sync::Arc;
-use tokio::sync::broadcast::error::RecvError;
+// RecvError no longer needed with trait-based receivers
 use tokio::sync::RwLock;
 
 use crate::channels::priority_queue::PriorityQueue;
@@ -441,7 +441,7 @@ impl Reaction for ProfilerReaction {
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to subscribe to query {}: {}", query_id, e))?;
 
-            let mut broadcast_receiver = response.broadcast_receiver;
+            let mut receiver = response.receiver;
             let priority_queue = self.priority_queue.clone();
             let reaction_id = self.config.id.clone();
             let query_id_clone = query_id.clone();
@@ -454,7 +454,7 @@ impl Reaction for ProfilerReaction {
                 );
 
                 loop {
-                    match broadcast_receiver.recv().await {
+                    match receiver.recv().await {
                         Ok(query_result) => {
                             // Enqueue the result to the priority queue
                             if !priority_queue.enqueue(query_result.clone()).await {
@@ -464,19 +464,22 @@ impl Reaction for ProfilerReaction {
                                 );
                             }
                         }
-                        Err(RecvError::Lagged(count)) => {
-                            warn!(
-                                "[{}] Broadcast receiver lagged by {} messages for query: {}",
-                                reaction_id, count, query_id_clone
-                            );
-                            continue;
-                        }
-                        Err(RecvError::Closed) => {
-                            info!(
-                                "[{}] Broadcast channel closed for query: {}",
-                                reaction_id, query_id_clone
-                            );
-                            break;
+                        Err(e) => {
+                            // Check if it's a lag error or closed channel
+                            let error_str = e.to_string();
+                            if error_str.contains("lagged") {
+                                warn!(
+                                    "[{}] Receiver lagged for query '{}': {}",
+                                    reaction_id, query_id_clone, error_str
+                                );
+                                continue;
+                            } else {
+                                info!(
+                                    "[{}] Receiver error for query '{}': {}",
+                                    reaction_id, query_id_clone, error_str
+                                );
+                                break;
+                            }
                         }
                     }
                 }

@@ -16,7 +16,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use log::{debug, error, info, trace, warn};
 use std::sync::Arc;
-use tokio::sync::broadcast::error::RecvError;
+// RecvError no longer needed with trait-based receivers
 use tokio::sync::RwLock;
 
 use crate::channels::priority_queue::PriorityQueue;
@@ -128,17 +128,17 @@ impl Reaction for LogReaction {
                 .subscribe(self.config.id.clone())
                 .await
                 .map_err(|e| anyhow::anyhow!(e))?;
-            let mut broadcast_receiver = subscription_response.broadcast_receiver;
+            let mut receiver = subscription_response.receiver;
 
             // Clone necessary data for the forwarder task
             let priority_queue = self.priority_queue.clone();
             let query_id_clone = query_id.clone();
             let reaction_id = self.config.id.clone();
 
-            // Spawn forwarder task to read from broadcast and enqueue to priority queue
+            // Spawn forwarder task to read from receiver and enqueue to priority queue
             let forwarder_task = tokio::spawn(async move {
                 loop {
-                    match broadcast_receiver.recv().await {
+                    match receiver.recv().await {
                         Ok(query_result) => {
                             // Enqueue to priority queue for timestamp-ordered processing
                             if !priority_queue.enqueue(query_result).await {
@@ -148,19 +148,22 @@ impl Reaction for LogReaction {
                                 );
                             }
                         }
-                        Err(RecvError::Lagged(count)) => {
-                            warn!(
-                                "[{}] Broadcast receiver lagged by {} messages for query '{}'",
-                                reaction_id, count, query_id_clone
-                            );
-                            continue;
-                        }
-                        Err(RecvError::Closed) => {
-                            info!(
-                                "[{}] Broadcast channel closed for query '{}'",
-                                reaction_id, query_id_clone
-                            );
-                            break;
+                        Err(e) => {
+                            // Check if it's a lag error or closed channel
+                            let error_str = e.to_string();
+                            if error_str.contains("lagged") {
+                                warn!(
+                                    "[{}] Receiver lagged for query '{}': {}",
+                                    reaction_id, query_id_clone, error_str
+                                );
+                                continue;
+                            } else {
+                                info!(
+                                    "[{}] Receiver error for query '{}': {}",
+                                    reaction_id, query_id_clone, error_str
+                                );
+                                break;
+                            }
                         }
                     }
                 }

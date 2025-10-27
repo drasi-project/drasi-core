@@ -20,7 +20,6 @@ use log::{debug, error, info, warn};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, RwLock};
 use tokio_stream::StreamExt;
 use tower_http::cors::{Any, CorsLayer};
@@ -130,7 +129,7 @@ impl Reaction for SseReaction {
                     anyhow::anyhow!("Failed to subscribe to query '{}': {}", query_id, e)
                 })?;
 
-            let mut broadcast_receiver = subscription_response.broadcast_receiver;
+            let mut receiver = subscription_response.receiver;
             let priority_queue = self.priority_queue.clone();
             let reaction_id = self.config.id.clone();
             let query_id_clone = query_id.clone();
@@ -142,7 +141,7 @@ impl Reaction for SseReaction {
                     reaction_id, query_id_clone
                 );
                 loop {
-                    match broadcast_receiver.recv().await {
+                    match receiver.recv().await {
                         Ok(query_result) => {
                             debug!(
                                 "[{}] Received result from query '{}', enqueuing to priority queue",
@@ -155,19 +154,21 @@ impl Reaction for SseReaction {
                                 );
                             }
                         }
-                        Err(RecvError::Lagged(count)) => {
-                            warn!(
-                                "[{}] Forwarder lagged by {} messages for query '{}'",
-                                reaction_id, count, query_id_clone
-                            );
-                            continue;
-                        }
-                        Err(RecvError::Closed) => {
-                            info!(
-                                "[{}] Broadcast channel closed for query '{}', exiting forwarder",
-                                reaction_id, query_id_clone
-                            );
-                            break;
+                        Err(e) => {
+                            // Check if it's a lagged error by checking the error message
+                            if e.to_string().contains("lagged") {
+                                warn!(
+                                    "[{}] Forwarder lagged for query '{}': {}",
+                                    reaction_id, query_id_clone, e
+                                );
+                                continue;
+                            } else {
+                                info!(
+                                    "[{}] Channel closed for query '{}', exiting forwarder: {}",
+                                    reaction_id, query_id_clone, e
+                                );
+                                break;
+                            }
                         }
                     }
                 }

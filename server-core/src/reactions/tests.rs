@@ -16,6 +16,7 @@
 mod manager_tests {
     use super::super::*;
     use crate::channels::*;
+    use crate::channels::dispatcher::{BroadcastChangeDispatcher, ChangeDispatcher};
     use crate::config::QueryConfig;
     use crate::queries::Query;
     use crate::server_core::DrasiServerCore;
@@ -30,12 +31,12 @@ mod manager_tests {
     struct MockQuery {
         config: QueryConfig,
         status: Arc<RwLock<ComponentStatus>>,
-        broadcast_tx: QueryResultBroadcastSender,
+        dispatcher: Arc<BroadcastChangeDispatcher<QueryResult>>,
     }
 
     impl MockQuery {
         fn new(query_id: &str) -> Self {
-            let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
+            let dispatcher = Arc::new(BroadcastChangeDispatcher::<QueryResult>::new(1000));
             Self {
                 config: QueryConfig {
                     id: query_id.to_string(),
@@ -49,9 +50,10 @@ mod manager_tests {
                     bootstrap_buffer_size: 10000,
                     priority_queue_capacity: None,
                     broadcast_channel_capacity: None,
+                    dispatch_mode: None,
                 },
                 status: Arc::new(RwLock::new(ComponentStatus::Running)),
-                broadcast_tx,
+                dispatcher,
             }
         }
     }
@@ -82,13 +84,13 @@ mod manager_tests {
 
         async fn subscribe(
             &self,
-            reaction_id: String,
+            _reaction_id: String,
         ) -> Result<QuerySubscriptionResponse, String> {
-            let broadcast_receiver = self.broadcast_tx.subscribe();
+            let receiver = self.dispatcher.create_receiver()
+                .map_err(|e| format!("Failed to create receiver: {}", e))?;
             Ok(QuerySubscriptionResponse {
                 query_id: self.config.id.clone(),
-                reaction_id,
-                broadcast_receiver,
+                receiver,
             })
         }
     }
@@ -334,12 +336,12 @@ mod log_reaction_tests {
     struct MockQuery {
         config: QueryConfig,
         status: Arc<RwLock<ComponentStatus>>,
-        broadcast_tx: QueryResultBroadcastSender,
+        dispatcher: Arc<crate::channels::BroadcastChangeDispatcher<QueryResult>>,
     }
 
     impl MockQuery {
         fn new(query_id: &str) -> Self {
-            let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
+            let dispatcher = Arc::new(crate::channels::BroadcastChangeDispatcher::<QueryResult>::new(1000));
             Self {
                 config: QueryConfig {
                     id: query_id.to_string(),
@@ -353,9 +355,10 @@ mod log_reaction_tests {
                     bootstrap_buffer_size: 10000,
                     priority_queue_capacity: None,
                     broadcast_channel_capacity: None,
+                    dispatch_mode: None,
                 },
                 status: Arc::new(RwLock::new(ComponentStatus::Running)),
-                broadcast_tx,
+                dispatcher,
             }
         }
     }
@@ -386,13 +389,13 @@ mod log_reaction_tests {
 
         async fn subscribe(
             &self,
-            reaction_id: String,
+            _reaction_id: String,
         ) -> Result<QuerySubscriptionResponse, String> {
-            let broadcast_receiver = self.broadcast_tx.subscribe();
+            let receiver = self.dispatcher.create_receiver()
+                .map_err(|e| format!("Failed to create receiver: {}", e))?;
             Ok(QuerySubscriptionResponse {
                 query_id: self.config.id.clone(),
-                reaction_id,
-                broadcast_receiver,
+                receiver,
             })
         }
     }

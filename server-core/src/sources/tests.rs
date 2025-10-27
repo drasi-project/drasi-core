@@ -247,6 +247,7 @@ mod internal_source_tests {
             properties,
             bootstrap_provider: None,
             broadcast_channel_capacity: None,
+            dispatch_mode: None,
         };
 
         let source = MockSource::new(config, event_tx).unwrap();
@@ -291,6 +292,7 @@ mod internal_source_tests {
             properties,
             bootstrap_provider: None,
             broadcast_channel_capacity: None,
+            dispatch_mode: None,
         };
 
         let source = MockSource::new(config, event_tx).unwrap();
@@ -332,6 +334,7 @@ mod internal_source_tests {
             properties,
             bootstrap_provider: None,
             broadcast_channel_capacity: None,
+            dispatch_mode: None,
         };
 
         let source = MockSource::new(config, event_tx).unwrap();

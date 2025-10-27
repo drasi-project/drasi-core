@@ -40,9 +40,7 @@ fn create_test_source(
     stream_key: &str,
 ) -> (
     PlatformSource,
-    tokio::sync::broadcast::Receiver<
-        std::sync::Arc<drasi_server_core::channels::SourceEventWrapper>,
-    >,
+    Box<dyn drasi_server_core::channels::ChangeReceiver<drasi_server_core::channels::SourceEventWrapper>>,
     mpsc::Receiver<drasi_server_core::channels::ComponentEvent>,
 ) {
     let (event_tx, event_rx) = mpsc::channel(100);
@@ -62,6 +60,7 @@ fn create_test_source(
         properties,
         bootstrap_provider: None,
         broadcast_channel_capacity: None,
+        dispatch_mode: None,
     };
 
     let source = PlatformSource::new(config, event_tx).unwrap();

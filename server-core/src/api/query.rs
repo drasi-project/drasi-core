@@ -107,6 +107,7 @@ impl QueryBuilder {
             bootstrap_buffer_size: 10000,     // Default buffer size
             priority_queue_capacity: None,    // Default: inherit from server global setting
             broadcast_channel_capacity: None, // Default: inherit from server global setting
+            dispatch_mode: None,               // Default: inherit from server global setting or Broadcast
         }
     }
 }

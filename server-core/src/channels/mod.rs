@@ -12,11 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod dispatcher;
 pub mod events;
 pub mod priority_queue;
 
 #[cfg(test)]
 mod events_test;
 
+pub use dispatcher::{
+    BroadcastChangeDispatcher, BroadcastChangeReceiver, ChangeDispatcher, ChangeReceiver,
+    ChannelChangeDispatcher, ChannelChangeReceiver, DispatchMode,
+};
 pub use events::*;
 pub use priority_queue::{PriorityQueue, PriorityQueueMetrics};

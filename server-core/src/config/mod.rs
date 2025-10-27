@@ -16,6 +16,8 @@ pub mod runtime;
 pub mod schema;
 
 #[cfg(test)]
+mod dispatch_mode_test;
+#[cfg(test)]
 mod tests;
 
 pub use runtime::{QueryRuntime, ReactionRuntime, RuntimeConfig, SourceRuntime};

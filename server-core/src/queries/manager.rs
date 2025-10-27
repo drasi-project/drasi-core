@@ -35,7 +35,7 @@ use drasi_query_gql::GQLParser;
 
 use crate::channels::*;
 use crate::config::{QueryConfig, QueryLanguage, QueryRuntime};
-use crate::queries::PriorityQueue;
+use crate::queries::{PriorityQueue, QueryBase};
 // DataRouter no longer needed - queries subscribe directly to sources
 use crate::sources::SourceManager;
 use crate::utils::*;
@@ -119,16 +119,11 @@ enum BootstrapPhase {
 }
 
 pub struct DrasiQuery {
-    config: QueryConfig,
-    status: Arc<RwLock<ComponentStatus>>,
-    event_tx: ComponentEventSender,
+    // Use QueryBase for common functionality
+    base: QueryBase,
     #[allow(dead_code)]
     continuous_query: Option<ContinuousQuery>,
     current_results: Arc<RwLock<Vec<serde_json::Value>>>,
-    task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
-
-    // Broadcast channel for zero-copy query result distribution to reactions
-    broadcast_tx: QueryResultBroadcastSender,
     // Priority queue for ordered event processing
     priority_queue: PriorityQueue,
     // Reference to SourceManager for direct subscription
@@ -149,18 +144,13 @@ impl DrasiQuery {
         let priority_capacity = config.priority_queue_capacity.unwrap_or(10000);
         let priority_queue = PriorityQueue::new(priority_capacity);
 
-        // Create broadcast channel for query results with configured capacity (fallback to 1000 if not set)
-        let broadcast_capacity = config.broadcast_channel_capacity.unwrap_or(1000);
-        let (broadcast_tx, _) = tokio::sync::broadcast::channel(broadcast_capacity);
+        // Create QueryBase for common functionality
+        let base = QueryBase::new(config, event_tx).expect("Failed to create QueryBase");
 
         Self {
-            config,
-            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            event_tx,
+            base,
             continuous_query: None,
             current_results: Arc::new(RwLock::new(Vec::new())),
-            task_handle: Arc::new(RwLock::new(None)),
-            broadcast_tx,
             priority_queue,
             source_manager,
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
@@ -176,33 +166,33 @@ impl DrasiQuery {
 #[async_trait]
 impl Query for DrasiQuery {
     async fn start(&self) -> Result<()> {
-        log_component_start("Query", &self.config.id);
+        log_component_start("Query", &self.base.config.id);
 
-        *self.status.write().await = ComponentStatus::Starting;
+        *self.base.status.write().await = ComponentStatus::Starting;
 
         let event = ComponentEvent {
-            component_id: self.config.id.clone(),
+            component_id: self.base.config.id.clone(),
             component_type: ComponentType::Query,
             status: ComponentStatus::Starting,
             timestamp: chrono::Utc::now(),
             message: Some("Starting query".to_string()),
         };
 
-        if let Err(e) = self.event_tx.send(event).await {
+        if let Err(e) = self.base.event_tx.send(event).await {
             error!("Failed to send component event: {}", e);
         }
 
         // Build and initialize the actual Drasi ContinuousQuery
-        let query_str = self.config.query.clone();
+        let query_str = self.base.config.query.clone();
 
         // Create a parser and function registry based on the query language
         let config = Arc::new(DefaultQueryConfig);
         let (parser, function_registry): (Arc<dyn QueryParser>, Arc<FunctionRegistry>) =
-            match self.config.query_language {
+            match self.base.config.query_language {
                 QueryLanguage::Cypher => {
                     debug!(
                         "Query '{}' using Cypher parser and function set",
-                        self.config.id
+                        self.base.config.id
                     );
                     (
                         Arc::new(CypherParser::new(config)),
@@ -212,7 +202,7 @@ impl Query for DrasiQuery {
                 QueryLanguage::GQL => {
                     debug!(
                         "Query '{}' using GQL parser and function set",
-                        self.config.id
+                        self.base.config.id
                     );
                     (
                         Arc::new(GQLParser::new(config)),
@@ -225,10 +215,10 @@ impl Query for DrasiQuery {
             QueryBuilder::new(&query_str, parser).with_function_registry(function_registry);
 
         // Add joins if configured
-        if let Some(joins) = &self.config.joins {
+        if let Some(joins) = &self.base.config.joins {
             debug!(
                 "Query '{}' has {} configured joins",
-                self.config.id,
+                self.base.config.id,
                 joins.len()
             );
             let drasi_joins: Vec<drasi_core::models::QueryJoin> =
@@ -239,18 +229,18 @@ impl Query for DrasiQuery {
         let continuous_query = match builder.try_build().await {
             Ok(query) => query,
             Err(e) => {
-                error!("Failed to build query '{}': {}", self.config.id, e);
-                *self.status.write().await = ComponentStatus::Error;
+                error!("Failed to build query '{}': {}", self.base.config.id, e);
+                *self.base.status.write().await = ComponentStatus::Error;
 
                 let event = ComponentEvent {
-                    component_id: self.config.id.clone(),
+                    component_id: self.base.config.id.clone(),
                     component_type: ComponentType::Query,
                     status: ComponentStatus::Error,
                     timestamp: chrono::Utc::now(),
                     message: Some(format!("Failed to build query: {}", e)),
                 };
 
-                if let Err(e) = self.event_tx.send(event).await {
+                if let Err(e) = self.base.event_tx.send(event).await {
                     error!("Failed to send component event: {}", e);
                 }
 
@@ -261,12 +251,12 @@ impl Query for DrasiQuery {
         // Extract labels from the query for bootstrap
         let labels = match crate::queries::LabelExtractor::extract_labels(
             &query_str,
-            &self.config.query_language,
+            &self.base.config.query_language,
         ) {
             Ok(labels) => labels,
             Err(e) => {
                 warn!("Failed to extract labels from query '{}': {}. Bootstrap will request all data.",
-                    self.config.id, e);
+                    self.base.config.id, e);
                 crate::queries::QueryLabels {
                     node_labels: vec![],
                     relation_labels: vec![],
@@ -277,24 +267,24 @@ impl Query for DrasiQuery {
         // NEW: Subscribe to each source sequentially
         info!(
             "Query '{}' subscribing to {} sources: {:?}",
-            self.config.id,
-            self.config.sources.len(),
-            self.config.sources
+            self.base.config.id,
+            self.base.config.sources.len(),
+            self.base.config.sources
         );
 
         let mut bootstrap_channels = Vec::new();
         let mut subscription_tasks = Vec::new();
 
-        for source_id in &self.config.sources {
+        for source_id in &self.base.config.sources {
             // Get source from SourceManager
             let source = match self.source_manager.get_source_instance(source_id).await {
                 Some(src) => src,
                 None => {
                     error!(
                         "Query '{}' failed to find source '{}' in SourceManager",
-                        self.config.id, source_id
+                        self.base.config.id, source_id
                     );
-                    *self.status.write().await = ComponentStatus::Error;
+                    *self.base.status.write().await = ComponentStatus::Error;
                     return Err(anyhow::anyhow!("Source '{}' not found", source_id));
                 }
             };
@@ -303,7 +293,7 @@ impl Query for DrasiQuery {
             let enable_bootstrap = true;
             let subscription_response = match source
                 .subscribe(
-                    self.config.id.clone(),
+                    self.base.config.id.clone(),
                     enable_bootstrap,
                     labels.node_labels.clone(),
                     labels.relation_labels.clone(),
@@ -314,9 +304,9 @@ impl Query for DrasiQuery {
                 Err(e) => {
                     error!(
                         "Query '{}' failed to subscribe to source '{}': {}",
-                        self.config.id, source_id, e
+                        self.base.config.id, source_id, e
                     );
-                    *self.status.write().await = ComponentStatus::Error;
+                    *self.base.status.write().await = ComponentStatus::Error;
                     return Err(anyhow::anyhow!(
                         "Failed to subscribe to source '{}': {}",
                         source_id,
@@ -327,7 +317,7 @@ impl Query for DrasiQuery {
 
             info!(
                 "Query '{}' successfully subscribed to source '{}'",
-                self.config.id, source_id
+                self.base.config.id, source_id
             );
 
             // Store bootstrap channel if provided
@@ -341,38 +331,36 @@ impl Query for DrasiQuery {
                 .await
                 .insert(source_id.clone(), BootstrapPhase::NotStarted);
 
-            // Spawn task to forward broadcast events to priority queue
-            let mut broadcast_rx = subscription_response.broadcast_receiver;
+            // Spawn task to forward events from receiver to priority queue
+            let mut receiver = subscription_response.receiver;
             let priority_queue = self.priority_queue.clone();
-            let query_id = self.config.id.clone();
+            let query_id = self.base.config.id.clone();
             let source_id_clone = source_id.clone();
 
             let task = tokio::spawn(async move {
                 debug!(
-                    "Query '{}' started broadcast forwarder for source '{}'",
+                    "Query '{}' started event forwarder for source '{}'",
                     query_id, source_id_clone
                 );
 
                 loop {
-                    match broadcast_rx.recv().await {
+                    match receiver.recv().await {
                         Ok(arc_event) => {
                             // Enqueue the Arc-wrapped event into the priority queue
-                            if !priority_queue.enqueue(arc_event.clone()).await {
+                            if !priority_queue.enqueue(arc_event).await {
                                 warn!(
                                     "Query '{}' priority queue at capacity, dropping event from source '{}'",
                                     query_id, source_id_clone
                                 );
                             }
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                            warn!(
-                                "Query '{}' lagged on source '{}', skipped {} events",
-                                query_id, source_id_clone, skipped
+                        Err(e) => {
+                            error!(
+                                "Query '{}' receiver error for source '{}': {}",
+                                query_id, source_id_clone, e
                             );
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             info!(
-                                "Query '{}' broadcast channel closed for source '{}'",
+                                "Query '{}' channel closed for source '{}'",
                                 query_id, source_id_clone
                             );
                             break;
@@ -381,7 +369,7 @@ impl Query for DrasiQuery {
                 }
 
                 debug!(
-                    "Query '{}' broadcast forwarder exited for source '{}'",
+                    "Query '{}' event forwarder exited for source '{}'",
                     query_id, source_id_clone
                 );
             });
@@ -399,7 +387,7 @@ impl Query for DrasiQuery {
         if !bootstrap_channels.is_empty() {
             info!(
                 "Query '{}' starting bootstrap from {} sources",
-                self.config.id,
+                self.base.config.id,
                 bootstrap_channels.len()
             );
 
@@ -415,26 +403,19 @@ impl Query for DrasiQuery {
             );
 
             let control_result =
-                QueryResult::new(self.config.id.clone(), chrono::Utc::now(), vec![], metadata);
+                QueryResult::new(self.base.config.id.clone(), chrono::Utc::now(), vec![], metadata);
 
-            // Broadcast the control signal to all subscribed reactions
-            let arc_result = Arc::new(control_result);
-            if let Err(_) = self.broadcast_tx.send(arc_result) {
-                debug!(
-                    "No reactions subscribed to query '{}' for bootstrapStarted signal",
-                    self.config.id
-                );
-            } else {
-                info!(
-                    "[BOOTSTRAP] Emitted bootstrapStarted signal for query '{}'",
-                    self.config.id
-                );
-            }
+            // Dispatch the control signal to all subscribed reactions
+            self.base.dispatch_query_result(control_result).await.ok();
+            info!(
+                "[BOOTSTRAP] Emitted bootstrapStarted signal for query '{}'",
+                self.base.config.id
+            );
 
             // Process bootstrap events from each source
             let continuous_query_clone = continuous_query.clone();
-            let broadcast_tx = self.broadcast_tx.clone();
-            let query_id = self.config.id.clone();
+            let base_dispatchers = self.base.dispatchers.clone();
+            let query_id = self.base.config.id.clone();
             let bootstrap_state = self.bootstrap_state.clone();
 
             for (source_id, mut bootstrap_rx) in bootstrap_channels {
@@ -450,10 +431,10 @@ impl Query for DrasiQuery {
                 );
 
                 let continuous_query_ref = continuous_query_clone.clone();
-                let broadcast_tx_clone = broadcast_tx.clone();
                 let query_id_clone = query_id.clone();
                 let source_id_clone = source_id.clone();
                 let bootstrap_state_clone = bootstrap_state.clone();
+                let base_dispatchers_clone = base_dispatchers.clone();
 
                 tokio::spawn(async move {
                     let mut count = 0u64;
@@ -524,7 +505,17 @@ impl Query for DrasiQuery {
                         );
 
                         let arc_result = Arc::new(control_result);
-                        if let Err(_) = broadcast_tx_clone.send(arc_result) {
+
+                        // Dispatch bootstrapCompleted signal to all reactions
+                        let dispatchers = base_dispatchers_clone.read().await;
+                        let mut dispatched = false;
+                        for dispatcher in dispatchers.iter() {
+                            if dispatcher.dispatch_change(arc_result.clone()).await.is_ok() {
+                                dispatched = true;
+                            }
+                        }
+
+                        if !dispatched {
                             debug!(
                                 "No reactions subscribed to query '{}' for bootstrapCompleted signal",
                                 query_id_clone
@@ -541,33 +532,33 @@ impl Query for DrasiQuery {
         } else {
             info!(
                 "Query '{}' no bootstrap channels, skipping bootstrap",
-                self.config.id
+                self.base.config.id
             );
         }
 
         // Set status to Running before starting event processor
-        *self.status.write().await = ComponentStatus::Running;
+        *self.base.status.write().await = ComponentStatus::Running;
 
         let event = ComponentEvent {
-            component_id: self.config.id.clone(),
+            component_id: self.base.config.id.clone(),
             component_type: ComponentType::Query,
             status: ComponentStatus::Running,
             timestamp: chrono::Utc::now(),
             message: Some("Query started successfully".to_string()),
         };
 
-        if let Err(e) = self.event_tx.send(event).await {
+        if let Err(e) = self.base.event_tx.send(event).await {
             error!("Failed to send component event: {}", e);
         }
 
         // NEW: Spawn event processor task that reads from priority queue
         let continuous_query_for_processor = continuous_query.clone();
-        let broadcast_tx = self.broadcast_tx.clone();
-        let query_id = self.config.id.clone();
+        let base_dispatchers = self.base.dispatchers.clone();
+        let query_id = self.base.config.id.clone();
         let current_results = self.current_results.clone();
-        let task_handle_clone = self.task_handle.clone();
+        let task_handle_clone = self.base.task_handle.clone();
         let priority_queue = self.priority_queue.clone();
-        let status = self.status.clone();
+        let status = self.base.status.clone();
 
         let handle = tokio::spawn(async move {
             info!(
@@ -765,13 +756,16 @@ impl Query for DrasiQuery {
                                 results.len()
                             );
 
-                            // Broadcast query result to all subscribed reactions
+                            // Dispatch query result to all subscribed reactions
                             let arc_result = Arc::new(query_result);
-                            if let Err(_) = broadcast_tx.send(arc_result) {
-                                debug!(
-                                    "No reactions subscribed to query '{}', result discarded",
-                                    query_id
-                                );
+                            let dispatchers = base_dispatchers.read().await;
+                            for dispatcher in dispatchers.iter() {
+                                if let Err(e) = dispatcher.dispatch_change(arc_result.clone()).await {
+                                    debug!(
+                                        "Failed to dispatch result for query '{}': {}",
+                                        query_id, e
+                                    );
+                                }
                             }
                         }
                     }
@@ -794,40 +788,40 @@ impl Query for DrasiQuery {
     }
 
     async fn stop(&self) -> Result<()> {
-        log_component_stop("Query", &self.config.id);
+        log_component_stop("Query", &self.base.config.id);
 
-        *self.status.write().await = ComponentStatus::Stopping;
+        *self.base.status.write().await = ComponentStatus::Stopping;
 
         let event = ComponentEvent {
-            component_id: self.config.id.clone(),
+            component_id: self.base.config.id.clone(),
             component_type: ComponentType::Query,
             status: ComponentStatus::Stopping,
             timestamp: chrono::Utc::now(),
             message: Some("Stopping query".to_string()),
         };
 
-        if let Err(e) = self.event_tx.send(event).await {
+        if let Err(e) = self.base.event_tx.send(event).await {
             error!("Failed to send component event: {}", e);
         }
 
         // Abort the processing task if it exists
-        if let Some(handle) = self.task_handle.write().await.take() {
+        if let Some(handle) = self.base.task_handle.write().await.take() {
             handle.abort();
             // Wait for the task to finish (it will be cancelled)
             let _ = handle.await;
         }
 
-        *self.status.write().await = ComponentStatus::Stopped;
+        *self.base.status.write().await = ComponentStatus::Stopped;
 
         let event = ComponentEvent {
-            component_id: self.config.id.clone(),
+            component_id: self.base.config.id.clone(),
             component_type: ComponentType::Query,
             status: ComponentStatus::Stopped,
             timestamp: chrono::Utc::now(),
             message: Some("Query stopped successfully".to_string()),
         };
 
-        if let Err(e) = self.event_tx.send(event).await {
+        if let Err(e) = self.base.event_tx.send(event).await {
             error!("Failed to send component event: {}", e);
         }
 
@@ -835,11 +829,11 @@ impl Query for DrasiQuery {
     }
 
     async fn status(&self) -> ComponentStatus {
-        self.status.read().await.clone()
+        self.base.status.read().await.clone()
     }
 
     fn get_config(&self) -> &QueryConfig {
-        &self.config
+        &self.base.config
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -849,17 +843,12 @@ impl Query for DrasiQuery {
     async fn subscribe(&self, reaction_id: String) -> Result<QuerySubscriptionResponse, String> {
         debug!(
             "Reaction '{}' subscribing to query '{}'",
-            reaction_id, self.config.id
+            reaction_id, self.base.config.id
         );
 
-        // Create a new receiver from the broadcast channel
-        let broadcast_receiver = self.broadcast_tx.subscribe();
-
-        Ok(QuerySubscriptionResponse {
-            query_id: self.config.id.clone(),
-            reaction_id,
-            broadcast_receiver,
-        })
+        // Use QueryBase's subscribe method which returns QuerySubscriptionResponse
+        self.base.subscribe(&reaction_id).await
+            .map_err(|e| format!("Failed to subscribe: {}", e))
     }
 }
 

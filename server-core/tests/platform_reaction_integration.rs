@@ -24,8 +24,8 @@ mod test_support;
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_server_core::channels::{
-    ComponentEvent, ComponentStatus, QueryResult, QueryResultBroadcastSender,
-    QuerySubscriptionResponse,
+    ChangeDispatcher, ComponentEvent, ComponentStatus, QueryResult,
+    QueryResultBroadcastSender, QuerySubscriptionResponse,
 };
 use drasi_server_core::config::{QueryConfig, ReactionConfig};
 use drasi_server_core::queries::Query;
@@ -46,12 +46,12 @@ use tokio::time::sleep;
 struct MockQuery {
     config: QueryConfig,
     status: Arc<RwLock<ComponentStatus>>,
-    broadcast_tx: QueryResultBroadcastSender,
+    dispatcher: Arc<drasi_server_core::channels::BroadcastChangeDispatcher<QueryResult>>,
 }
 
 impl MockQuery {
     fn new(query_id: &str) -> Self {
-        let (broadcast_tx, _) = tokio::sync::broadcast::channel(1000);
+        let dispatcher = Arc::new(drasi_server_core::channels::BroadcastChangeDispatcher::<QueryResult>::new(1000));
         Self {
             config: QueryConfig {
                 id: query_id.to_string(),
@@ -65,14 +65,15 @@ impl MockQuery {
                 bootstrap_buffer_size: 10000,
                 priority_queue_capacity: None,
                 broadcast_channel_capacity: None,
+                dispatch_mode: None,
             },
             status: Arc::new(RwLock::new(ComponentStatus::Running)),
-            broadcast_tx,
+            dispatcher,
         }
     }
 
-    fn get_broadcast_sender(&self) -> QueryResultBroadcastSender {
-        self.broadcast_tx.clone()
+    async fn send_result(&self, result: QueryResult) {
+        let _ = self.dispatcher.dispatch_change(Arc::new(result)).await;
     }
 }
 
@@ -100,12 +101,12 @@ impl Query for MockQuery {
         self
     }
 
-    async fn subscribe(&self, reaction_id: String) -> Result<QuerySubscriptionResponse, String> {
-        let broadcast_receiver = self.broadcast_tx.subscribe();
+    async fn subscribe(&self, _reaction_id: String) -> Result<QuerySubscriptionResponse, String> {
+        let receiver = self.dispatcher.create_receiver()
+            .map_err(|e| format!("Failed to create receiver: {}", e))?;
         Ok(QuerySubscriptionResponse {
             query_id: self.config.id.clone(),
-            reaction_id,
-            broadcast_receiver,
+            receiver,
         })
     }
 }
@@ -113,9 +114,8 @@ impl Query for MockQuery {
 /// Helper to create a test environment with DrasiServerCore and a mock query
 async fn create_test_server_with_query(
     query_id: &str,
-) -> (Arc<DrasiServerCore>, QueryResultBroadcastSender) {
+) -> (Arc<DrasiServerCore>, Arc<MockQuery>) {
     let mock_query = Arc::new(MockQuery::new(query_id));
-    let broadcast_sender = mock_query.get_broadcast_sender();
 
     // Create DrasiServerCore using builder
     let server_core = drasi_server_core::server_core::DrasiServerCore::builder()
@@ -126,11 +126,11 @@ async fn create_test_server_with_query(
     // Add the mock query to the query manager
     server_core
         .query_manager()
-        .add_query_instance_for_test(mock_query)
+        .add_query_instance_for_test(mock_query.clone())
         .await
         .expect("Failed to add mock query");
 
-    (Arc::new(server_core), broadcast_sender)
+    (Arc::new(server_core), mock_query)
 }
 
 /// Helper to create a platform reaction with test configuration
@@ -254,7 +254,7 @@ async fn test_publish_add_results() -> Result<()> {
     let query_id = "test-query-add";
 
     // Create test server with mock query
-    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
+    let (server_core, mock_query) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, mut event_rx) =
@@ -281,12 +281,9 @@ async fn test_publish_add_results() -> Result<()> {
         panic!("Reaction did not start");
     }
 
-    // Send add result through the query's broadcast channel
+    // Send add result through the query's dispatcher
     let query_result = build_query_result_add(query_id, vec![json!({"id": "1", "name": "Alice"})]);
-    let arc_result = Arc::new(query_result);
-    if let Err(e) = broadcast_tx.send(arc_result) {
-        panic!("Failed to send query result: {:?}", e);
-    }
+    mock_query.send_result(query_result).await;
 
     // Wait for publication
     sleep(Duration::from_millis(300)).await;
@@ -317,7 +314,7 @@ async fn test_publish_update_results() -> Result<()> {
     let query_id = "test-query-update";
 
     // Create test server with mock query
-    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
+    let (server_core, mock_query) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
@@ -336,9 +333,8 @@ async fn test_publish_update_results() -> Result<()> {
             None,
         )],
     );
-    broadcast_tx
-        .send(Arc::new(query_result))
-        .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+    mock_query
+        .send_result(query_result).await;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -368,7 +364,7 @@ async fn test_publish_delete_results() -> Result<()> {
     let query_id = "test-query-delete";
 
     // Create test server with mock query
-    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
+    let (server_core, mock_query) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
@@ -380,9 +376,8 @@ async fn test_publish_delete_results() -> Result<()> {
 
     // Send delete result
     let query_result = build_query_result_delete(query_id, vec![json!({"id": "2", "name": "Bob"})]);
-    broadcast_tx
-        .send(Arc::new(query_result))
-        .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+    mock_query
+        .send_result(query_result).await;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -405,7 +400,7 @@ async fn test_mixed_result_types() -> Result<()> {
     let query_id = "test-query-mixed";
 
     // Create test server with mock query
-    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
+    let (server_core, mock_query) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
@@ -427,9 +422,8 @@ async fn test_mixed_result_types() -> Result<()> {
         metadata: HashMap::new(),
         profiling: None,
     };
-    broadcast_tx
-        .send(Arc::new(query_result))
-        .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+    mock_query
+        .send_result(query_result).await;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -453,7 +447,7 @@ async fn test_stream_naming_convention() -> Result<()> {
     let query_id = "my-custom-query";
 
     // Create test server with mock query
-    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
+    let (server_core, mock_query) = create_test_server_with_query(query_id).await;
     let expected_stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
@@ -465,9 +459,8 @@ async fn test_stream_naming_convention() -> Result<()> {
 
     // Send result
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    broadcast_tx
-        .send(Arc::new(query_result))
-        .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+    mock_query
+        .send_result(query_result).await;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -488,7 +481,7 @@ async fn test_metadata_preservation() -> Result<()> {
     let query_id = "test-query-metadata";
 
     // Create test server with mock query
-    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
+    let (server_core, mock_query) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
@@ -510,9 +503,8 @@ async fn test_metadata_preservation() -> Result<()> {
         metadata,
         profiling: None,
     };
-    broadcast_tx
-        .send(Arc::new(query_result))
-        .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+    mock_query
+        .send_result(query_result).await;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -538,7 +530,7 @@ async fn test_cloudevent_required_fields() -> Result<()> {
     let query_id = "test-cloudevent-fields";
 
     // Create test server with mock query
-    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
+    let (server_core, mock_query) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
@@ -549,9 +541,8 @@ async fn test_cloudevent_required_fields() -> Result<()> {
     sleep(Duration::from_millis(150)).await;
 
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    broadcast_tx
-        .send(Arc::new(query_result))
-        .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+    mock_query
+        .send_result(query_result).await;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -573,7 +564,7 @@ async fn test_cloudevent_topic_format() -> Result<()> {
     let query_id = "test-topic-format";
 
     // Create test server with mock query
-    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
+    let (server_core, mock_query) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
@@ -584,9 +575,8 @@ async fn test_cloudevent_topic_format() -> Result<()> {
     sleep(Duration::from_millis(150)).await;
 
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    broadcast_tx
-        .send(Arc::new(query_result))
-        .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+    mock_query
+        .send_result(query_result).await;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -604,7 +594,7 @@ async fn test_cloudevent_timestamp_format() -> Result<()> {
     let query_id = "test-timestamp";
 
     // Create test server with mock query
-    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
+    let (server_core, mock_query) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
@@ -615,9 +605,8 @@ async fn test_cloudevent_timestamp_format() -> Result<()> {
     sleep(Duration::from_millis(150)).await;
 
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    broadcast_tx
-        .send(Arc::new(query_result))
-        .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+    mock_query
+        .send_result(query_result).await;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -635,7 +624,7 @@ async fn test_cloudevent_data_content_type() -> Result<()> {
     let query_id = "test-content-type";
 
     // Create test server with mock query
-    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
+    let (server_core, mock_query) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
@@ -646,9 +635,8 @@ async fn test_cloudevent_data_content_type() -> Result<()> {
     sleep(Duration::from_millis(150)).await;
 
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    broadcast_tx
-        .send(Arc::new(query_result))
-        .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+    mock_query
+        .send_result(query_result).await;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -665,7 +653,7 @@ async fn test_dapr_metadata_fields() -> Result<()> {
     let query_id = "test-dapr-metadata";
 
     // Create test server with mock query
-    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
+    let (server_core, mock_query) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
@@ -676,9 +664,8 @@ async fn test_dapr_metadata_fields() -> Result<()> {
     sleep(Duration::from_millis(150)).await;
 
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    broadcast_tx
-        .send(Arc::new(query_result))
-        .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+    mock_query
+        .send_result(query_result).await;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -698,7 +685,7 @@ async fn test_custom_pubsub_name() -> Result<()> {
     let query_id = "test-custom-pubsub";
 
     // Create test server with mock query
-    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
+    let (server_core, mock_query) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) = create_test_reaction(
@@ -714,9 +701,8 @@ async fn test_custom_pubsub_name() -> Result<()> {
     sleep(Duration::from_millis(150)).await;
 
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    broadcast_tx
-        .send(Arc::new(query_result))
-        .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+    mock_query
+        .send_result(query_result).await;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -735,7 +721,7 @@ async fn test_running_control_event() -> Result<()> {
     let query_id = "test-control-running";
 
     // Create test server with mock query
-    let (server_core, _broadcast_tx) = create_test_server_with_query(query_id).await;
+    let (server_core, _mock_query) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) = create_test_reaction(redis_url.clone(), query_id, true, None, None);
@@ -762,7 +748,7 @@ async fn test_control_events_disabled() -> Result<()> {
     let query_id = "test-control-disabled";
 
     // Create test server with mock query
-    let (server_core, _broadcast_tx) = create_test_server_with_query(query_id).await;
+    let (server_core, _mock_query) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
@@ -790,7 +776,7 @@ async fn test_sequence_numbering() -> Result<()> {
     let query_id = "test-sequence";
 
     // Create test server with mock query
-    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
+    let (server_core, mock_query) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
@@ -803,9 +789,8 @@ async fn test_sequence_numbering() -> Result<()> {
     // Send 5 query results
     for i in 1..=5 {
         let query_result = build_query_result_add(query_id, vec![json!({"id": i})]);
-        broadcast_tx
-            .send(Arc::new(query_result))
-            .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+        mock_query
+            .send_result(query_result).await;
         sleep(Duration::from_millis(50)).await;
     }
 
@@ -834,7 +819,7 @@ async fn test_maxlen_stream_trimming() -> Result<()> {
     let query_id = "test-maxlen";
 
     // Create test server with mock query
-    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
+    let (server_core, mock_query) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) = create_test_reaction(
@@ -852,9 +837,8 @@ async fn test_maxlen_stream_trimming() -> Result<()> {
     // Send 10 events
     for i in 1..=10 {
         let query_result = build_query_result_add(query_id, vec![json!({"id": i})]);
-        broadcast_tx
-            .send(Arc::new(query_result))
-            .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+        mock_query
+            .send_result(query_result).await;
         sleep(Duration::from_millis(30)).await;
     }
 
@@ -885,7 +869,7 @@ async fn test_update_with_grouping_keys() -> Result<()> {
     let query_id = "test-grouping-keys";
 
     // Create test server with mock query
-    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
+    let (server_core, mock_query) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
@@ -904,9 +888,8 @@ async fn test_update_with_grouping_keys() -> Result<()> {
             Some(vec!["key1".to_string(), "key2".to_string()]),
         )],
     );
-    broadcast_tx
-        .send(Arc::new(query_result))
-        .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+    mock_query
+        .send_result(query_result).await;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -934,7 +917,7 @@ async fn test_empty_metadata_filtered() -> Result<()> {
     let query_id = "test-empty-metadata";
 
     // Create test server with mock query
-    let (server_core, broadcast_tx) = create_test_server_with_query(query_id).await;
+    let (server_core, mock_query) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
@@ -952,9 +935,8 @@ async fn test_empty_metadata_filtered() -> Result<()> {
         metadata: HashMap::new(), // Empty metadata
         profiling: None,
     };
-    broadcast_tx
-        .send(Arc::new(query_result))
-        .map_err(|e| anyhow::anyhow!("Failed to send: {:?}", e))?;
+    mock_query
+        .send_result(query_result).await;
 
     sleep(Duration::from_millis(300)).await;
 

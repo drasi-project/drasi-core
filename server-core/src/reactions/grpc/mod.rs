@@ -19,7 +19,7 @@ use rand::Rng;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::broadcast::error::RecvError;
+// RecvError no longer needed with trait-based receivers
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
 
@@ -498,7 +498,7 @@ impl Reaction for GrpcReaction {
                 }
             };
 
-            let mut broadcast_receiver = subscription_response.broadcast_receiver;
+            let mut receiver = subscription_response.receiver;
             let priority_queue = self.priority_queue.clone();
             let reaction_id = self.config.id.clone();
             let query_id_clone = query_id.clone();
@@ -511,7 +511,7 @@ impl Reaction for GrpcReaction {
                 );
 
                 loop {
-                    match broadcast_receiver.recv().await {
+                    match receiver.recv().await {
                         Ok(query_result) => {
                             // Enqueue to priority queue for timestamp-ordered processing
                             if !priority_queue.enqueue(query_result).await {
@@ -521,19 +521,22 @@ impl Reaction for GrpcReaction {
                                 );
                             }
                         }
-                        Err(RecvError::Lagged(count)) => {
-                            warn!(
-                                "[{}] Forwarder lagged by {} messages for query '{}'",
-                                reaction_id, count, query_id_clone
-                            );
-                            continue;
-                        }
-                        Err(RecvError::Closed) => {
-                            info!(
-                                "[{}] Broadcast channel closed for query '{}', forwarder exiting",
-                                reaction_id, query_id_clone
-                            );
-                            break;
+                        Err(e) => {
+                            // Check if it's a lag error or closed channel
+                            let error_str = e.to_string();
+                            if error_str.contains("lagged") {
+                                warn!(
+                                    "[{}] Receiver lagged for query '{}': {}",
+                                    reaction_id, query_id_clone, error_str
+                                );
+                                continue;
+                            } else {
+                                info!(
+                                    "[{}] Receiver error for query '{}', forwarder exiting: {}",
+                                    reaction_id, query_id_clone, error_str
+                                );
+                                break;
+                            }
                         }
                     }
                 }

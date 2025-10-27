@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod base;
 pub mod label_extractor;
 pub mod manager;
 pub mod priority_queue;
@@ -22,6 +23,7 @@ mod tests;
 #[cfg(test)]
 mod joins_test;
 
+pub use base::QueryBase;
 pub use label_extractor::*;
 pub use manager::*;
 pub use priority_queue::*;

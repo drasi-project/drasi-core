@@ -16,34 +16,10 @@
 //!
 //! This module provides `SourceBase` which encapsulates common patterns
 //! used across all source implementations:
-//! - Broadcast channel setup and management
+//! - Dispatcher setup and management
 //! - Bootstrap subscription handling
 //! - Event dispatching with profiling
 //! - Component lifecycle management
-//!
-//! ## Usage
-//!
-//! Source implementations should create a `SourceBase` instance and use
-//! its methods to handle common operations:
-//!
-//! ```ignore
-//! use drasi_server_core::sources::base::SourceBase;
-//! use drasi_server_core::config::SourceConfig;
-//! use drasi_server_core::channels::ComponentEventSender;
-//! use anyhow::Result;
-//!
-//! pub struct MySource {
-//!     base: SourceBase,
-//!     // ... source-specific fields
-//! }
-//!
-//! impl MySource {
-//!     pub fn new(config: SourceConfig, event_tx: ComponentEventSender) -> Result<Self> {
-//!         let base = SourceBase::new(config, event_tx)?;
-//!         Ok(Self { base /* ... */ })
-//!     }
-//! }
-//! ```
 
 use anyhow::Result;
 use log::{debug, error, info};
@@ -62,8 +38,8 @@ pub struct SourceBase {
     pub config: SourceConfig,
     /// Current component status
     pub status: Arc<RwLock<ComponentStatus>>,
-    /// Broadcast channel for sending source events to subscribers
-    pub broadcast_tx: SourceBroadcastSender,
+    /// Dispatchers for sending source events to subscribers
+    pub dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     /// Channel for sending component lifecycle events
     pub event_tx: ComponentEventSender,
     /// Handle to the source's main task
@@ -75,39 +51,37 @@ pub struct SourceBase {
 impl SourceBase {
     /// Create a new SourceBase with the given configuration
     pub fn new(config: SourceConfig, event_tx: ComponentEventSender) -> Result<Self> {
-        // Set up broadcast channel with configured capacity
-        let capacity = config.broadcast_channel_capacity.unwrap_or(1000);
-        let (broadcast_tx, _) = tokio::sync::broadcast::channel(capacity);
+        // Determine dispatch mode (default to Broadcast if not specified)
+        let dispatch_mode = config.dispatch_mode.unwrap_or(DispatchMode::Broadcast);
+
+        // Set up initial dispatchers based on dispatch mode
+        let mut dispatchers: Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>> = Vec::new();
+
+        if dispatch_mode == DispatchMode::Broadcast {
+            // For broadcast mode, create a single broadcast dispatcher
+            let capacity = config.broadcast_channel_capacity.unwrap_or(1000);
+            let dispatcher = BroadcastChangeDispatcher::<SourceEventWrapper>::new(capacity);
+            dispatchers.push(Box::new(dispatcher));
+        }
+        // For channel mode, dispatchers will be created on-demand when subscribing
 
         Ok(Self {
             config,
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            broadcast_tx,
+            dispatchers: Arc::new(RwLock::new(dispatchers)),
             event_tx,
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
         })
     }
 
-    /// Get a broadcast receiver for subscribing to source events
-    pub fn get_broadcast_receiver(&self) -> Result<SourceBroadcastReceiver> {
-        Ok(self.broadcast_tx.subscribe())
-    }
-
     /// Subscribe to this source with optional bootstrap
     ///
     /// This is the standard subscribe implementation that all sources can use.
     /// It handles:
-    /// - Creating a broadcast receiver for streaming events
+    /// - Creating a receiver for streaming events (based on dispatch mode)
     /// - Setting up bootstrap if requested and a provider is configured
     /// - Returning the appropriate SubscriptionResponse
-    ///
-    /// # Arguments
-    /// * `query_id` - ID of the subscribing query
-    /// * `enable_bootstrap` - Whether to request bootstrap data
-    /// * `node_labels` - Node labels to bootstrap
-    /// * `relation_labels` - Relation labels to bootstrap
-    /// * `source_type` - Name of the source type for logging (e.g., "gRPC", "HTTP")
     pub async fn subscribe_with_bootstrap(
         &self,
         query_id: String,
@@ -121,7 +95,33 @@ impl SourceBase {
             query_id, source_type, self.config.id, enable_bootstrap
         );
 
-        let broadcast_receiver = self.broadcast_tx.subscribe();
+        let dispatch_mode = self.config.dispatch_mode.unwrap_or(DispatchMode::Broadcast);
+
+        // Create receiver based on dispatch mode
+        let receiver: Box<dyn ChangeReceiver<SourceEventWrapper>> = match dispatch_mode {
+            DispatchMode::Broadcast => {
+                // For broadcast mode, use the single dispatcher
+                let dispatchers = self.dispatchers.read().await;
+                if let Some(dispatcher) = dispatchers.first() {
+                    dispatcher.create_receiver()?
+                } else {
+                    return Err(anyhow::anyhow!("No broadcast dispatcher available"));
+                }
+            }
+            DispatchMode::Channel => {
+                // For channel mode, create a new dispatcher for this subscription
+                let capacity = self.config.broadcast_channel_capacity.unwrap_or(1000);
+                let dispatcher = ChannelChangeDispatcher::<SourceEventWrapper>::new(capacity);
+                let receiver = dispatcher.create_receiver()?;
+
+                // Add the new dispatcher to our list
+                let mut dispatchers = self.dispatchers.write().await;
+                dispatchers.push(Box::new(dispatcher));
+
+                receiver
+            }
+        };
+
         let query_id_for_response = query_id.clone();
 
         // Handle bootstrap if requested and bootstrap provider is configured
@@ -135,15 +135,12 @@ impl SourceBase {
         Ok(SubscriptionResponse {
             query_id: query_id_for_response,
             source_id: self.config.id.clone(),
-            broadcast_receiver,
+            receiver,
             bootstrap_receiver,
         })
     }
 
     /// Handle bootstrap subscription logic
-    ///
-    /// This method encapsulates the ~80 lines of identical bootstrap logic
-    /// that was duplicated across all source implementations.
     async fn handle_bootstrap_subscription(
         &self,
         query_id: String,
@@ -153,26 +150,24 @@ impl SourceBase {
     ) -> Result<Option<BootstrapEventReceiver>> {
         if let Some(provider_config) = &self.config.bootstrap_provider {
             info!(
-                "Bootstrap enabled for query '{}' with {} node labels and {} relation labels, delegating to bootstrap provider",
-                query_id,
-                node_labels.len(),
-                relation_labels.len()
+                "Creating bootstrap provider for query '{}' on {} source '{}'",
+                query_id, source_type, self.config.id
             );
 
-            // Create channel for bootstrap events
-            let (tx, rx) = tokio::sync::mpsc::channel(1000);
-
-            // Create bootstrap provider
-            let provider = BootstrapProviderFactory::create_provider(provider_config)?;
-
-            // Create bootstrap context
+            // Create bootstrap context with Arc-wrapped source config
             let context = BootstrapContext::new(
-                self.config.id.clone(),
+                self.config.id.clone(), // server_id
                 Arc::new(self.config.clone()),
                 self.config.id.clone(),
             );
 
-            // Create bootstrap request
+            // Create the bootstrap provider using the factory
+            let provider = BootstrapProviderFactory::create_provider(provider_config)?;
+
+            // Create bootstrap channel
+            let (bootstrap_tx, bootstrap_rx) = tokio::sync::mpsc::channel(1000);
+
+            // Create bootstrap request with request_id
             let request = BootstrapRequest {
                 query_id: query_id.clone(),
                 node_labels,
@@ -182,7 +177,7 @@ impl SourceBase {
 
             // Spawn bootstrap task
             tokio::spawn(async move {
-                match provider.bootstrap(request, &context, tx).await {
+                match provider.bootstrap(request, &context, bootstrap_tx).await {
                     Ok(count) => {
                         info!(
                             "Bootstrap completed successfully for query '{}', sent {} events",
@@ -195,7 +190,7 @@ impl SourceBase {
                 }
             });
 
-            Ok(Some(rx))
+            Ok(Some(bootstrap_rx))
         } else {
             info!(
                 "Bootstrap requested for query '{}' but no bootstrap provider configured for {} source '{}'",
@@ -210,9 +205,9 @@ impl SourceBase {
     /// This method handles the common pattern of:
     /// - Creating profiling metadata with timestamp
     /// - Wrapping the change in a SourceEventWrapper
-    /// - Broadcasting to all subscribers
+    /// - Dispatching to all subscribers
     /// - Handling the no-subscriber case gracefully
-    pub fn dispatch_source_change(&self, change: SourceChange) -> Result<()> {
+    pub async fn dispatch_source_change(&self, change: SourceChange) -> Result<()> {
         // Create profiling metadata
         let mut profiling = profiling::ProfilingMetadata::new();
         profiling.source_send_ns = Some(profiling::timestamp_ns());
@@ -225,34 +220,98 @@ impl SourceBase {
             profiling,
         );
 
-        // Broadcast event
-        self.broadcast_event(wrapper)
+        // Dispatch event
+        self.dispatch_event(wrapper).await
     }
 
-    /// Broadcast a SourceEventWrapper to all subscribers
+    /// Dispatch a SourceEventWrapper to all subscribers
     ///
-    /// This is a generic method for broadcasting any SourceEvent.
-    /// It handles Arc-wrapping for zero-copy broadcast and logs
+    /// This is a generic method for dispatching any SourceEvent.
+    /// It handles Arc-wrapping for zero-copy sharing and logs
     /// when there are no subscribers.
-    pub fn broadcast_event(&self, wrapper: SourceEventWrapper) -> Result<()> {
-        debug!("[{}] Broadcasting event: {:?}", self.config.id, &wrapper);
+    pub async fn dispatch_event(&self, wrapper: SourceEventWrapper) -> Result<()> {
+        debug!("[{}] Dispatching event: {:?}", self.config.id, &wrapper);
 
-        // Arc-wrap for zero-copy broadcast
+        // Arc-wrap for zero-copy sharing across dispatchers
         let arc_wrapper = Arc::new(wrapper);
 
-        if let Err(e) = self.broadcast_tx.send(arc_wrapper) {
-            debug!(
-                "[{}] Failed to broadcast (no subscribers): {}",
-                self.config.id, e
-            );
+        // Send to all dispatchers
+        let dispatchers = self.dispatchers.read().await;
+        for dispatcher in dispatchers.iter() {
+            if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
+                debug!(
+                    "[{}] Failed to dispatch event: {}",
+                    self.config.id, e
+                );
+            }
         }
 
         Ok(())
     }
 
-    /// Send a component lifecycle event
-    ///
-    /// Helper method for sending component status updates
+    /// Broadcast SourceControl events
+    pub async fn broadcast_control(&self, control: SourceControl) -> Result<()> {
+        let wrapper = SourceEventWrapper::new(
+            self.config.id.clone(),
+            SourceEvent::Control(control),
+            chrono::Utc::now(),
+        );
+        self.dispatch_event(wrapper).await
+    }
+
+    /// Handle common stop functionality
+    pub async fn stop_common(&self) -> Result<()> {
+        info!("Stopping source '{}'", self.config.id);
+
+        // Send shutdown signal if we have one
+        if let Some(tx) = self.shutdown_tx.write().await.take() {
+            let _ = tx.send(());
+        }
+
+        // Wait for task to complete
+        if let Some(handle) = self.task_handle.write().await.take() {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
+                Ok(Ok(())) => {
+                    info!("Source '{}' task completed successfully", self.config.id);
+                }
+                Ok(Err(e)) => {
+                    error!("Source '{}' task panicked: {}", self.config.id, e);
+                }
+                Err(_) => {
+                    error!(
+                        "Source '{}' task did not complete within timeout",
+                        self.config.id
+                    );
+                }
+            }
+        }
+
+        *self.status.write().await = ComponentStatus::Stopped;
+        info!("Source '{}' stopped", self.config.id);
+        Ok(())
+    }
+
+    /// Get the current status
+    pub async fn get_status(&self) -> ComponentStatus {
+        self.status.read().await.clone()
+    }
+
+    /// Set the current status
+    pub async fn set_status(&self, status: ComponentStatus) {
+        *self.status.write().await = status;
+    }
+
+    /// Set the task handle
+    pub async fn set_task_handle(&self, handle: tokio::task::JoinHandle<()>) {
+        *self.task_handle.write().await = Some(handle);
+    }
+
+    /// Set the shutdown sender
+    pub async fn set_shutdown_tx(&self, tx: tokio::sync::oneshot::Sender<()>) {
+        *self.shutdown_tx.write().await = Some(tx);
+    }
+
+    /// Send a component event
     pub async fn send_component_event(
         &self,
         status: ComponentStatus,
@@ -267,61 +326,8 @@ impl SourceBase {
         };
 
         if let Err(e) = self.event_tx.send(event).await {
-            error!("[{}] Failed to send component event: {}", self.config.id, e);
+            error!("Failed to send component event: {}", e);
         }
-
-        Ok(())
-    }
-
-    /// Update the component status
-    pub async fn set_status(&self, status: ComponentStatus) {
-        *self.status.write().await = status;
-    }
-
-    /// Get the current component status
-    pub async fn get_status(&self) -> ComponentStatus {
-        self.status.read().await.clone()
-    }
-
-    /// Common stop implementation for sources
-    ///
-    /// This handles the standard shutdown sequence:
-    /// - Update status to Stopping
-    /// - Send stopping event
-    /// - Trigger shutdown via oneshot channel
-    /// - Wait for task to complete
-    /// - Update status to Stopped
-    /// - Send stopped event
-    pub async fn stop_common(&self, source_type: &str) -> Result<()> {
-        info!("Stopping {} source '{}'", source_type, self.config.id);
-
-        // Update status to Stopping
-        self.set_status(ComponentStatus::Stopping).await;
-        self.send_component_event(
-            ComponentStatus::Stopping,
-            Some(format!("Stopping {} source", source_type)),
-        )
-        .await?;
-
-        // Send shutdown signal
-        if let Some(tx) = self.shutdown_tx.write().await.take() {
-            let _ = tx.send(());
-        }
-
-        // Wait for task to complete
-        if let Some(handle) = self.task_handle.write().await.take() {
-            let _ = handle.await;
-        }
-
-        // Update status to Stopped
-        self.set_status(ComponentStatus::Stopped).await;
-        self.send_component_event(
-            ComponentStatus::Stopped,
-            Some(format!("{} source stopped", source_type)),
-        )
-        .await?;
-
-        info!("{} source '{}' stopped", source_type, self.config.id);
         Ok(())
     }
 }

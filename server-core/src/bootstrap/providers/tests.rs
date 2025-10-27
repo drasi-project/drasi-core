@@ -43,6 +43,7 @@ mod tests {
             properties,
             bootstrap_provider: None,
             broadcast_channel_capacity: None,
+            dispatch_mode: None,
         });
 
         let context = BootstrapContext::new(

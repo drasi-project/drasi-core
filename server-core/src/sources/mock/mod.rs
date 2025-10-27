@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
-use log::{error, info};
+use log::{debug, info};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -38,15 +38,6 @@ impl MockSource {
         })
     }
 
-    /// Subscribe to source events (for testing)
-    ///
-    /// This method is intended for use in tests to receive events broadcast by the source.
-    /// In production, queries subscribe to sources through the SourceManager.
-    pub fn test_subscribe(
-        &self,
-    ) -> tokio::sync::broadcast::Receiver<Arc<crate::channels::SourceEventWrapper>> {
-        self.base.broadcast_tx.subscribe()
-    }
 }
 
 #[async_trait]
@@ -63,7 +54,7 @@ impl Source for MockSource {
             .await?;
 
         // Get broadcast_tx for publishing
-        let broadcast_tx = self.base.broadcast_tx.clone();
+        let base_dispatchers = self.base.dispatchers.clone();
         let source_id = self.base.config.id.clone();
 
         // Get configuration
@@ -251,11 +242,14 @@ impl Source for MockSource {
                     profiling,
                 );
 
-                // Send to broadcast channel - wrapped in Arc for zero-copy
+                // Dispatch to all subscribers via dispatchers
                 let arc_wrapper = Arc::new(wrapper);
-                if let Err(e) = broadcast_tx.send(arc_wrapper) {
-                    error!("Failed to broadcast change: {}", e);
-                    // Continue even if no subscribers
+                let dispatchers = base_dispatchers.read().await;
+                for dispatcher in dispatchers.iter() {
+                    if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
+                        debug!("Failed to dispatch change: {}", e);
+                        // Continue even if no subscribers
+                    }
                 }
             }
 
@@ -329,9 +323,6 @@ impl Source for MockSource {
             .await
     }
 
-    fn get_broadcast_receiver(&self) -> Result<SourceBroadcastReceiver> {
-        self.base.get_broadcast_receiver()
-    }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -342,6 +333,17 @@ impl MockSource {
     /// Inject a test event into the mock source for testing purposes
     /// This allows tests to send specific events without relying on automatic generation
     pub async fn inject_event(&self, change: SourceChange) -> Result<()> {
-        self.base.dispatch_source_change(change)
+        self.base.dispatch_source_change(change).await
+    }
+
+    /// For testing purposes - get a receiver that gets all events from this source
+    pub fn test_subscribe(&self) -> Box<dyn ChangeReceiver<SourceEventWrapper>> {
+        // Create a receiver from the first dispatcher (should be broadcast in tests)
+        let dispatchers = futures::executor::block_on(self.base.dispatchers.read());
+        if let Some(dispatcher) = dispatchers.first() {
+            dispatcher.create_receiver().unwrap()
+        } else {
+            panic!("No dispatchers available for test subscription");
+        }
     }
 }

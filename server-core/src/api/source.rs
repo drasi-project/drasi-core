@@ -103,6 +103,7 @@ impl SourceBuilder {
             properties: self.properties,
             bootstrap_provider: self.bootstrap_provider,
             broadcast_channel_capacity: None, // Default: inherit from server global setting
+            dispatch_mode: None,               // Default: inherit from server global setting or Broadcast
         }
     }
 }

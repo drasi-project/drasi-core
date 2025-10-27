@@ -162,15 +162,14 @@ pub struct SubscriptionRequest {
 pub struct SubscriptionResponse {
     pub query_id: String,
     pub source_id: String,
-    pub broadcast_receiver: SourceBroadcastReceiver,
+    pub receiver: Box<dyn super::ChangeReceiver<SourceEventWrapper>>,
     pub bootstrap_receiver: Option<BootstrapEventReceiver>,
 }
 
 /// Subscription response from Query to Reaction
 pub struct QuerySubscriptionResponse {
     pub query_id: String,
-    pub reaction_id: String,
-    pub broadcast_receiver: QueryResultBroadcastReceiver,
+    pub receiver: Box<dyn super::ChangeReceiver<QueryResult>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -16,6 +16,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use log::{debug, error, info};
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tonic::{transport::Server, Request, Response, Status};
 
 use crate::channels::*;
@@ -92,7 +93,7 @@ impl Source for GrpcSource {
         // Create gRPC service
         let service = GrpcSourceService {
             source_id: self.base.config.id.clone(),
-            broadcast_tx: self.base.broadcast_tx.clone(),
+            dispatchers: self.base.dispatchers.clone(),
         };
 
         let svc = SourceServiceServer::new(service);
@@ -140,7 +141,7 @@ impl Source for GrpcSource {
 
     async fn stop(&self) -> Result<()> {
         log_component_stop("gRPC Source", &self.base.config.id);
-        self.base.stop_common("gRPC").await
+        self.base.stop_common().await
     }
 
     async fn status(&self) -> ComponentStatus {
@@ -169,9 +170,6 @@ impl Source for GrpcSource {
             .await
     }
 
-    fn get_broadcast_receiver(&self) -> Result<SourceBroadcastReceiver> {
-        self.base.get_broadcast_receiver()
-    }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -181,7 +179,7 @@ impl Source for GrpcSource {
 /// gRPC service implementation
 struct GrpcSourceService {
     source_id: String,
-    broadcast_tx: SourceBroadcastSender,
+    dispatchers: Arc<RwLock<Vec<Box<dyn crate::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
 }
 
 #[tonic::async_trait]
@@ -208,13 +206,16 @@ impl SourceService for GrpcSourceService {
 
                     debug!("[{}] Processing gRPC event: {:?}", self.source_id, &wrapper);
 
-                    // Broadcast (Arc-wrapped for zero-copy)
+                    // Dispatch to all subscribers (Arc-wrapped for zero-copy)
                     let arc_wrapper = Arc::new(wrapper);
-                    if let Err(e) = self.broadcast_tx.send(arc_wrapper) {
-                        debug!(
-                            "[{}] Failed to broadcast (no subscribers): {}",
-                            self.source_id, e
-                        );
+                    let dispatchers = futures::executor::block_on(self.dispatchers.read());
+                    for dispatcher in dispatchers.iter() {
+                        if let Err(e) = futures::executor::block_on(dispatcher.dispatch_change(arc_wrapper.clone())) {
+                            debug!(
+                                "[{}] Failed to dispatch (no subscribers): {}",
+                                self.source_id, e
+                            );
+                        }
                     }
 
                     debug!("[{}] Successfully processed gRPC event", self.source_id);
@@ -254,7 +255,7 @@ impl SourceService for GrpcSourceService {
     ) -> Result<Response<Self::StreamEventsStream>, Status> {
         let mut stream = request.into_inner();
         let source_id = self.source_id.clone();
-        let broadcast_tx = self.broadcast_tx.clone();
+        let dispatchers = self.dispatchers.clone();
 
         let (tx, rx) = tokio::sync::mpsc::channel(128);
 
@@ -275,13 +276,16 @@ impl SourceService for GrpcSourceService {
                             profiling,
                         );
 
-                        // Broadcast to new architecture
+                        // Dispatch to new architecture
                         let arc_wrapper = Arc::new(wrapper.clone());
-                        if let Err(e) = broadcast_tx.send(arc_wrapper) {
-                            debug!(
-                                "[{}] Failed to broadcast (no subscribers): {}",
-                                source_id, e
-                            );
+                        let dispatchers_guard = dispatchers.read().await;
+                        for dispatcher in dispatchers_guard.iter() {
+                            if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
+                                debug!(
+                                    "[{}] Failed to dispatch (no subscribers): {}",
+                                    source_id, e
+                                );
+                            }
                         }
 
                         events_processed += 1;

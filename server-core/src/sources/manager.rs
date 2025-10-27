@@ -40,7 +40,7 @@ pub trait Source: Send + Sync {
     fn get_config(&self) -> &SourceConfig;
 
     /// Subscribe to this source for change events
-    /// Returns a broadcast receiver for source change events and optionally a bootstrap channel
+    /// Returns a receiver for source change events and optionally a bootstrap channel
     async fn subscribe(
         &self,
         query_id: String,
@@ -48,9 +48,6 @@ pub trait Source: Send + Sync {
         node_labels: Vec<String>,
         relation_labels: Vec<String>,
     ) -> Result<SubscriptionResponse>;
-
-    /// Get a clone of the broadcast receiver for this source
-    fn get_broadcast_receiver(&self) -> Result<SourceBroadcastReceiver>;
 
     /// Downcast helper for testing - allows access to concrete types
     fn as_any(&self) -> &dyn std::any::Any;

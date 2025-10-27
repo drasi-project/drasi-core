@@ -200,7 +200,7 @@ impl ApplicationSource {
             .ok_or_else(|| anyhow::anyhow!("Receiver already taken"))?;
 
         let source_name = self.base.config.id.clone();
-        let broadcast_tx = self.base.broadcast_tx.clone();
+        let base_dispatchers = self.base.dispatchers.clone();
         let event_tx = self.base.event_tx.clone();
         let status = self.base.status.clone();
         let bootstrap_data = self.bootstrap_data.clone();
@@ -246,10 +246,13 @@ impl ApplicationSource {
                     profiling,
                 );
 
-                // Broadcast (Arc-wrapped for zero-copy)
+                // Dispatch to all subscribers via dispatchers
                 let arc_wrapper = Arc::new(wrapper);
-                if let Err(e) = broadcast_tx.send(arc_wrapper) {
-                    debug!("Failed to broadcast change (no subscribers): {}", e);
+                let dispatchers = base_dispatchers.read().await;
+                for dispatcher in dispatchers.iter() {
+                    if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
+                        debug!("Failed to dispatch change (no subscribers): {}", e);
+                    }
                 }
             }
 
@@ -347,7 +350,32 @@ impl Source for ApplicationSource {
             query_id, self.base.config.id, enable_bootstrap
         );
 
-        let broadcast_receiver = self.base.broadcast_tx.subscribe();
+        // Create receiver based on dispatch mode
+        let dispatch_mode = self.base.config.dispatch_mode.unwrap_or(crate::channels::DispatchMode::Broadcast);
+
+        let receiver: Box<dyn crate::channels::ChangeReceiver<crate::channels::SourceEventWrapper>> = match dispatch_mode {
+            crate::channels::DispatchMode::Broadcast => {
+                // For broadcast mode, use the single dispatcher
+                let dispatchers = self.base.dispatchers.read().await;
+                if let Some(dispatcher) = dispatchers.first() {
+                    dispatcher.create_receiver()?
+                } else {
+                    return Err(anyhow::anyhow!("No broadcast dispatcher available"));
+                }
+            }
+            crate::channels::DispatchMode::Channel => {
+                // For channel mode, create a new dispatcher for this subscription
+                let capacity = self.base.config.broadcast_channel_capacity.unwrap_or(1000);
+                let dispatcher = crate::channels::ChannelChangeDispatcher::<crate::channels::SourceEventWrapper>::new(capacity);
+                let receiver = dispatcher.create_receiver()?;
+
+                // Add the new dispatcher to our list
+                let mut dispatchers = self.base.dispatchers.write().await;
+                dispatchers.push(Box::new(dispatcher));
+
+                receiver
+            }
+        };
 
         // Clone query_id for later use since it will be moved into async block
         let query_id_for_response = query_id.clone();
@@ -448,14 +476,11 @@ impl Source for ApplicationSource {
         Ok(SubscriptionResponse {
             query_id: query_id_for_response,
             source_id: self.base.config.id.clone(),
-            broadcast_receiver,
+            receiver,
             bootstrap_receiver,
         })
     }
 
-    fn get_broadcast_receiver(&self) -> Result<SourceBroadcastReceiver> {
-        self.base.get_broadcast_receiver()
-    }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self

@@ -27,7 +27,7 @@ use super::protocol::BackendMessage;
 use super::types::{StandbyStatusUpdate, WalMessage};
 use super::PostgresReplicationConfig;
 use crate::channels::{
-    ComponentEventSender, ComponentStatus, SourceBroadcastSender, SourceEvent, SourceEventWrapper,
+    ComponentEventSender, ComponentStatus, SourceEvent, SourceEventWrapper,
 };
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 
@@ -36,7 +36,7 @@ pub struct ReplicationStream {
     source_id: String,
     connection: Option<ReplicationConnection>,
     decoder: PgOutputDecoder,
-    broadcast_tx: SourceBroadcastSender,
+    dispatchers: Arc<RwLock<Vec<Box<dyn crate::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     #[allow(dead_code)]
     event_tx: ComponentEventSender,
     status: Arc<RwLock<ComponentStatus>>,
@@ -59,7 +59,7 @@ impl ReplicationStream {
     pub fn new(
         config: PostgresReplicationConfig,
         source_id: String,
-        broadcast_tx: SourceBroadcastSender,
+        dispatchers: Arc<RwLock<Vec<Box<dyn crate::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
         event_tx: ComponentEventSender,
         status: Arc<RwLock<ComponentStatus>>,
     ) -> Self {
@@ -68,7 +68,7 @@ impl ReplicationStream {
             source_id,
             connection: None,
             decoder: PgOutputDecoder::new(),
-            broadcast_tx,
+            dispatchers,
             event_tx,
             status,
             current_lsn: 0,
@@ -363,13 +363,16 @@ impl ReplicationStream {
                             profiling,
                         );
 
-                        // Broadcast to new architecture (Arc-wrapped)
+                        // Dispatch to new architecture (Arc-wrapped for zero-copy)
                         let arc_wrapper = Arc::new(wrapper.clone());
-                        if let Err(e) = self.broadcast_tx.send(arc_wrapper) {
-                            debug!(
-                                "[{}] Failed to broadcast change (no subscribers): {}",
-                                self.source_id, e
-                            );
+                        let dispatchers_guard = self.dispatchers.read().await;
+                        for dispatcher in dispatchers_guard.iter() {
+                            if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
+                                debug!(
+                                    "[{}] Failed to dispatch change (no subscribers): {}",
+                                    self.source_id, e
+                                );
+                            }
                         }
                     }
                     debug!(
@@ -410,13 +413,16 @@ impl ReplicationStream {
                             profiling,
                         );
 
-                        // Broadcast to new architecture (Arc-wrapped)
+                        // Dispatch to new architecture (Arc-wrapped for zero-copy)
                         let arc_wrapper = Arc::new(wrapper.clone());
-                        if let Err(e) = self.broadcast_tx.send(arc_wrapper) {
-                            debug!(
-                                "[{}] Failed to broadcast change (no subscribers): {}",
-                                self.source_id, e
-                            );
+                        let dispatchers_guard = self.dispatchers.read().await;
+                        for dispatcher in dispatchers_guard.iter() {
+                            if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
+                                debug!(
+                                    "[{}] Failed to dispatch change (no subscribers): {}",
+                                    self.source_id, e
+                                );
+                            }
                         }
                     }
                 }
@@ -443,13 +449,16 @@ impl ReplicationStream {
                             profiling,
                         );
 
-                        // Broadcast to new architecture (Arc-wrapped)
+                        // Dispatch to new architecture (Arc-wrapped for zero-copy)
                         let arc_wrapper = Arc::new(wrapper.clone());
-                        if let Err(e) = self.broadcast_tx.send(arc_wrapper) {
-                            debug!(
-                                "[{}] Failed to broadcast change (no subscribers): {}",
-                                self.source_id, e
-                            );
+                        let dispatchers_guard = self.dispatchers.read().await;
+                        for dispatcher in dispatchers_guard.iter() {
+                            if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
+                                debug!(
+                                    "[{}] Failed to dispatch change (no subscribers): {}",
+                                    self.source_id, e
+                                );
+                            }
                         }
                     }
                 }
@@ -472,13 +481,16 @@ impl ReplicationStream {
                             profiling,
                         );
 
-                        // Broadcast to new architecture (Arc-wrapped)
+                        // Dispatch to new architecture (Arc-wrapped for zero-copy)
                         let arc_wrapper = Arc::new(wrapper.clone());
-                        if let Err(e) = self.broadcast_tx.send(arc_wrapper) {
-                            debug!(
-                                "[{}] Failed to broadcast change (no subscribers): {}",
-                                self.source_id, e
-                            );
+                        let dispatchers_guard = self.dispatchers.read().await;
+                        for dispatcher in dispatchers_guard.iter() {
+                            if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
+                                debug!(
+                                    "[{}] Failed to dispatch change (no subscribers): {}",
+                                    self.source_id, e
+                                );
+                            }
                         }
                     }
                 }

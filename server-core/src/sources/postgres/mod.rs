@@ -162,7 +162,7 @@ impl Source for PostgresReplicationSource {
 
         let config = self.parse_config()?;
         let source_id = self.base.config.id.clone();
-        let broadcast_tx = self.base.broadcast_tx.clone();
+        let dispatchers = self.base.dispatchers.clone();
         let event_tx = self.base.event_tx.clone();
         let status_clone = self.base.status.clone();
 
@@ -170,7 +170,7 @@ impl Source for PostgresReplicationSource {
             if let Err(e) = run_replication(
                 source_id.clone(),
                 config,
-                broadcast_tx,
+                dispatchers,
                 event_tx.clone(),
                 status_clone.clone(),
             )
@@ -257,9 +257,6 @@ impl Source for PostgresReplicationSource {
             .await
     }
 
-    fn get_broadcast_receiver(&self) -> Result<SourceBroadcastReceiver> {
-        self.base.get_broadcast_receiver()
-    }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -269,14 +266,14 @@ impl Source for PostgresReplicationSource {
 async fn run_replication(
     source_id: String,
     config: PostgresReplicationConfig,
-    broadcast_tx: SourceBroadcastSender,
+    dispatchers: Arc<RwLock<Vec<Box<dyn crate::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     event_tx: ComponentEventSender,
     status: Arc<RwLock<ComponentStatus>>,
 ) -> Result<()> {
     info!("Starting replication for source {}", source_id);
 
     let mut stream =
-        stream::ReplicationStream::new(config, source_id, broadcast_tx, event_tx, status);
+        stream::ReplicationStream::new(config, source_id, dispatchers, event_tx, status);
 
     stream.run().await
 }

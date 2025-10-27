@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::broadcast::error::RecvError;
+// RecvError no longer needed with trait-based receivers
 use tokio::sync::RwLock;
 
 use crate::channels::priority_queue::PriorityQueue;
@@ -319,7 +319,7 @@ impl Reaction for HttpReaction {
                 }
             };
 
-            let mut broadcast_receiver = subscription_response.broadcast_receiver;
+            let mut receiver = subscription_response.receiver;
             let priority_queue = self.priority_queue.clone();
             let reaction_id = self.config.id.clone();
             let query_id_clone = query_id.clone();
@@ -332,7 +332,7 @@ impl Reaction for HttpReaction {
                 );
 
                 loop {
-                    match broadcast_receiver.recv().await {
+                    match receiver.recv().await {
                         Ok(query_result) => {
                             // Enqueue to priority queue
                             if !priority_queue.enqueue(query_result).await {
@@ -342,19 +342,22 @@ impl Reaction for HttpReaction {
                                 );
                             }
                         }
-                        Err(RecvError::Lagged(count)) => {
-                            warn!(
-                                "[{}] Broadcast receiver lagged by {} messages for query '{}'",
-                                reaction_id, count, query_id_clone
-                            );
-                            // Continue processing
-                        }
-                        Err(RecvError::Closed) => {
-                            info!(
-                                "[{}] Broadcast channel closed for query '{}'",
-                                reaction_id, query_id_clone
-                            );
-                            break;
+                        Err(e) => {
+                            // Check if it's a lag error or closed channel
+                            let error_str = e.to_string();
+                            if error_str.contains("lagged") {
+                                warn!(
+                                    "[{}] Receiver lagged for query '{}': {}",
+                                    reaction_id, query_id_clone, error_str
+                                );
+                                // Continue processing
+                            } else {
+                                info!(
+                                    "[{}] Receiver error for query '{}': {}",
+                                    reaction_id, query_id_clone, error_str
+                                );
+                                break;
+                            }
                         }
                     }
                 }

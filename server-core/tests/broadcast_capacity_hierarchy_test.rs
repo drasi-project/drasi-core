@@ -39,7 +39,8 @@ async fn test_broadcast_capacity_hierarchy_all_defaults() {
                 auto_start: true,
                 properties: HashMap::new(),
                 bootstrap_provider: None,
-                broadcast_channel_capacity: None, // No component override
+                broadcast_channel_capacity: None, // No component override,
+                dispatch_mode: None,
             },
             SourceConfig {
                 id: "source2".to_string(),
@@ -47,7 +48,8 @@ async fn test_broadcast_capacity_hierarchy_all_defaults() {
                 auto_start: true,
                 properties: HashMap::new(),
                 bootstrap_provider: None,
-                broadcast_channel_capacity: None, // No component override
+                broadcast_channel_capacity: None, // No component override,
+                dispatch_mode: None,
             },
         ],
         queries: vec![
@@ -62,7 +64,8 @@ async fn test_broadcast_capacity_hierarchy_all_defaults() {
                 enable_bootstrap: true,
                 bootstrap_buffer_size: 10000,
                 priority_queue_capacity: None,
-                broadcast_channel_capacity: None, // No component override
+                broadcast_channel_capacity: None, // No component override,
+                dispatch_mode: None,
             },
             QueryConfig {
                 id: "query2".to_string(),
@@ -75,7 +78,8 @@ async fn test_broadcast_capacity_hierarchy_all_defaults() {
                 enable_bootstrap: true,
                 bootstrap_buffer_size: 10000,
                 priority_queue_capacity: None,
-                broadcast_channel_capacity: None, // No component override
+                broadcast_channel_capacity: None, // No component override,
+                dispatch_mode: None,
             },
         ],
         reactions: vec![],
@@ -124,7 +128,8 @@ async fn test_broadcast_capacity_hierarchy_global_override() {
                 auto_start: true,
                 properties: HashMap::new(),
                 bootstrap_provider: None,
-                broadcast_channel_capacity: None, // No component override
+                broadcast_channel_capacity: None, // No component override,
+                dispatch_mode: None,
             },
             SourceConfig {
                 id: "source2".to_string(),
@@ -132,7 +137,8 @@ async fn test_broadcast_capacity_hierarchy_global_override() {
                 auto_start: true,
                 properties: HashMap::new(),
                 bootstrap_provider: None,
-                broadcast_channel_capacity: None, // No component override
+                broadcast_channel_capacity: None, // No component override,
+                dispatch_mode: None,
             },
         ],
         queries: vec![QueryConfig {
@@ -146,8 +152,8 @@ async fn test_broadcast_capacity_hierarchy_global_override() {
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
-            broadcast_channel_capacity: None, // No component override
-        }],
+            broadcast_channel_capacity: None, // No component override,
+                dispatch_mode: None,        }],
         reactions: vec![],
     };
 
@@ -189,7 +195,8 @@ async fn test_broadcast_capacity_hierarchy_component_override() {
                 auto_start: true,
                 properties: HashMap::new(),
                 bootstrap_provider: None,
-                broadcast_channel_capacity: Some(10000), // Component override
+                broadcast_channel_capacity: Some(10000), // Component override,
+                dispatch_mode: None,
             },
             SourceConfig {
                 id: "source2".to_string(),
@@ -197,7 +204,8 @@ async fn test_broadcast_capacity_hierarchy_component_override() {
                 auto_start: true,
                 properties: HashMap::new(),
                 bootstrap_provider: None,
-                broadcast_channel_capacity: None, // No component override
+                broadcast_channel_capacity: None, // No component override,
+                dispatch_mode: None,
             },
         ],
         queries: vec![
@@ -212,7 +220,8 @@ async fn test_broadcast_capacity_hierarchy_component_override() {
                 enable_bootstrap: true,
                 bootstrap_buffer_size: 10000,
                 priority_queue_capacity: None,
-                broadcast_channel_capacity: Some(8000), // Component override
+                broadcast_channel_capacity: Some(8000), // Component override,
+                dispatch_mode: None,
             },
             QueryConfig {
                 id: "query2".to_string(),
@@ -225,7 +234,8 @@ async fn test_broadcast_capacity_hierarchy_component_override() {
                 enable_bootstrap: true,
                 bootstrap_buffer_size: 10000,
                 priority_queue_capacity: None,
-                broadcast_channel_capacity: None, // No component override
+                broadcast_channel_capacity: None, // No component override,
+                dispatch_mode: None,
             },
         ],
         reactions: vec![],
@@ -278,7 +288,8 @@ async fn test_broadcast_capacity_hierarchy_mixed() {
                 auto_start: true,
                 properties: HashMap::new(),
                 bootstrap_provider: None,
-                broadcast_channel_capacity: Some(20000), // High volume, needs large capacity
+                broadcast_channel_capacity: Some(20000), // High volume, needs large capacity,
+                dispatch_mode: None,
             },
             SourceConfig {
                 id: "standard_source".to_string(),
@@ -286,7 +297,8 @@ async fn test_broadcast_capacity_hierarchy_mixed() {
                 auto_start: true,
                 properties: HashMap::new(),
                 bootstrap_provider: None,
-                broadcast_channel_capacity: None, // Uses global (3000)
+                broadcast_channel_capacity: None, // Uses global (3000),
+                dispatch_mode: None,
             },
             SourceConfig {
                 id: "low_volume_source".to_string(),
@@ -294,7 +306,8 @@ async fn test_broadcast_capacity_hierarchy_mixed() {
                 auto_start: true,
                 properties: HashMap::new(),
                 bootstrap_provider: None,
-                broadcast_channel_capacity: Some(500), // Low volume, small capacity
+                broadcast_channel_capacity: Some(500), // Low volume, small capacity,
+                dispatch_mode: None,
             },
         ],
         queries: vec![
@@ -309,7 +322,8 @@ async fn test_broadcast_capacity_hierarchy_mixed() {
                 enable_bootstrap: true,
                 bootstrap_buffer_size: 10000,
                 priority_queue_capacity: Some(100000),
-                broadcast_channel_capacity: Some(15000), // Many reactions subscribe
+                broadcast_channel_capacity: Some(15000), // Many reactions subscribe,
+                dispatch_mode: None,
             },
             QueryConfig {
                 id: "standard_query".to_string(),
@@ -322,7 +336,8 @@ async fn test_broadcast_capacity_hierarchy_mixed() {
                 enable_bootstrap: true,
                 bootstrap_buffer_size: 10000,
                 priority_queue_capacity: None,    // Uses global (50000)
-                broadcast_channel_capacity: None, // Uses global (3000)
+                broadcast_channel_capacity: None, // Uses global (3000),
+                dispatch_mode: None,
             },
         ],
         reactions: vec![],
@@ -387,8 +402,8 @@ async fn test_broadcast_capacity_hierarchy_nil_global_nil_component() {
             auto_start: true,
             properties: HashMap::new(),
             bootstrap_provider: None,
-            broadcast_channel_capacity: None, // No component override
-        }],
+            broadcast_channel_capacity: None, // No component override,
+                dispatch_mode: None,        }],
         queries: vec![QueryConfig {
             id: "query1".to_string(),
             query: "MATCH (n) RETURN n".to_string(),
@@ -400,8 +415,8 @@ async fn test_broadcast_capacity_hierarchy_nil_global_nil_component() {
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
-            broadcast_channel_capacity: None, // No component override
-        }],
+            broadcast_channel_capacity: None, // No component override,
+                dispatch_mode: None,        }],
         reactions: vec![],
     };
 

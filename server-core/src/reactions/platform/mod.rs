@@ -69,7 +69,7 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use publisher::{PublisherConfig, RedisStreamPublisher};
 use std::sync::Arc;
-use tokio::sync::broadcast::error::RecvError;
+// RecvError no longer needed with trait-based receivers
 use tokio::sync::RwLock;
 
 /// Platform Reaction for publishing to Redis Streams
@@ -241,7 +241,7 @@ impl Reaction for PlatformReaction {
                 .await
                 .map_err(|e| anyhow!("Failed to subscribe to query '{}': {}", query_id, e))?;
 
-            let mut broadcast_receiver = subscription_response.broadcast_receiver;
+            let mut receiver = subscription_response.receiver;
             let priority_queue = self.priority_queue.clone();
             let query_id_for_task = query_id.clone();
             let reaction_id = self.config.id.clone();
@@ -255,7 +255,7 @@ impl Reaction for PlatformReaction {
                 );
 
                 loop {
-                    match broadcast_receiver.recv().await {
+                    match receiver.recv().await {
                         Ok(query_result) => {
                             // Enqueue into priority queue for timestamp-ordered processing
                             if !priority_queue.enqueue(query_result).await {
@@ -266,22 +266,26 @@ impl Reaction for PlatformReaction {
                                 );
                             }
                         }
-                        Err(RecvError::Lagged(count)) => {
-                            log::warn!(
-                                "Reaction '{}' lagged behind query '{}' by {} messages",
-                                reaction_id,
-                                query_id_for_task,
-                                count
-                            );
-                            // Continue receiving
-                        }
-                        Err(RecvError::Closed) => {
-                            log::info!(
-                                "Query '{}' broadcast channel closed for reaction '{}'",
-                                query_id_for_task,
-                                reaction_id
-                            );
-                            break;
+                        Err(e) => {
+                            // Check if it's a lag error or closed channel
+                            let error_str = e.to_string();
+                            if error_str.contains("lagged") {
+                                log::warn!(
+                                    "Reaction '{}' lagged behind query '{}': {}",
+                                    reaction_id,
+                                    query_id_for_task,
+                                    error_str
+                                );
+                                // Continue receiving
+                            } else {
+                                log::info!(
+                                    "Query '{}' receiver error for reaction '{}': {}",
+                                    query_id_for_task,
+                                    reaction_id,
+                                    error_str
+                                );
+                                break;
+                            }
                         }
                     }
                 }

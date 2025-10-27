@@ -230,7 +230,7 @@ impl AdaptiveHttpSource {
 
     async fn run_adaptive_batcher(
         batch_rx: mpsc::Receiver<SourceChangeEvent>,
-        broadcast_tx: SourceBroadcastSender,
+        dispatchers: Arc<tokio::sync::RwLock<Vec<Box<dyn crate::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
         adaptive_config: AdaptiveBatchConfig,
         source_id: String,
     ) {
@@ -267,13 +267,16 @@ impl AdaptiveHttpSource {
                     profiling,
                 );
 
-                // Broadcast to new architecture (Arc-wrapped for zero-copy)
+                // Dispatch to new architecture (Arc-wrapped for zero-copy)
                 let arc_wrapper = Arc::new(wrapper.clone());
-                if let Err(e) = broadcast_tx.send(arc_wrapper) {
-                    debug!(
-                        "[{}] Failed to broadcast (no subscribers): {}",
-                        source_id, e
-                    );
+                let dispatchers_guard = dispatchers.read().await;
+                for dispatcher in dispatchers_guard.iter() {
+                    if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
+                        debug!(
+                            "[{}] Failed to dispatch (no subscribers): {}",
+                            source_id, e
+                        );
+                    }
                 }
             }
 
@@ -334,7 +337,7 @@ impl Source for AdaptiveHttpSource {
 
         tokio::spawn(Self::run_adaptive_batcher(
             batch_rx,
-            self.base.broadcast_tx.clone(),
+            self.base.dispatchers.clone(),
             adaptive_config,
             source_id.clone(),
         ));
@@ -455,9 +458,6 @@ impl Source for AdaptiveHttpSource {
             .await
     }
 
-    fn get_broadcast_receiver(&self) -> Result<SourceBroadcastReceiver> {
-        self.base.get_broadcast_receiver()
-    }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self

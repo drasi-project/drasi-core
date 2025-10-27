@@ -160,6 +160,7 @@ mod tests {
             },
             bootstrap_provider: None,
             broadcast_channel_capacity: None,
+            dispatch_mode: None,
         };
 
         let (event_tx, _event_rx) = mpsc::channel(100);

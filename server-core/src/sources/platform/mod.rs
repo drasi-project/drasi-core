@@ -23,9 +23,8 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
 use crate::channels::{
-    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, ControlOperation,
-    SourceBroadcastReceiver, SourceBroadcastSender, SourceControl, SourceEvent, SourceEventWrapper,
-    SubscriptionResponse,
+    ChangeReceiver, ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType,
+    ControlOperation, SourceControl, SourceEvent, SourceEventWrapper, SubscriptionResponse,
 };
 use crate::config::SourceConfig;
 use crate::sources::base::SourceBase;
@@ -97,11 +96,6 @@ impl PlatformSource {
     ///
     /// This method is intended for use in tests to receive events broadcast by the source.
     /// In production, queries subscribe to sources through the SourceManager.
-    pub fn test_subscribe(
-        &self,
-    ) -> tokio::sync::broadcast::Receiver<Arc<crate::channels::SourceEventWrapper>> {
-        self.base.broadcast_tx.subscribe()
-    }
 
     /// Parse configuration from properties
     fn parse_config(properties: &HashMap<String, Value>) -> Result<PlatformConfig> {
@@ -289,7 +283,7 @@ impl PlatformSource {
     async fn start_consumer_task(
         source_id: String,
         platform_config: PlatformConfig,
-        broadcast_tx: SourceBroadcastSender,
+        dispatchers: Arc<RwLock<Vec<Box<dyn crate::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
         event_tx: ComponentEventSender,
         status: Arc<RwLock<ComponentStatus>>,
     ) -> JoinHandle<()> {
@@ -409,18 +403,19 @@ impl PlatformSource {
                                                                         profiling,
                                                                     );
 
-                                                                    // Broadcast to new architecture (Arc-wrapped)
+                                                                    // Dispatch to new architecture (Arc-wrapped)
                                                                     let arc_wrapper =
                                                                         Arc::new(wrapper);
-                                                                    if let Err(e) = broadcast_tx
-                                                                        .send(arc_wrapper)
-                                                                    {
-                                                                        debug!("[{}] Failed to broadcast control event (no subscribers): {}", source_id, e);
-                                                                    } else {
-                                                                        debug!(
-                                                                            "Published control event for stream {}",
-                                                                            stream_id.id
-                                                                        );
+                                                                    let dispatchers_guard = dispatchers.read().await;
+                                                                    for dispatcher in dispatchers_guard.iter() {
+                                                                        if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
+                                                                            debug!("[{}] Failed to dispatch control event (no subscribers): {}", source_id, e);
+                                                                        } else {
+                                                                            debug!(
+                                                                                "Published control event for stream {}",
+                                                                                stream_id.id
+                                                                            );
+                                                                        }
                                                                     }
                                                                 }
                                                             }
@@ -467,18 +462,19 @@ impl PlatformSource {
                                                                         profiling,
                                                                     );
 
-                                                                    // Broadcast to new architecture (Arc-wrapped)
+                                                                    // Dispatch to new architecture (Arc-wrapped for zero-copy)
                                                                     let arc_wrapper =
                                                                         Arc::new(wrapper);
-                                                                    if let Err(e) = broadcast_tx
-                                                                        .send(arc_wrapper)
-                                                                    {
-                                                                        debug!("[{}] Failed to broadcast change (no subscribers): {}", source_id, e);
-                                                                    } else {
-                                                                        debug!(
-                                                                            "Published source change for event {}",
-                                                                            stream_id.id
-                                                                        );
+                                                                    let dispatchers_guard = dispatchers.read().await;
+                                                                    for dispatcher in dispatchers_guard.iter() {
+                                                                        if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
+                                                                            debug!("[{}] Failed to dispatch change (no subscribers): {}", source_id, e);
+                                                                        } else {
+                                                                            debug!(
+                                                                                "Published source change for event {}",
+                                                                                stream_id.id
+                                                                            );
+                                                                        }
                                                                     }
                                                                 }
                                                             }
@@ -589,7 +585,7 @@ impl Source for PlatformSource {
         let task = Self::start_consumer_task(
             self.base.config.id.clone(),
             platform_config,
-            self.base.broadcast_tx.clone(),
+            self.base.dispatchers.clone(),
             self.base.event_tx.clone(),
             self.base.status.clone(),
         )
@@ -640,12 +636,22 @@ impl Source for PlatformSource {
             .await
     }
 
-    fn get_broadcast_receiver(&self) -> Result<SourceBroadcastReceiver> {
-        self.base.get_broadcast_receiver()
-    }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+
+impl PlatformSource {
+    /// For testing purposes - get a receiver that gets all events from this source
+    pub fn test_subscribe(&self) -> Box<dyn ChangeReceiver<SourceEventWrapper>> {
+        // Create a receiver from the first dispatcher (should be broadcast in tests)
+        let dispatchers = futures::executor::block_on(self.base.dispatchers.read());
+        if let Some(dispatcher) = dispatchers.first() {
+            dispatcher.create_receiver().unwrap()
+        } else {
+            panic!("No dispatchers available for test subscription");
+        }
     }
 }
 

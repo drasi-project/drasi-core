@@ -19,6 +19,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::bootstrap::BootstrapProviderConfig;
+use crate::channels::DispatchMode;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum QueryLanguage {
@@ -71,6 +72,9 @@ pub struct SourceConfig {
     /// Broadcast channel capacity for this source (default: server global, or 1000 if not specified)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub broadcast_channel_capacity: Option<usize>,
+    /// Dispatch mode for this source (default: Broadcast)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_mode: Option<DispatchMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +112,9 @@ pub struct QueryConfig {
     /// Broadcast channel capacity for this query (default: server global, or 1000 if not specified)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub broadcast_channel_capacity: Option<usize>,
+    /// Dispatch mode for this query (default: Broadcast)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_mode: Option<DispatchMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
