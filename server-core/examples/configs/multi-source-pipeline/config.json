@@ -1,6 +1,8 @@
 {
-  "server": {
-    "id": "multi-source-pipeline"
+  "server_core": {
+    "id": "multi-source-pipeline",
+    "priority_queue_capacity": 20000,
+    "dispatch_buffer_capacity": 2000
   },
   "sources": [
     {
@@ -11,6 +13,10 @@
         "data_type": "sensor",
         "interval_ms": 1000,
         "initial_count": 0
+      },
+      "bootstrap_provider": {
+        "type": "scriptfile",
+        "file_paths": ["examples/data/sensor_data.jsonl"]
       }
     },
     {
@@ -45,6 +51,7 @@
       "queryLanguage": "Cypher",
       "sources": ["sensor-stream"],
       "auto_start": true,
+      "priority_queue_capacity": 50000,
       "properties": {
         "description": "Alert on high temperature readings",
         "threshold": 80
@@ -77,6 +84,7 @@
       "reaction_type": "log",
       "queries": ["high-temp-alert"],
       "auto_start": true,
+      "priority_queue_capacity": 100000,
       "properties": {
         "log_level": "warn",
         "format": "json",

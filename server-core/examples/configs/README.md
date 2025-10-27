@@ -38,12 +38,48 @@ Complex pipeline demonstrating multiple sources and bootstrap providers:
 - Mixed bootstrap providers (script_file, none)
 - Multiple queries with different patterns
 - Multiple reactions with different configurations
+- Priority queue and dispatch buffer capacity tuning
 
 **Key Features:**
 - Multiple source types with different bootstrap strategies
 - Cross-source queries and relationships
 - Aggregation and filtering queries
 - Multiple reaction outputs
+- Capacity configuration hierarchy (global, query, reaction overrides)
+
+### platform_bootstrap/
+Shows how to use platform bootstrap provider:
+- Platform sources with remote Query API bootstrap
+- Multiple timeout configurations for different scenarios
+- Query label filtering during bootstrap
+
+**Key Features:**
+- Platform bootstrap provider with HTTP Query API
+- Configurable timeout values
+- Label-based bootstrap filtering
+
+### platform_reaction/
+Demonstrates platform reaction publishing to Redis Streams:
+- Mock sensor data source
+- Continuous query monitoring
+- Platform reaction publishing to Redis in CloudEvent format
+
+**Key Features:**
+- Redis Stream publishing
+- Dapr CloudEvent format
+- Control event emission
+- Stream length management
+
+### query_language/
+Examples of both Cypher and GQL query languages:
+- Explicit and default Cypher queries
+- GQL query configurations
+- Query with joins
+
+**Key Features:**
+- Cypher and GQL language examples
+- Query language specification
+- Join configuration
 
 ## Bootstrap Provider Types
 
@@ -56,6 +92,16 @@ bootstrap_provider:
 ```
 
 Loads initial data from JSONL (JSON Lines) script files with support for multiple sequential files.
+
+### Platform Provider
+```yaml
+bootstrap_provider:
+  type: platform
+  query_api_url: "http://remote-query-api:8080"
+  timeout_seconds: 300  # Optional, defaults to 300
+```
+
+Bootstraps data from a remote Drasi Query API service via HTTP streaming. Automatically filters bootstrap elements based on query label requirements. See `platform_bootstrap/` example for complete configuration.
 
 ### No Provider (Noop)
 ```yaml
@@ -121,6 +167,9 @@ JSONL format uses one JSON object per line. Script files require:
 - `priority_queue_capacity`: Global default priority queue capacity (default: 10000)
   - Applies to all queries and reactions unless overridden
   - Controls internal event buffering capacity
+- `dispatch_buffer_capacity`: Global default dispatch buffer capacity (default: 1000)
+  - Applies to all sources and queries unless overridden
+  - Controls event routing channel capacity
 
 ### Source Configuration
 - `id`: Unique identifier for the source
@@ -128,14 +177,18 @@ JSONL format uses one JSON object per line. Script files require:
 - `auto_start`: Whether to start automatically
 - `properties`: Source-specific configuration
 - `bootstrap_provider`: Optional initial data provider
+- `dispatch_buffer_capacity`: Optional override for this source's dispatch buffer capacity
+- `dispatch_mode`: Optional dispatch mode ("Broadcast" or "Channel", default: "Channel")
 
 ### Query Configuration
 - `id`: Unique identifier for the query
 - `query`: Cypher query string
-- `query_language`: "cypher" or "gql"
+- `query_language`: "cypher" or "gql" (default: "cypher")
 - `sources`: List of source IDs to query
 - `auto_start`: Whether to start automatically
 - `priority_queue_capacity`: Optional override for this query's priority queue capacity
+- `dispatch_buffer_capacity`: Optional override for this query's dispatch buffer capacity
+- `dispatch_mode`: Optional dispatch mode ("Broadcast" or "Channel", default: "Channel")
 
 ### Reaction Configuration
 - `id`: Unique identifier for the reaction
@@ -187,6 +240,76 @@ reactions:
 - 100,000 capacity ≈ 100-200 MB per component
 
 See the `multi-source-pipeline/config.yaml` example for a complete demonstration.
+
+### Dispatch Buffer Capacity Tuning
+
+Dispatch buffers control channel capacity for event routing between sources and queries. You can configure capacity at three levels:
+
+**1. Global Default** (applies to all components):
+```yaml
+server_core:
+  id: my-server
+  dispatch_buffer_capacity: 2000  # Default: 1000
+```
+
+**2. Per-Source Override**:
+```yaml
+sources:
+  - id: high-throughput-source
+    source_type: mock
+    dispatch_buffer_capacity: 5000  # Overrides global default
+    properties:
+      data_type: sensor
+```
+
+**3. Per-Query Override**:
+```yaml
+queries:
+  - id: multi-subscriber-query
+    query: "MATCH (n) RETURN n"
+    sources: ["source1"]
+    dispatch_buffer_capacity: 3000  # Overrides global default
+```
+
+**When to Adjust:**
+- **Increase** (5k-50k): High-throughput sources, multiple subscribers, burst traffic
+- **Decrease** (100-500): Memory-constrained environments, low-traffic sources
+- **Default (1000)**: Most production workloads
+
+**Memory Impact:**
+- Each buffered event ≈ 1-2 KB
+- 1,000 capacity ≈ 1-2 MB per channel
+- 10,000 capacity ≈ 10-20 MB per channel
+
+### Dispatch Mode Configuration
+
+Sources and queries can use different dispatch modes for event routing:
+
+**Broadcast Mode** (1-to-N fanout):
+```yaml
+sources:
+  - id: shared-source
+    source_type: mock
+    dispatch_mode: Broadcast  # One channel, multiple subscribers
+    properties:
+      data_type: sensor
+```
+
+**Channel Mode** (1-to-1 dedicated channels - DEFAULT):
+```yaml
+sources:
+  - id: dedicated-source
+    source_type: mock
+    dispatch_mode: Channel  # Separate channel per subscriber
+    properties:
+      data_type: sensor
+```
+
+**When to Use:**
+- **Broadcast**: Memory-efficient for many subscribers, shared event stream
+- **Channel**: Isolation between subscribers, independent consumption rates (DEFAULT)
+
+The default mode is `Channel`, which provides better isolation and independent backpressure handling for each subscriber.
 
 ### Query Joins
 Multi-source queries automatically handle joins when sources are specified in the `sources` array.

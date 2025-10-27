@@ -1,0 +1,80 @@
+{
+  "server_core": {
+    "id": "platform-bootstrap-example",
+    "priority_queue_capacity": 10000,
+    "dispatch_buffer_capacity": 1000
+  },
+  "sources": [
+    {
+      "id": "remote_platform_source",
+      "source_type": "platform",
+      "bootstrap_provider": {
+        "type": "platform",
+        "query_api_url": "http://my-source-query-api:8080",
+        "timeout_seconds": 300
+      },
+      "properties": {
+        "redis_url": "redis://localhost:6379",
+        "stream_key": "external-source:changes",
+        "consumer_group": "drasi-core",
+        "consumer_name": "consumer-1",
+        "batch_size": 10,
+        "block_ms": 5000
+      }
+    },
+    {
+      "id": "remote_platform_source_alt",
+      "source_type": "platform",
+      "bootstrap_provider": {
+        "type": "platform",
+        "timeout_seconds": 600
+      },
+      "properties": {
+        "redis_url": "redis://localhost:6379",
+        "stream_key": "sensor-data:changes",
+        "consumer_group": "drasi-core",
+        "consumer_name": "consumer-1",
+        "query_api_url": "http://sensor-query-api:8080"
+      }
+    },
+    {
+      "id": "dev_platform_source",
+      "source_type": "platform",
+      "bootstrap_provider": {
+        "type": "platform",
+        "query_api_url": "http://localhost:8080",
+        "timeout_seconds": 30
+      },
+      "properties": {
+        "redis_url": "redis://localhost:6379",
+        "stream_key": "test-source:changes",
+        "consumer_group": "dev-core",
+        "consumer_name": "dev-consumer"
+      }
+    }
+  ],
+  "queries": [
+    {
+      "id": "person_query",
+      "query": "MATCH (p:Person)-[k:KNOWS]->(p2:Person) RETURN p, k, p2",
+      "sources": ["remote_platform_source"]
+    },
+    {
+      "id": "all_data_query",
+      "query": "MATCH (n)-[r]->(m) RETURN n, r, m",
+      "sources": ["remote_platform_source"]
+    }
+  ],
+  "reactions": [
+    {
+      "id": "platform_logger",
+      "reaction_type": "log",
+      "queries": ["person_query"],
+      "auto_start": true,
+      "properties": {
+        "log_level": "info",
+        "format": "json"
+      }
+    }
+  ]
+}

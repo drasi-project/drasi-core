@@ -27,6 +27,7 @@ pub struct ReactionBuilder {
     queries: Vec<String>,
     auto_start: bool,
     properties: HashMap<String, Value>,
+    priority_queue_capacity: Option<usize>,
 }
 
 impl ReactionBuilder {
@@ -38,6 +39,7 @@ impl ReactionBuilder {
             queries: Vec::new(),
             auto_start: true,
             properties: HashMap::new(),
+            priority_queue_capacity: None,
         }
     }
 
@@ -71,6 +73,22 @@ impl ReactionBuilder {
         self
     }
 
+    /// Set the priority queue capacity for this reaction
+    ///
+    /// This overrides the global default priority queue capacity.
+    /// Controls the internal event buffering capacity for timestamp-ordered processing.
+    ///
+    /// Default: Inherits from server global setting (or 10000 if not specified)
+    ///
+    /// Recommended values:
+    /// - Critical reactions: 100000-1000000 (high reliability)
+    /// - Normal reactions: 10000 (default)
+    /// - Memory-constrained: 1000-5000
+    pub fn with_priority_queue_capacity(mut self, capacity: usize) -> Self {
+        self.priority_queue_capacity = Some(capacity);
+        self
+    }
+
     /// Build the reaction configuration
     pub fn build(self) -> ReactionConfig {
         ReactionConfig {
@@ -79,7 +97,7 @@ impl ReactionBuilder {
             queries: self.queries,
             auto_start: self.auto_start,
             properties: self.properties,
-            priority_queue_capacity: None, // Default: inherit from server global setting
+            priority_queue_capacity: self.priority_queue_capacity,
         }
     }
 }

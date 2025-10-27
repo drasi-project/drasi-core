@@ -10,8 +10,10 @@
 # The provider automatically filters bootstrap elements based on query label requirements
 # and transforms platform SDK element format to drasi-core format.
 
-server:
+server_core:
   id: "platform-bootstrap-example"
+  priority_queue_capacity: 10000
+  dispatch_buffer_capacity: 1000
 
 sources:
   # Example 1: Platform source with inline query_api_url in bootstrap config

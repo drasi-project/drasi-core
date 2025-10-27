@@ -1,6 +1,8 @@
 {
-  "server": {
-    "id": "file-bootstrap-source"
+  "server_core": {
+    "id": "file-bootstrap-source",
+    "priority_queue_capacity": 10000,
+    "dispatch_buffer_capacity": 1000
   },
   "sources": [
     {

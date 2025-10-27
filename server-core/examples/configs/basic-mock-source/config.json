@@ -1,5 +1,5 @@
 {
-  "server": {
+  "server_core": {
     "id": "basic-mock-source-server"
   },
   "sources": [
@@ -11,6 +11,10 @@
         "data_type": "sensor",
         "interval_ms": 2000,
         "initial_count": 5
+      },
+      "bootstrap_provider": {
+        "type": "scriptfile",
+        "file_paths": ["examples/data/sensor_small.jsonl"]
       }
     }
   ],

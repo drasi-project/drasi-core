@@ -2,12 +2,10 @@
 # This demonstrates how to configure the platform reaction to publish
 # query results to Redis Streams in Dapr CloudEvent format
 
-server:
-  host: "0.0.0.0"
-  port: 8080
-  log_level: "info"
-  max_connections: 100
-  shutdown_timeout_seconds: 30
+server_core:
+  id: "platform-reaction-example"
+  priority_queue_capacity: 10000
+  dispatch_buffer_capacity: 1000
 
 # Data source - using mock for demonstration
 sources:

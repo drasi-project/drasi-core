@@ -2,8 +2,10 @@
 # This example demonstrates how to configure a source with
 # script_file bootstrap provider for initial data loading from JSONL files.
 
-server:
+server_core:
   id: "file-bootstrap-server"
+  priority_queue_capacity: 10000     # Global default for queries/reactions (default: 10000)
+  dispatch_buffer_capacity: 1000     # Global default for sources/queries (default: 1000)
 
 sources:
   - id: "user-data-source"

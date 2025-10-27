@@ -6,31 +6,83 @@ This directory contains the integration test suite for the DrasiServerCore libra
 
 ```
 tests/
-├── integration.rs      # Library integration tests
-└── README.md          # This file
+├── integration.rs                    # Library integration tests
+├── config_validation.rs              # Config file validation tests
+├── example_compilation_test.rs       # Example code validation tests
+├── bootstrap_platform_provider.rs    # Platform bootstrap provider tests
+├── dispatch_buffer_capacity_hierarchy_test.rs  # Dispatch buffer tests
+├── platform_reaction_integration.rs  # Platform reaction tests
+├── platform_source_integration.rs    # Platform source tests
+├── priority_queue_hierarchy_test.rs  # Priority queue tests
+├── multi_reaction_subscription_test.rs  # Multi-reaction tests
+├── multi_source_join_test.rs         # Multi-source join tests
+├── profiling_integration_test.rs     # Profiling tests
+├── fixtures/                         # Test data and resources
+│   └── bootstrap_scripts/           # Bootstrap script files
+└── README.md                         # This file
 ```
 
 ## Test Structure
 
-The test suite follows Rust conventions with two categories:
+The test suite follows Rust conventions with three categories:
 
 ### Unit Tests (in `src/`)
 Unit tests are located alongside the source code in `src/` using `#[cfg(test)]` modules. These test individual components in isolation.
 
 **Current coverage: 73 unit tests**
 
-### Integration Tests (`tests/integration.rs`)
+### Integration Tests (in `tests/`)
 Integration tests verify that the library works correctly as a whole from an external consumer's perspective.
 
-**Current coverage: 6 integration tests**
+#### Core Integration Tests (`tests/integration.rs`)
+**Coverage: 6 integration tests**
 
-#### Available Integration Tests:
 - `test_library_initialization` - Verifies basic initialization
 - `test_start_stop_lifecycle` - Tests server start/stop lifecycle
 - `test_with_mock_source` - Tests with a mock data source
 - `test_with_query_and_reaction` - Tests complete pipeline (source → query → reaction)
 - `test_restart_capability` - Verifies server can restart after stopping
 - `test_multiple_sources_and_queries` - Tests multiple component configuration
+
+#### Configuration Validation Tests (`tests/config_validation.rs`)
+Validates that all example configuration files (JSON and YAML) can be parsed successfully and contain valid data.
+
+**What it tests:**
+- All JSON/YAML config files in `examples/` directory
+- Server configuration has required fields (ID, etc.)
+- Sources have valid types and properties
+- Queries reference valid sources
+- Reactions reference valid queries
+
+**Running:**
+```bash
+cargo test --test config_validation
+```
+
+#### Example Code Validation Tests (`tests/example_compilation_test.rs`)
+Validates that all example.rs files in the configs directory exist and are syntactically correct.
+
+**What it tests:**
+- All example.rs files exist in `examples/configs/`
+- Each example directory has corresponding config files (YAML/JSON)
+- Example code structure and file organization
+
+**Running:**
+```bash
+cargo test --test example_compilation_test
+```
+
+**Note:** The example.rs files are code examples demonstrating the builder API. They are not standalone projects, so they don't have individual Cargo.toml files. The test ensures they exist and are properly organized. The actual syntax validation happens through the builder API usage in other integration tests.
+
+#### Feature-Specific Integration Tests
+- `bootstrap_platform_provider.rs` - Platform bootstrap provider functionality
+- `dispatch_buffer_capacity_hierarchy_test.rs` - Dispatch buffer capacity configuration
+- `platform_reaction_integration.rs` - Platform reaction (Redis Streams output)
+- `platform_source_integration.rs` - Platform source (Redis Streams input)
+- `priority_queue_hierarchy_test.rs` - Priority queue capacity configuration
+- `multi_reaction_subscription_test.rs` - Multiple reactions subscribing to queries
+- `multi_source_join_test.rs` - Multi-source query joins
+- `profiling_integration_test.rs` - Performance profiling
 
 ## Running Tests
 
@@ -54,11 +106,20 @@ cargo test --lib
 # Run only integration tests
 cargo test --tests
 
-# Run a specific integration test
+# Run a specific integration test file
+cargo test --test integration
+
+# Run a specific test within an integration test file
 cargo test --test integration test_start_stop_lifecycle
 
 # Run tests matching a pattern
 cargo test lifecycle
+
+# Run config validation tests
+cargo test --test config_validation
+
+# Run example validation tests
+cargo test --test example_compilation_test
 ```
 
 ### Run Tests with Coverage

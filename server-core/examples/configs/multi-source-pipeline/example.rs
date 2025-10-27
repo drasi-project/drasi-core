@@ -15,6 +15,9 @@ async fn main() -> anyhow::Result<()> {
     // Build server with multiple sources, queries, and reactions using fluent API
     let core = DrasiServerCore::builder()
         .with_id("multi-source-pipeline")
+        // Configure global capacity settings
+        .with_priority_queue_capacity(20000) // Global default for queries/reactions
+        .with_dispatch_buffer_capacity(2000) // Global default for sources/queries
         // Sensor stream with script_file bootstrap
         .add_source(
             Source::mock("sensor-stream")
@@ -53,13 +56,14 @@ async fn main() -> anyhow::Result<()> {
                 .auto_start(true)
                 .build(),
         )
-        // High temperature alert query
+        // High temperature alert query with custom capacity
         .add_query(
             Query::cypher("high-temp-alert")
                 .query("MATCH (s:SensorReading) WHERE s.temperature > 80 RETURN s")
                 .from_source("sensor-stream")
                 .with_property("description", json!("Alert on high temperature readings"))
                 .with_property("threshold", json!(80))
+                .with_priority_queue_capacity(50000) // Override global for high-volume query
                 .auto_start(true)
                 .build(),
         )
@@ -81,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
                 .auto_start(true)
                 .build(),
         )
-        // Critical alert reaction
+        // Critical alert reaction with custom capacity
         .add_reaction(
             Reaction::log("critical-alert-webhook")
                 .subscribe_to("high-temp-alert")
@@ -91,6 +95,7 @@ async fn main() -> anyhow::Result<()> {
                         .with_string("format", "json")
                         .with_bool("include_metadata", true),
                 )
+                .with_priority_queue_capacity(100000) // Override global for critical reliability
                 .auto_start(true)
                 .build(),
         )
@@ -124,19 +129,22 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     println!("✓ Server configured successfully");
-    println!("✓ Components:");
-    println!("  Sources:");
+    println!("✓ Configuration:");
+    println!("  Global Settings:");
+    println!("    - Priority queue capacity: 20000");
+    println!("    - Dispatch buffer capacity: 2000");
+    println!("\n  Sources:");
     println!("    - sensor-stream: Mock sensors with script_file bootstrap");
     println!("    - user-data: Mock users with script_file bootstrap");
     println!("    - event-stream: Mock events (no bootstrap)");
-    println!("  Queries:");
-    println!("    - high-temp-alert: Monitor sensors > 80°");
-    println!("    - user-activity: Track user-event relationships");
-    println!("    - sensor-summary: Aggregate readings by location");
-    println!("  Reactions:");
-    println!("    - critical-alert-webhook: High temp alerts");
-    println!("    - activity-analytics: User activity data");
-    println!("    - dashboard-feed: Sensor summaries\n");
+    println!("\n  Queries:");
+    println!("    - high-temp-alert: Monitor sensors > 80° (capacity: 50000)");
+    println!("    - user-activity: Track user-event relationships (capacity: 20000 default)");
+    println!("    - sensor-summary: Aggregate readings by location (capacity: 20000 default)");
+    println!("\n  Reactions:");
+    println!("    - critical-alert-webhook: High temp alerts (capacity: 100000)");
+    println!("    - activity-analytics: User activity data (capacity: 20000 default)");
+    println!("    - dashboard-feed: Sensor summaries (capacity: 20000 default)\n");
 
     core.start().await?;
     println!("✓ Drasi Server Core started\n");

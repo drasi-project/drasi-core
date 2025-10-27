@@ -7,6 +7,9 @@ server_core:
   # Global default priority queue capacity for all queries and reactions
   # Default is 10000 if not specified
   priority_queue_capacity: 20000
+  # Global default dispatch buffer capacity for sources and queries
+  # Default is 1000 if not specified
+  dispatch_buffer_capacity: 2000
 
 sources:
   # Mock sensor data with script file bootstrap

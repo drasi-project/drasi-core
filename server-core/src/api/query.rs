@@ -15,6 +15,7 @@
 //! Query configuration builders
 
 use crate::api::Properties;
+use crate::channels::DispatchMode;
 use crate::config::{QueryConfig, QueryJoinConfig, QueryLanguage};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -29,6 +30,9 @@ pub struct QueryBuilder {
     auto_start: bool,
     properties: HashMap<String, Value>,
     joins: Option<Vec<QueryJoinConfig>>,
+    priority_queue_capacity: Option<usize>,
+    dispatch_buffer_capacity: Option<usize>,
+    dispatch_mode: Option<DispatchMode>,
 }
 
 impl QueryBuilder {
@@ -42,6 +46,9 @@ impl QueryBuilder {
             auto_start: true,
             properties: HashMap::new(),
             joins: None,
+            priority_queue_capacity: None,
+            dispatch_buffer_capacity: None,
+            dispatch_mode: None,
         }
     }
 
@@ -93,6 +100,44 @@ impl QueryBuilder {
         self
     }
 
+    /// Set the priority queue capacity for this query
+    ///
+    /// This overrides the global default priority queue capacity.
+    /// Controls the internal event buffering capacity for timestamp-ordered processing.
+    ///
+    /// Default: Inherits from server global setting (or 10000 if not specified)
+    ///
+    /// Recommended values:
+    /// - High-volume queries: 50000-1000000
+    /// - Normal queries: 10000 (default)
+    /// - Memory-constrained: 1000-5000
+    pub fn with_priority_queue_capacity(mut self, capacity: usize) -> Self {
+        self.priority_queue_capacity = Some(capacity);
+        self
+    }
+
+    /// Set the dispatch buffer capacity for this query
+    ///
+    /// This overrides the global default dispatch buffer capacity.
+    /// Controls the channel capacity for event routing to reactions.
+    ///
+    /// Default: Inherits from server global setting (or 1000 if not specified)
+    pub fn with_dispatch_buffer_capacity(mut self, capacity: usize) -> Self {
+        self.dispatch_buffer_capacity = Some(capacity);
+        self
+    }
+
+    /// Set the dispatch mode for this query
+    ///
+    /// - `DispatchMode::Broadcast`: Single channel shared by all subscribers (memory efficient)
+    /// - `DispatchMode::Channel`: Separate channel per subscriber (default, better isolation)
+    ///
+    /// Default: Channel mode
+    pub fn with_dispatch_mode(mut self, mode: DispatchMode) -> Self {
+        self.dispatch_mode = Some(mode);
+        self
+    }
+
     /// Build the query configuration
     pub fn build(self) -> QueryConfig {
         QueryConfig {
@@ -105,9 +150,9 @@ impl QueryBuilder {
             joins: self.joins,
             enable_bootstrap: true,           // Default: bootstrap enabled
             bootstrap_buffer_size: 10000,     // Default buffer size
-            priority_queue_capacity: None,    // Default: inherit from server global setting
-            dispatch_buffer_capacity: None, // Default: inherit from server global setting
-            dispatch_mode: None,               // Default: Channel
+            priority_queue_capacity: self.priority_queue_capacity,
+            dispatch_buffer_capacity: self.dispatch_buffer_capacity,
+            dispatch_mode: self.dispatch_mode,
         }
     }
 }

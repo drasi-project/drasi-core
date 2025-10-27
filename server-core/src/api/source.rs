@@ -16,6 +16,7 @@
 
 use crate::api::Properties;
 use crate::bootstrap::BootstrapProviderConfig;
+use crate::channels::DispatchMode;
 use crate::config::SourceConfig;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -28,6 +29,8 @@ pub struct SourceBuilder {
     auto_start: bool,
     properties: HashMap<String, Value>,
     bootstrap_provider: Option<BootstrapProviderConfig>,
+    dispatch_buffer_capacity: Option<usize>,
+    dispatch_mode: Option<DispatchMode>,
 }
 
 impl SourceBuilder {
@@ -39,6 +42,8 @@ impl SourceBuilder {
             auto_start: true,
             properties: HashMap::new(),
             bootstrap_provider: None,
+            dispatch_buffer_capacity: None,
+            dispatch_mode: None,
         }
     }
 
@@ -94,6 +99,28 @@ impl SourceBuilder {
         self
     }
 
+    /// Set the dispatch buffer capacity for this source
+    ///
+    /// This overrides the global default dispatch buffer capacity.
+    /// Controls the channel capacity for event routing to queries.
+    ///
+    /// Default: Inherits from server global setting (or 1000 if not specified)
+    pub fn with_dispatch_buffer_capacity(mut self, capacity: usize) -> Self {
+        self.dispatch_buffer_capacity = Some(capacity);
+        self
+    }
+
+    /// Set the dispatch mode for this source
+    ///
+    /// - `DispatchMode::Broadcast`: Single channel shared by all subscribers (memory efficient)
+    /// - `DispatchMode::Channel`: Separate channel per subscriber (default, better isolation)
+    ///
+    /// Default: Channel mode
+    pub fn with_dispatch_mode(mut self, mode: DispatchMode) -> Self {
+        self.dispatch_mode = Some(mode);
+        self
+    }
+
     /// Build the source configuration
     pub fn build(self) -> SourceConfig {
         SourceConfig {
@@ -102,8 +129,8 @@ impl SourceBuilder {
             auto_start: self.auto_start,
             properties: self.properties,
             bootstrap_provider: self.bootstrap_provider,
-            dispatch_buffer_capacity: None, // Default: inherit from server global setting
-            dispatch_mode: None,               // Default: Channel
+            dispatch_buffer_capacity: self.dispatch_buffer_capacity,
+            dispatch_mode: self.dispatch_mode,
         }
     }
 }
