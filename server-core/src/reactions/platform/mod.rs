@@ -84,6 +84,10 @@ pub struct PlatformReaction {
     subscription_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
     priority_queue: PriorityQueue<QueryResult>,
     processing_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+    // Batch configuration
+    batch_enabled: bool,
+    batch_max_size: usize,
+    batch_max_wait_ms: u64,
 }
 
 impl PlatformReaction {
@@ -124,6 +128,43 @@ impl PlatformReaction {
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
+        // Extract batch configuration
+        let batch_enabled = config
+            .properties
+            .get("batch_enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true); // Default: batching enabled
+
+        let batch_max_size = config
+            .properties
+            .get("batch_max_size")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .unwrap_or(100); // Default: 100 events per batch
+
+        let batch_max_wait_ms = config
+            .properties
+            .get("batch_max_wait_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(10); // Default: 10ms timeout
+
+        // Validate batch configuration
+        if batch_max_size == 0 {
+            return Err(anyhow!("batch_max_size must be greater than 0"));
+        }
+        if batch_max_size > 10000 {
+            log::warn!(
+                "batch_max_size {} is very large, consider using a smaller value (recommended: 100-1000)",
+                batch_max_size
+            );
+        }
+        if batch_max_wait_ms > 1000 {
+            log::warn!(
+                "batch_max_wait_ms {} is large and may increase latency (recommended: 1-100ms)",
+                batch_max_wait_ms
+            );
+        }
+
         // Create publisher config
         let publisher_config = PublisherConfig { max_stream_length };
 
@@ -145,6 +186,9 @@ impl PlatformReaction {
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
             priority_queue: PriorityQueue::new(config.priority_queue_capacity.unwrap_or(10000)),
             processing_task: Arc::new(RwLock::new(None)),
+            batch_enabled,
+            batch_max_size,
+            batch_max_wait_ms,
         })
     }
 
@@ -308,6 +352,9 @@ impl Reaction for PlatformReaction {
         let reaction_id = self.config.id.clone();
         let emit_control_events = self.emit_control_events;
         let priority_queue = self.priority_queue.clone();
+        let batch_enabled = self.batch_enabled;
+        let batch_max_size = self.batch_max_size;
+        let batch_max_wait_ms = self.batch_max_wait_ms;
 
         // Spawn main processing task
         let processing_task_handle = tokio::spawn(async move {
@@ -316,12 +363,26 @@ impl Reaction for PlatformReaction {
                 reaction_id
             );
 
+            // Buffer for batching CloudEvents before publishing
+            let mut event_buffer: Vec<CloudEvent<ResultEvent>> = Vec::new();
+            let mut last_flush_time = std::time::Instant::now();
+
             loop {
                 // Dequeue from priority queue (blocking until available)
                 let query_result = priority_queue.dequeue().await;
 
                 // Check if this is a control signal
                 if let Some(control_signal) = query_result.metadata.get("control_signal") {
+                    // Flush any buffered events before processing control signal
+                    if !event_buffer.is_empty() {
+                        log::debug!("Flushing {} buffered events before control signal", event_buffer.len());
+                        if let Err(e) = publisher.publish_batch_with_retry(event_buffer.clone(), 3).await {
+                            log::error!("Failed to publish buffered events before control signal: {}", e);
+                        }
+                        event_buffer.clear();
+                        last_flush_time = std::time::Instant::now();
+                    }
+
                     if emit_control_events {
                         // This is a control signal, emit it as a control event
                         if let Some(signal_type) = control_signal.as_str() {
@@ -396,22 +457,59 @@ impl Reaction for PlatformReaction {
                             &cloud_event_config,
                         );
 
-                        // Publish to Redis
-                        match publisher.publish_with_retry(cloud_event, 3).await {
-                            Ok(message_id) => {
+                        if batch_enabled {
+                            // Add to buffer
+                            event_buffer.push(cloud_event);
+
+                            // Check if we should flush the buffer
+                            let should_flush = event_buffer.len() >= batch_max_size
+                                || last_flush_time.elapsed().as_millis() >= batch_max_wait_ms as u128;
+
+                            if should_flush {
                                 log::debug!(
-                                    "Published query result for '{}' (sequence: {}, message_id: {})",
-                                    query_result_mut.query_id,
-                                    sequence,
-                                    message_id
+                                    "Flushing batch of {} events (size: {}, time_elapsed: {}ms)",
+                                    event_buffer.len(),
+                                    event_buffer.len() >= batch_max_size,
+                                    last_flush_time.elapsed().as_millis()
                                 );
+
+                                match publisher.publish_batch_with_retry(event_buffer.clone(), 3).await {
+                                    Ok(message_ids) => {
+                                        log::debug!(
+                                            "Published batch of {} query results",
+                                            message_ids.len()
+                                        );
+                                    }
+                                    Err(e) => {
+                                        log::error!(
+                                            "Failed to publish batch of {} query results: {}",
+                                            event_buffer.len(),
+                                            e
+                                        );
+                                    }
+                                }
+
+                                event_buffer.clear();
+                                last_flush_time = std::time::Instant::now();
                             }
-                            Err(e) => {
-                                log::error!(
-                                    "Failed to publish query result for '{}': {}",
-                                    query_result_mut.query_id,
-                                    e
-                                );
+                        } else {
+                            // Batching disabled - publish immediately
+                            match publisher.publish_with_retry(cloud_event, 3).await {
+                                Ok(message_id) => {
+                                    log::debug!(
+                                        "Published query result for '{}' (sequence: {}, message_id: {})",
+                                        query_result_mut.query_id,
+                                        sequence,
+                                        message_id
+                                    );
+                                }
+                                Err(e) => {
+                                    log::error!(
+                                        "Failed to publish query result for '{}': {}",
+                                        query_result_mut.query_id,
+                                        e
+                                    );
+                                }
                             }
                         }
                     }

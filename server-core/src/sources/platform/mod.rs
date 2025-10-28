@@ -361,10 +361,16 @@ impl PlatformSource {
 
                 match read_result {
                     Ok(reply) => {
+                        // Collect all stream IDs for batch acknowledgment
+                        let mut all_stream_ids = Vec::new();
+
                         // Process each stream entry
                         for stream_key in reply.keys {
                             for stream_id in stream_key.ids {
                                 debug!("Received event from stream: {}", stream_id.id);
+
+                                // Store stream ID for batch acknowledgment
+                                all_stream_ids.push(stream_id.id.clone());
 
                                 // Extract event data
                                 match extract_event_data(&stream_id.map) {
@@ -518,14 +524,58 @@ impl PlatformSource {
                                         );
                                     }
                                 }
+                            }
+                        }
 
-                                // Acknowledge the message
-                                let _: Result<i64, redis::RedisError> = redis::cmd("XACK")
-                                    .arg(&platform_config.stream_key)
-                                    .arg(&platform_config.consumer_group)
-                                    .arg(&stream_id.id)
-                                    .query_async(&mut conn)
-                                    .await;
+                        // Batch acknowledge all messages at once
+                        if !all_stream_ids.is_empty() {
+                            debug!("Acknowledging batch of {} messages", all_stream_ids.len());
+
+                            let mut cmd = redis::cmd("XACK");
+                            cmd.arg(&platform_config.stream_key)
+                                .arg(&platform_config.consumer_group);
+
+                            // Add all stream IDs to the command
+                            for stream_id in &all_stream_ids {
+                                cmd.arg(stream_id);
+                            }
+
+                            match cmd.query_async::<_, i64>(&mut conn).await {
+                                Ok(ack_count) => {
+                                    debug!("Successfully acknowledged {} messages", ack_count);
+                                    if ack_count as usize != all_stream_ids.len() {
+                                        warn!(
+                                            "Acknowledged {} messages but expected {}",
+                                            ack_count,
+                                            all_stream_ids.len()
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to acknowledge message batch: {}", e);
+
+                                    // Fallback: Try acknowledging messages individually
+                                    warn!("Falling back to individual acknowledgments");
+                                    for stream_id in &all_stream_ids {
+                                        match redis::cmd("XACK")
+                                            .arg(&platform_config.stream_key)
+                                            .arg(&platform_config.consumer_group)
+                                            .arg(stream_id)
+                                            .query_async::<_, i64>(&mut conn)
+                                            .await
+                                        {
+                                            Ok(_) => {
+                                                debug!("Individually acknowledged message {}", stream_id);
+                                            }
+                                            Err(e) => {
+                                                error!(
+                                                    "Failed to individually acknowledge message {}: {}",
+                                                    stream_id, e
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

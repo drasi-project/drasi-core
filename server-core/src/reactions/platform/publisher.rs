@@ -151,6 +151,118 @@ impl RedisStreamPublisher {
 
         unreachable!("Loop should have returned or errored");
     }
+
+    /// Publish multiple CloudEvents in a single Redis pipeline
+    ///
+    /// # Arguments
+    /// * `events` - Vector of CloudEvents to publish
+    ///
+    /// # Returns
+    /// Vector of message IDs assigned by Redis, in the same order as input events
+    pub async fn publish_batch(&self, events: Vec<CloudEvent<ResultEvent>>) -> Result<Vec<String>> {
+        if events.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut conn = self.get_connection().await?;
+
+        // Build a Redis pipeline for all events
+        let mut pipe = redis::pipe();
+        pipe.atomic();
+
+        for event in &events {
+            // Serialize the CloudEvent to JSON
+            let json_data = serde_json::to_string(event)
+                .context("Failed to serialize CloudEvent in batch")?;
+
+            // Use the topic from the CloudEvent as the stream key
+            let stream_key = &event.topic;
+
+            // Add XADD command to pipeline
+            if let Some(max_len) = self.config.max_stream_length {
+                // Use MAXLEN with approximate trimming (~)
+                pipe.xadd_maxlen(
+                    stream_key,
+                    redis::streams::StreamMaxlen::Approx(max_len),
+                    "*",
+                    &[("data", json_data.as_str())],
+                );
+            } else {
+                // No length limit
+                pipe.xadd(stream_key, "*", &[("data", json_data.as_str())]);
+            }
+        }
+
+        // Execute the pipeline
+        let message_ids: Vec<String> = pipe
+            .query_async(&mut conn)
+            .await
+            .context("Failed to execute batch publish pipeline")?;
+
+        log::debug!(
+            "Published batch of {} CloudEvents to Redis streams",
+            events.len()
+        );
+
+        Ok(message_ids)
+    }
+
+    /// Publish multiple CloudEvents with retry logic
+    ///
+    /// # Arguments
+    /// * `events` - Vector of CloudEvents to publish
+    /// * `max_retries` - Maximum number of retry attempts
+    ///
+    /// # Returns
+    /// Vector of message IDs assigned by Redis
+    pub async fn publish_batch_with_retry(
+        &self,
+        events: Vec<CloudEvent<ResultEvent>>,
+        max_retries: usize,
+    ) -> Result<Vec<String>> {
+        let mut retry_delay = Duration::from_millis(100);
+
+        for attempt in 1..=max_retries {
+            match self.publish_batch(events.clone()).await {
+                Ok(message_ids) => return Ok(message_ids),
+                Err(e) if attempt < max_retries => {
+                    log::warn!(
+                        "Failed to publish batch of {} CloudEvents (attempt {}/{}): {}. Retrying in {:?}",
+                        events.len(),
+                        attempt,
+                        max_retries,
+                        e,
+                        retry_delay
+                    );
+                    sleep(retry_delay).await;
+                    retry_delay *= 2; // Exponential backoff
+                }
+                Err(e) => {
+                    log::error!(
+                        "Failed to publish batch after {} retries, falling back to individual publishes",
+                        max_retries
+                    );
+
+                    // Fallback: Try publishing events individually
+                    let mut message_ids = Vec::with_capacity(events.len());
+                    for event in events {
+                        match self.publish_with_retry(event, max_retries).await {
+                            Ok(msg_id) => message_ids.push(msg_id),
+                            Err(individual_err) => {
+                                return Err(e).context(format!(
+                                    "Batch publish failed after retries, and individual fallback also failed: {}",
+                                    individual_err
+                                ));
+                            }
+                        }
+                    }
+                    return Ok(message_ids);
+                }
+            }
+        }
+
+        unreachable!("Loop should have returned or errored");
+    }
 }
 
 #[cfg(test)]
