@@ -1911,8 +1911,10 @@ impl ExpressionEvaluator {
         let result_key = match context.get_output_grouping_key() {
             Some(group_expressions) => {
                 let mut grouping_vals = Vec::new();
+                let mut context = context.clone();
+                context.set_side_effects(SideEffects::Snapshot);
                 for group_expression in group_expressions {
-                    grouping_vals.push(self.evaluate_expression(context, group_expression).await?);
+                    grouping_vals.push(self.evaluate_expression(&context, group_expression).await?);
                 }
                 ResultKey::GroupBy(Arc::new(grouping_vals))
             }
