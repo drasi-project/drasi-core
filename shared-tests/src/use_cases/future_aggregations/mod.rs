@@ -128,7 +128,7 @@ pub async fn truefor_sum(config: &(impl QueryTestConfig + Send)) {
             after: variablemap!("value"=>VariableValue::Float(Float::from(3.0))),
             before: Some(variablemap!("value"=>VariableValue::Float(Float::from(2.0))),),
             grouping_keys: vec![],
-            default_before: false,
+            default_before: true,
             default_after: false
         }));
     }
@@ -230,7 +230,7 @@ pub async fn truefor_grouped_sum(config: &(impl QueryTestConfig + Send)) {
                 "category"=>VariableValue::from("A")
             )),
             grouping_keys: vec!["category".into()],
-            default_before: false,
+            default_before: true,
             default_after: false
         }));
     }

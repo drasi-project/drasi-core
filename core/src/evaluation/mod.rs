@@ -74,6 +74,7 @@ pub enum FunctionEvaluationError {
     InvalidFormat { expected: String },
     CorruptData,
     InvalidType { expected: String },
+    EvaluationError(Box<EvaluationError>),
 }
 
 impl PartialEq for FunctionEvaluationError {
@@ -122,7 +123,8 @@ impl fmt::Display for FunctionEvaluationError {
             FunctionEvaluationError::CorruptData => write!(f, "Invalid accumulator"),
             FunctionEvaluationError::InvalidType { expected } => {
                 write!(f, "Invalid type, expected: {expected}")
-            }
+            },
+            FunctionEvaluationError::EvaluationError(err) => write!(f, "Evaluation error: {err}"),
         }
     }
 }

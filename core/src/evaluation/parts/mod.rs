@@ -79,6 +79,7 @@ impl QueryPartEvaluator {
                             &after,
                             SideEffects::Snapshot,
                             change_context,
+                            part,
                         );
                         let mut grouping_keys = Vec::new();
                         Some(
@@ -94,7 +95,7 @@ impl QueryPartEvaluator {
                 };
 
                 let eval_context =
-                    ExpressionEvaluationContext::from_after_change(&after, change_context);
+                    ExpressionEvaluationContext::from_after_change(&after, change_context, part);
 
                 let mut grouping_keys = Vec::new();
 
@@ -142,6 +143,7 @@ impl QueryPartEvaluator {
                             &after,
                             SideEffects::Snapshot,
                             change_context,
+                            part,
                         );
                         Some(
                             self.project(
@@ -160,6 +162,7 @@ impl QueryPartEvaluator {
                     &before,
                     SideEffects::Snapshot,
                     change_context,
+                    part,
                 );
                 let mut before_filtered = false;
 
@@ -184,6 +187,7 @@ impl QueryPartEvaluator {
                         &before,
                         SideEffects::RevertForUpdate,
                         change_context,
+                        part,
                     );
 
                     agg_after = Some(
@@ -197,7 +201,7 @@ impl QueryPartEvaluator {
                 }
 
                 let mut after_context =
-                    ExpressionEvaluationContext::from_after_change(&after, change_context);
+                    ExpressionEvaluationContext::from_after_change(&after, change_context, part);
                 after_context.set_side_effects(context::SideEffects::Apply);
 
                 for filter in &part.where_clauses {
@@ -276,6 +280,7 @@ impl QueryPartEvaluator {
                             &before,
                             SideEffects::Snapshot,
                             change_context,
+                            part,
                         );
                         let mut grouping_keys = Vec::new();
                         Some(
@@ -290,6 +295,7 @@ impl QueryPartEvaluator {
                     &before,
                     SideEffects::RevertForDelete,
                     change_context,
+                    part,
                 );
                 let mut grouping_keys = Vec::new();
 
@@ -417,6 +423,7 @@ impl QueryPartEvaluator {
                             &after,
                             SideEffects::Snapshot,
                             change_context,
+                            part,
                         );
                         let mut grouping_keys = Vec::new();
                         Some(
@@ -438,6 +445,7 @@ impl QueryPartEvaluator {
                             before,
                             SideEffects::Snapshot,
                             change_context,
+                            part,
                         );
                         Some(
                             self.project(
@@ -460,6 +468,7 @@ impl QueryPartEvaluator {
                         before,
                         SideEffects::Snapshot,
                         change_context,
+                        part,
                     );
 
                     for filter in &part.where_clauses {
@@ -475,6 +484,7 @@ impl QueryPartEvaluator {
                             before,
                             SideEffects::RevertForUpdate,
                             change_context,
+                            part,
                         );
                         revert_context.replace_variables(before);
                         next_after = Some(
@@ -489,7 +499,7 @@ impl QueryPartEvaluator {
                 }
 
                 let mut after_context =
-                    ExpressionEvaluationContext::from_after_change(&after, change_context);
+                    ExpressionEvaluationContext::from_after_change(&after, change_context, part);
 
                 if !should_apply {
                     after_context.set_side_effects(SideEffects::Snapshot);

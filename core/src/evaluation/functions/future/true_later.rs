@@ -49,12 +49,10 @@ impl ScalarFunction for TrueLater {
                 error: FunctionEvaluationError::InvalidArgumentCount,
             });
         }
-        println!("TrueLater called:");
 
         let anchor_ref = match context.get_anchor_element() {
             Some(anchor) => anchor.get_reference().clone(),
             None => {
-                println!("No anchor element found");
                 return Ok(VariableValue::Null);
             }
         };
@@ -69,8 +67,6 @@ impl ScalarFunction for TrueLater {
                 })
             }
         };
-
-        println!("Condition: {}", condition);
 
         let due_time = match &args[1] {
             VariableValue::Date(d) => {
@@ -96,25 +92,19 @@ impl ScalarFunction for TrueLater {
             }
         };
 
-        println!("Due time: {}", due_time);
-
-        let group_signature = context.get_input_grouping_hash();
-
-        println!("Group signature: {}", group_signature);
+        let input_signature = context.get_input_grouping_hash();
 
         if due_time <= context.get_realtime() {
-            println!("Due time is in the past");
             return Ok(VariableValue::Bool(*condition));
         }
 
         if let SideEffects::Apply = context.get_side_effects() {
-            println!("Adding to future queue");
             match self
                 .future_queue
                 .push(
                     PushType::Overwrite,
                     expression.position_in_query,
-                    group_signature,
+                    input_signature,
                     &anchor_ref,
                     context.get_transaction_time(),
                     due_time,
@@ -130,8 +120,6 @@ impl ScalarFunction for TrueLater {
                 }
             }
         }
-
-        println!("Returning Awaiting");
 
         Ok(VariableValue::Awaiting)
     }

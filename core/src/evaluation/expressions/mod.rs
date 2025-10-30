@@ -1901,6 +1901,30 @@ impl ExpressionEvaluator {
             }),
         }
     }
+
+    /// Resolves the context result key for the given expression evaluation context.
+    /// The result key is either the set of grouping keys or the input grouping hash.
+    pub async fn resolve_context_result_key(
+        &self,
+        context: &ExpressionEvaluationContext<'_>,
+    ) -> Result<ResultKey, EvaluationError> {
+        let result_key = match context.get_output_grouping_key() {
+            Some(group_expressions) => {                
+                let mut grouping_vals = Vec::new();
+                for group_expression in group_expressions {
+                    grouping_vals.push(
+                        self
+                            .evaluate_expression(context, group_expression)
+                            .await?,                        
+                    );
+                }
+                ResultKey::GroupBy(Arc::new(grouping_vals))
+            }
+            None => ResultKey::InputHash(context.get_input_grouping_hash()),
+        };
+        Ok(result_key)
+    }
+
 }
 
 async fn get_date_property(date: NaiveDate, property: String) -> Option<u32> {

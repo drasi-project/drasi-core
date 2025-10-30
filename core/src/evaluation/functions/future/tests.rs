@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use chrono::NaiveDate;
-use drasi_query_ast::ast;
+use drasi_query_ast::ast::{self, QueryPart};
 use mockall::predicate::*;
 use mockall::*;
 use serde_json::json;
@@ -106,6 +106,7 @@ async fn test_true_now_or_later_condition_true() {
     };
 
     let binding = QueryVariables::new();
+    let part = QueryPart::default();
     let context = ExpressionEvaluationContext::from_after_change(
         &binding,
         &ChangeContext {
@@ -118,6 +119,7 @@ async fn test_true_now_or_later_condition_true() {
             after_anchor_element: Some(Arc::new(anchor)),
             is_future_reprocess: false,
         },
+        &part,
     );
 
     // Test when condition is true
@@ -158,6 +160,7 @@ async fn test_true_now_or_later_due_time_passed() {
     let due_time = 900; // Earlier than current time
 
     let binding = QueryVariables::new();
+    let part = QueryPart::default();
     let context = ExpressionEvaluationContext::from_after_change(
         &binding,
         &ChangeContext {
@@ -170,6 +173,7 @@ async fn test_true_now_or_later_due_time_passed() {
             after_anchor_element: Some(Arc::new(anchor)),
             is_future_reprocess: false,
         },
+        &part,
     );
 
     // Test when due time has already passed
@@ -224,6 +228,7 @@ async fn test_true_now_or_later_schedule_future() {
     };
 
     let binding = QueryVariables::new();
+    let part = QueryPart::default();
     let context = ExpressionEvaluationContext::from_after_change(
         &binding,
         &ChangeContext {
@@ -236,6 +241,7 @@ async fn test_true_now_or_later_schedule_future() {
             after_anchor_element: Some(Arc::new(anchor)),
             is_future_reprocess: false,
         },
+        &part,
     );
 
     // Test scheduling for future evaluation
@@ -294,6 +300,7 @@ async fn test_true_now_or_later_with_date() {
     };
 
     let binding = QueryVariables::new();
+    let part = QueryPart::default();
     let context = ExpressionEvaluationContext::from_after_change(
         &binding,
         &ChangeContext {
@@ -306,6 +313,7 @@ async fn test_true_now_or_later_with_date() {
             after_anchor_element: Some(Arc::new(anchor)),
             is_future_reprocess: false,
         },
+        &part,
     );
 
     // Test with Date argument
@@ -340,6 +348,7 @@ async fn test_true_now_or_later_invalid_condition_type() {
     };
 
     let binding = QueryVariables::new();
+    let part = QueryPart::default();
     let context = ExpressionEvaluationContext::from_after_change(
         &binding,
         &ChangeContext {
@@ -352,6 +361,7 @@ async fn test_true_now_or_later_invalid_condition_type() {
             after_anchor_element: Some(Arc::new(anchor)),
             is_future_reprocess: false,
         },
+        &part,
     );
 
     // Test with invalid condition type (string instead of bool)
@@ -396,6 +406,7 @@ async fn test_true_now_or_later_null_arguments() {
     };
 
     let binding = QueryVariables::new();
+    let part = QueryPart::default();
     let context = ExpressionEvaluationContext::from_after_change(
         &binding,
         &ChangeContext {
@@ -408,6 +419,7 @@ async fn test_true_now_or_later_null_arguments() {
             after_anchor_element: Some(Arc::new(anchor)),
             is_future_reprocess: false,
         },
+        &part,
     );
 
     // Test with null condition

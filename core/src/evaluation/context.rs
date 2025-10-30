@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use drasi_query_ast::ast;
+use drasi_query_ast::ast::{self, ProjectionClause, QueryPart};
 use hashers::jenkins::spooky_hash::SpookyHasher;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
@@ -104,30 +104,38 @@ impl<'a> ExpressionEvaluationContext<'a> {
         variables: &'a QueryVariables,
         side_effect_directive: SideEffects,
         change_context: &ChangeContext,
+        query_part: &'a QueryPart,
     ) -> ExpressionEvaluationContext<'a> {
         ExpressionEvaluationContext {
             variables,
             side_effects: side_effect_directive,
-            output_grouping_key: None,
             input_grouping_hash: change_context.before_grouping_hash,
             clock: change_context.before_clock.clone(),
             solution_signature: Some(change_context.solution_signature),
             anchor_element: change_context.before_anchor_element.clone(),
+            output_grouping_key: match &query_part.return_clause {
+                ProjectionClause::GroupBy { grouping, .. } => Some(grouping),
+                _ => None,
+            },
         }
     }
 
     pub fn from_after_change(
         variables: &'a QueryVariables,
         change_context: &ChangeContext,
+        query_part: &'a QueryPart,
     ) -> ExpressionEvaluationContext<'a> {
         ExpressionEvaluationContext {
             variables,
             side_effects: SideEffects::Apply,
-            output_grouping_key: None,
             input_grouping_hash: change_context.after_grouping_hash,
             clock: change_context.after_clock.clone(),
             solution_signature: Some(change_context.solution_signature),
             anchor_element: change_context.after_anchor_element.clone(),
+            output_grouping_key: match &query_part.return_clause {
+                ProjectionClause::GroupBy { grouping, .. } => Some(grouping),
+                _ => None,
+            },
         }
     }
 

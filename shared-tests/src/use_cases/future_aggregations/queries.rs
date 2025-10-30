@@ -45,6 +45,7 @@ pub fn truelater_max_query() -> &'static str {
         (max(datetime(coalesce(c.created_at, i.created_at))) + duration({ seconds: 10 })) <= datetime.realtime(),
         datetime.transaction() + duration({ seconds: 10 })
       )
+    OR (max(datetime(coalesce(c.created_at, i.created_at))) + duration({ seconds: 10 })) <= datetime.realtime()
    
     RETURN
       i.id AS id
