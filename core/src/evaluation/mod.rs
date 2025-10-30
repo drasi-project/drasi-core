@@ -123,7 +123,7 @@ impl fmt::Display for FunctionEvaluationError {
             FunctionEvaluationError::CorruptData => write!(f, "Invalid accumulator"),
             FunctionEvaluationError::InvalidType { expected } => {
                 write!(f, "Invalid type, expected: {expected}")
-            },
+            }
             FunctionEvaluationError::EvaluationError(err) => write!(f, "Evaluation error: {err}"),
         }
     }

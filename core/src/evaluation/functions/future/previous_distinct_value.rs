@@ -88,7 +88,10 @@ impl ScalarFunction for PreviousDistinctValue {
             }
         };
 
-        let result_key = match expression_evaluator.resolve_context_result_key(context).await {
+        let result_key = match expression_evaluator
+            .resolve_context_result_key(context)
+            .await
+        {
             Ok(key) => key,
             Err(e) => {
                 return Err(FunctionError {

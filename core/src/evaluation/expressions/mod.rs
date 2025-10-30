@@ -1909,14 +1909,10 @@ impl ExpressionEvaluator {
         context: &ExpressionEvaluationContext<'_>,
     ) -> Result<ResultKey, EvaluationError> {
         let result_key = match context.get_output_grouping_key() {
-            Some(group_expressions) => {                
+            Some(group_expressions) => {
                 let mut grouping_vals = Vec::new();
                 for group_expression in group_expressions {
-                    grouping_vals.push(
-                        self
-                            .evaluate_expression(context, group_expression)
-                            .await?,                        
-                    );
+                    grouping_vals.push(self.evaluate_expression(context, group_expression).await?);
                 }
                 ResultKey::GroupBy(Arc::new(grouping_vals))
             }
@@ -1924,7 +1920,6 @@ impl ExpressionEvaluator {
         };
         Ok(result_key)
     }
-
 }
 
 async fn get_date_property(date: NaiveDate, property: String) -> Option<u32> {

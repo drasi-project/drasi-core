@@ -134,7 +134,6 @@ pub async fn truefor_sum(config: &(impl QueryTestConfig + Send)) {
     }
 }
 
-
 #[allow(clippy::print_stdout, clippy::unwrap_used)]
 pub async fn truefor_grouped_sum(config: &(impl QueryTestConfig + Send)) {
     let cq = {
@@ -294,8 +293,8 @@ pub async fn truelater_max(config: &(impl QueryTestConfig + Send)) {
 
     //create Comment for Issue 1
     {
-        cq.process_source_change(SourceChange::Insert { 
-            element: Element::Relation { 
+        cq.process_source_change(SourceChange::Insert {
+            element: Element::Relation {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "r1"),
                     labels: Arc::new([Arc::from("HAS")]),
@@ -305,9 +304,11 @@ pub async fn truelater_max(config: &(impl QueryTestConfig + Send)) {
                 out_node: ElementReference::new("test", "c1"),
                 properties: ElementPropertyMap::from(json!({
                     "id": "r1"
-                }))
-            }
-        }).await.unwrap();
+                })),
+            },
+        })
+        .await
+        .unwrap();
 
         let change = SourceChange::Insert {
             element: Element::Node {
@@ -330,6 +331,4 @@ pub async fn truelater_max(config: &(impl QueryTestConfig + Send)) {
             before: variablemap!("id"=>VariableValue::from("i1"))
         }));
     }
-
-
 }
