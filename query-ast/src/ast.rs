@@ -28,6 +28,16 @@ pub struct QueryPart {
     pub return_clause: ProjectionClause,
 }
 
+impl Default for QueryPart {
+    fn default() -> Self {
+        Self {
+            match_clauses: Vec::new(),
+            where_clauses: Vec::new(),
+            return_clause: ProjectionClause::Item(Vec::new()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchClause {
     pub start: NodeMatch,

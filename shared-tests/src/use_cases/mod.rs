@@ -41,6 +41,7 @@ pub mod crosses_above_three_times_in_an_hour;
 pub mod decrease_by_ten;
 pub mod document;
 pub mod exceeds_one_standard_deviation;
+pub mod future_aggregations;
 pub mod greater_than_a_threshold;
 pub mod logical_conditions;
 pub mod prev_distinct;
