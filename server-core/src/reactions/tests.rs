@@ -234,7 +234,7 @@ mod manager_tests {
 
         let retrieved = retrieved.unwrap();
         assert_eq!(retrieved.id, config.id);
-        assert_eq!(retrieved.reaction_type, config.reaction_type);
+        assert_eq!(retrieved.reaction_type(), config.reaction_type());
         assert_eq!(retrieved.queries, config.queries);
     }
 
@@ -413,7 +413,6 @@ mod log_reaction_tests {
 
         let config = ReactionConfig {
             id: "test-log".to_string(),
-            reaction_type: "log".to_string(),
             queries: vec!["query1".to_string()],
             auto_start: false,
             config: crate::config::ReactionSpecificConfig::Log(LogReactionConfig {
@@ -434,7 +433,6 @@ mod log_reaction_tests {
 
         let config = ReactionConfig {
             id: "test-log".to_string(),
-            reaction_type: "log".to_string(),
             queries: vec!["query1".to_string()],
             auto_start: false,
             config: crate::config::ReactionSpecificConfig::Log(LogReactionConfig {

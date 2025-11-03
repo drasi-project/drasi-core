@@ -145,7 +145,6 @@ mod tests {
         // Add reaction
         config.reactions.push(ReactionConfig {
             id: "reaction1".to_string(),
-            reaction_type: "log".to_string(),
             queries: vec!["query1".to_string()],
             auto_start: true,
             config: crate::config::ReactionSpecificConfig::Log(LogReactionConfig {

@@ -232,7 +232,6 @@ mod tests {
 
         let config = ReactionConfig {
             id: "test-reaction".to_string(),
-            reaction_type: "application".to_string(),
             queries: vec!["query1".to_string()],
             auto_start: true,
             config: crate::config::ReactionSpecificConfig::Application(ApplicationReactionConfig {
@@ -253,7 +252,6 @@ mod tests {
         let (event_tx, mut event_rx) = mpsc::channel(100);
         let config = ReactionConfig {
             id: "test-reaction".to_string(),
-            reaction_type: "application".to_string(),
             queries: vec![],
             auto_start: true,
             config: crate::config::ReactionSpecificConfig::Application(ApplicationReactionConfig {
@@ -284,7 +282,6 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(100);
         let config = ReactionConfig {
             id: "test-reaction".to_string(),
-            reaction_type: "application".to_string(),
             queries: vec![],
             auto_start: true,
             config: crate::config::ReactionSpecificConfig::Application(ApplicationReactionConfig {

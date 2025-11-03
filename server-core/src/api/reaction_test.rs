@@ -24,7 +24,7 @@ mod tests {
         let reaction = Reaction::application("app-reaction").build();
 
         assert_eq!(reaction.id, "app-reaction");
-        assert_eq!(reaction.reaction_type, "application");
+        assert_eq!(reaction.reaction_type(), "application");
         assert!(
             reaction.auto_start,
             "Application reaction should auto-start by default"
@@ -37,7 +37,7 @@ mod tests {
         let reaction = Reaction::http("http-reaction").build();
 
         assert_eq!(reaction.id, "http-reaction");
-        assert_eq!(reaction.reaction_type, "http");
+        assert_eq!(reaction.reaction_type(), "http");
         assert!(reaction.auto_start);
     }
 
@@ -46,7 +46,7 @@ mod tests {
         let reaction = Reaction::grpc("grpc-reaction").build();
 
         assert_eq!(reaction.id, "grpc-reaction");
-        assert_eq!(reaction.reaction_type, "grpc");
+        assert_eq!(reaction.reaction_type(), "grpc");
         assert!(reaction.auto_start);
     }
 
@@ -55,7 +55,7 @@ mod tests {
         let reaction = Reaction::sse("sse-reaction").build();
 
         assert_eq!(reaction.id, "sse-reaction");
-        assert_eq!(reaction.reaction_type, "sse");
+        assert_eq!(reaction.reaction_type(), "sse");
         assert!(reaction.auto_start);
     }
 
@@ -64,7 +64,7 @@ mod tests {
         let reaction = Reaction::log("log-reaction").build();
 
         assert_eq!(reaction.id, "log-reaction");
-        assert_eq!(reaction.reaction_type, "log");
+        assert_eq!(reaction.reaction_type(), "log");
         assert!(reaction.auto_start);
     }
 
@@ -73,7 +73,7 @@ mod tests {
         let reaction = Reaction::custom("custom-reaction", "custom-type").build();
 
         assert_eq!(reaction.id, "custom-reaction");
-        assert_eq!(reaction.reaction_type, "custom-type");
+        assert_eq!(reaction.reaction_type(), "custom");
         assert!(reaction.auto_start);
     }
 
@@ -138,7 +138,7 @@ mod tests {
 
         // Verify the reaction is created correctly
         assert_eq!(reaction.id, "http-reaction");
-        assert_eq!(reaction.reaction_type, "http");
+        assert_eq!(reaction.reaction_type(), "http");
         // Properties should be stored in the typed config
         let properties = reaction.get_properties();
         assert!(properties.contains_key("base_url"));
@@ -156,7 +156,7 @@ mod tests {
             .build();
 
         assert_eq!(reaction.id, "http-reaction");
-        assert_eq!(reaction.reaction_type, "http");
+        assert_eq!(reaction.reaction_type(), "http");
         // Verify properties are stored in config
         let properties = reaction.get_properties();
         assert!(properties.contains_key("base_url"));
@@ -173,7 +173,7 @@ mod tests {
             .build();
 
         assert_eq!(reaction.id, "chained-reaction");
-        assert_eq!(reaction.reaction_type, "http");
+        assert_eq!(reaction.reaction_type(), "http");
         assert_eq!(reaction.queries.len(), 1);
         assert!(reaction.auto_start);
         // Properties should be in config
@@ -195,7 +195,7 @@ mod tests {
             .build();
 
         assert_eq!(reaction.id, "complex-reaction");
-        assert_eq!(reaction.reaction_type, "http");
+        assert_eq!(reaction.reaction_type(), "http");
         assert_eq!(reaction.queries.len(), 2);
         assert!(reaction.auto_start);
         // Verify properties are stored in config
@@ -211,7 +211,7 @@ mod tests {
             .build();
 
         assert_eq!(reaction.id, "debug-logger");
-        assert_eq!(reaction.reaction_type, "log");
+        assert_eq!(reaction.reaction_type(), "log");
         assert_eq!(reaction.queries.len(), 1);
     }
 
@@ -224,7 +224,7 @@ mod tests {
             .build();
 
         assert_eq!(reaction.id, "sse-stream");
-        assert_eq!(reaction.reaction_type, "sse");
+        assert_eq!(reaction.reaction_type(), "sse");
         assert_eq!(reaction.queries.len(), 1);
         // Verify config properties are stored
         let properties = reaction.get_properties();
@@ -244,7 +244,7 @@ mod tests {
             .build();
 
         assert_eq!(reaction.id, "grpc-stream");
-        assert_eq!(reaction.reaction_type, "grpc");
+        assert_eq!(reaction.reaction_type(), "grpc");
         assert_eq!(reaction.queries.len(), 1);
         // Verify config properties are stored
         let props = reaction.get_properties();
@@ -259,7 +259,7 @@ mod tests {
             .build();
 
         assert_eq!(reaction.id, "test-reaction");
-        assert_eq!(reaction.reaction_type, "application");
+        assert_eq!(reaction.reaction_type(), "application");
         // Empty properties should be empty
         let props = reaction.get_properties();
         assert!(props.is_empty() || props.len() == 0);
@@ -274,7 +274,7 @@ mod tests {
             .build();
 
         assert_eq!(reaction.id, "test-reaction");
-        assert_eq!(reaction.reaction_type, "http");
+        assert_eq!(reaction.reaction_type(), "http");
         // Verify properties were replaced
         let properties = reaction.get_properties();
         assert!(properties.contains_key("base_url"));

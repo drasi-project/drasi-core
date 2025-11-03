@@ -114,7 +114,7 @@ impl From<QueryConfig> for QueryRuntime {
 impl From<ReactionConfig> for ReactionRuntime {
     fn from(config: ReactionConfig) -> Self {
         let id = config.id.clone();
-        let reaction_type = config.reaction_type.clone();
+        let reaction_type = config.reaction_type().to_string();
         let queries = config.queries.clone();
         let properties = serialize_to_properties(&config.config);
         Self {

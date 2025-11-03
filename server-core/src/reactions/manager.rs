@@ -210,7 +210,7 @@ impl ReactionManager {
             ));
         }
 
-        let reaction: Arc<dyn Reaction> = match config.reaction_type.as_str() {
+        let reaction: Arc<dyn Reaction> = match config.reaction_type() {
             "log" => Arc::new(LogReaction::new(config.clone(), self.event_tx.clone())),
             "http" => Arc::new(HttpReaction::new(config.clone(), self.event_tx.clone())),
             // Adaptive HTTP reaction
@@ -315,7 +315,7 @@ impl ReactionManager {
             let config = reaction.get_config();
             let runtime = ReactionRuntime {
                 id: config.id.clone(),
-                reaction_type: config.reaction_type.clone(),
+                reaction_type: config.reaction_type().to_string(),
                 status: status.clone(),
                 error_message: match &status {
                     ComponentStatus::Error => Some("Reaction error occurred".to_string()),

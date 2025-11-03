@@ -108,7 +108,6 @@ mod schema_tests {
 
         let config = ReactionConfig {
             id: "test-reaction".to_string(),
-            reaction_type: "log".to_string(),
             queries: vec!["query1".to_string()],
             auto_start: true,
             config: crate::config::ReactionSpecificConfig::Log(LogReactionConfig {
@@ -118,7 +117,7 @@ mod schema_tests {
         };
 
         assert_eq!(config.id, "test-reaction");
-        assert_eq!(config.reaction_type, "log");
+        assert_eq!(config.reaction_type(), "log");
         assert!(config.auto_start); // default is true
     }
 
@@ -159,7 +158,6 @@ mod schema_tests {
         // Add a reaction
         config.reactions.push(ReactionConfig {
             id: "reaction1".to_string(),
-            reaction_type: "log".to_string(),
             queries: vec!["query1".to_string()],
             auto_start: true,
             config: crate::config::ReactionSpecificConfig::Log(LogReactionConfig {
@@ -350,7 +348,6 @@ mod runtime_tests {
 
         let config = ReactionConfig {
             id: "test-reaction".to_string(),
-            reaction_type: "log".to_string(),
             queries: vec!["query1".to_string()],
             auto_start: true,
             config: crate::config::ReactionSpecificConfig::Log(LogReactionConfig {
@@ -361,7 +358,7 @@ mod runtime_tests {
 
         let runtime = ReactionRuntime::from(config.clone());
         assert_eq!(runtime.id, config.id);
-        assert_eq!(runtime.reaction_type, config.reaction_type);
+        assert_eq!(runtime.reaction_type, config.reaction_type());
         assert_eq!(runtime.queries, config.queries);
         matches!(runtime.status, ComponentStatus::Stopped);
     }

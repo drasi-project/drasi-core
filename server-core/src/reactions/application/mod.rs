@@ -257,7 +257,6 @@ mod tests {
 
         ReactionConfig {
             id: id.to_string(),
-            reaction_type: "application".to_string(),
             auto_start: true,
             queries,
             config: crate::config::ReactionSpecificConfig::Application(ApplicationReactionConfig {

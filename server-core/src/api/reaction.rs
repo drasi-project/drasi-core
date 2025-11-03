@@ -287,10 +287,10 @@ impl ReactionBuilder {
                 })
             }
             _ => {
-                // Default to application for unknown types
-                ReactionSpecificConfig::Application(ApplicationReactionConfig {
+                // Use custom reaction type for unknown types
+                ReactionSpecificConfig::Custom {
                     properties: self.properties.clone(),
-                })
+                }
             }
         }
     }

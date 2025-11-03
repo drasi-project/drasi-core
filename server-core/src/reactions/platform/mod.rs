@@ -450,7 +450,6 @@ mod tests {
 
         ReactionConfig {
             id: "test-reaction".to_string(),
-            reaction_type: "platform".to_string(),
             queries: vec!["test-query".to_string()],
             auto_start: true,
             config: crate::config::ReactionSpecificConfig::Platform(PlatformReactionConfig {
@@ -486,7 +485,6 @@ mod tests {
 
         let config = ReactionConfig {
             id: "test-reaction".to_string(),
-            reaction_type: "platform".to_string(),
             queries: vec!["test-query".to_string()],
             auto_start: true,
             config: crate::config::ReactionSpecificConfig::Platform(PlatformReactionConfig {
@@ -518,7 +516,6 @@ mod tests {
 
         let config = ReactionConfig {
             id: "test-reaction".to_string(),
-            reaction_type: "platform".to_string(),
             queries: vec!["test-query".to_string()],
             auto_start: true,
             config: crate::config::ReactionSpecificConfig::Platform(PlatformReactionConfig {

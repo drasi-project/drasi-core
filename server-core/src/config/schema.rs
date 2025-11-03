@@ -179,6 +179,9 @@ impl ReactionConfig {
             ReactionSpecificConfig::Http(_) => "http",
             ReactionSpecificConfig::Grpc(_) => "grpc",
             ReactionSpecificConfig::Sse(_) => "sse",
+            ReactionSpecificConfig::Platform(_) => "platform",
+            ReactionSpecificConfig::Profiler(_) => "profiler",
+            ReactionSpecificConfig::Application(_) => "application",
             ReactionSpecificConfig::Custom { .. } => "custom",
         }
     }

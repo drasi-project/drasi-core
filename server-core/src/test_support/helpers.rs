@@ -145,7 +145,6 @@ pub mod test_fixtures {
 
         ReactionConfig {
             id: id.to_string(),
-            reaction_type: "log".to_string(),
             queries,
             auto_start: true,
             config: crate::config::ReactionSpecificConfig::Log(LogReactionConfig {
