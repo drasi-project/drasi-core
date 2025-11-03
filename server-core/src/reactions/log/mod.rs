@@ -31,12 +31,10 @@ pub struct LogReaction {
 
 impl LogReaction {
     pub fn new(config: ReactionConfig, event_tx: ComponentEventSender) -> Self {
-        let log_level = config
-            .properties
-            .get("log_level")
-            .and_then(|v| v.as_str())
-            .unwrap_or("info")
-            .to_string();
+        let log_level = match &config.config {
+            crate::config::ReactionSpecificConfig::Log(log_config) => log_config.log_level.clone(),
+            _ => "info".to_string(),
+        };
 
         Self {
             base: ReactionBase::new(config, event_tx),

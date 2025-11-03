@@ -18,6 +18,18 @@ use std::collections::HashMap;
 use super::schema::{QueryConfig, ReactionConfig, SourceConfig};
 use crate::channels::ComponentStatus;
 
+/// Helper function to convert typed config to properties HashMap
+fn serialize_to_properties<T: serde::Serialize>(config: &T) -> HashMap<String, serde_json::Value> {
+    match serde_json::to_value(config) {
+        Ok(serde_json::Value::Object(map)) => {
+            map.into_iter()
+                .filter(|(k, _)| k != "source_type" && k != "reaction_type")
+                .collect()
+        }
+        _ => HashMap::new(),
+    }
+}
+
 /// Runtime representation of a source with status
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceRuntime {
@@ -48,8 +60,6 @@ pub struct QueryRuntime {
     pub error_message: Option<String>,
     /// IDs of sources this query subscribes to
     pub sources: Vec<String>,
-    /// Query-specific configuration properties
-    pub properties: HashMap<String, serde_json::Value>,
     /// Optional synthetic joins for the query
     #[serde(skip_serializing_if = "Option::is_none")]
     pub joins: Option<Vec<super::schema::QueryJoinConfig>>,
@@ -75,12 +85,15 @@ pub struct ReactionRuntime {
 
 impl From<SourceConfig> for SourceRuntime {
     fn from(config: SourceConfig) -> Self {
+        let id = config.id.clone();
+        let source_type = config.source_type().to_string();
+        let properties = serialize_to_properties(&config.config);
         Self {
-            id: config.id,
-            source_type: config.source_type,
+            id,
+            source_type,
             status: ComponentStatus::Stopped,
             error_message: None,
-            properties: config.properties,
+            properties,
         }
     }
 }
@@ -93,7 +106,6 @@ impl From<QueryConfig> for QueryRuntime {
             status: ComponentStatus::Stopped,
             error_message: None,
             sources: config.sources,
-            properties: config.properties,
             joins: config.joins,
         }
     }
@@ -101,13 +113,17 @@ impl From<QueryConfig> for QueryRuntime {
 
 impl From<ReactionConfig> for ReactionRuntime {
     fn from(config: ReactionConfig) -> Self {
+        let id = config.id.clone();
+        let reaction_type = config.reaction_type.clone();
+        let queries = config.queries.clone();
+        let properties = serialize_to_properties(&config.config);
         Self {
-            id: config.id,
-            reaction_type: config.reaction_type,
+            id,
+            reaction_type,
             status: ComponentStatus::Stopped,
             error_message: None,
-            queries: config.queries,
-            properties: config.properties,
+            queries,
+            properties,
         }
     }
 }

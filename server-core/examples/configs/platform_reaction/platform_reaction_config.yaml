@@ -12,9 +12,9 @@ sources:
   - id: "sensor-data"
     source_type: "mock"
     auto_start: true
-    properties:
-      data_type: "sensor"
-      interval_ms: 2000
+    # Mock source configuration (typed)
+    data_type: "sensor"
+    interval_ms: 2000
 
 # Continuous query
 queries:
@@ -29,23 +29,23 @@ reactions:
     reaction_type: "platform"
     queries: ["high-temperature-alert"]
     auto_start: true
-    properties:
-      # Required: Redis connection URL
-      redis_url: "redis://localhost:6379"
+    # Platform reaction configuration (typed)
+    # Required: Redis connection URL
+    redis_url: "redis://localhost:6379"
 
-      # Optional: Pub/sub name for Dapr CloudEvent (default: "drasi-pubsub")
-      pubsub_name: "drasi-pubsub"
+    # Optional: Pub/sub name for Dapr CloudEvent (default: "drasi-pubsub")
+    pubsub_name: "drasi-pubsub"
 
-      # Optional: Source name for CloudEvent (default: "drasi-core")
-      source_name: "drasi-core"
+    # Optional: Source name for CloudEvent (default: "drasi-core")
+    source_name: "drasi-core"
 
-      # Optional: Maximum stream length for trimming (default: unlimited)
-      # Uses Redis MAXLEN with approximate trimming (~)
-      max_stream_length: 10000
+    # Optional: Maximum stream length for trimming (default: unlimited)
+    # Uses Redis MAXLEN with approximate trimming (~)
+    max_stream_length: 10000
 
-      # Optional: Emit control events for lifecycle (default: true)
-      # Control events include: BootstrapStarted, BootstrapCompleted, Running, Stopped, Deleted
-      emit_control_events: true
+    # Optional: Emit control events for lifecycle (default: true)
+    # Control events include: BootstrapStarted, BootstrapCompleted, Running, Stopped, Deleted
+    emit_control_events: true
 
 # Stream Naming Convention:
 # Results are published to streams named: {query-id}-results

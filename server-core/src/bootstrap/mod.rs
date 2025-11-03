@@ -71,8 +71,8 @@ impl BootstrapContext {
     }
 
     /// Get a property from the source configuration
-    pub fn get_property(&self, key: &str) -> Option<&serde_json::Value> {
-        self.source_config.properties.get(key)
+    pub fn get_property(&self, key: &str) -> Option<serde_json::Value> {
+        self.source_config.get_properties().get(key).cloned()
     }
 
     /// Get a typed property from the source configuration

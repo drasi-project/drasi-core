@@ -24,7 +24,8 @@ mod test_support;
 use anyhow::Result;
 use drasi_core::models::SourceChange;
 use drasi_server_core::channels::SourceEvent;
-use drasi_server_core::config::SourceConfig;
+use drasi_server_core::config::{SourceConfig, SourceSpecificConfig};
+use drasi_server_core::config::typed::PlatformSourceConfig;
 use drasi_server_core::sources::platform::PlatformSource;
 use drasi_server_core::sources::Source;
 use serde_json::json;
@@ -45,19 +46,18 @@ async fn create_test_source(
 ) {
     let (event_tx, event_rx) = mpsc::channel(100);
 
-    let mut properties = HashMap::new();
-    properties.insert("redis_url".to_string(), json!(redis_url));
-    properties.insert("stream_key".to_string(), json!(stream_key));
-    properties.insert("consumer_group".to_string(), json!("test-group"));
-    properties.insert("consumer_name".to_string(), json!("test-consumer"));
-    properties.insert("batch_size".to_string(), json!(10));
-    properties.insert("block_ms".to_string(), json!(100));
-
     let config = SourceConfig {
         id: "test-source".to_string(),
         source_type: "platform".to_string(),
         auto_start: false,
-        properties,
+        config: SourceSpecificConfig::Platform(PlatformSourceConfig {
+            redis_url,
+            stream_key: stream_key.to_string(),
+            consumer_group: "test-group".to_string(),
+            consumer_name: Some("test-consumer".to_string()),
+            batch_size: 10,
+            block_ms: 100,
+        }),
         bootstrap_provider: None,
         dispatch_buffer_capacity: None,
         dispatch_mode: None,

@@ -13,14 +13,12 @@
         "query_api_url": "http://my-source-query-api:8080",
         "timeout_seconds": 300
       },
-      "properties": {
-        "redis_url": "redis://localhost:6379",
-        "stream_key": "external-source:changes",
-        "consumer_group": "drasi-core",
-        "consumer_name": "consumer-1",
-        "batch_size": 10,
-        "block_ms": 5000
-      }
+      "redis_url": "redis://localhost:6379",
+      "stream_key": "external-source:changes",
+      "consumer_group": "drasi-core",
+      "consumer_name": "consumer-1",
+      "batch_size": 10,
+      "block_ms": 5000
     },
     {
       "id": "remote_platform_source_alt",
@@ -29,13 +27,10 @@
         "type": "platform",
         "timeout_seconds": 600
       },
-      "properties": {
-        "redis_url": "redis://localhost:6379",
-        "stream_key": "sensor-data:changes",
-        "consumer_group": "drasi-core",
-        "consumer_name": "consumer-1",
-        "query_api_url": "http://sensor-query-api:8080"
-      }
+      "redis_url": "redis://localhost:6379",
+      "stream_key": "sensor-data:changes",
+      "consumer_group": "drasi-core",
+      "consumer_name": "consumer-1"
     },
     {
       "id": "dev_platform_source",
@@ -45,12 +40,10 @@
         "query_api_url": "http://localhost:8080",
         "timeout_seconds": 30
       },
-      "properties": {
-        "redis_url": "redis://localhost:6379",
-        "stream_key": "test-source:changes",
-        "consumer_group": "dev-core",
-        "consumer_name": "dev-consumer"
-      }
+      "redis_url": "redis://localhost:6379",
+      "stream_key": "test-source:changes",
+      "consumer_group": "dev-core",
+      "consumer_name": "dev-consumer"
     }
   ],
   "queries": [
@@ -71,10 +64,7 @@
       "reaction_type": "log",
       "queries": ["person_query"],
       "auto_start": true,
-      "properties": {
-        "log_level": "info",
-        "format": "json"
-      }
+      "log_level": "info"
     }
   ]
 }

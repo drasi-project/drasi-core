@@ -27,7 +27,8 @@ use drasi_server_core::channels::{
     ChangeDispatcher, ComponentEvent, ComponentStatus, QueryResult,
     QuerySubscriptionResponse,
 };
-use drasi_server_core::config::{QueryConfig, ReactionConfig};
+use drasi_server_core::config::{QueryConfig, ReactionConfig, ReactionSpecificConfig};
+use drasi_server_core::config::typed::PlatformReactionConfig;
 use drasi_server_core::queries::Query;
 use drasi_server_core::reactions::platform::{
     CloudEvent, ControlSignal, PlatformReaction, ResultEvent,
@@ -59,7 +60,6 @@ impl MockQuery {
                 query_language: drasi_server_core::config::QueryLanguage::Cypher,
                 sources: vec![],
                 auto_start: false,
-                properties: HashMap::new(),
                 joins: None,
                 enable_bootstrap: false,
                 bootstrap_buffer_size: 10000,
@@ -143,27 +143,21 @@ fn create_test_reaction(
 ) -> (PlatformReaction, mpsc::Receiver<ComponentEvent>) {
     let (event_tx, event_rx) = mpsc::channel(100);
 
-    let mut properties = HashMap::new();
-    properties.insert("redis_url".to_string(), json!(redis_url));
-    properties.insert(
-        "emit_control_events".to_string(),
-        json!(emit_control_events),
-    );
-
-    if let Some(max_len) = max_stream_length {
-        properties.insert("max_stream_length".to_string(), json!(max_len));
-    }
-
-    if let Some(pubsub) = pubsub_name {
-        properties.insert("pubsub_name".to_string(), json!(pubsub));
-    }
-
     let config = ReactionConfig {
         id: "test-reaction".to_string(),
         reaction_type: "platform".to_string(),
         queries: vec![query_id.to_string()],
         auto_start: false,
-        properties,
+        config: ReactionSpecificConfig::Platform(PlatformReactionConfig {
+            redis_url,
+            pubsub_name: pubsub_name.map(|s| s.to_string()),
+            source_name: None,
+            max_stream_length,
+            emit_control_events,
+            batch_enabled: false,
+            batch_max_size: 100,
+            batch_max_wait_ms: 1000,
+        }),
         priority_queue_capacity: None,
     };
 

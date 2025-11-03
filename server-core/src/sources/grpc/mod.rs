@@ -63,21 +63,12 @@ impl Source for GrpcSource {
             .await?;
 
         // Get configuration
-        let port = self
-            .base
-            .config
-            .properties
-            .get("port")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(50051) as u16;
-
-        let host = self
-            .base
-            .config
-            .properties
-            .get("host")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0.0.0.0");
+        let (host, port) = match &self.base.config.config {
+            crate::config::SourceSpecificConfig::Grpc(grpc_config) => {
+                (&grpc_config.host as &str, grpc_config.port)
+            }
+            _ => ("0.0.0.0", 50051),
+        };
 
         let addr = format!("{}:{}", host, port).parse()?;
 

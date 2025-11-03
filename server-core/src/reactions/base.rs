@@ -24,6 +24,7 @@
 
 use anyhow::Result;
 use log::{error, info, warn};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -227,12 +228,16 @@ mod tests {
     #[tokio::test]
     async fn test_reaction_base_creation() {
         let (event_tx, _event_rx) = mpsc::channel(100);
+        use crate::config::typed::ApplicationReactionConfig;
+
         let config = ReactionConfig {
             id: "test-reaction".to_string(),
-            reaction_type: "test".to_string(),
+            reaction_type: "application".to_string(),
             queries: vec!["query1".to_string()],
             auto_start: true,
-            properties: Default::default(),
+            config: crate::config::ReactionSpecificConfig::Application(ApplicationReactionConfig {
+                properties: HashMap::new(),
+            }),
             priority_queue_capacity: Some(5000),
         };
 
@@ -243,13 +248,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_status_transitions() {
+        use crate::config::typed::ApplicationReactionConfig;
+
         let (event_tx, mut event_rx) = mpsc::channel(100);
         let config = ReactionConfig {
             id: "test-reaction".to_string(),
-            reaction_type: "test".to_string(),
+            reaction_type: "application".to_string(),
             queries: vec![],
             auto_start: true,
-            properties: Default::default(),
+            config: crate::config::ReactionSpecificConfig::Application(ApplicationReactionConfig {
+                properties: HashMap::new(),
+            }),
             priority_queue_capacity: None,
         };
 
@@ -270,13 +279,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_priority_queue_operations() {
+        use crate::config::typed::ApplicationReactionConfig;
+
         let (event_tx, _event_rx) = mpsc::channel(100);
         let config = ReactionConfig {
             id: "test-reaction".to_string(),
-            reaction_type: "test".to_string(),
+            reaction_type: "application".to_string(),
             queries: vec![],
             auto_start: true,
-            properties: Default::default(),
+            config: crate::config::ReactionSpecificConfig::Application(ApplicationReactionConfig {
+                properties: HashMap::new(),
+            }),
             priority_queue_capacity: Some(10),
         };
 

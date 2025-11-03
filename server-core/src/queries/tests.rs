@@ -294,7 +294,6 @@ mod manager_tests {
 #[cfg(test)]
 mod query_core_tests {
     use crate::config::QueryConfig;
-    use std::collections::HashMap;
 
     #[tokio::test]
     async fn test_query_syntax_validation() {
@@ -311,7 +310,6 @@ mod query_core_tests {
                 query_language: crate::config::QueryLanguage::Cypher,
                 sources: vec![],
                 auto_start: false,
-                properties: HashMap::new(),
                 joins: None,
                 enable_bootstrap: true,
                 bootstrap_buffer_size: 10000,
@@ -333,7 +331,6 @@ mod query_core_tests {
             query_language: crate::config::QueryLanguage::Cypher,
             sources: vec![],
             auto_start: false,
-            properties: HashMap::new(),
             joins: None,
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,

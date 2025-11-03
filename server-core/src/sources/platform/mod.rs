@@ -627,8 +627,26 @@ impl Source for PlatformSource {
     async fn start(&self) -> Result<()> {
         info!("Starting platform source: {}", self.base.config.id);
 
-        // Parse configuration
-        let platform_config = Self::parse_config(&self.base.config.properties)?;
+        // Extract configuration from typed config
+        let platform_config = match &self.base.config.config {
+            crate::config::SourceSpecificConfig::Platform(platform_config) => {
+                PlatformConfig {
+                    redis_url: platform_config.redis_url.clone(),
+                    stream_key: platform_config.stream_key.clone(),
+                    consumer_group: platform_config.consumer_group.clone(),
+                    consumer_name: platform_config.consumer_name.clone().unwrap_or_else(|| {
+                        format!("drasi-consumer-{}", self.base.config.id)
+                    }),
+                    batch_size: platform_config.batch_size,
+                    block_ms: platform_config.block_ms,
+                    start_id: ">".to_string(),
+                    always_create_consumer_group: false,
+                    max_retries: 5,
+                    retry_delay_ms: 1000,
+                }
+            }
+            _ => return Err(anyhow::anyhow!("Invalid config type for platform source")),
+        };
 
         // Update status
         *self.base.status.write().await = ComponentStatus::Running;

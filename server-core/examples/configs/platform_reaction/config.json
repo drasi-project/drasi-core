@@ -9,10 +9,8 @@
       "id": "sensor-data",
       "source_type": "mock",
       "auto_start": true,
-      "properties": {
-        "data_type": "sensor",
-        "interval_ms": 2000
-      }
+      "data_type": "sensor",
+      "interval_ms": 2000
     }
   ],
   "queries": [
@@ -29,13 +27,11 @@
       "reaction_type": "platform",
       "queries": ["high-temperature-alert"],
       "auto_start": true,
-      "properties": {
-        "redis_url": "redis://localhost:6379",
-        "pubsub_name": "drasi-pubsub",
-        "source_name": "drasi-core",
-        "max_stream_length": 10000,
-        "emit_control_events": true
-      }
+      "redis_url": "redis://localhost:6379",
+      "pubsub_name": "drasi-pubsub",
+      "source_name": "drasi-core",
+      "max_stream_length": 10000,
+      "emit_control_events": true
     }
   ]
 }

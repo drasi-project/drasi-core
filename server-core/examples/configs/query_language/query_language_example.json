@@ -9,10 +9,8 @@
       "id": "source1",
       "source_type": "mock",
       "auto_start": true,
-      "properties": {
-        "data_type": "sensor",
-        "interval_ms": 1000
-      }
+      "data_type": "sensor",
+      "interval_ms": 1000
     }
   ],
   "queries": [
@@ -55,9 +53,7 @@
         "gql-complex-query"
       ],
       "auto_start": true,
-      "properties": {
-        "log_level": "info"
-      }
+      "log_level": "info"
     }
   ]
 }

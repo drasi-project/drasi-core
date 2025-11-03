@@ -76,60 +76,32 @@ pub struct GrpcReaction {
 impl GrpcReaction {
     pub fn new(config: ReactionConfig, event_tx: ComponentEventSender) -> Self {
         // Extract gRPC-specific configuration
-        let endpoint = config
-            .properties
-            .get("endpoint")
-            .and_then(|v| v.as_str())
-            .unwrap_or("grpc://localhost:50052")
-            .to_string();
-
-        let batch_size = config
-            .properties
-            .get("batch_size")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(100) as usize;
-
-        let batch_flush_timeout_ms = config
-            .properties
-            .get("batch_flush_timeout_ms")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(1000); // Default 1 second flush timeout
-
-        let timeout_ms = config
-            .properties
-            .get("timeout_ms")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(5000);
-
-        let max_retries = config
-            .properties
-            .get("max_retries")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(3) as u32;
-
-        let connection_retry_attempts = config
-            .properties
-            .get("connection_retry_attempts")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(5) as u32;
-
-        let initial_connection_timeout_ms = config
-            .properties
-            .get("initial_connection_timeout_ms")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(10000);
-
-        // Parse metadata if provided
-        let mut metadata = HashMap::new();
-        if let Some(meta_value) = config.properties.get("metadata") {
-            if let Some(meta_obj) = meta_value.as_object() {
-                for (key, value) in meta_obj {
-                    if let Some(str_value) = value.as_str() {
-                        metadata.insert(key.clone(), str_value.to_string());
-                    }
-                }
+        let (endpoint, batch_size, batch_flush_timeout_ms, timeout_ms, max_retries, connection_retry_attempts, initial_connection_timeout_ms, metadata) = match &config.config {
+            crate::config::ReactionSpecificConfig::Grpc(grpc_config) => {
+                (
+                    grpc_config.endpoint.clone(),
+                    grpc_config.batch_size,
+                    grpc_config.batch_flush_timeout_ms,
+                    grpc_config.timeout_ms,
+                    grpc_config.max_retries,
+                    grpc_config.connection_retry_attempts,
+                    grpc_config.initial_connection_timeout_ms,
+                    grpc_config.metadata.clone(),
+                )
             }
-        }
+            _ => {
+                (
+                    "grpc://localhost:50052".to_string(),
+                    100,
+                    1000,
+                    5000,
+                    3,
+                    5,
+                    10000,
+                    HashMap::new(),
+                )
+            }
+        };
 
         Self {
             base: ReactionBase::new(config, event_tx),

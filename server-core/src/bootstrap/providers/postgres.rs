@@ -81,6 +81,10 @@ struct PostgresConfig {
     pub database: String,
     pub user: String,
     pub password: String,
+    pub tables: Vec<String>,
+    pub slot_name: String,
+    pub publication_name: String,
+    pub ssl_mode: String,
     pub table_keys: Vec<TableKeyConfig>,
 }
 
@@ -92,35 +96,28 @@ struct TableKeyConfig {
 
 impl PostgresConfig {
     fn from_context(context: &BootstrapContext) -> Result<Self> {
-        let props = &context.source_config.properties;
-
-        Ok(PostgresConfig {
-            host: props
-                .get("host")
-                .and_then(|v| v.as_str())
-                .unwrap_or("localhost")
-                .to_string(),
-            port: props.get("port").and_then(|v| v.as_u64()).unwrap_or(5432) as u16,
-            database: props
-                .get("database")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("database property is required for PostgreSQL bootstrap"))?
-                .to_string(),
-            user: props
-                .get("user")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("user property is required for PostgreSQL bootstrap"))?
-                .to_string(),
-            password: props
-                .get("password")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("password property is required for PostgreSQL bootstrap"))?
-                .to_string(),
-            table_keys: props
-                .get("table_keys")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .unwrap_or_default(),
-        })
+        match &context.source_config.config {
+            crate::config::SourceSpecificConfig::Postgres(postgres_config) => {
+                Ok(PostgresConfig {
+                    host: postgres_config.host.clone(),
+                    port: postgres_config.port,
+                    database: postgres_config.database.clone(),
+                    user: postgres_config.user.clone(),
+                    password: postgres_config.password.clone(),
+                    tables: postgres_config.tables.clone(),
+                    slot_name: postgres_config.slot_name.clone(),
+                    publication_name: postgres_config.publication_name.clone(),
+                    ssl_mode: postgres_config.ssl_mode.clone(),
+                    table_keys: postgres_config.table_keys.iter().map(|tk| TableKeyConfig {
+                        table: tk.table.clone(),
+                        key_columns: tk.key_columns.clone(),
+                    }).collect(),
+                })
+            }
+            _ => {
+                Err(anyhow!("PostgreSQL bootstrap provider requires PostgreSQL source config"))
+            }
+        }
     }
 }
 

@@ -253,12 +253,16 @@ mod tests {
     use std::collections::HashMap;
 
     fn create_test_reaction_config(id: &str, queries: Vec<String>) -> ReactionConfig {
+        use crate::config::typed::ApplicationReactionConfig;
+
         ReactionConfig {
             id: id.to_string(),
             reaction_type: "application".to_string(),
             auto_start: true,
             queries,
-            properties: HashMap::new(),
+            config: crate::config::ReactionSpecificConfig::Application(ApplicationReactionConfig {
+                properties: HashMap::new(),
+            }),
             priority_queue_capacity: None,
         }
     }
@@ -462,21 +466,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_reaction_creation_with_properties() {
-        let mut config = create_test_reaction_config("test-reaction", vec![]);
-        config
-            .properties
-            .insert("test_key".to_string(), serde_json::json!("test_value"));
+    async fn test_reaction_creation_with_config() {
+        let config = create_test_reaction_config("test-reaction", vec![]);
 
         let (event_tx, _) = mpsc::channel(100);
         let (reaction, _handle) = ApplicationReaction::new(config, event_tx);
 
         let config = reaction.get_config();
-        assert_eq!(config.properties.len(), 1);
-        assert_eq!(
-            config.properties.get("test_key"),
-            Some(&serde_json::json!("test_value"))
-        );
+        assert_eq!(config.id, "test-reaction");
+        // Verify we can get properties through the helper method
+        let props = config.get_properties();
+        assert!(props.is_empty());
     }
 
     #[tokio::test]

@@ -13,13 +13,14 @@
 // limitations under the License.
 
 use anyhow::Result;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
 use crate::bootstrap::BootstrapProviderConfig;
 use crate::channels::DispatchMode;
+use crate::config::typed::{SourceSpecificConfig, ReactionSpecificConfig};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum QueryLanguage {
@@ -58,14 +59,12 @@ pub struct DrasiServerCoreSettings {
 pub struct SourceConfig {
     /// Unique identifier for the source
     pub id: String,
-    /// Type of source (e.g., "mock", "kafka", "database")
-    pub source_type: String,
     /// Whether to automatically start this source (default: true)
     #[serde(default = "default_auto_start")]
     pub auto_start: bool,
-    /// Source-specific configuration properties
-    #[serde(default, deserialize_with = "deserialize_null_as_empty_map")]
-    pub properties: HashMap<String, serde_json::Value>,
+    /// Typed source-specific configuration (contains source_type as discriminator)
+    #[serde(flatten)]
+    pub config: SourceSpecificConfig,
     /// Optional bootstrap provider configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bootstrap_provider: Option<BootstrapProviderConfig>,
@@ -75,6 +74,31 @@ pub struct SourceConfig {
     /// Dispatch mode for this source (default: Channel)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_mode: Option<DispatchMode>,
+}
+
+impl SourceConfig {
+    /// Get the source type as a string from the enum variant
+    pub fn source_type(&self) -> &str {
+        match &self.config {
+            SourceSpecificConfig::Mock(_) => "mock",
+            SourceSpecificConfig::Postgres(_) => "postgres",
+            SourceSpecificConfig::Http(_) => "http",
+            SourceSpecificConfig::Grpc(_) => "grpc",
+            SourceSpecificConfig::Platform(_) => "platform",
+            SourceSpecificConfig::Application(_) => "application",
+            SourceSpecificConfig::Custom { .. } => "custom",
+        }
+    }
+
+    /// Get typed configuration properties as HashMap for backward compatibility
+    pub fn get_properties(&self) -> HashMap<String, serde_json::Value> {
+        match serde_json::to_value(&self.config) {
+            Ok(serde_json::Value::Object(map)) => {
+                map.into_iter().filter(|(k, _)| k != "source_type").collect()
+            }
+            _ => HashMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,9 +115,6 @@ pub struct QueryConfig {
     /// Whether to automatically start this query (default: true)
     #[serde(default = "default_auto_start")]
     pub auto_start: bool,
-    /// Query-specific configuration properties
-    #[serde(default, deserialize_with = "deserialize_null_as_empty_map")]
-    pub properties: HashMap<String, serde_json::Value>,
     /// Optional synthetic joins for the query
     #[serde(skip_serializing_if = "Option::is_none")]
     pub joins: Option<Vec<QueryJoinConfig>>,
@@ -137,19 +158,40 @@ pub struct QueryJoinKeyConfig {
 pub struct ReactionConfig {
     /// Unique identifier for the reaction
     pub id: String,
-    /// Type of reaction (e.g., "log", "webhook", "notification")
-    pub reaction_type: String,
     /// IDs of queries this reaction subscribes to
     pub queries: Vec<String>,
     /// Whether to automatically start this reaction (default: true)
     #[serde(default = "default_auto_start")]
     pub auto_start: bool,
-    /// Reaction-specific configuration properties
-    #[serde(default, deserialize_with = "deserialize_null_as_empty_map")]
-    pub properties: HashMap<String, serde_json::Value>,
+    /// Typed reaction-specific configuration (contains reaction_type as discriminator)
+    #[serde(flatten)]
+    pub config: ReactionSpecificConfig,
     /// Priority queue capacity for this reaction (default: server global, or 10000 if not specified)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority_queue_capacity: Option<usize>,
+}
+
+impl ReactionConfig {
+    /// Get the reaction type as a string from the enum variant
+    pub fn reaction_type(&self) -> &str {
+        match &self.config {
+            ReactionSpecificConfig::Log(_) => "log",
+            ReactionSpecificConfig::Http(_) => "http",
+            ReactionSpecificConfig::Grpc(_) => "grpc",
+            ReactionSpecificConfig::Sse(_) => "sse",
+            ReactionSpecificConfig::Custom { .. } => "custom",
+        }
+    }
+
+    /// Get typed configuration properties as HashMap for backward compatibility
+    pub fn get_properties(&self) -> HashMap<String, serde_json::Value> {
+        match serde_json::to_value(&self.config) {
+            Ok(serde_json::Value::Object(map)) => {
+                map.into_iter().filter(|(k, _)| k != "reaction_type").collect()
+            }
+            _ => HashMap::new(),
+        }
+    }
 }
 
 impl DrasiServerCoreConfig {
@@ -268,16 +310,6 @@ fn default_bootstrap_buffer_size() -> usize {
     10000
 }
 
-/// Helper to deserialize null as empty HashMap
-fn deserialize_null_as_empty_map<'de, D>(
-    deserializer: D,
-) -> Result<HashMap<String, serde_json::Value>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let opt = Option::<HashMap<String, serde_json::Value>>::deserialize(deserializer)?;
-    Ok(opt.unwrap_or_default())
-}
 
 // Conversion implementations for QueryJoin types
 impl From<QueryJoinKeyConfig> for drasi_core::models::QueryJoinKey {

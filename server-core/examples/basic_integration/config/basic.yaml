@@ -3,17 +3,17 @@
 # filtering query, and log reaction
 
 # Server configuration - basic setup
-server:
+server_core:
   id: "basic-example"
 
 # Data sources - using mock for simplicity
 sources:
   - id: "counter-source"       # Unique identifier for this source
-    source_type: "mock"  # Built-in mock data generator
+    source_type: "mock"        # Built-in mock data generator
     auto_start: true           # Start immediately when core starts
-    properties:
-      data_type: "counter"     # Generate incrementing counter data
-      interval_ms: 2000        # Generate new data every 2 seconds
+    # Mock source configuration (typed)
+    data_type: "counter"       # Generate incrementing counter data
+    interval_ms: 2000          # Generate new data every 2 seconds
 
 # Continuous queries - simple filtering example
 queries:
@@ -27,8 +27,8 @@ queries:
 # Reactions - log output for easy viewing
 reactions:
   - id: "log-reaction"         # Unique identifier for this reaction
-    reaction_type: "log"  # Built-in logging reaction
+    reaction_type: "log"       # Built-in logging reaction
     queries: ["filter-query"]   # Connect to our filtering query
     auto_start: true           # Start immediately
-    properties:
-      log_level: "info"        # Log at info level for visibility
+    # Log reaction configuration (typed)
+    log_level: "info"          # Log at info level for visibility

@@ -356,17 +356,12 @@ pub struct ProfilerReaction {
 
 impl ProfilerReaction {
     pub fn new(config: ReactionConfig, event_tx: ComponentEventSender) -> Self {
-        let window_size = config
-            .properties
-            .get("window_size")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(1000) as usize;
-
-        let report_interval_secs = config
-            .properties
-            .get("report_interval_secs")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(10);
+        let (window_size, report_interval_secs) = match &config.config {
+            crate::config::ReactionSpecificConfig::Profiler(profiler_config) => {
+                (profiler_config.window_size, profiler_config.report_interval_secs)
+            }
+            _ => (1000, 10),
+        };
 
         Self {
             base: ReactionBase::new(config, event_tx),

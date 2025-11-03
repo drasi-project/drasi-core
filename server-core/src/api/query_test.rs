@@ -16,9 +16,8 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::api::{Properties, Query};
+    use crate::api::Query;
     use crate::config::{QueryJoinConfig, QueryJoinKeyConfig, QueryLanguage};
-    use serde_json::json;
 
     #[test]
     fn test_query_cypher() {
@@ -29,7 +28,6 @@ mod tests {
         assert_eq!(query.query, "");
         assert!(query.sources.is_empty());
         assert!(query.auto_start);
-        assert!(query.properties.is_empty());
         assert!(query.joins.is_none());
     }
 
@@ -111,37 +109,6 @@ mod tests {
     }
 
     #[test]
-    fn test_query_with_property() {
-        let query = Query::cypher("test-query")
-            .query("MATCH (n) RETURN n")
-            .with_property("timeout_ms", json!(5000))
-            .with_property("buffer_size", json!(1000))
-            .build();
-
-        assert_eq!(query.properties.len(), 2);
-        assert_eq!(query.properties.get("timeout_ms").unwrap(), &json!(5000));
-        assert_eq!(query.properties.get("buffer_size").unwrap(), &json!(1000));
-    }
-
-    #[test]
-    fn test_query_with_properties() {
-        let props = Properties::new()
-            .with_int("timeout_ms", 5000)
-            .with_int("buffer_size", 1000)
-            .with_bool("enable_cache", true);
-
-        let query = Query::cypher("test-query")
-            .query("MATCH (n) RETURN n")
-            .with_properties(props)
-            .build();
-
-        assert_eq!(query.properties.len(), 3);
-        assert_eq!(query.properties.get("timeout_ms").unwrap(), &json!(5000));
-        assert_eq!(query.properties.get("buffer_size").unwrap(), &json!(1000));
-        assert_eq!(query.properties.get("enable_cache").unwrap(), &json!(true));
-    }
-
-    #[test]
     fn test_query_with_single_join() {
         let join = QueryJoinConfig {
             id: "join-1".to_string(),
@@ -213,7 +180,6 @@ mod tests {
             .query("MATCH (n:Order) WHERE n.status = 'active' RETURN n")
             .from_source("orders-source")
             .auto_start(true)
-            .with_property("cache_enabled", json!(true))
             .build();
 
         assert_eq!(query.id, "chained-query");
@@ -223,7 +189,6 @@ mod tests {
         );
         assert_eq!(query.sources.len(), 1);
         assert!(query.auto_start);
-        assert_eq!(query.properties.len(), 1);
     }
 
     #[test]
@@ -246,18 +211,11 @@ mod tests {
             .query("MATCH (n)-[r]->(m) RETURN n, r, m")
             .from_sources(vec!["source-1".to_string(), "source-2".to_string()])
             .auto_start(true)
-            .with_properties(
-                Properties::new()
-                    .with_int("timeout_ms", 10000)
-                    .with_int("buffer_size", 2000)
-                    .with_bool("enable_cache", true),
-            )
             .with_joins(joins_vec)
             .build();
 
         assert_eq!(query.id, "complex-query");
         assert_eq!(query.sources.len(), 2);
-        assert_eq!(query.properties.len(), 3);
         assert!(query.joins.is_some());
         assert_eq!(query.joins.unwrap().len(), 1);
     }
@@ -274,30 +232,6 @@ mod tests {
         assert!(matches!(query.query_language, QueryLanguage::GQL));
         assert_eq!(query.query, "{ users { id name email } }");
         assert_eq!(query.sources.len(), 1);
-    }
-
-    #[test]
-    fn test_query_empty_properties() {
-        let query = Query::cypher("test-query")
-            .query("MATCH (n) RETURN n")
-            .with_properties(Properties::new())
-            .build();
-
-        assert!(query.properties.is_empty());
-    }
-
-    #[test]
-    fn test_query_properties_override() {
-        // with_properties should replace all previous properties
-        let query = Query::cypher("test-query")
-            .query("MATCH (n) RETURN n")
-            .with_property("old_key", json!("old_value"))
-            .with_properties(Properties::new().with_string("new_key", "new_value"))
-            .build();
-
-        assert_eq!(query.properties.len(), 1);
-        assert!(query.properties.contains_key("new_key"));
-        assert!(!query.properties.contains_key("old_key"));
     }
 
     #[test]

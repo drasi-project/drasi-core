@@ -17,7 +17,8 @@
 use crate::api::Properties;
 use crate::bootstrap::BootstrapProviderConfig;
 use crate::channels::DispatchMode;
-use crate::config::SourceConfig;
+use crate::config::{SourceConfig, SourceSpecificConfig};
+use crate::config::typed::*;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -123,14 +124,240 @@ impl SourceBuilder {
 
     /// Build the source configuration
     pub fn build(self) -> SourceConfig {
+        // Convert properties HashMap to typed config based on source_type
+        let config = self.build_typed_config();
+
         SourceConfig {
             id: self.id,
-            source_type: self.source_type,
             auto_start: self.auto_start,
-            properties: self.properties,
+            config,
             bootstrap_provider: self.bootstrap_provider,
             dispatch_buffer_capacity: self.dispatch_buffer_capacity,
             dispatch_mode: self.dispatch_mode,
+        }
+    }
+
+    /// Helper to build typed config from properties
+    fn build_typed_config(&self) -> SourceSpecificConfig {
+        match self.source_type.as_str() {
+            "mock" => {
+                let data_type = self.properties
+                    .get("data_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("generic")
+                    .to_string();
+                let interval_ms = self.properties
+                    .get("interval_ms")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(5000);
+                SourceSpecificConfig::Mock(MockSourceConfig {
+                    data_type,
+                    interval_ms,
+                })
+            }
+            "postgres" => {
+                let host = self.properties
+                    .get("host")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("localhost")
+                    .to_string();
+                let port = self.properties
+                    .get("port")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(5432) as u16;
+                let database = self.properties
+                    .get("database")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("postgres")
+                    .to_string();
+                let user = self.properties
+                    .get("user")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("postgres")
+                    .to_string();
+                let password = self.properties
+                    .get("password")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let tables = self.properties
+                    .get("tables")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                let slot_name = self.properties
+                    .get("slot_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("drasi_slot")
+                    .to_string();
+                let publication_name = self.properties
+                    .get("publication_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("drasi_publication")
+                    .to_string();
+                let ssl_mode = self.properties
+                    .get("ssl_mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("prefer")
+                    .to_string();
+
+                SourceSpecificConfig::Postgres(PostgresSourceConfig {
+                    host,
+                    port,
+                    database,
+                    user,
+                    password,
+                    tables,
+                    slot_name,
+                    publication_name,
+                    ssl_mode,
+                    table_keys: Vec::new(),
+                })
+            }
+            "http" => {
+                let host = self.properties
+                    .get("host")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("localhost")
+                    .to_string();
+                let port = self.properties
+                    .get("port")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(8080) as u16;
+                let endpoint = self.properties
+                    .get("endpoint")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let timeout_ms = self.properties
+                    .get("timeout_ms")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(30000);
+                let database = self.properties
+                    .get("database")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let user = self.properties
+                    .get("user")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let password = self.properties
+                    .get("password")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let adaptive_enabled = self.properties
+                    .get("adaptive_enabled")
+                    .and_then(|v| v.as_bool());
+                let adaptive_max_batch_size = self.properties
+                    .get("adaptive_max_batch_size")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize);
+                let adaptive_min_batch_size = self.properties
+                    .get("adaptive_min_batch_size")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize);
+                let adaptive_max_wait_ms = self.properties
+                    .get("adaptive_max_wait_ms")
+                    .and_then(|v| v.as_u64());
+                let adaptive_min_wait_ms = self.properties
+                    .get("adaptive_min_wait_ms")
+                    .and_then(|v| v.as_u64());
+                let adaptive_window_secs = self.properties
+                    .get("adaptive_window_secs")
+                    .and_then(|v| v.as_u64());
+
+                SourceSpecificConfig::Http(HttpSourceConfig {
+                    host,
+                    port,
+                    endpoint,
+                    timeout_ms,
+                    tables: Vec::new(),
+                    table_keys: Vec::new(),
+                    database,
+                    user,
+                    password,
+                    adaptive_enabled,
+                    adaptive_max_batch_size,
+                    adaptive_min_batch_size,
+                    adaptive_max_wait_ms,
+                    adaptive_min_wait_ms,
+                    adaptive_window_secs,
+                })
+            }
+            "grpc" => {
+                let host = self.properties
+                    .get("host")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("0.0.0.0")
+                    .to_string();
+                let port = self.properties
+                    .get("port")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(50051) as u16;
+                let endpoint = self.properties
+                    .get("endpoint")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let timeout_ms = self.properties
+                    .get("timeout_ms")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(30000);
+
+                SourceSpecificConfig::Grpc(GrpcSourceConfig {
+                    host,
+                    port,
+                    endpoint,
+                    timeout_ms,
+                })
+            }
+            "platform" => {
+                let redis_url = self.properties
+                    .get("redis_url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("redis://localhost:6379")
+                    .to_string();
+                let stream_key = self.properties
+                    .get("stream_key")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("drasi:changes")
+                    .to_string();
+                let consumer_group = self.properties
+                    .get("consumer_group")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("drasi-core")
+                    .to_string();
+                let consumer_name = self.properties
+                    .get("consumer_name")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let batch_size = self.properties
+                    .get("batch_size")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(10) as usize;
+                let block_ms = self.properties
+                    .get("block_ms")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(5000);
+
+                SourceSpecificConfig::Platform(PlatformSourceConfig {
+                    redis_url,
+                    stream_key,
+                    consumer_group,
+                    consumer_name,
+                    batch_size,
+                    block_ms,
+                })
+            }
+            "application" => {
+                SourceSpecificConfig::Application(ApplicationSourceConfig {
+                    properties: self.properties.clone(),
+                })
+            }
+            _ => {
+                // Custom source type
+                SourceSpecificConfig::Custom {
+                    properties: self.properties.clone(),
+                }
+            }
         }
     }
 }

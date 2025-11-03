@@ -10,9 +10,9 @@ sources:
   - id: "source1"
     source_type: "mock"
     auto_start: true
-    properties:
-      data_type: "sensor"
-      interval_ms: 1000
+    # Mock source configuration (typed)
+    data_type: "sensor"
+    interval_ms: 1000
 
 queries:
   # Example 1: Cypher query (explicit)
@@ -63,11 +63,11 @@ queries:
 reactions:
   - id: "log-reaction"
     reaction_type: "log"
-    queries: 
+    queries:
       - "cypher-query-explicit"
       - "cypher-query-default"
       - "gql-query"
       - "gql-complex-query"
     auto_start: true
-    properties:
-      log_level: "info"
+    # Log reaction configuration (typed)
+    log_level: "info"

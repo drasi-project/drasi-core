@@ -58,22 +58,12 @@ impl Source for MockSource {
         let source_id = self.base.config.id.clone();
 
         // Get configuration
-        let data_type = self
-            .base
-            .config
-            .properties
-            .get("data_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("generic")
-            .to_string();
-
-        let interval_ms = self
-            .base
-            .config
-            .properties
-            .get("interval_ms")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(5000);
+        let (data_type, interval_ms) = match &self.base.config.config {
+            crate::config::SourceSpecificConfig::Mock(mock_config) => {
+                (mock_config.data_type.clone(), mock_config.interval_ms)
+            }
+            _ => ("generic".to_string(), 5000),
+        };
 
         // Start the data generation task
         let status = Arc::clone(&self.base.status);

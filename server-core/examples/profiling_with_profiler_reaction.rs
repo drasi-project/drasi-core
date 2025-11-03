@@ -26,7 +26,8 @@
 //! Run with: cargo run --example profiling_with_profiler_reaction
 
 use drasi_server_core::{
-    config::ReactionConfig,
+    config::{ReactionConfig, ReactionSpecificConfig},
+    config::typed::ProfilerReactionConfig,
     reactions::{ProfilerReaction, Reaction},
     server_core::DrasiServerCore,
 };
@@ -40,16 +41,17 @@ async fn main() {
     // STEP 1: Create ProfilerReaction configuration
     println!("Step 1: Creating ProfilerReaction configuration");
 
-    let mut properties = std::collections::HashMap::new();
-    properties.insert("window_size".to_string(), serde_json::json!(100));
-    properties.insert("report_interval_secs".to_string(), serde_json::json!(10));
-
     let config = ReactionConfig {
         id: "profiler".to_string(),
         reaction_type: "profiler".to_string(),
         queries: vec!["example_query".to_string()],
         auto_start: true,
-        properties,
+        config: ReactionSpecificConfig::Profiler(ProfilerReactionConfig {
+            output_file: None,
+            detailed: true,
+            window_size: 100,
+            report_interval_secs: 10,
+        }),
         priority_queue_capacity: None,
     };
 

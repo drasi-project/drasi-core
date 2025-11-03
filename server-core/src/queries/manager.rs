@@ -985,7 +985,6 @@ impl QueryManager {
                     _ => None,
                 },
                 sources: config.sources.clone(),
-                properties: config.properties.clone(),
                 joins: config.joins.clone(),
             };
             Ok(runtime)

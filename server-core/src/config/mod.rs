@@ -14,6 +14,7 @@
 
 pub mod runtime;
 pub mod schema;
+pub mod typed;
 
 #[cfg(test)]
 mod dispatch_mode_test;
@@ -22,3 +23,4 @@ mod tests;
 
 pub use runtime::{QueryRuntime, ReactionRuntime, RuntimeConfig, SourceRuntime};
 pub use schema::*;
+pub use typed::*;

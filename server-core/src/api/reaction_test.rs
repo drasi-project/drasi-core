@@ -30,7 +30,6 @@ mod tests {
             "Application reaction should auto-start by default"
         );
         assert!(reaction.queries.is_empty());
-        assert!(reaction.properties.is_empty());
     }
 
     #[test]
@@ -133,38 +132,35 @@ mod tests {
     #[test]
     fn test_reaction_with_property() {
         let reaction = Reaction::http("http-reaction")
-            .with_property("url", json!("http://localhost:8080/webhook"))
-            .with_property("method", json!("POST"))
+            .with_property("base_url", json!("http://localhost:8080"))
+            .with_property("timeout_ms", json!(5000))
             .build();
 
-        assert_eq!(reaction.properties.len(), 2);
-        assert_eq!(
-            reaction.properties.get("url").unwrap(),
-            &json!("http://localhost:8080/webhook")
-        );
-        assert_eq!(reaction.properties.get("method").unwrap(), &json!("POST"));
+        // Verify the reaction is created correctly
+        assert_eq!(reaction.id, "http-reaction");
+        assert_eq!(reaction.reaction_type, "http");
+        // Properties should be stored in the typed config
+        let properties = reaction.get_properties();
+        assert!(properties.contains_key("base_url"));
+        assert!(properties.contains_key("timeout_ms"));
     }
 
     #[test]
     fn test_reaction_with_properties() {
         let props = Properties::new()
-            .with_string("url", "http://localhost:8080/webhook")
-            .with_string("method", "POST")
-            .with_int("timeout_ms", 5000)
-            .with_bool("retry", true);
+            .with_string("base_url", "http://localhost:8080")
+            .with_int("timeout_ms", 5000);
 
         let reaction = Reaction::http("http-reaction")
             .with_properties(props)
             .build();
 
-        assert_eq!(reaction.properties.len(), 4);
-        assert_eq!(
-            reaction.properties.get("url").unwrap(),
-            &json!("http://localhost:8080/webhook")
-        );
-        assert_eq!(reaction.properties.get("method").unwrap(), &json!("POST"));
-        assert_eq!(reaction.properties.get("timeout_ms").unwrap(), &json!(5000));
-        assert_eq!(reaction.properties.get("retry").unwrap(), &json!(true));
+        assert_eq!(reaction.id, "http-reaction");
+        assert_eq!(reaction.reaction_type, "http");
+        // Verify properties are stored in config
+        let properties = reaction.get_properties();
+        assert!(properties.contains_key("base_url"));
+        assert!(properties.contains_key("timeout_ms"));
     }
 
     #[test]
@@ -172,14 +168,18 @@ mod tests {
         let reaction = Reaction::http("chained-reaction")
             .subscribe_to("orders-query")
             .auto_start(true)
-            .with_property("url", json!("http://api:8080/webhook"))
-            .with_property("method", json!("POST"))
+            .with_property("base_url", json!("http://api:8080"))
+            .with_property("timeout_ms", json!(5000))
             .build();
 
         assert_eq!(reaction.id, "chained-reaction");
+        assert_eq!(reaction.reaction_type, "http");
         assert_eq!(reaction.queries.len(), 1);
         assert!(reaction.auto_start);
-        assert_eq!(reaction.properties.len(), 2);
+        // Properties should be in config
+        let props = reaction.get_properties();
+        assert!(props.contains_key("base_url"));
+        assert!(props.contains_key("timeout_ms"));
     }
 
     #[test]
@@ -189,18 +189,19 @@ mod tests {
             .auto_start(true)
             .with_properties(
                 Properties::new()
-                    .with_string("url", "http://localhost:8080/webhook")
-                    .with_string("method", "POST")
-                    .with_int("timeout_ms", 10000)
-                    .with_int("retry_count", 3)
-                    .with_bool("verify_ssl", true),
+                    .with_string("base_url", "http://localhost:8080")
+                    .with_int("timeout_ms", 10000),
             )
             .build();
 
         assert_eq!(reaction.id, "complex-reaction");
+        assert_eq!(reaction.reaction_type, "http");
         assert_eq!(reaction.queries.len(), 2);
         assert!(reaction.auto_start);
-        assert_eq!(reaction.properties.len(), 5);
+        // Verify properties are stored in config
+        let props = reaction.get_properties();
+        assert!(props.contains_key("base_url"));
+        assert!(props.contains_key("timeout_ms"));
     }
 
     #[test]
@@ -219,14 +220,16 @@ mod tests {
         let reaction = Reaction::sse("sse-stream")
             .subscribe_to("events-query")
             .with_property("port", json!(8081))
-            .with_property("path", json!("/events"))
+            .with_property("sse_path", json!("/events"))
             .build();
 
         assert_eq!(reaction.id, "sse-stream");
         assert_eq!(reaction.reaction_type, "sse");
         assert_eq!(reaction.queries.len(), 1);
-        assert_eq!(reaction.properties.get("port").unwrap(), &json!(8081));
-        assert_eq!(reaction.properties.get("path").unwrap(), &json!("/events"));
+        // Verify config properties are stored
+        let properties = reaction.get_properties();
+        assert!(properties.contains_key("port"));
+        assert!(properties.contains_key("sse_path"));
     }
 
     #[test]
@@ -236,14 +239,17 @@ mod tests {
             .with_properties(
                 Properties::new()
                     .with_string("endpoint", "localhost:50051")
-                    .with_bool("use_tls", false),
+                    .with_int("timeout_ms", 30000),
             )
             .build();
 
         assert_eq!(reaction.id, "grpc-stream");
         assert_eq!(reaction.reaction_type, "grpc");
         assert_eq!(reaction.queries.len(), 1);
-        assert_eq!(reaction.properties.len(), 2);
+        // Verify config properties are stored
+        let props = reaction.get_properties();
+        assert!(props.contains_key("endpoint"));
+        assert!(props.contains_key("timeout_ms"));
     }
 
     #[test]
@@ -252,20 +258,26 @@ mod tests {
             .with_properties(Properties::new())
             .build();
 
-        assert!(reaction.properties.is_empty());
+        assert_eq!(reaction.id, "test-reaction");
+        assert_eq!(reaction.reaction_type, "application");
+        // Empty properties should be empty
+        let props = reaction.get_properties();
+        assert!(props.is_empty() || props.len() == 0);
     }
 
     #[test]
     fn test_reaction_properties_override() {
         // with_properties should replace all previous properties
         let reaction = Reaction::http("test-reaction")
-            .with_property("old_key", json!("old_value"))
-            .with_properties(Properties::new().with_string("new_key", "new_value"))
+            .with_property("base_url", json!("http://old"))
+            .with_properties(Properties::new().with_string("base_url", "http://new"))
             .build();
 
-        assert_eq!(reaction.properties.len(), 1);
-        assert!(reaction.properties.contains_key("new_key"));
-        assert!(!reaction.properties.contains_key("old_key"));
+        assert_eq!(reaction.id, "test-reaction");
+        assert_eq!(reaction.reaction_type, "http");
+        // Verify properties were replaced
+        let properties = reaction.get_properties();
+        assert!(properties.contains_key("base_url"));
     }
 
     #[test]

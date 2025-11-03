@@ -65,49 +65,25 @@ impl AdaptiveHttpSource {
         let mut adaptive_config = AdaptiveBatchConfig::default();
 
         // Allow overriding adaptive parameters from config
-        if let Some(max_batch) = config
-            .properties
-            .get("adaptive_max_batch_size")
-            .and_then(|v| v.as_u64())
-        {
-            adaptive_config.max_batch_size = max_batch as usize;
-        }
-        if let Some(min_batch) = config
-            .properties
-            .get("adaptive_min_batch_size")
-            .and_then(|v| v.as_u64())
-        {
-            adaptive_config.min_batch_size = min_batch as usize;
-        }
-        if let Some(max_wait_ms) = config
-            .properties
-            .get("adaptive_max_wait_ms")
-            .and_then(|v| v.as_u64())
-        {
-            adaptive_config.max_wait_time = Duration::from_millis(max_wait_ms);
-        }
-        if let Some(min_wait_ms) = config
-            .properties
-            .get("adaptive_min_wait_ms")
-            .and_then(|v| v.as_u64())
-        {
-            adaptive_config.min_wait_time = Duration::from_millis(min_wait_ms);
-        }
-        if let Some(window_secs) = config
-            .properties
-            .get("adaptive_window_secs")
-            .and_then(|v| v.as_u64())
-        {
-            adaptive_config.throughput_window = Duration::from_secs(window_secs);
-        }
-
-        // Check if adaptive mode is explicitly disabled
-        if let Some(enabled) = config
-            .properties
-            .get("adaptive_enabled")
-            .and_then(|v| v.as_bool())
-        {
-            adaptive_config.adaptive_enabled = enabled;
+        if let crate::config::SourceSpecificConfig::Http(http_config) = &config.config {
+            if let Some(max_batch) = http_config.adaptive_max_batch_size {
+                adaptive_config.max_batch_size = max_batch;
+            }
+            if let Some(min_batch) = http_config.adaptive_min_batch_size {
+                adaptive_config.min_batch_size = min_batch;
+            }
+            if let Some(max_wait_ms) = http_config.adaptive_max_wait_ms {
+                adaptive_config.max_wait_time = Duration::from_millis(max_wait_ms);
+            }
+            if let Some(min_wait_ms) = http_config.adaptive_min_wait_ms {
+                adaptive_config.min_wait_time = Duration::from_millis(min_wait_ms);
+            }
+            if let Some(window_secs) = http_config.adaptive_window_secs {
+                adaptive_config.throughput_window = Duration::from_secs(window_secs);
+            }
+            if let Some(enabled) = http_config.adaptive_enabled {
+                adaptive_config.adaptive_enabled = enabled;
+            }
         }
 
         Ok(Self {
@@ -313,22 +289,13 @@ impl Source for AdaptiveHttpSource {
             )
             .await?;
 
-        // Extract configuration
-        let host = self
-            .base
-            .config
-            .properties
-            .get("host")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0.0.0.0")
-            .to_string();
-        let port = self
-            .base
-            .config
-            .properties
-            .get("port")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(8080) as u16;
+        // Extract configuration from typed config
+        let (host, port) = match &self.base.config.config {
+            crate::config::SourceSpecificConfig::Http(http_config) => {
+                (http_config.host.clone(), http_config.port)
+            }
+            _ => ("0.0.0.0".to_string(), 8080u16),
+        };
 
         // Create batch channel
         let (batch_tx, batch_rx) = mpsc::channel(1000);

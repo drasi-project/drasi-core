@@ -9,11 +9,8 @@
       "id": "sensor-stream",
       "source_type": "mock",
       "auto_start": true,
-      "properties": {
-        "data_type": "sensor",
-        "interval_ms": 1000,
-        "initial_count": 0
-      },
+      "data_type": "sensor",
+      "interval_ms": 1000,
       "bootstrap_provider": {
         "type": "scriptfile",
         "file_paths": ["examples/data/sensor_data.jsonl"]
@@ -23,11 +20,8 @@
       "id": "user-data",
       "source_type": "mock",
       "auto_start": true,
-      "properties": {
-        "data_type": "person",
-        "interval_ms": 10000,
-        "initial_count": 0
-      },
+      "data_type": "person",
+      "interval_ms": 10000,
       "bootstrap_provider": {
         "type": "scriptfile",
         "file_paths": ["/data/users.jsonl"]
@@ -37,11 +31,8 @@
       "id": "event-stream",
       "source_type": "mock",
       "auto_start": true,
-      "properties": {
-        "data_type": "event",
-        "interval_ms": 2000,
-        "initial_count": 10
-      }
+      "data_type": "event",
+      "interval_ms": 2000
     }
   ],
   "queries": [
@@ -51,31 +42,21 @@
       "queryLanguage": "Cypher",
       "sources": ["sensor-stream"],
       "auto_start": true,
-      "priority_queue_capacity": 50000,
-      "properties": {
-        "description": "Alert on high temperature readings",
-        "threshold": 80
-      }
+      "priority_queue_capacity": 50000
     },
     {
       "id": "user-activity",
       "query": "MATCH (u:Person)-[:TRIGGERED]->(e:Event) RETURN u, e",
       "queryLanguage": "Cypher",
       "sources": ["user-data", "event-stream"],
-      "auto_start": true,
-      "properties": {
-        "description": "Track user activity patterns"
-      }
+      "auto_start": true
     },
     {
       "id": "sensor-summary",
       "query": "MATCH (s:SensorReading) RETURN s.location, avg(s.temperature) as avg_temp",
       "queryLanguage": "Cypher",
       "sources": ["sensor-stream"],
-      "auto_start": true,
-      "properties": {
-        "description": "Aggregate sensor readings by location"
-      }
+      "auto_start": true
     }
   ],
   "reactions": [
@@ -85,33 +66,21 @@
       "queries": ["high-temp-alert"],
       "auto_start": true,
       "priority_queue_capacity": 100000,
-      "properties": {
-        "log_level": "warn",
-        "format": "json",
-        "include_metadata": true
-      }
+      "log_level": "warn"
     },
     {
       "id": "activity-analytics",
       "reaction_type": "log",
       "queries": ["user-activity"],
       "auto_start": true,
-      "properties": {
-        "log_level": "info",
-        "format": "json",
-        "batch_size": 100
-      }
+      "log_level": "info"
     },
     {
       "id": "dashboard-feed",
       "reaction_type": "log",
       "queries": ["sensor-summary"],
       "auto_start": true,
-      "properties": {
-        "log_level": "debug",
-        "format": "json",
-        "update_interval": 5000
-      }
+      "log_level": "debug"
     }
   ]
 }

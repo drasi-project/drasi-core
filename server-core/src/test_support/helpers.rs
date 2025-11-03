@@ -16,7 +16,6 @@ pub mod test_fixtures {
     use crate::config::{
         DrasiServerCoreConfig, DrasiServerCoreSettings, QueryConfig, ReactionConfig, SourceConfig,
     };
-    use serde_json::json;
     use std::collections::HashMap;
 
     /// Creates a minimal valid server configuration for testing
@@ -36,25 +35,68 @@ pub mod test_fixtures {
 
     /// Creates a test source configuration
     pub fn create_test_source_config(id: &str, source_type: &str) -> SourceConfig {
-        let mut properties = HashMap::new();
+        use crate::config::typed::*;
 
-        match source_type {
-            "mock" => {
-                properties.insert("data_type".to_string(), json!("counter"));
-                properties.insert("interval_ms".to_string(), json!(1000));
-            }
-            "process" => {
-                properties.insert("executable".to_string(), json!("python3"));
-                properties.insert("script".to_string(), json!("test.py"));
-            }
-            _ => {}
-        }
+        let config = match source_type {
+            "mock" => crate::config::SourceSpecificConfig::Mock(MockSourceConfig {
+                data_type: "counter".to_string(),
+                interval_ms: 1000,
+            }),
+            "postgres" => crate::config::SourceSpecificConfig::Postgres(PostgresSourceConfig {
+                host: "localhost".to_string(),
+                port: 5432,
+                database: "test_db".to_string(),
+                user: "test_user".to_string(),
+                password: "".to_string(),
+                tables: vec![],
+                slot_name: "drasi_slot".to_string(),
+                publication_name: "drasi_publication".to_string(),
+                ssl_mode: "prefer".to_string(),
+                table_keys: vec![],
+            }),
+            "http" => crate::config::SourceSpecificConfig::Http(HttpSourceConfig {
+                host: "localhost".to_string(),
+                port: 8080,
+                endpoint: None,
+                timeout_ms: 30000,
+                tables: vec![],
+                table_keys: vec![],
+                database: None,
+                user: None,
+                password: None,
+                adaptive_enabled: None,
+                adaptive_max_batch_size: None,
+                adaptive_min_batch_size: None,
+                adaptive_max_wait_ms: None,
+                adaptive_min_wait_ms: None,
+                adaptive_window_secs: None,
+            }),
+            "grpc" => crate::config::SourceSpecificConfig::Grpc(GrpcSourceConfig {
+                host: "localhost".to_string(),
+                port: 50051,
+                endpoint: None,
+                timeout_ms: 30000,
+            }),
+            "platform" => crate::config::SourceSpecificConfig::Platform(PlatformSourceConfig {
+                redis_url: "redis://localhost:6379".to_string(),
+                stream_key: "drasi:changes".to_string(),
+                consumer_group: "drasi-core".to_string(),
+                consumer_name: None,
+                batch_size: 10,
+                block_ms: 5000,
+            }),
+            "application" => crate::config::SourceSpecificConfig::Application(ApplicationSourceConfig {
+                properties: HashMap::new(),
+            }),
+            _ => crate::config::SourceSpecificConfig::Application(ApplicationSourceConfig {
+                properties: HashMap::new(),
+            }),
+        };
 
         SourceConfig {
             id: id.to_string(),
-            source_type: source_type.to_string(),
             auto_start: true,
-            properties,
+            config,
             bootstrap_provider: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -70,7 +112,6 @@ pub mod test_fixtures {
             query_language: QueryLanguage::Cypher,
             sources,
             auto_start: true,
-            properties: HashMap::new(),
             joins: None,
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
@@ -89,7 +130,6 @@ pub mod test_fixtures {
             query_language: QueryLanguage::GQL,
             sources,
             auto_start: true,
-            properties: HashMap::new(),
             joins: None,
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
@@ -101,15 +141,16 @@ pub mod test_fixtures {
 
     /// Creates a test reaction configuration
     pub fn create_test_reaction_config(id: &str, queries: Vec<String>) -> ReactionConfig {
-        let mut properties = HashMap::new();
-        properties.insert("log_level".to_string(), json!("info"));
+        use crate::config::typed::LogReactionConfig;
 
         ReactionConfig {
             id: id.to_string(),
             reaction_type: "log".to_string(),
             queries,
             auto_start: true,
-            properties,
+            config: crate::config::ReactionSpecificConfig::Log(LogReactionConfig {
+                log_level: "info".to_string(),
+            }),
             priority_queue_capacity: None,
         }
     }

@@ -15,7 +15,8 @@
 //! Reaction configuration builders
 
 use crate::api::Properties;
-use crate::config::ReactionConfig;
+use crate::config::{ReactionConfig, ReactionSpecificConfig};
+use crate::config::typed::*;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -91,13 +92,206 @@ impl ReactionBuilder {
 
     /// Build the reaction configuration
     pub fn build(self) -> ReactionConfig {
+        // Convert properties HashMap to typed config based on reaction_type
+        let config = self.build_typed_config();
+
         ReactionConfig {
             id: self.id,
-            reaction_type: self.reaction_type,
             queries: self.queries,
             auto_start: self.auto_start,
-            properties: self.properties,
+            config,
             priority_queue_capacity: self.priority_queue_capacity,
+        }
+    }
+
+    /// Helper to build typed config from properties
+    fn build_typed_config(&self) -> ReactionSpecificConfig {
+        match self.reaction_type.as_str() {
+            "log" => {
+                let log_level = self.properties
+                    .get("log_level")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("info")
+                    .to_string();
+                ReactionSpecificConfig::Log(LogReactionConfig { log_level })
+            }
+            "http" => {
+                let base_url = self.properties
+                    .get("base_url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("http://localhost")
+                    .to_string();
+                let token = self.properties
+                    .get("token")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let timeout_ms = self.properties
+                    .get("timeout_ms")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(10000);
+
+                ReactionSpecificConfig::Http(HttpReactionConfig {
+                    base_url,
+                    token,
+                    timeout_ms,
+                    queries: HashMap::new(),
+                })
+            }
+            "grpc" => {
+                let endpoint = self.properties
+                    .get("endpoint")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("grpc://localhost:50052")
+                    .to_string();
+                let token = self.properties
+                    .get("token")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let timeout_ms = self.properties
+                    .get("timeout_ms")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(5000);
+                let batch_size = self.properties
+                    .get("batch_size")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize);
+                let batch_flush_timeout_ms = self.properties
+                    .get("batch_flush_timeout_ms")
+                    .and_then(|v| v.as_u64());
+                let max_retries = self.properties
+                    .get("max_retries")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32);
+                let connection_retry_attempts = self.properties
+                    .get("connection_retry_attempts")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32);
+                let initial_connection_timeout_ms = self.properties
+                    .get("initial_connection_timeout_ms")
+                    .and_then(|v| v.as_u64());
+
+                ReactionSpecificConfig::Grpc(GrpcReactionConfig {
+                    endpoint,
+                    token,
+                    timeout_ms,
+                    batch_size: batch_size.unwrap_or(10),
+                    batch_flush_timeout_ms: batch_flush_timeout_ms.unwrap_or(1000),
+                    max_retries: max_retries.unwrap_or(3),
+                    connection_retry_attempts: connection_retry_attempts.unwrap_or(5),
+                    initial_connection_timeout_ms: initial_connection_timeout_ms.unwrap_or(10000),
+                    metadata: HashMap::new(),
+                })
+            }
+            "sse" => {
+                let host = self.properties
+                    .get("host")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("localhost")
+                    .to_string();
+                let port = self.properties
+                    .get("port")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(8080) as u16;
+                let sse_path = self.properties
+                    .get("sse_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("/sse")
+                    .to_string();
+                let heartbeat_interval_ms = self.properties
+                    .get("heartbeat_interval_ms")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(30000);
+
+                ReactionSpecificConfig::Sse(SseReactionConfig {
+                    host,
+                    port,
+                    sse_path,
+                    heartbeat_interval_ms,
+                })
+            }
+            "platform" => {
+                let redis_url = self.properties
+                    .get("redis_url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("redis://localhost:6379")
+                    .to_string();
+                let pubsub_name = self.properties
+                    .get("pubsub_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("drasi")
+                    .to_string();
+                let source_name = self.properties
+                    .get("source_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("output")
+                    .to_string();
+                let max_stream_length = self.properties
+                    .get("max_stream_length")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1000) as usize;
+                let emit_control_events = self.properties
+                    .get("emit_control_events")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                let batch_enabled = self.properties
+                    .get("batch_enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let batch_max_size = self.properties
+                    .get("batch_max_size")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize);
+                let batch_max_wait_ms = self.properties
+                    .get("batch_max_wait_ms")
+                    .and_then(|v| v.as_u64());
+
+                ReactionSpecificConfig::Platform(PlatformReactionConfig {
+                    redis_url,
+                    pubsub_name: Some(pubsub_name),
+                    source_name: Some(source_name),
+                    max_stream_length: Some(max_stream_length),
+                    emit_control_events,
+                    batch_enabled,
+                    batch_max_size: batch_max_size.unwrap_or(100),
+                    batch_max_wait_ms: batch_max_wait_ms.unwrap_or(100),
+                })
+            }
+            "profiler" => {
+                let output_file = self.properties
+                    .get("output_file")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let detailed = self.properties
+                    .get("detailed")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                let window_size = self.properties
+                    .get("window_size")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1000) as usize;
+                let report_interval_secs = self.properties
+                    .get("report_interval_secs")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(60);
+
+                ReactionSpecificConfig::Profiler(ProfilerReactionConfig {
+                    output_file,
+                    detailed,
+                    window_size,
+                    report_interval_secs,
+                })
+            }
+            "application" => {
+                ReactionSpecificConfig::Application(ApplicationReactionConfig {
+                    properties: self.properties.clone(),
+                })
+            }
+            _ => {
+                // Default to application for unknown types
+                ReactionSpecificConfig::Application(ApplicationReactionConfig {
+                    properties: self.properties.clone(),
+                })
+            }
         }
     }
 }

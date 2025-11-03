@@ -14,11 +14,8 @@
 
 //! Query configuration builders
 
-use crate::api::Properties;
 use crate::channels::DispatchMode;
 use crate::config::{QueryConfig, QueryJoinConfig, QueryLanguage};
-use serde_json::Value;
-use std::collections::HashMap;
 
 /// Fluent builder for Query configuration
 #[derive(Debug, Clone)]
@@ -28,7 +25,6 @@ pub struct QueryBuilder {
     query_language: QueryLanguage,
     sources: Vec<String>,
     auto_start: bool,
-    properties: HashMap<String, Value>,
     joins: Option<Vec<QueryJoinConfig>>,
     priority_queue_capacity: Option<usize>,
     dispatch_buffer_capacity: Option<usize>,
@@ -44,7 +40,6 @@ impl QueryBuilder {
             query_language: language,
             sources: Vec::new(),
             auto_start: true,
-            properties: HashMap::new(),
             joins: None,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
@@ -73,18 +68,6 @@ impl QueryBuilder {
     /// Set whether to auto-start this query (default: true)
     pub fn auto_start(mut self, auto_start: bool) -> Self {
         self.auto_start = auto_start;
-        self
-    }
-
-    /// Add a property
-    pub fn with_property(mut self, key: impl Into<String>, value: Value) -> Self {
-        self.properties.insert(key.into(), value);
-        self
-    }
-
-    /// Set properties using the Properties builder
-    pub fn with_properties(mut self, properties: Properties) -> Self {
-        self.properties = properties.build();
         self
     }
 
@@ -146,7 +129,6 @@ impl QueryBuilder {
             query_language: self.query_language,
             sources: self.sources,
             auto_start: self.auto_start,
-            properties: self.properties,
             joins: self.joins,
             enable_bootstrap: true,           // Default: bootstrap enabled
             bootstrap_buffer_size: 10000,     // Default buffer size

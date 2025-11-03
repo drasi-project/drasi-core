@@ -16,8 +16,8 @@
 
 use drasi_server_core::bootstrap::providers::PlatformBootstrapProvider;
 use drasi_server_core::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
-use drasi_server_core::config::SourceConfig;
-use std::collections::HashMap;
+use drasi_server_core::config::{SourceConfig, SourceSpecificConfig};
+use drasi_server_core::config::typed::PlatformSourceConfig;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use wiremock::matchers::{method, path};
@@ -47,17 +47,18 @@ async fn test_platform_bootstrap_with_mock_server() {
     let (tx, mut rx) = mpsc::channel(100);
 
     // Create source config
-    let mut properties = HashMap::new();
-    properties.insert(
-        "query_api_url".to_string(),
-        serde_json::json!(mock_server.uri()),
-    );
-
     let source_config = Arc::new(SourceConfig {
         id: "test-source".to_string(),
         source_type: "platform".to_string(),
         auto_start: true,
-        properties,
+        config: SourceSpecificConfig::Platform(PlatformSourceConfig {
+            redis_url: "redis://localhost:6379".to_string(),
+            stream_key: "test-stream".to_string(),
+            consumer_group: "test-group".to_string(),
+            consumer_name: None,
+            batch_size: 10,
+            block_ms: 5000,
+        }),
         bootstrap_provider: None,
         dispatch_buffer_capacity: None,
         dispatch_mode: None,
@@ -119,7 +120,14 @@ async fn test_platform_bootstrap_label_filtering() {
         id: "test-source".to_string(),
         source_type: "platform".to_string(),
         auto_start: true,
-        properties: HashMap::new(),
+        config: SourceSpecificConfig::Platform(PlatformSourceConfig {
+            redis_url: "redis://localhost:6379".to_string(),
+            stream_key: "test-stream".to_string(),
+            consumer_group: "test-group".to_string(),
+            consumer_name: None,
+            batch_size: 10,
+            block_ms: 5000,
+        }),
         bootstrap_provider: None,
         dispatch_buffer_capacity: None,
         dispatch_mode: None,
@@ -163,7 +171,14 @@ async fn test_platform_bootstrap_connection_failure() {
         id: "test-source".to_string(),
         source_type: "platform".to_string(),
         auto_start: true,
-        properties: HashMap::new(),
+        config: SourceSpecificConfig::Platform(PlatformSourceConfig {
+            redis_url: "redis://localhost:6379".to_string(),
+            stream_key: "test-stream".to_string(),
+            consumer_group: "test-group".to_string(),
+            consumer_name: None,
+            batch_size: 10,
+            block_ms: 5000,
+        }),
         bootstrap_provider: None,
         dispatch_buffer_capacity: None,
         dispatch_mode: None,
@@ -212,7 +227,14 @@ this is not valid json
         id: "test-source".to_string(),
         source_type: "platform".to_string(),
         auto_start: true,
-        properties: HashMap::new(),
+        config: SourceSpecificConfig::Platform(PlatformSourceConfig {
+            redis_url: "redis://localhost:6379".to_string(),
+            stream_key: "test-stream".to_string(),
+            consumer_group: "test-group".to_string(),
+            consumer_name: None,
+            batch_size: 10,
+            block_ms: 5000,
+        }),
         bootstrap_provider: None,
         dispatch_buffer_capacity: None,
         dispatch_mode: None,

@@ -44,28 +44,12 @@ pub struct SseReaction {
 
 impl SseReaction {
     pub fn new(config: ReactionConfig, event_tx: ComponentEventSender) -> Self {
-        let host = config
-            .properties
-            .get("host")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0.0.0.0")
-            .to_string();
-        let port = config
-            .properties
-            .get("port")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(50051) as u16;
-        let sse_path = config
-            .properties
-            .get("sse_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("/events")
-            .to_string();
-        let heartbeat_interval_ms = config
-            .properties
-            .get("heartbeat_interval_ms")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(15_000);
+        let (host, port, sse_path, heartbeat_interval_ms) = match &config.config {
+            crate::config::ReactionSpecificConfig::Sse(sse_config) => {
+                (sse_config.host.clone(), sse_config.port, sse_config.sse_path.clone(), sse_config.heartbeat_interval_ms)
+            }
+            _ => ("0.0.0.0".to_string(), 50051, "/events".to_string(), 15_000),
+        };
         let (tx, _rx) = broadcast::channel(1024);
         Self {
             base: ReactionBase::new(config, event_tx),

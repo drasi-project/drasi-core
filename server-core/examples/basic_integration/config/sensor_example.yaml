@@ -1,16 +1,16 @@
 # Sensor Data Example - Different Mock Data Type
 # Shows how to use sensor data type with different query patterns
 
-server:
+server_core:
   id: "sensor-example"
 
 sources:
   - id: "sensor-source"
     source_type: "mock"
     auto_start: true
-    properties:
-      data_type: "sensor"      # Generates sensor readings (temperature, humidity, etc.)
-      interval_ms: 1500        # Every 1.5 seconds
+    # Mock source configuration (typed)
+    data_type: "sensor"        # Generates sensor readings (temperature, humidity, etc.)
+    interval_ms: 1500          # Every 1.5 seconds
 
 queries:
   # Example 1: Filter by temperature
@@ -19,10 +19,10 @@ queries:
     sources: ["sensor-source"]
     auto_start: true
 
-  # Example 2: Filter by humidity  
+  # Example 2: Filter by humidity
   - id: "high-humidity"
     query: "MATCH (n:Sensor) WHERE n.humidity > 60 RETURN n"
-    sources: ["sensor-source"] 
+    sources: ["sensor-source"]
     auto_start: true
 
 reactions:
@@ -31,12 +31,12 @@ reactions:
     reaction_type: "log"
     queries: ["hot-temperature"]
     auto_start: true
-    properties:
-      log_level: "warn"        # Use warn level for high temperature
+    # Log reaction configuration (typed)
+    log_level: "warn"          # Use warn level for high temperature
 
   - id: "humidity-logger"
     reaction_type: "log"
     queries: ["high-humidity"]
     auto_start: true
-    properties:
-      log_level: "info"
+    # Log reaction configuration (typed)
+    log_level: "info"

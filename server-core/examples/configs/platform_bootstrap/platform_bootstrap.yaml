@@ -23,14 +23,13 @@ sources:
       type: platform
       query_api_url: "http://my-source-query-api:8080"
       timeout_seconds: 300  # Optional, defaults to 300
-    properties:
-      # Platform source streaming properties
-      redis_url: "redis://localhost:6379"
-      stream_key: "external-source:changes"
-      consumer_group: "drasi-core"
-      consumer_name: "consumer-1"
-      batch_size: 10
-      block_ms: 5000
+    # Platform source configuration (typed)
+    redis_url: "redis://localhost:6379"
+    stream_key: "external-source:changes"
+    consumer_group: "drasi-core"
+    consumer_name: "consumer-1"
+    batch_size: 10
+    block_ms: 5000
 
   # Example 2: Platform source with query_api_url in source properties (fallback)
   - id: remote_platform_source_alt
@@ -39,12 +38,11 @@ sources:
       type: platform
       # query_api_url will be read from properties below
       timeout_seconds: 600  # Longer timeout for large datasets
-    properties:
-      redis_url: "redis://localhost:6379"
-      stream_key: "sensor-data:changes"
-      consumer_group: "drasi-core"
-      consumer_name: "consumer-1"
-      query_api_url: "http://sensor-query-api:8080"
+    # Platform source configuration (typed)
+    redis_url: "redis://localhost:6379"
+    stream_key: "sensor-data:changes"
+    consumer_group: "drasi-core"
+    consumer_name: "consumer-1"
 
   # Example 3: Development/testing with short timeout
   - id: dev_platform_source
@@ -53,11 +51,11 @@ sources:
       type: platform
       query_api_url: "http://localhost:8080"
       timeout_seconds: 30  # Short timeout for development
-    properties:
-      redis_url: "redis://localhost:6379"
-      stream_key: "test-source:changes"
-      consumer_group: "dev-core"
-      consumer_name: "dev-consumer"
+    # Platform source configuration (typed)
+    redis_url: "redis://localhost:6379"
+    stream_key: "test-source:changes"
+    consumer_group: "dev-core"
+    consumer_name: "dev-consumer"
 
 queries:
   # This query will only receive Person nodes and KNOWS relations from bootstrap
@@ -79,9 +77,8 @@ reactions:
     reaction_type: log
     queries: ["person_query"]
     auto_start: true
-    properties:
-      log_level: info
-      format: json
+    # Log reaction configuration (typed)
+    log_level: info
 
 # Network and connectivity considerations:
 # - Ensure the Query API service is accessible from the drasi-core network

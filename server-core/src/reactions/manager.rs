@@ -322,7 +322,7 @@ impl ReactionManager {
                     _ => None,
                 },
                 queries: config.queries.clone(),
-                properties: config.properties.clone(),
+                properties: config.get_properties(),
             };
             Ok(runtime)
         } else {

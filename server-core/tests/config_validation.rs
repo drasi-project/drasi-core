@@ -43,7 +43,7 @@ fn validate_config_file(path: &Path) -> Result<(), String> {
         if source.id.is_empty() {
             return Err(format!("Source has empty ID"));
         }
-        if source.source_type.is_empty() {
+        if source.source_type().is_empty() {
             return Err(format!("Source '{}' has empty source_type", source.id));
         }
     }

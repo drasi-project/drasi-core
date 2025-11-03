@@ -7,11 +7,8 @@
       "id": "mock-sensor-data",
       "source_type": "mock",
       "auto_start": true,
-      "properties": {
-        "data_type": "sensor",
-        "interval_ms": 2000,
-        "initial_count": 5
-      },
+      "data_type": "sensor",
+      "interval_ms": 2000,
       "bootstrap_provider": {
         "type": "scriptfile",
         "file_paths": ["examples/data/sensor_small.jsonl"]
@@ -24,10 +21,7 @@
       "query": "MATCH (n:SensorReading) RETURN n",
       "queryLanguage": "Cypher",
       "sources": ["mock-sensor-data"],
-      "auto_start": true,
-      "properties": {
-        "description": "Monitor all sensor readings"
-      }
+      "auto_start": true
     }
   ],
   "reactions": [
@@ -36,10 +30,7 @@
       "reaction_type": "log",
       "queries": ["sensor-monitor"],
       "auto_start": true,
-      "properties": {
-        "log_level": "info",
-        "format": "json"
-      }
+      "log_level": "info"
     }
   ]
 }

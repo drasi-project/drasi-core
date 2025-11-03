@@ -23,7 +23,6 @@ mod manager_tests {
     use crate::test_support::helpers::test_fixtures::*;
     use anyhow::Result;
     use async_trait::async_trait;
-    use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::{mpsc, RwLock};
 
@@ -44,7 +43,6 @@ mod manager_tests {
                     query_language: crate::config::QueryLanguage::Cypher,
                     sources: vec![],
                     auto_start: false,
-                    properties: HashMap::new(),
                     joins: None,
                     enable_bootstrap: false,
                     bootstrap_buffer_size: 10000,
@@ -327,8 +325,6 @@ mod log_reaction_tests {
     use crate::server_core::DrasiServerCore;
     use anyhow::Result;
     use async_trait::async_trait;
-    use serde_json::json;
-    use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::{mpsc, RwLock};
 
@@ -349,7 +345,6 @@ mod log_reaction_tests {
                     query_language: crate::config::QueryLanguage::Cypher,
                     sources: vec![],
                     auto_start: false,
-                    properties: HashMap::new(),
                     joins: None,
                     enable_bootstrap: false,
                     bootstrap_buffer_size: 10000,
@@ -412,17 +407,18 @@ mod log_reaction_tests {
 
     #[tokio::test]
     async fn test_log_reaction_creation() {
-        let (event_tx, _event_rx) = mpsc::channel(100);
+        use crate::config::typed::LogReactionConfig;
 
-        let mut properties = HashMap::new();
-        properties.insert("log_level".to_string(), json!("info"));
+        let (event_tx, _event_rx) = mpsc::channel(100);
 
         let config = ReactionConfig {
             id: "test-log".to_string(),
             reaction_type: "log".to_string(),
             queries: vec!["query1".to_string()],
             auto_start: false,
-            properties,
+            config: crate::config::ReactionSpecificConfig::Log(LogReactionConfig {
+                log_level: "info".to_string(),
+            }),
             priority_queue_capacity: None,
         };
 
@@ -432,6 +428,8 @@ mod log_reaction_tests {
 
     #[tokio::test]
     async fn test_log_reaction_processes_results() {
+        use crate::config::typed::LogReactionConfig;
+
         let (event_tx, _event_rx) = mpsc::channel(100);
 
         let config = ReactionConfig {
@@ -439,7 +437,9 @@ mod log_reaction_tests {
             reaction_type: "log".to_string(),
             queries: vec!["query1".to_string()],
             auto_start: false,
-            properties: HashMap::new(),
+            config: crate::config::ReactionSpecificConfig::Log(LogReactionConfig {
+                log_level: "info".to_string(),
+            }),
             priority_queue_capacity: None,
         };
 

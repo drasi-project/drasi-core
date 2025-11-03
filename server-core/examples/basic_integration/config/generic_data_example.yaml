@@ -1,16 +1,16 @@
 # Generic Data Example - Using Generic Mock Data Type
 # Shows the generic data type and property selection queries
 
-server:
+server_core:
   id: "generic-data-example"
 
 sources:
   - id: "generic-source"
     source_type: "mock"
     auto_start: true
-    properties:
-      data_type: "generic"     # Generates generic data with random properties
-      interval_ms: 2500        # Every 2.5 seconds
+    # Mock source configuration (typed)
+    data_type: "generic"       # Generates generic data with random properties
+    interval_ms: 2500          # Every 2.5 seconds
 
 queries:
   # Example 1: Return all properties
@@ -31,5 +31,5 @@ reactions:
     reaction_type: "log"
     queries: ["all-data", "selected-properties"]
     auto_start: true
-    properties:
-      log_level: "debug"
+    # Log reaction configuration (typed)
+    log_level: "debug"

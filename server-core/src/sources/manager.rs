@@ -151,7 +151,7 @@ impl SourceManager {
             ));
         }
 
-        let source: Arc<dyn Source> = match config.source_type.as_str() {
+        let source: Arc<dyn Source> = match config.source_type() {
             // Internal Rust sources running as tokio tasks
             "mock" => Arc::new(MockSource::new(config.clone(), self.event_tx.clone())?),
             "postgres" => Arc::new(super::PostgresReplicationSource::new(
@@ -174,7 +174,7 @@ impl SourceManager {
             _ => {
                 return Err(anyhow::anyhow!(
                     "Unknown source type: {}",
-                    config.source_type
+                    config.source_type()
                 ));
             }
         };
@@ -257,13 +257,13 @@ impl SourceManager {
             let config = source.get_config();
             let runtime = SourceRuntime {
                 id: config.id.clone(),
-                source_type: config.source_type.clone(),
+                source_type: config.source_type().to_string(),
                 status: status.clone(),
                 error_message: match &status {
                     ComponentStatus::Error => Some("Source error occurred".to_string()),
                     _ => None,
                 },
-                properties: config.properties.clone(),
+                properties: config.get_properties(),
             };
             Ok(runtime)
         } else {

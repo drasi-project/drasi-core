@@ -11,10 +11,9 @@ sources:
   - id: "user-data-source"
     source_type: "mock"
     auto_start: true
-    properties:
-      data_type: "person"
-      interval_ms: 5000
-      initial_count: 0
+    # Mock source configuration (typed)
+    data_type: "person"
+    interval_ms: 5000
     bootstrap_provider:
       type: scriptfile
       file_paths:
@@ -26,15 +25,11 @@ queries:
     query_language: "cypher"
     sources: ["user-data-source"]
     auto_start: true
-    properties:
-      description: "Monitor users over 25 years old"
 
 reactions:
   - id: "user-webhook"
     reaction_type: "log"
     queries: ["user-monitor"]
     auto_start: true
-    properties:
-      log_level: "info"
-      format: "json"
-      include_metadata: true
+    # Log reaction configuration (typed)
+    log_level: "info"

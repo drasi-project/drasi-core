@@ -21,7 +21,7 @@ use crate::reactions::Reaction;
 use crate::server_core::DrasiServerCore;
 use crate::utils::{AdaptiveBatchConfig, AdaptiveBatcher};
 
-use super::http::QueryConfig;
+use super::http::{CallSpec, QueryConfig};
 
 /// Batch result for sending multiple results in one HTTP call
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,97 +49,100 @@ pub struct AdaptiveHttpReaction {
 
 impl AdaptiveHttpReaction {
     pub fn new(config: ReactionConfig, event_tx: ComponentEventSender) -> Self {
-        // Extract HTTP-specific configuration
-        let base_url = config
-            .properties
-            .get("base_url")
-            .and_then(|v| v.as_str())
-            .unwrap_or("http://localhost")
-            .to_string();
-
-        let token = config
-            .properties
-            .get("token")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let timeout_ms = config
-            .properties
-            .get("timeout_ms")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(10000);
-
-        // Parse query configurations
-        let mut query_configs = HashMap::new();
-        if let Some(queries_value) = config.properties.get("queries") {
-            if let Some(queries_obj) = queries_value.as_object() {
-                for (query_name, query_value) in queries_obj {
-                    if let Ok(query_config) =
-                        serde_json::from_value::<QueryConfig>(query_value.clone())
-                    {
-                        query_configs.insert(query_name.clone(), query_config);
-                    } else {
-                        warn!("Failed to parse query config for query: {}", query_name);
-                    }
-                }
-            }
-        }
+        // Extract HTTP-specific configuration from typed config
+        let (base_url, token, timeout_ms, query_configs) =
+            match &config.config {
+                crate::config::ReactionSpecificConfig::Http(http_config) => (
+                    http_config.base_url.clone(),
+                    http_config.token.clone(),
+                    http_config.timeout_ms,
+                    http_config.queries.clone(),
+                ),
+                _ => (
+                    "http://localhost".to_string(),
+                    None,
+                    10000,
+                    HashMap::new(),
+                ),
+            };
 
         // Configure adaptive batching
         let mut adaptive_config = AdaptiveBatchConfig::default();
 
-        // Allow overriding adaptive parameters from config
-        if let Some(max_batch) = config
-            .properties
-            .get("adaptive_max_batch_size")
-            .and_then(|v| v.as_u64())
-        {
-            adaptive_config.max_batch_size = max_batch as usize;
-        }
-        if let Some(min_batch) = config
-            .properties
-            .get("adaptive_min_batch_size")
-            .and_then(|v| v.as_u64())
-        {
-            adaptive_config.min_batch_size = min_batch as usize;
-        }
-        if let Some(max_wait_ms) = config
-            .properties
-            .get("adaptive_max_wait_ms")
-            .and_then(|v| v.as_u64())
-        {
-            adaptive_config.max_wait_time = Duration::from_millis(max_wait_ms);
-        }
-        if let Some(min_wait_ms) = config
-            .properties
-            .get("adaptive_min_wait_ms")
-            .and_then(|v| v.as_u64())
-        {
-            adaptive_config.min_wait_time = Duration::from_millis(min_wait_ms);
-        }
-        if let Some(window_secs) = config
-            .properties
-            .get("adaptive_window_secs")
-            .and_then(|v| v.as_u64())
-        {
-            adaptive_config.throughput_window = Duration::from_secs(window_secs);
-        }
+        // Allow overriding adaptive parameters from config if using custom variant
+        if let crate::config::ReactionSpecificConfig::Custom { properties } = &config.config {
+            if let Some(max_batch) = properties
+                .get("adaptive_max_batch_size")
+                .and_then(|v| v.as_u64())
+            {
+                adaptive_config.max_batch_size = max_batch as usize;
+            }
+            if let Some(min_batch) = properties
+                .get("adaptive_min_batch_size")
+                .and_then(|v| v.as_u64())
+            {
+                adaptive_config.min_batch_size = min_batch as usize;
+            }
+            if let Some(max_wait_ms) = properties
+                .get("adaptive_max_wait_ms")
+                .and_then(|v| v.as_u64())
+            {
+                adaptive_config.max_wait_time = Duration::from_millis(max_wait_ms);
+            }
+            if let Some(min_wait_ms) = properties
+                .get("adaptive_min_wait_ms")
+                .and_then(|v| v.as_u64())
+            {
+                adaptive_config.min_wait_time = Duration::from_millis(min_wait_ms);
+            }
+            if let Some(window_secs) = properties
+                .get("adaptive_window_secs")
+                .and_then(|v| v.as_u64())
+            {
+                adaptive_config.throughput_window = Duration::from_secs(window_secs);
+            }
 
-        // Check if adaptive mode is explicitly disabled
-        if let Some(enabled) = config
-            .properties
-            .get("adaptive_enabled")
-            .and_then(|v| v.as_bool())
-        {
-            adaptive_config.adaptive_enabled = enabled;
+            // Check if adaptive mode is explicitly disabled
+            if let Some(enabled) = properties
+                .get("adaptive_enabled")
+                .and_then(|v| v.as_bool())
+            {
+                adaptive_config.adaptive_enabled = enabled;
+            }
         }
 
         // Check if batch endpoints are enabled
-        let batch_endpoints_enabled = config
-            .properties
-            .get("batch_endpoints_enabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+        let batch_endpoints_enabled = true; // Default to true for adaptive HTTP
+
+        // Convert typed QueryCallConfig to local QueryConfig
+        let query_configs: HashMap<String, QueryConfig> = query_configs
+            .into_iter()
+            .map(|(key, call_config)| {
+                (
+                    key,
+                    QueryConfig {
+                        added: call_config.added.map(|spec| CallSpec {
+                            url: spec.url,
+                            method: spec.method,
+                            body: spec.body,
+                            headers: spec.headers,
+                        }),
+                        updated: call_config.updated.map(|spec| CallSpec {
+                            url: spec.url,
+                            method: spec.method,
+                            body: spec.body,
+                            headers: spec.headers,
+                        }),
+                        deleted: call_config.deleted.map(|spec| CallSpec {
+                            url: spec.url,
+                            method: spec.method,
+                            body: spec.body,
+                            headers: spec.headers,
+                        }),
+                    },
+                )
+            })
+            .collect();
 
         // Create HTTP client with connection pooling
         let client = Client::builder()

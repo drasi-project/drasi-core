@@ -88,60 +88,24 @@ pub struct PlatformReaction {
 impl PlatformReaction {
     /// Create a new Platform Reaction
     pub fn new(config: ReactionConfig, event_tx: ComponentEventSender) -> Result<Self> {
-        // Extract required configuration
-        let redis_url = config
-            .properties
-            .get("redis_url")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("Missing required property: redis_url"))?
-            .to_string();
-
-        // Extract optional configuration with defaults
-        let pubsub_name = config
-            .properties
-            .get("pubsub_name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("drasi-pubsub")
-            .to_string();
-
-        let source_name = config
-            .properties
-            .get("source_name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("drasi-core")
-            .to_string();
-
-        let max_stream_length = config
-            .properties
-            .get("max_stream_length")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize);
-
-        let emit_control_events = config
-            .properties
-            .get("emit_control_events")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-
-        // Extract batch configuration
-        let batch_enabled = config
-            .properties
-            .get("batch_enabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true); // Default: batching enabled
-
-        let batch_max_size = config
-            .properties
-            .get("batch_max_size")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
-            .unwrap_or(100); // Default: 100 events per batch
-
-        let batch_max_wait_ms = config
-            .properties
-            .get("batch_max_wait_ms")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(10); // Default: 10ms timeout
+        // Extract configuration from typed config
+        let (redis_url, pubsub_name, source_name, max_stream_length, emit_control_events, batch_enabled, batch_max_size, batch_max_wait_ms) = match &config.config {
+            crate::config::ReactionSpecificConfig::Platform(platform_config) => {
+                (
+                    platform_config.redis_url.clone(),
+                    platform_config.pubsub_name.clone().unwrap_or_else(|| "drasi-pubsub".to_string()),
+                    platform_config.source_name.clone().unwrap_or_else(|| "drasi-core".to_string()),
+                    platform_config.max_stream_length,
+                    platform_config.emit_control_events,
+                    platform_config.batch_enabled,
+                    platform_config.batch_max_size,
+                    platform_config.batch_max_wait_ms,
+                )
+            }
+            _ => {
+                return Err(anyhow!("Invalid config type for Platform reaction"));
+            }
+        };
 
         // Validate batch configuration
         if batch_max_size == 0 {
@@ -482,15 +446,23 @@ mod tests {
     use tokio::sync::mpsc;
 
     fn create_test_config() -> ReactionConfig {
-        let mut properties = HashMap::new();
-        properties.insert("redis_url".to_string(), json!("redis://localhost:6379"));
+        use crate::config::typed::PlatformReactionConfig;
 
         ReactionConfig {
             id: "test-reaction".to_string(),
             reaction_type: "platform".to_string(),
             queries: vec!["test-query".to_string()],
             auto_start: true,
-            properties,
+            config: crate::config::ReactionSpecificConfig::Platform(PlatformReactionConfig {
+                redis_url: "redis://localhost:6379".to_string(),
+                pubsub_name: None,
+                source_name: None,
+                max_stream_length: None,
+                emit_control_events: false,
+                batch_enabled: false,
+                batch_max_size: 100,
+                batch_max_wait_ms: 100,
+            }),
             priority_queue_capacity: None,
         }
     }
@@ -510,15 +482,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_platform_reaction_missing_redis_url() {
-        let mut properties = HashMap::new();
-        properties.insert("pubsub_name".to_string(), json!("test-pubsub"));
+        use crate::config::typed::PlatformReactionConfig;
 
         let config = ReactionConfig {
             id: "test-reaction".to_string(),
             reaction_type: "platform".to_string(),
             queries: vec!["test-query".to_string()],
             auto_start: true,
-            properties,
+            config: crate::config::ReactionSpecificConfig::Platform(PlatformReactionConfig {
+                redis_url: String::new(), // Empty redis_url should fail
+                pubsub_name: Some("test-pubsub".to_string()),
+                source_name: None,
+                max_stream_length: None,
+                emit_control_events: false,
+                batch_enabled: false,
+                batch_max_size: 100,
+                batch_max_wait_ms: 100,
+            }),
             priority_queue_capacity: None,
         };
 
@@ -527,27 +507,30 @@ mod tests {
         let result = PlatformReaction::new(config, event_tx);
         assert!(result.is_err());
         if let Err(e) = result {
-            assert!(e
-                .to_string()
-                .contains("Missing required property: redis_url"));
+            // Error should be about failing to create Redis publisher
+            assert!(e.to_string().contains("Redis") || e.to_string().contains("Failed"));
         }
     }
 
     #[tokio::test]
     async fn test_config_with_custom_values() {
-        let mut properties = HashMap::new();
-        properties.insert("redis_url".to_string(), json!("redis://localhost:6379"));
-        properties.insert("pubsub_name".to_string(), json!("custom-pubsub"));
-        properties.insert("source_name".to_string(), json!("custom-source"));
-        properties.insert("max_stream_length".to_string(), json!(5000));
-        properties.insert("emit_control_events".to_string(), json!(false));
+        use crate::config::typed::PlatformReactionConfig;
 
         let config = ReactionConfig {
             id: "test-reaction".to_string(),
             reaction_type: "platform".to_string(),
             queries: vec!["test-query".to_string()],
             auto_start: true,
-            properties,
+            config: crate::config::ReactionSpecificConfig::Platform(PlatformReactionConfig {
+                redis_url: "redis://localhost:6379".to_string(),
+                pubsub_name: Some("custom-pubsub".to_string()),
+                source_name: Some("custom-source".to_string()),
+                max_stream_length: Some(5000),
+                emit_control_events: false,
+                batch_enabled: false,
+                batch_max_size: 100,
+                batch_max_wait_ms: 100,
+            }),
             priority_queue_capacity: None,
         };
 

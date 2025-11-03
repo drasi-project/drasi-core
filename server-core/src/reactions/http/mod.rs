@@ -63,40 +63,42 @@ pub struct HttpReaction {
 impl HttpReaction {
     pub fn new(config: ReactionConfig, event_tx: ComponentEventSender) -> Self {
         // Extract HTTP-specific configuration
-        let base_url = config
-            .properties
-            .get("base_url")
-            .and_then(|v| v.as_str())
-            .unwrap_or("http://localhost")
-            .to_string();
-
-        let token = config
-            .properties
-            .get("token")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let timeout_ms = config
-            .properties
-            .get("timeout_ms")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(10000);
-
-        // Parse query configurations
-        let mut query_configs = HashMap::new();
-        if let Some(queries_value) = config.properties.get("queries") {
-            if let Some(queries_obj) = queries_value.as_object() {
-                for (query_name, query_value) in queries_obj {
-                    if let Ok(query_config) =
-                        serde_json::from_value::<QueryConfig>(query_value.clone())
-                    {
-                        query_configs.insert(query_name.clone(), query_config);
-                    } else {
-                        warn!("Failed to parse query config for query: {}", query_name);
-                    }
-                }
+        let (base_url, token, timeout_ms, typed_query_configs) = match &config.config {
+            crate::config::ReactionSpecificConfig::Http(http_config) => {
+                (http_config.base_url.clone(), http_config.token.clone(), http_config.timeout_ms, http_config.queries.clone())
             }
-        }
+            _ => ("http://localhost".to_string(), None, 10000, HashMap::new()),
+        };
+
+        // Convert typed QueryCallConfig to local QueryConfig
+        let query_configs: HashMap<String, QueryConfig> = typed_query_configs
+            .into_iter()
+            .map(|(key, call_config)| {
+                (
+                    key,
+                    QueryConfig {
+                        added: call_config.added.map(|spec| CallSpec {
+                            url: spec.url,
+                            method: spec.method,
+                            body: spec.body,
+                            headers: spec.headers,
+                        }),
+                        updated: call_config.updated.map(|spec| CallSpec {
+                            url: spec.url,
+                            method: spec.method,
+                            body: spec.body,
+                            headers: spec.headers,
+                        }),
+                        deleted: call_config.deleted.map(|spec| CallSpec {
+                            url: spec.url,
+                            method: spec.method,
+                            body: spec.body,
+                            headers: spec.headers,
+                        }),
+                    },
+                )
+            })
+            .collect();
 
         Self {
             base: ReactionBase::new(config, event_tx),

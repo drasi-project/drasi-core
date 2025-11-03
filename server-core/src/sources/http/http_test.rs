@@ -18,7 +18,6 @@ mod tests {
     use crate::config::SourceConfig;
     use crate::sources::http::direct_format::*;
     use crate::sources::Source;
-    use std::collections::HashMap;
     use tokio::sync::mpsc;
 
     #[tokio::test]
@@ -148,16 +147,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_http_source_start_stop() {
+        use crate::config::typed::{HttpSourceConfig, SourceSpecificConfig};
+
         let config = SourceConfig {
             id: "test-http-source".to_string(),
-            source_type: "http".to_string(),
             auto_start: false,
-            properties: {
-                let mut props = HashMap::new();
-                props.insert("port".to_string(), serde_json::json!(9999));
-                props.insert("host".to_string(), serde_json::json!("127.0.0.1"));
-                props
-            },
+            config: SourceSpecificConfig::Http(HttpSourceConfig {
+                host: "127.0.0.1".to_string(),
+                port: 9999,
+                endpoint: None,
+                timeout_ms: 30000,
+                tables: vec![],
+                table_keys: vec![],
+                database: None,
+                user: None,
+                password: None,
+                adaptive_enabled: None,
+                adaptive_max_batch_size: None,
+                adaptive_min_batch_size: None,
+                adaptive_max_wait_ms: None,
+                adaptive_min_wait_ms: None,
+                adaptive_window_secs: None,
+            }),
             bootstrap_provider: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
