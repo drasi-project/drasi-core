@@ -5,14 +5,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 // RecvError no longer needed with trait-based receivers
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc;
 use tonic::transport::Channel;
 
-use crate::channels::priority_queue::PriorityQueue;
-use crate::channels::{
-    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, QueryResult,
-};
+use crate::channels::{ComponentEventSender, ComponentStatus};
 use crate::config::ReactionConfig;
+use crate::reactions::base::ReactionBase;
 use crate::reactions::Reaction;
 use crate::server_core::DrasiServerCore;
 use crate::utils::{AdaptiveBatchConfig, AdaptiveBatcher};
@@ -26,11 +24,8 @@ use super::grpc::proto::{
 use super::grpc::convert_json_to_proto_struct;
 
 /// Adaptive gRPC reaction that dynamically adjusts batching based on throughput
-#[derive(Clone)]
 pub struct AdaptiveGrpcReaction {
-    config: ReactionConfig,
-    status: Arc<RwLock<ComponentStatus>>,
-    event_tx: ComponentEventSender,
+    base: ReactionBase,
     endpoint: String,
     timeout_ms: u64,
     max_retries: u32,
@@ -39,10 +34,6 @@ pub struct AdaptiveGrpcReaction {
     initial_connection_timeout_ms: u64,
     // Adaptive batching configuration
     adaptive_config: AdaptiveBatchConfig,
-    // Subscription management
-    subscription_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
-    priority_queue: PriorityQueue<QueryResult>,
-    processing_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl AdaptiveGrpcReaction {
@@ -141,9 +132,7 @@ impl AdaptiveGrpcReaction {
         }
 
         Self {
-            config: config.clone(),
-            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            event_tx,
+            base: ReactionBase::new(config, event_tx),
             endpoint,
             timeout_ms,
             max_retries,
@@ -151,9 +140,6 @@ impl AdaptiveGrpcReaction {
             _connection_retry_attempts: connection_retry_attempts,
             initial_connection_timeout_ms,
             adaptive_config,
-            subscription_tasks: Arc::new(RwLock::new(Vec::new())),
-            priority_queue: PriorityQueue::new(config.priority_queue_capacity.unwrap_or(10000)),
-            processing_task: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -218,8 +204,7 @@ impl AdaptiveGrpcReaction {
         _connection_retry_attempts: u32,
         initial_connection_timeout_ms: u64,
         adaptive_config: AdaptiveBatchConfig,
-        priority_queue: PriorityQueue<QueryResult>,
-        status: Arc<RwLock<ComponentStatus>>,
+        base: ReactionBase,
     ) {
         let _timeout_ms = timeout_ms;
 
@@ -358,9 +343,9 @@ impl AdaptiveGrpcReaction {
 
             loop {
                 // Dequeue from priority queue (blocking)
-                let query_result = priority_queue.dequeue().await;
+                let query_result = base.priority_queue.dequeue().await;
 
-                if !matches!(*status.read().await, ComponentStatus::Running) {
+                if !matches!(*base.status.read().await, ComponentStatus::Running) {
                     info!(
                         "[{}] Reaction status changed to non-running, exiting",
                         reaction_name
@@ -444,129 +429,43 @@ impl AdaptiveGrpcReaction {
 #[async_trait]
 impl Reaction for AdaptiveGrpcReaction {
     async fn start(&self, server_core: Arc<DrasiServerCore>) -> Result<()> {
-        info!("Starting adaptive gRPC reaction: {}", self.config.id);
+        info!("Starting adaptive gRPC reaction: {}", self.base.config.id);
 
-        *self.status.write().await = ComponentStatus::Starting;
+        // Set status to Starting
+        self.base
+            .set_status_with_event(
+                ComponentStatus::Starting,
+                Some("Starting adaptive gRPC reaction".to_string()),
+            )
+            .await?;
 
-        // Send start event
-        let event = ComponentEvent {
-            component_id: self.config.id.clone(),
-            component_type: ComponentType::Reaction,
-            status: ComponentStatus::Starting,
-            timestamp: chrono::Utc::now(),
-            message: Some("Starting adaptive gRPC reaction".to_string()),
-        };
+        // Subscribe to queries
+        self.base.subscribe_to_queries(server_core).await?;
 
-        if let Err(e) = self.event_tx.send(event).await {
-            error!("Failed to send component event: {}", e);
-        }
-
-        // Get QueryManager from server_core
-        let query_manager = server_core.query_manager();
-
-        // Subscribe to all configured queries
-        let mut subscription_tasks = self.subscription_tasks.write().await;
-
-        for query_id in &self.config.queries {
-            info!("[{}] Subscribing to query '{}'", self.config.id, query_id);
-
-            // Get the query instance
-            let query = match query_manager.get_query_instance(query_id).await {
-                Ok(q) => q,
-                Err(e) => {
-                    error!(
-                        "[{}] Failed to get query instance '{}': {}",
-                        self.config.id, query_id, e
-                    );
-                    continue;
-                }
-            };
-
-            // Subscribe to the query
-            let subscription_response = match query.subscribe(self.config.id.clone()).await {
-                Ok(resp) => resp,
-                Err(e) => {
-                    error!(
-                        "[{}] Failed to subscribe to query '{}': {}",
-                        self.config.id, query_id, e
-                    );
-                    continue;
-                }
-            };
-
-            let mut receiver = subscription_response.receiver;
-            let priority_queue = self.priority_queue.clone();
-            let reaction_id = self.config.id.clone();
-            let query_id_clone = query_id.clone();
-
-            // Spawn a forwarder task for this subscription
-            let forwarder_task = tokio::spawn(async move {
-                info!(
-                    "[{}] Forwarder task started for query '{}'",
-                    reaction_id, query_id_clone
-                );
-
-                loop {
-                    match receiver.recv().await {
-                        Ok(query_result) => {
-                            // Dereference Arc to get QueryResult and enqueue
-                            if !priority_queue.enqueue(Arc::clone(&query_result)).await {
-                                warn!(
-                                    "[{}] Priority queue full, dropped result from query '{}'",
-                                    reaction_id, query_id_clone
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            // Check if it's a lag error or closed channel
-                            let error_str = e.to_string();
-                            if error_str.contains("lagged") {
-                                warn!(
-                                    "[{}] Receiver lagged for query '{}': {}",
-                                    reaction_id, query_id_clone, error_str
-                                );
-                                continue;
-                            } else {
-                                info!(
-                                    "[{}] Receiver error for query '{}', forwarder exiting: {}",
-                                    reaction_id, query_id_clone, error_str
-                                );
-                                break;
-                            }
-                        }
-                    }
-                }
-            });
-
-            subscription_tasks.push(forwarder_task);
-        }
-
-        drop(subscription_tasks);
-
-        *self.status.write().await = ComponentStatus::Running;
-
-        let event = ComponentEvent {
-            component_id: self.config.id.clone(),
-            component_type: ComponentType::Reaction,
-            status: ComponentStatus::Running,
-            timestamp: chrono::Utc::now(),
-            message: Some("Adaptive gRPC reaction started".to_string()),
-        };
-
-        if let Err(e) = self.event_tx.send(event).await {
-            error!("Failed to send component event: {}", e);
-        }
+        // Set status to Running
+        self.base
+            .set_status_with_event(
+                ComponentStatus::Running,
+                Some("Adaptive gRPC reaction started".to_string()),
+            )
+            .await?;
 
         // Start processing task that dequeues from priority queue
-        let reaction_name = self.config.id.clone();
-        let status = Arc::clone(&self.status);
+        let reaction_name = self.base.config.id.clone();
         let endpoint = self.endpoint.clone();
         let max_retries = self.max_retries;
         let metadata = self.metadata.clone();
         let timeout_ms = self.timeout_ms;
         let initial_connection_timeout_ms = self.initial_connection_timeout_ms;
         let adaptive_config = self.adaptive_config.clone();
-        let priority_queue = self.priority_queue.clone();
+        let base = ReactionBase {
+            config: self.base.config.clone(),
+            status: self.base.status.clone(),
+            event_tx: self.base.event_tx.clone(),
+            priority_queue: self.base.priority_queue.clone(),
+            subscription_tasks: self.base.subscription_tasks.clone(),
+            processing_task: self.base.processing_task.clone(),
+        };
 
         let processing_task_handle = tokio::spawn(async move {
             Self::run_internal(
@@ -578,88 +477,50 @@ impl Reaction for AdaptiveGrpcReaction {
                 0, // We'll handle connection retry inside run_internal
                 initial_connection_timeout_ms,
                 adaptive_config,
-                priority_queue,
-                status,
+                base,
             )
             .await;
         });
 
         // Store the processing task handle
-        *self.processing_task.write().await = Some(processing_task_handle);
+        self.base.set_processing_task(processing_task_handle).await;
 
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        info!("[{}] Stopping adaptive gRPC reaction", self.config.id);
+        info!("[{}] Stopping adaptive gRPC reaction", self.base.config.id);
 
-        *self.status.write().await = ComponentStatus::Stopping;
+        // Set status to Stopping
+        self.base
+            .set_status_with_event(
+                ComponentStatus::Stopping,
+                Some("Stopping adaptive gRPC reaction".to_string()),
+            )
+            .await?;
 
-        let event = ComponentEvent {
-            component_id: self.config.id.clone(),
-            component_type: ComponentType::Reaction,
-            status: ComponentStatus::Stopping,
-            timestamp: chrono::Utc::now(),
-            message: Some("Stopping adaptive gRPC reaction".to_string()),
-        };
+        // Perform common cleanup
+        self.base.stop_common().await?;
 
-        if let Err(e) = self.event_tx.send(event).await {
-            error!("Failed to send component event: {}", e);
-        }
-
-        // Abort all subscription forwarder tasks
-        let mut subscription_tasks = self.subscription_tasks.write().await;
-        for task in subscription_tasks.drain(..) {
-            task.abort();
-        }
-        drop(subscription_tasks);
-        info!(
-            "[{}] Aborted all subscription forwarder tasks",
-            self.config.id
-        );
-
-        // Abort the processing task
-        let mut processing_task = self.processing_task.write().await;
-        if let Some(task) = processing_task.take() {
-            task.abort();
-            info!("[{}] Aborted processing task", self.config.id);
-        }
-        drop(processing_task);
-
-        // Drain the priority queue
-        let drained = self.priority_queue.drain().await;
-        if !drained.is_empty() {
-            warn!(
-                "[{}] Drained {} items from priority queue during stop",
-                self.config.id,
-                drained.len()
-            );
-        }
-
+        // Wait a moment for cleanup
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        *self.status.write().await = ComponentStatus::Stopped;
-
-        let event = ComponentEvent {
-            component_id: self.config.id.clone(),
-            component_type: ComponentType::Reaction,
-            status: ComponentStatus::Stopped,
-            timestamp: chrono::Utc::now(),
-            message: Some("Adaptive gRPC reaction stopped successfully".to_string()),
-        };
-
-        if let Err(e) = self.event_tx.send(event).await {
-            error!("Failed to send component event: {}", e);
-        }
+        // Set status to Stopped
+        self.base
+            .set_status_with_event(
+                ComponentStatus::Stopped,
+                Some("Adaptive gRPC reaction stopped successfully".to_string()),
+            )
+            .await?;
 
         Ok(())
     }
 
     async fn status(&self) -> ComponentStatus {
-        self.status.read().await.clone()
+        self.base.get_status().await
     }
 
     fn get_config(&self) -> &ReactionConfig {
-        &self.config
+        &self.base.config
     }
 }

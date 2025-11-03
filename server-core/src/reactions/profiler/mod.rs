@@ -14,20 +14,18 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use log::{error, info, warn};
+use log::info;
 use std::collections::VecDeque;
 use std::sync::Arc;
-// RecvError no longer needed with trait-based receivers
 use tokio::sync::RwLock;
 
-use crate::channels::priority_queue::PriorityQueue;
-use crate::channels::{
-    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, QueryResult,
-};
+use crate::channels::{ComponentEventSender, ComponentStatus};
 use crate::config::ReactionConfig;
 use crate::profiling::ProfilingMetadata;
+use crate::reactions::base::ReactionBase;
 use crate::reactions::Reaction;
 use crate::server_core::DrasiServerCore;
+use crate::utils::log_component_start;
 
 /// Statistics for a specific metric
 #[derive(Debug, Clone)]
@@ -351,14 +349,9 @@ fn percentile(sorted_values: &[f64], p: f64) -> f64 {
 
 /// ProfilerReaction collects and analyzes profiling data
 pub struct ProfilerReaction {
-    config: ReactionConfig,
-    status: Arc<RwLock<ComponentStatus>>,
-    event_tx: ComponentEventSender,
+    base: ReactionBase,
     stats: Arc<RwLock<ProfilingStats>>,
     report_interval_secs: u64,
-    subscription_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
-    priority_queue: PriorityQueue<QueryResult>,
-    processing_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl ProfilerReaction {
@@ -376,14 +369,9 @@ impl ProfilerReaction {
             .unwrap_or(10);
 
         Self {
-            config: config.clone(),
-            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            event_tx,
+            base: ReactionBase::new(config, event_tx),
             stats: Arc::new(RwLock::new(ProfilingStats::new(window_size))),
             report_interval_secs,
-            subscription_tasks: Arc::new(RwLock::new(Vec::new())),
-            priority_queue: PriorityQueue::new(config.priority_queue_capacity.unwrap_or(10000)),
-            processing_task: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -406,120 +394,39 @@ impl ProfilerReaction {
 #[async_trait]
 impl Reaction for ProfilerReaction {
     async fn start(&self, server_core: Arc<DrasiServerCore>) -> Result<()> {
-        info!("Starting ProfilerReaction: {}", self.config.id);
+        log_component_start("Reaction", &self.base.config.id);
 
-        *self.status.write().await = ComponentStatus::Starting;
+        // Transition to Starting
+        self.base
+            .set_status_with_event(
+                ComponentStatus::Starting,
+                Some("Starting profiler reaction".to_string()),
+            )
+            .await?;
 
-        let event = ComponentEvent {
-            component_id: self.config.id.clone(),
-            component_type: ComponentType::Reaction,
-            status: ComponentStatus::Starting,
-            timestamp: chrono::Utc::now(),
-            message: Some("Starting profiler reaction".to_string()),
-        };
+        // Subscribe to all configured queries using ReactionBase
+        self.base.subscribe_to_queries(server_core).await?;
 
-        if let Err(e) = self.event_tx.send(event).await {
-            error!("Failed to send component event: {}", e);
-        }
-
-        // Get QueryManager from server_core
-        let query_manager = server_core.query_manager();
-
-        // Subscribe to each query and spawn forwarder tasks
-        for query_id in &self.config.queries {
-            info!("[{}] Subscribing to query: {}", self.config.id, query_id);
-
-            // Get the query instance
-            let query = query_manager
-                .get_query_instance(query_id)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to get query instance {}: {}", query_id, e))?;
-
-            // Subscribe to the query
-            let response = query
-                .subscribe(self.config.id.clone())
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to subscribe to query {}: {}", query_id, e))?;
-
-            let mut receiver = response.receiver;
-            let priority_queue = self.priority_queue.clone();
-            let reaction_id = self.config.id.clone();
-            let query_id_clone = query_id.clone();
-
-            // Spawn a forwarder task for this query
-            let forwarder_task = tokio::spawn(async move {
-                info!(
-                    "[{}] Forwarder task started for query: {}",
-                    reaction_id, query_id_clone
-                );
-
-                loop {
-                    match receiver.recv().await {
-                        Ok(query_result) => {
-                            // Enqueue the result to the priority queue
-                            if !priority_queue.enqueue(query_result.clone()).await {
-                                warn!(
-                                    "[{}] Priority queue full, dropping result from query: {}",
-                                    reaction_id, query_id_clone
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            // Check if it's a lag error or closed channel
-                            let error_str = e.to_string();
-                            if error_str.contains("lagged") {
-                                warn!(
-                                    "[{}] Receiver lagged for query '{}': {}",
-                                    reaction_id, query_id_clone, error_str
-                                );
-                                continue;
-                            } else {
-                                info!(
-                                    "[{}] Receiver error for query '{}': {}",
-                                    reaction_id, query_id_clone, error_str
-                                );
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                info!(
-                    "[{}] Forwarder task stopped for query: {}",
-                    reaction_id, query_id_clone
-                );
-            });
-
-            // Store the forwarder task handle
-            self.subscription_tasks.write().await.push(forwarder_task);
-        }
-
-        *self.status.write().await = ComponentStatus::Running;
-
-        let event = ComponentEvent {
-            component_id: self.config.id.clone(),
-            component_type: ComponentType::Reaction,
-            status: ComponentStatus::Running,
-            timestamp: chrono::Utc::now(),
-            message: Some("Profiler reaction started".to_string()),
-        };
-
-        if let Err(e) = self.event_tx.send(event).await {
-            error!("Failed to send component event: {}", e);
-        }
+        // Transition to Running
+        self.base
+            .set_status_with_event(
+                ComponentStatus::Running,
+                Some("Profiler reaction started".to_string()),
+            )
+            .await?;
 
         info!(
             "[{}] Profiler started - window_size: {}, report_interval: {}s",
-            self.config.id,
+            self.base.config.id,
             self.stats.read().await.window_size,
             self.report_interval_secs
         );
 
         // Spawn the processing task
-        let reaction_name = self.config.id.clone();
+        let reaction_name = self.base.config.id.clone();
         let stats = self.stats.clone();
         let report_interval = self.report_interval_secs;
-        let priority_queue = self.priority_queue.clone();
+        let priority_queue = self.base.priority_queue.clone();
 
         let processing_task = tokio::spawn(async move {
             let mut report_timer =
@@ -567,57 +474,31 @@ impl Reaction for ProfilerReaction {
         });
 
         // Store the processing task handle
-        *self.processing_task.write().await = Some(processing_task);
+        self.base.set_processing_task(processing_task).await;
 
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        info!("Stopping ProfilerReaction: {}", self.config.id);
-        *self.status.write().await = ComponentStatus::Stopped;
+        // Use ReactionBase common stop functionality
+        self.base.stop_common().await?;
 
-        // Abort all subscription forwarder tasks
-        let mut tasks = self.subscription_tasks.write().await;
-        for task in tasks.drain(..) {
-            task.abort();
-        }
-        drop(tasks);
-
-        // Abort the processing task
-        let mut processing_task = self.processing_task.write().await;
-        if let Some(task) = processing_task.take() {
-            task.abort();
-        }
-        drop(processing_task);
-
-        // Drain the priority queue
-        let drained = self.priority_queue.drain().await;
-        info!(
-            "[{}] Drained {} events from priority queue",
-            self.config.id,
-            drained.len()
-        );
-
-        let event = ComponentEvent {
-            component_id: self.config.id.clone(),
-            component_type: ComponentType::Reaction,
-            status: ComponentStatus::Stopped,
-            timestamp: chrono::Utc::now(),
-            message: Some("Profiler reaction stopped".to_string()),
-        };
-
-        if let Err(e) = self.event_tx.send(event).await {
-            error!("Failed to send component event: {}", e);
-        }
+        // Transition to Stopped
+        self.base
+            .set_status_with_event(
+                ComponentStatus::Stopped,
+                Some("Profiler reaction stopped".to_string()),
+            )
+            .await?;
 
         Ok(())
     }
 
     async fn status(&self) -> ComponentStatus {
-        self.status.read().await.clone()
+        self.base.get_status().await
     }
 
     fn get_config(&self) -> &ReactionConfig {
-        &self.config
+        &self.base.config
     }
 }

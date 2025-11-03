@@ -60,30 +60,25 @@ pub use types::{
     ResultEvent, UpdatePayload,
 };
 
-use crate::channels::priority_queue::PriorityQueue;
-use crate::channels::{ComponentEvent, ComponentEventSender, ComponentStatus, QueryResult};
+use crate::channels::{ComponentEventSender, ComponentStatus};
 use crate::config::ReactionConfig;
+use crate::reactions::base::ReactionBase;
 use crate::reactions::Reaction;
 use crate::server_core::DrasiServerCore;
+use crate::utils::log_component_start;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use publisher::{PublisherConfig, RedisStreamPublisher};
 use std::sync::Arc;
-// RecvError no longer needed with trait-based receivers
 use tokio::sync::RwLock;
 
 /// Platform Reaction for publishing to Redis Streams
 pub struct PlatformReaction {
-    config: ReactionConfig,
-    status: Arc<RwLock<ComponentStatus>>,
-    event_tx: ComponentEventSender,
+    base: ReactionBase,
     publisher: Arc<RedisStreamPublisher>,
     sequence_counter: Arc<RwLock<i64>>,
     cloud_event_config: CloudEventConfig,
     emit_control_events: bool,
-    subscription_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
-    priority_queue: PriorityQueue<QueryResult>,
-    processing_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     // Batch configuration
     batch_enabled: bool,
     batch_max_size: usize,
@@ -176,16 +171,11 @@ impl PlatformReaction {
         let cloud_event_config = CloudEventConfig::with_values(pubsub_name, source_name);
 
         Ok(Self {
-            config: config.clone(),
-            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            event_tx,
+            base: ReactionBase::new(config, event_tx),
             publisher: Arc::new(publisher),
             sequence_counter: Arc::new(RwLock::new(0)),
             cloud_event_config,
             emit_control_events,
-            subscription_tasks: Arc::new(RwLock::new(Vec::new())),
-            priority_queue: PriorityQueue::new(config.priority_queue_capacity.unwrap_or(10000)),
-            processing_task: Arc::new(RwLock::new(None)),
             batch_enabled,
             batch_max_size,
             batch_max_wait_ms,
@@ -200,6 +190,7 @@ impl PlatformReaction {
 
         // Use first query ID from config for control events
         let query_id = self
+            .base
             .config
             .queries
             .first()
@@ -230,128 +221,39 @@ impl PlatformReaction {
 #[async_trait]
 impl Reaction for PlatformReaction {
     async fn start(&self, server_core: Arc<DrasiServerCore>) -> Result<()> {
-        log::info!("Starting Platform Reaction: {}", self.config.id);
+        log_component_start("Reaction", &self.base.config.id);
 
-        // Update status to Starting
-        *self.status.write().await = ComponentStatus::Starting;
-
-        // Send started event
-        let event = ComponentEvent {
-            component_id: self.config.id.clone(),
-            component_type: crate::channels::ComponentType::Reaction,
-            status: ComponentStatus::Starting,
-            timestamp: chrono::Utc::now(),
-            message: Some("Starting platform reaction".to_string()),
-        };
-        if let Err(e) = self.event_tx.send(event).await {
-            log::error!("Failed to send reaction started event: {}", e);
-        }
+        // Transition to Starting
+        self.base
+            .set_status_with_event(
+                ComponentStatus::Starting,
+                Some("Starting platform reaction".to_string()),
+            )
+            .await?;
 
         // Emit Running control event
         if let Err(e) = self.emit_control_event(ControlSignal::Running).await {
             log::warn!("Failed to emit Running control event: {}", e);
         }
 
-        // Update status to Running
-        *self.status.write().await = ComponentStatus::Running;
+        // Subscribe to all configured queries using ReactionBase
+        self.base.subscribe_to_queries(server_core).await?;
 
-        // Send running event
-        let event = ComponentEvent {
-            component_id: self.config.id.clone(),
-            component_type: crate::channels::ComponentType::Reaction,
-            status: ComponentStatus::Running,
-            timestamp: chrono::Utc::now(),
-            message: Some("Platform reaction started".to_string()),
-        };
-        if let Err(e) = self.event_tx.send(event).await {
-            log::error!("Failed to send reaction running event: {}", e);
-        }
-
-        // Get QueryManager from server_core
-        let query_manager = server_core.query_manager();
-
-        // Subscribe to all configured queries
-        let mut subscription_tasks = self.subscription_tasks.write().await;
-        for query_id in &self.config.queries {
-            // Get the query instance
-            let query = query_manager
-                .get_query_instance(query_id)
-                .await
-                .map_err(|e| anyhow!("Failed to get query instance '{}': {}", query_id, e))?;
-
-            // Subscribe to the query
-            let subscription_response = query
-                .subscribe(self.config.id.clone())
-                .await
-                .map_err(|e| anyhow!("Failed to subscribe to query '{}': {}", query_id, e))?;
-
-            let mut receiver = subscription_response.receiver;
-            let priority_queue = self.priority_queue.clone();
-            let query_id_for_task = query_id.clone();
-            let reaction_id = self.config.id.clone();
-
-            // Spawn forwarder task for this query subscription
-            let forwarder_task = tokio::spawn(async move {
-                log::debug!(
-                    "Platform Reaction '{}' forwarder task started for query '{}'",
-                    reaction_id,
-                    query_id_for_task
-                );
-
-                loop {
-                    match receiver.recv().await {
-                        Ok(query_result) => {
-                            // Enqueue into priority queue for timestamp-ordered processing
-                            if !priority_queue.enqueue(query_result).await {
-                                log::warn!(
-                                    "Priority queue full for reaction '{}', dropping result from query '{}'",
-                                    reaction_id,
-                                    query_id_for_task
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            // Check if it's a lag error or closed channel
-                            let error_str = e.to_string();
-                            if error_str.contains("lagged") {
-                                log::warn!(
-                                    "Reaction '{}' lagged behind query '{}': {}",
-                                    reaction_id,
-                                    query_id_for_task,
-                                    error_str
-                                );
-                                // Continue receiving
-                            } else {
-                                log::info!(
-                                    "Query '{}' receiver error for reaction '{}': {}",
-                                    query_id_for_task,
-                                    reaction_id,
-                                    error_str
-                                );
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                log::debug!(
-                    "Platform Reaction '{}' forwarder task stopped for query '{}'",
-                    reaction_id,
-                    query_id_for_task
-                );
-            });
-
-            subscription_tasks.push(forwarder_task);
-        }
-        drop(subscription_tasks);
+        // Transition to Running
+        self.base
+            .set_status_with_event(
+                ComponentStatus::Running,
+                Some("Platform reaction started".to_string()),
+            )
+            .await?;
 
         // Clone what we need for the processing task
         let publisher = self.publisher.clone();
         let sequence_counter = self.sequence_counter.clone();
         let cloud_event_config = self.cloud_event_config.clone();
-        let reaction_id = self.config.id.clone();
+        let reaction_id = self.base.config.id.clone();
         let emit_control_events = self.emit_control_events;
-        let priority_queue = self.priority_queue.clone();
+        let priority_queue = self.base.priority_queue.clone();
         let batch_enabled = self.batch_enabled;
         let batch_max_size = self.batch_max_size;
         let batch_max_wait_ms = self.batch_max_wait_ms;
@@ -375,9 +277,18 @@ impl Reaction for PlatformReaction {
                 if let Some(control_signal) = query_result.metadata.get("control_signal") {
                     // Flush any buffered events before processing control signal
                     if !event_buffer.is_empty() {
-                        log::debug!("Flushing {} buffered events before control signal", event_buffer.len());
-                        if let Err(e) = publisher.publish_batch_with_retry(event_buffer.clone(), 3).await {
-                            log::error!("Failed to publish buffered events before control signal: {}", e);
+                        log::debug!(
+                            "Flushing {} buffered events before control signal",
+                            event_buffer.len()
+                        );
+                        if let Err(e) = publisher
+                            .publish_batch_with_retry(event_buffer.clone(), 3)
+                            .await
+                        {
+                            log::error!(
+                                "Failed to publish buffered events before control signal: {}",
+                                e
+                            );
                         }
                         event_buffer.clear();
                         last_flush_time = std::time::Instant::now();
@@ -463,7 +374,8 @@ impl Reaction for PlatformReaction {
 
                             // Check if we should flush the buffer
                             let should_flush = event_buffer.len() >= batch_max_size
-                                || last_flush_time.elapsed().as_millis() >= batch_max_wait_ms as u128;
+                                || last_flush_time.elapsed().as_millis()
+                                    >= batch_max_wait_ms as u128;
 
                             if should_flush {
                                 log::debug!(
@@ -473,7 +385,10 @@ impl Reaction for PlatformReaction {
                                     last_flush_time.elapsed().as_millis()
                                 );
 
-                                match publisher.publish_batch_with_retry(event_buffer.clone(), 3).await {
+                                match publisher
+                                    .publish_batch_with_retry(event_buffer.clone(), 3)
+                                    .await
+                                {
                                     Ok(message_ids) => {
                                         log::debug!(
                                             "Published batch of {} query results",
@@ -525,67 +440,37 @@ impl Reaction for PlatformReaction {
         });
 
         // Store the processing task handle
-        *self.processing_task.write().await = Some(processing_task_handle);
+        self.base.set_processing_task(processing_task_handle).await;
 
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        log::info!("Stopping Platform Reaction: {}", self.config.id);
-
-        // Abort all subscription forwarder tasks
-        let mut subscription_tasks = self.subscription_tasks.write().await;
-        for task in subscription_tasks.drain(..) {
-            task.abort();
-        }
-        drop(subscription_tasks);
-
-        // Abort the processing task
-        let mut processing_task = self.processing_task.write().await;
-        if let Some(task) = processing_task.take() {
-            task.abort();
-        }
-        drop(processing_task);
-
-        // Drain the priority queue
-        let drained = self.priority_queue.drain().await;
-        if !drained.is_empty() {
-            log::info!(
-                "Drained {} events from priority queue for reaction '{}'",
-                drained.len(),
-                self.config.id
-            );
-        }
+        // Use ReactionBase common stop functionality
+        self.base.stop_common().await?;
 
         // Emit Stopped control event
         if let Err(e) = self.emit_control_event(ControlSignal::Stopped).await {
             log::warn!("Failed to emit Stopped control event: {}", e);
         }
 
-        // Update status
-        *self.status.write().await = ComponentStatus::Stopped;
-
-        // Send stopped event
-        let event = ComponentEvent {
-            component_id: self.config.id.clone(),
-            component_type: crate::channels::ComponentType::Reaction,
-            status: ComponentStatus::Stopped,
-            timestamp: chrono::Utc::now(),
-            message: Some("Platform reaction stopped".to_string()),
-        };
-        if let Err(e) = self.event_tx.send(event).await {
-            log::error!("Failed to send reaction stopped event: {}", e);
-        }
+        // Transition to Stopped
+        self.base
+            .set_status_with_event(
+                ComponentStatus::Stopped,
+                Some("Platform reaction stopped".to_string()),
+            )
+            .await?;
 
         Ok(())
     }
 
     async fn status(&self) -> ComponentStatus {
-        self.status.read().await.clone()
+        self.base.get_status().await
     }
 
     fn get_config(&self) -> &ReactionConfig {
-        &self.config
+        &self.base.config
     }
 }
 
@@ -619,7 +504,7 @@ mod tests {
         assert!(reaction.is_ok());
 
         let reaction = reaction.unwrap();
-        assert_eq!(reaction.config.id, "test-reaction");
+        assert_eq!(reaction.base.config.id, "test-reaction");
         assert_eq!(reaction.status().await, ComponentStatus::Stopped);
     }
 

@@ -172,8 +172,8 @@ impl RedisStreamPublisher {
 
         for event in &events {
             // Serialize the CloudEvent to JSON
-            let json_data = serde_json::to_string(event)
-                .context("Failed to serialize CloudEvent in batch")?;
+            let json_data =
+                serde_json::to_string(event).context("Failed to serialize CloudEvent in batch")?;
 
             // Use the topic from the CloudEvent as the stream key
             let stream_key = &event.topic;

@@ -18,17 +18,17 @@ pub use subscription::{Subscription, SubscriptionOptions, SubscriptionStream};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use std::sync::Arc;
 // RecvError no longer needed with trait-based receivers
 use tokio::sync::{mpsc, RwLock};
-use tokio::task::JoinHandle;
 
-use crate::channels::priority_queue::PriorityQueue;
-use crate::channels::{ComponentStatus, ComponentType, QueryResult, *};
+use crate::channels::{ComponentEventSender, ComponentStatus, QueryResult};
 use crate::config::ReactionConfig;
+use crate::reactions::base::ReactionBase;
 use crate::reactions::Reaction;
 use crate::server_core::DrasiServerCore;
+use crate::utils::log_component_start;
 
 /// Handle for applications to receive query results from the ApplicationReaction
 #[derive(Clone)]
@@ -129,13 +129,8 @@ impl ResultStream {
 
 /// A reaction that sends query results to the host application
 pub struct ApplicationReaction {
-    config: ReactionConfig,
-    status: Arc<RwLock<ComponentStatus>>,
-    event_tx: ComponentEventSender,
+    base: ReactionBase,
     app_tx: mpsc::Sender<QueryResult>,
-    subscription_tasks: Arc<RwLock<Vec<JoinHandle<()>>>>,
-    priority_queue: PriorityQueue<QueryResult>,
-    processing_task: Arc<RwLock<Option<JoinHandle<()>>>>,
 }
 
 impl ApplicationReaction {
@@ -151,13 +146,8 @@ impl ApplicationReaction {
         };
 
         let reaction = Self {
-            config: config.clone(),
-            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            event_tx,
+            base: ReactionBase::new(config, event_tx),
             app_tx,
-            subscription_tasks: Arc::new(RwLock::new(Vec::new())),
-            priority_queue: PriorityQueue::new(config.priority_queue_capacity.unwrap_or(10000)),
-            processing_task: Arc::new(RwLock::new(None)),
         };
 
         (reaction, handle)
@@ -167,100 +157,32 @@ impl ApplicationReaction {
 #[async_trait]
 impl Reaction for ApplicationReaction {
     async fn start(&self, server_core: Arc<DrasiServerCore>) -> Result<()> {
-        info!("Starting ApplicationReaction '{}'", self.config.id);
+        log_component_start("Reaction", &self.base.config.id);
 
-        *self.status.write().await = ComponentStatus::Starting;
+        // Transition to Starting
+        self.base
+            .set_status_with_event(
+                ComponentStatus::Starting,
+                Some("Starting application reaction".to_string()),
+            )
+            .await?;
 
-        let _ = self
-            .event_tx
-            .send(ComponentEvent {
-                component_id: self.config.id.clone(),
-                component_type: ComponentType::Reaction,
-                status: ComponentStatus::Starting,
-                timestamp: chrono::Utc::now(),
-                message: Some("Starting application reaction".to_string()),
-            })
-            .await;
+        // Subscribe to all configured queries using ReactionBase
+        self.base.subscribe_to_queries(server_core).await?;
 
-        // Get QueryManager from server_core
-        let query_manager = server_core.query_manager();
-
-        // Subscribe to all configured queries and spawn forwarder tasks
-        for query_id in &self.config.queries {
-            // Get the query instance
-            let query = query_manager
-                .get_query_instance(query_id)
-                .await
-                .map_err(|e| anyhow::anyhow!(e))?;
-
-            // Subscribe to the query
-            let subscription_response = query
-                .subscribe(self.config.id.clone())
-                .await
-                .map_err(|e| anyhow::anyhow!(e))?;
-            let mut receiver = subscription_response.receiver;
-
-            // Clone necessary data for the forwarder task
-            let priority_queue = self.priority_queue.clone();
-            let query_id_clone = query_id.clone();
-            let reaction_id = self.config.id.clone();
-
-            // Spawn forwarder task to read from receiver and enqueue to priority queue
-            let forwarder_task = tokio::spawn(async move {
-                loop {
-                    match receiver.recv().await {
-                        Ok(query_result) => {
-                            // Enqueue to priority queue for timestamp-ordered processing
-                            if !priority_queue.enqueue(query_result).await {
-                                warn!(
-                                    "[{}] Failed to enqueue result from query '{}' - priority queue at capacity",
-                                    reaction_id, query_id_clone
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            // Check if it's a lag error or closed channel
-                            let error_str = e.to_string();
-                            if error_str.contains("lagged") {
-                                warn!(
-                                    "[{}] Receiver lagged for query '{}': {}",
-                                    reaction_id, query_id_clone, error_str
-                                );
-                                continue;
-                            } else {
-                                info!(
-                                    "[{}] Receiver error for query '{}': {}",
-                                    reaction_id, query_id_clone, error_str
-                                );
-                                break;
-                            }
-                        }
-                    }
-                }
-            });
-
-            // Store the forwarder task handle
-            self.subscription_tasks.write().await.push(forwarder_task);
-        }
-
-        *self.status.write().await = ComponentStatus::Running;
-
-        let _ = self
-            .event_tx
-            .send(ComponentEvent {
-                component_id: self.config.id.clone(),
-                component_type: ComponentType::Reaction,
-                status: ComponentStatus::Running,
-                timestamp: chrono::Utc::now(),
-                message: Some("Application reaction started".to_string()),
-            })
-            .await;
+        // Transition to Running
+        self.base
+            .set_status_with_event(
+                ComponentStatus::Running,
+                Some("Application reaction started".to_string()),
+            )
+            .await?;
 
         // Spawn processing task to dequeue and process results in timestamp order
-        let priority_queue = self.priority_queue.clone();
-        let reaction_name = self.config.id.clone();
+        let priority_queue = self.base.priority_queue.clone();
+        let reaction_name = self.base.config.id.clone();
         let app_tx = self.app_tx.clone();
-        let query_filter = self.config.queries.clone();
+        let query_filter = self.base.config.queries.clone();
 
         let processing_task = tokio::spawn(async move {
             info!(
@@ -296,73 +218,32 @@ impl Reaction for ApplicationReaction {
         });
 
         // Store the processing task handle
-        *self.processing_task.write().await = Some(processing_task);
+        self.base.set_processing_task(processing_task).await;
 
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        info!("Stopping ApplicationReaction '{}'", self.config.id);
+        // Use ReactionBase common stop functionality
+        self.base.stop_common().await?;
 
-        *self.status.write().await = ComponentStatus::Stopping;
-
-        let _ = self
-            .event_tx
-            .send(ComponentEvent {
-                component_id: self.config.id.clone(),
-                component_type: ComponentType::Reaction,
-                status: ComponentStatus::Stopping,
-                timestamp: chrono::Utc::now(),
-                message: Some("Stopping application reaction".to_string()),
-            })
-            .await;
-
-        // Abort all subscription forwarder tasks
-        let mut subscription_tasks = self.subscription_tasks.write().await;
-        for task in subscription_tasks.drain(..) {
-            task.abort();
-        }
-        drop(subscription_tasks);
-
-        // Abort the processing task
-        let mut processing_task = self.processing_task.write().await;
-        if let Some(task) = processing_task.take() {
-            task.abort();
-        }
-        drop(processing_task);
-
-        // Drain the priority queue
-        let drained_events = self.priority_queue.drain().await;
-        if !drained_events.is_empty() {
-            info!(
-                "[{}] Drained {} pending events from priority queue",
-                self.config.id,
-                drained_events.len()
-            );
-        }
-
-        *self.status.write().await = ComponentStatus::Stopped;
-
-        let _ = self
-            .event_tx
-            .send(ComponentEvent {
-                component_id: self.config.id.clone(),
-                component_type: ComponentType::Reaction,
-                status: ComponentStatus::Stopped,
-                timestamp: chrono::Utc::now(),
-                message: Some("Application reaction stopped".to_string()),
-            })
-            .await;
+        // Transition to Stopped
+        self.base
+            .set_status_with_event(
+                ComponentStatus::Stopped,
+                Some("Application reaction stopped".to_string()),
+            )
+            .await?;
 
         Ok(())
     }
 
     async fn status(&self) -> ComponentStatus {
-        self.status.read().await.clone()
+        self.base.get_status().await
     }
 
     fn get_config(&self) -> &ReactionConfig {
-        &self.config
+        &self.base.config
     }
 }
 

@@ -12,13 +12,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 // RecvError no longer needed with trait-based receivers
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc;
 
-use crate::channels::priority_queue::PriorityQueue;
-use crate::channels::{
-    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, QueryResult,
-};
+use crate::channels::{ComponentEventSender, ComponentStatus};
 use crate::config::ReactionConfig;
+use crate::reactions::base::ReactionBase;
 use crate::reactions::Reaction;
 use crate::server_core::DrasiServerCore;
 use crate::utils::{AdaptiveBatchConfig, AdaptiveBatcher};
@@ -36,9 +34,7 @@ pub struct BatchResult {
 
 /// Adaptive HTTP reaction that batches webhook calls
 pub struct AdaptiveHttpReaction {
-    config: ReactionConfig,
-    status: Arc<RwLock<ComponentStatus>>,
-    event_tx: ComponentEventSender,
+    base: ReactionBase,
     base_url: String,
     token: Option<String>,
     timeout_ms: u64,
@@ -49,10 +45,6 @@ pub struct AdaptiveHttpReaction {
     client: Client,
     // Support batch endpoints
     batch_endpoints_enabled: bool,
-    // Subscription management
-    subscription_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
-    priority_queue: PriorityQueue<QueryResult>,
-    processing_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl AdaptiveHttpReaction {
@@ -159,9 +151,7 @@ impl AdaptiveHttpReaction {
             .unwrap_or_else(|_| Client::new());
 
         Self {
-            config: config.clone(),
-            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            event_tx,
+            base: ReactionBase::new(config, event_tx),
             base_url,
             token,
             timeout_ms,
@@ -169,9 +159,6 @@ impl AdaptiveHttpReaction {
             adaptive_config,
             client,
             batch_endpoints_enabled,
-            subscription_tasks: Arc::new(RwLock::new(Vec::new())),
-            priority_queue: PriorityQueue::new(config.priority_queue_capacity.unwrap_or(10000)),
-            processing_task: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -371,9 +358,7 @@ impl AdaptiveHttpReaction {
 
     async fn run_internal(
         reaction_name: String,
-        priority_queue: PriorityQueue<QueryResult>,
-        status: Arc<RwLock<ComponentStatus>>,
-        event_tx: ComponentEventSender,
+        base: ReactionBase,
         adaptive_config: AdaptiveBatchConfig,
         sender: Arc<Self>,
     ) {
@@ -432,10 +417,10 @@ impl AdaptiveHttpReaction {
 
         // Main task: receive query results from priority queue and forward to batcher
         loop {
-            let query_result_arc = priority_queue.dequeue().await;
+            let query_result_arc = base.priority_queue.dequeue().await;
             let query_result = query_result_arc.as_ref();
 
-            if !matches!(*status.read().await, ComponentStatus::Running) {
+            if !matches!(*base.status.read().await, ComponentStatus::Running) {
                 info!(
                     "[{}] Reaction status changed to non-running, exiting",
                     reaction_name
@@ -465,146 +450,51 @@ impl AdaptiveHttpReaction {
         let _ = tokio::time::timeout(Duration::from_secs(5), batcher_handle).await;
 
         info!("[{}] Adaptive HTTP reaction completed", reaction_name);
-
-        // Send stopped event
-        let event = ComponentEvent {
-            component_id: reaction_name.clone(),
-            component_type: ComponentType::Reaction,
-            status: ComponentStatus::Stopped,
-            timestamp: chrono::Utc::now(),
-            message: Some("Adaptive HTTP reaction stopped".to_string()),
-        };
-        let _ = event_tx.send(event).await;
     }
 }
 
 #[async_trait]
 impl Reaction for AdaptiveHttpReaction {
     async fn start(&self, server_core: Arc<DrasiServerCore>) -> Result<()> {
-        info!("[{}] Starting adaptive HTTP reaction", self.config.id);
+        info!("[{}] Starting adaptive HTTP reaction", self.base.config.id);
 
-        *self.status.write().await = ComponentStatus::Starting;
+        // Set status to Starting
+        self.base
+            .set_status_with_event(
+                ComponentStatus::Starting,
+                Some("Starting adaptive HTTP reaction".to_string()),
+            )
+            .await?;
 
-        // Send start event
-        let event = ComponentEvent {
-            component_id: self.config.id.clone(),
-            component_type: ComponentType::Reaction,
-            status: ComponentStatus::Starting,
-            timestamp: chrono::Utc::now(),
-            message: Some("Starting adaptive HTTP reaction".to_string()),
-        };
-        self.event_tx.send(event).await?;
+        // Subscribe to queries
+        self.base.subscribe_to_queries(server_core).await?;
 
-        // Get QueryManager from server_core
-        let query_manager = server_core.query_manager();
-
-        // Subscribe to each query and spawn forwarder tasks
-        let mut subscription_tasks = self.subscription_tasks.write().await;
-        for query_id in &self.config.queries {
-            info!("[{}] Subscribing to query: {}", self.config.id, query_id);
-
-            // Get the query instance
-            let query = match query_manager.get_query_instance(query_id).await {
-                Ok(q) => q,
-                Err(e) => {
-                    error!(
-                        "[{}] Failed to get query instance for '{}': {}",
-                        self.config.id, query_id, e
-                    );
-                    continue;
-                }
-            };
-
-            // Subscribe to the query
-            let subscription_response = match query.subscribe(self.config.id.clone()).await {
-                Ok(response) => response,
-                Err(e) => {
-                    error!(
-                        "[{}] Failed to subscribe to query '{}': {}",
-                        self.config.id, query_id, e
-                    );
-                    continue;
-                }
-            };
-
-            let mut receiver = subscription_response.receiver;
-            let priority_queue = self.priority_queue.clone();
-            let reaction_id = self.config.id.clone();
-            let query_id_clone = query_id.clone();
-
-            // Spawn forwarder task
-            let forwarder_task = tokio::spawn(async move {
-                info!(
-                    "[{}] Forwarder task started for query '{}'",
-                    reaction_id, query_id_clone
-                );
-
-                loop {
-                    match receiver.recv().await {
-                        Ok(query_result) => {
-                            // Enqueue to priority queue
-                            if !priority_queue.enqueue(query_result).await {
-                                warn!(
-                                    "[{}] Priority queue full, dropped result from query '{}'",
-                                    reaction_id, query_id_clone
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            // Check if it's a lag error or closed channel
-                            let error_str = e.to_string();
-                            if error_str.contains("lagged") {
-                                warn!(
-                                    "[{}] Receiver lagged for query '{}': {}",
-                                    reaction_id, query_id_clone, error_str
-                                );
-                                // Continue processing
-                            } else {
-                                info!(
-                                    "[{}] Receiver error for query '{}': {}",
-                                    reaction_id, query_id_clone, error_str
-                                );
-                                break;
-                            }
-                        }
+        // Set status to Running
+        self.base
+            .set_status_with_event(
+                ComponentStatus::Running,
+                Some(format!(
+                    "Adaptive HTTP reaction running - Base URL: {}, Batch endpoints: {}",
+                    self.base_url,
+                    if self.batch_endpoints_enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
                     }
-                }
-
-                info!(
-                    "[{}] Forwarder task stopped for query '{}'",
-                    reaction_id, query_id_clone
-                );
-            });
-
-            subscription_tasks.push(forwarder_task);
-        }
-        drop(subscription_tasks);
-
-        *self.status.write().await = ComponentStatus::Running;
-
-        // Send running event
-        let event = ComponentEvent {
-            component_id: self.config.id.clone(),
-            component_type: ComponentType::Reaction,
-            status: ComponentStatus::Running,
-            timestamp: chrono::Utc::now(),
-            message: Some(format!(
-                "Adaptive HTTP reaction running - Base URL: {}, Batch endpoints: {}",
-                self.base_url,
-                if self.batch_endpoints_enabled {
-                    "enabled"
-                } else {
-                    "disabled"
-                }
-            )),
-        };
-        self.event_tx.send(event).await?;
+                )),
+            )
+            .await?;
 
         // Create Arc for sharing self with the internal task
         let self_arc = Arc::new(Self {
-            config: self.config.clone(),
-            status: self.status.clone(),
-            event_tx: self.event_tx.clone(),
+            base: ReactionBase {
+                config: self.base.config.clone(),
+                status: self.base.status.clone(),
+                event_tx: self.base.event_tx.clone(),
+                priority_queue: self.base.priority_queue.clone(),
+                subscription_tasks: self.base.subscription_tasks.clone(),
+                processing_task: self.base.processing_task.clone(),
+            },
             base_url: self.base_url.clone(),
             token: self.token.clone(),
             timeout_ms: self.timeout_ms,
@@ -612,94 +502,65 @@ impl Reaction for AdaptiveHttpReaction {
             adaptive_config: self.adaptive_config.clone(),
             client: self.client.clone(),
             batch_endpoints_enabled: self.batch_endpoints_enabled,
-            subscription_tasks: self.subscription_tasks.clone(),
-            priority_queue: self.priority_queue.clone(),
-            processing_task: self.processing_task.clone(),
         });
 
-        let reaction_name = self.config.id.clone();
-        let status = self.status.clone();
-        let event_tx = self.event_tx.clone();
+        let reaction_name = self.base.config.id.clone();
+        let base = ReactionBase {
+            config: self.base.config.clone(),
+            status: self.base.status.clone(),
+            event_tx: self.base.event_tx.clone(),
+            priority_queue: self.base.priority_queue.clone(),
+            subscription_tasks: self.base.subscription_tasks.clone(),
+            processing_task: self.base.processing_task.clone(),
+        };
         let adaptive_config = self.adaptive_config.clone();
-        let priority_queue = self.priority_queue.clone();
 
         let processing_task_handle = tokio::spawn(Self::run_internal(
             reaction_name,
-            priority_queue,
-            status,
-            event_tx,
+            base,
             adaptive_config,
             self_arc,
         ));
 
         // Store the processing task handle
-        *self.processing_task.write().await = Some(processing_task_handle);
+        self.base.set_processing_task(processing_task_handle).await;
 
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        info!("[{}] Stopping adaptive HTTP reaction", self.config.id);
+        info!("[{}] Stopping adaptive HTTP reaction", self.base.config.id);
 
-        *self.status.write().await = ComponentStatus::Stopping;
+        // Set status to Stopping
+        self.base
+            .set_status_with_event(
+                ComponentStatus::Stopping,
+                Some("Stopping adaptive HTTP reaction".to_string()),
+            )
+            .await?;
 
-        // Send stop event
-        let event = ComponentEvent {
-            component_id: self.config.id.clone(),
-            component_type: ComponentType::Reaction,
-            status: ComponentStatus::Stopping,
-            timestamp: chrono::Utc::now(),
-            message: Some("Stopping adaptive HTTP reaction".to_string()),
-        };
-        self.event_tx.send(event).await?;
-
-        // Abort all subscription forwarder tasks
-        let mut subscription_tasks = self.subscription_tasks.write().await;
-        for task in subscription_tasks.drain(..) {
-            task.abort();
-        }
-        drop(subscription_tasks);
-
-        // Abort the processing task
-        let mut processing_task = self.processing_task.write().await;
-        if let Some(task) = processing_task.take() {
-            task.abort();
-        }
-        drop(processing_task);
-
-        // Drain the priority queue
-        let drained = self.priority_queue.drain().await;
-        if !drained.is_empty() {
-            info!(
-                "[{}] Drained {} pending results from priority queue",
-                self.config.id,
-                drained.len()
-            );
-        }
+        // Perform common cleanup
+        self.base.stop_common().await?;
 
         // Wait a moment for cleanup
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        *self.status.write().await = ComponentStatus::Stopped;
-
-        // Send stopped event
-        let event = ComponentEvent {
-            component_id: self.config.id.clone(),
-            component_type: ComponentType::Reaction,
-            status: ComponentStatus::Stopped,
-            timestamp: chrono::Utc::now(),
-            message: Some("Adaptive HTTP reaction stopped successfully".to_string()),
-        };
-        self.event_tx.send(event).await?;
+        // Set status to Stopped
+        self.base
+            .set_status_with_event(
+                ComponentStatus::Stopped,
+                Some("Adaptive HTTP reaction stopped successfully".to_string()),
+            )
+            .await?;
 
         Ok(())
     }
 
     async fn status(&self) -> ComponentStatus {
-        self.status.read().await.clone()
+        self.base.get_status().await
     }
 
     fn get_config(&self) -> &ReactionConfig {
-        &self.config
+        &self.base.config
     }
 }
