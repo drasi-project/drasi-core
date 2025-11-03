@@ -48,9 +48,7 @@ async fn test_platform_bootstrap_with_mock_server() {
 
     // Create source config
     let source_config = Arc::new(SourceConfig {
-        id: "test-source".to_string(),
-        source_type: "platform".to_string(),
-        auto_start: true,
+        id: "test-source".to_string(),        auto_start: true,
         config: SourceSpecificConfig::Platform(PlatformSourceConfig {
             redis_url: "redis://localhost:6379".to_string(),
             stream_key: "test-stream".to_string(),
@@ -117,9 +115,7 @@ async fn test_platform_bootstrap_label_filtering() {
     let (tx, mut rx) = mpsc::channel(100);
 
     let source_config = Arc::new(SourceConfig {
-        id: "test-source".to_string(),
-        source_type: "platform".to_string(),
-        auto_start: true,
+        id: "test-source".to_string(),        auto_start: true,
         config: SourceSpecificConfig::Platform(PlatformSourceConfig {
             redis_url: "redis://localhost:6379".to_string(),
             stream_key: "test-stream".to_string(),
@@ -168,9 +164,7 @@ async fn test_platform_bootstrap_connection_failure() {
     let (tx, _rx) = mpsc::channel(100);
 
     let source_config = Arc::new(SourceConfig {
-        id: "test-source".to_string(),
-        source_type: "platform".to_string(),
-        auto_start: true,
+        id: "test-source".to_string(),        auto_start: true,
         config: SourceSpecificConfig::Platform(PlatformSourceConfig {
             redis_url: "redis://localhost:6379".to_string(),
             stream_key: "test-stream".to_string(),
@@ -224,9 +218,7 @@ this is not valid json
     let (tx, mut rx) = mpsc::channel(100);
 
     let source_config = Arc::new(SourceConfig {
-        id: "test-source".to_string(),
-        source_type: "platform".to_string(),
-        auto_start: true,
+        id: "test-source".to_string(),        auto_start: true,
         config: SourceSpecificConfig::Platform(PlatformSourceConfig {
             redis_url: "redis://localhost:6379".to_string(),
             stream_key: "test-stream".to_string(),

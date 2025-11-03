@@ -43,7 +43,6 @@ async fn main() {
 
     let config = ReactionConfig {
         id: "profiler".to_string(),
-        reaction_type: "profiler".to_string(),
         queries: vec!["example_query".to_string()],
         auto_start: true,
         config: ReactionSpecificConfig::Profiler(ProfilerReactionConfig {

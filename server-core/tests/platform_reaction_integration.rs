@@ -145,7 +145,6 @@ fn create_test_reaction(
 
     let config = ReactionConfig {
         id: "test-reaction".to_string(),
-        reaction_type: "platform".to_string(),
         queries: vec![query_id.to_string()],
         auto_start: false,
         config: ReactionSpecificConfig::Platform(PlatformReactionConfig {

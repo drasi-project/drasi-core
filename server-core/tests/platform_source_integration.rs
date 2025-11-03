@@ -48,7 +48,6 @@ async fn create_test_source(
 
     let config = SourceConfig {
         id: "test-source".to_string(),
-        source_type: "platform".to_string(),
         auto_start: false,
         config: SourceSpecificConfig::Platform(PlatformSourceConfig {
             redis_url,

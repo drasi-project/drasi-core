@@ -66,7 +66,7 @@ fn validate_config_file(path: &Path) -> Result<(), String> {
         if reaction.id.is_empty() {
             return Err(format!("Reaction has empty ID"));
         }
-        if reaction.reaction_type.is_empty() {
+        if reaction.reaction_type().is_empty() {
             return Err(format!(
                 "Reaction '{}' has empty reaction_type",
                 reaction.id
