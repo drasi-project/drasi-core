@@ -43,7 +43,8 @@ pub struct SourceBase {
     /// Note: This field is `pub(crate)` to limit access to within the crate.
     /// External code should use the public methods like `dispatch_event()` or `test_subscribe()`.
     /// Internal source implementations may access this for spawned tasks that need the Arc.
-    pub(crate) dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    pub(crate) dispatchers:
+        Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     /// Channel for sending component lifecycle events
     pub event_tx: ComponentEventSender,
     /// Handle to the source's main task
@@ -59,7 +60,8 @@ impl SourceBase {
         let dispatch_mode = config.dispatch_mode.unwrap_or_default();
 
         // Set up initial dispatchers based on dispatch mode
-        let mut dispatchers: Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>> = Vec::new();
+        let mut dispatchers: Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>> =
+            Vec::new();
 
         if dispatch_mode == DispatchMode::Broadcast {
             // For broadcast mode, create a single broadcast dispatcher
@@ -258,10 +260,7 @@ impl SourceBase {
         let dispatchers = self.dispatchers.read().await;
         for dispatcher in dispatchers.iter() {
             if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
-                debug!(
-                    "[{}] Failed to dispatch event: {}",
-                    self.config.id, e
-                );
+                debug!("[{}] Failed to dispatch event: {}", self.config.id, e);
             }
         }
 
@@ -316,7 +315,10 @@ impl SourceBase {
         wrapper: SourceEventWrapper,
         source_id: &str,
     ) -> Result<()> {
-        debug!("[{}] Dispatching event from task: {:?}", source_id, &wrapper);
+        debug!(
+            "[{}] Dispatching event from task: {:?}",
+            source_id, &wrapper
+        );
 
         // Arc-wrap for zero-copy sharing across dispatchers
         let arc_wrapper = Arc::new(wrapper);
@@ -325,10 +327,7 @@ impl SourceBase {
         let dispatchers_guard = dispatchers.read().await;
         for dispatcher in dispatchers_guard.iter() {
             if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
-                debug!(
-                    "[{}] Failed to dispatch event from task: {}",
-                    source_id, e
-                );
+                debug!("[{}] Failed to dispatch event from task: {}", source_id, e);
             }
         }
 

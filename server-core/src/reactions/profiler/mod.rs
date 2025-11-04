@@ -357,9 +357,10 @@ pub struct ProfilerReaction {
 impl ProfilerReaction {
     pub fn new(config: ReactionConfig, event_tx: ComponentEventSender) -> Self {
         let (window_size, report_interval_secs) = match &config.config {
-            crate::config::ReactionSpecificConfig::Profiler(profiler_config) => {
-                (profiler_config.window_size, profiler_config.report_interval_secs)
-            }
+            crate::config::ReactionSpecificConfig::Profiler(profiler_config) => (
+                profiler_config.window_size,
+                profiler_config.report_interval_secs,
+            ),
             _ => (1000, 10),
         };
 

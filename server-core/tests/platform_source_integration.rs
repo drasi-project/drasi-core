@@ -24,8 +24,8 @@ mod test_support;
 use anyhow::Result;
 use drasi_core::models::SourceChange;
 use drasi_server_core::channels::SourceEvent;
-use drasi_server_core::config::{SourceConfig, SourceSpecificConfig};
 use drasi_server_core::config::typed::PlatformSourceConfig;
+use drasi_server_core::config::{SourceConfig, SourceSpecificConfig};
 use drasi_server_core::sources::platform::PlatformSource;
 use drasi_server_core::sources::Source;
 use serde_json::json;
@@ -41,7 +41,11 @@ async fn create_test_source(
     stream_key: &str,
 ) -> (
     PlatformSource,
-    Box<dyn drasi_server_core::channels::ChangeReceiver<drasi_server_core::channels::SourceEventWrapper>>,
+    Box<
+        dyn drasi_server_core::channels::ChangeReceiver<
+            drasi_server_core::channels::SourceEventWrapper,
+        >,
+    >,
     mpsc::Receiver<drasi_server_core::channels::ComponentEvent>,
 ) {
     let (event_tx, event_rx) = mpsc::channel(100);
@@ -370,7 +374,8 @@ async fn test_consumer_group_creation() -> Result<()> {
     let redis_url = setup_redis().await;
     let stream_key = "test-group-creation";
 
-    let (source, _source_change_rx, _event_rx) = create_test_source(redis_url.clone(), stream_key).await;
+    let (source, _source_change_rx, _event_rx) =
+        create_test_source(redis_url.clone(), stream_key).await;
     source.start().await?;
 
     // Give source time to create consumer group
@@ -635,7 +640,8 @@ async fn test_stream_creation_if_not_exists() -> Result<()> {
     let stream_key = "non-existent-stream";
 
     // Start source on non-existent stream
-    let (source, _source_change_rx, _event_rx) = create_test_source(redis_url.clone(), stream_key).await;
+    let (source, _source_change_rx, _event_rx) =
+        create_test_source(redis_url.clone(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(200)).await;
 

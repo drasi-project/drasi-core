@@ -206,7 +206,11 @@ impl AdaptiveHttpSource {
 
     async fn run_adaptive_batcher(
         batch_rx: mpsc::Receiver<SourceChangeEvent>,
-        dispatchers: Arc<tokio::sync::RwLock<Vec<Box<dyn crate::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+        dispatchers: Arc<
+            tokio::sync::RwLock<
+                Vec<Box<dyn crate::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
+            >,
+        >,
         adaptive_config: AdaptiveBatchConfig,
         source_id: String,
     ) {
@@ -244,17 +248,11 @@ impl AdaptiveHttpSource {
                 );
 
                 // Dispatch via helper
-                if let Err(e) = SourceBase::dispatch_from_task(
-                    dispatchers.clone(),
-                    wrapper.clone(),
-                    &source_id,
-                )
-                .await
+                if let Err(e) =
+                    SourceBase::dispatch_from_task(dispatchers.clone(), wrapper.clone(), &source_id)
+                        .await
                 {
-                    debug!(
-                        "[{}] Failed to dispatch (no subscribers): {}",
-                        source_id, e
-                    );
+                    debug!("[{}] Failed to dispatch (no subscribers): {}", source_id, e);
                 }
             }
 
@@ -426,7 +424,6 @@ impl Source for AdaptiveHttpSource {
             )
             .await
     }
-
 
     fn as_any(&self) -> &dyn std::any::Any {
         self

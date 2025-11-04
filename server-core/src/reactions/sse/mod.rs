@@ -45,9 +45,12 @@ pub struct SseReaction {
 impl SseReaction {
     pub fn new(config: ReactionConfig, event_tx: ComponentEventSender) -> Self {
         let (host, port, sse_path, heartbeat_interval_ms) = match &config.config {
-            crate::config::ReactionSpecificConfig::Sse(sse_config) => {
-                (sse_config.host.clone(), sse_config.port, sse_config.sse_path.clone(), sse_config.heartbeat_interval_ms)
-            }
+            crate::config::ReactionSpecificConfig::Sse(sse_config) => (
+                sse_config.host.clone(),
+                sse_config.port,
+                sse_config.sse_path.clone(),
+                sse_config.heartbeat_interval_ms,
+            ),
             _ => ("0.0.0.0".to_string(), 50051, "/events".to_string(), 15_000),
         };
         let (tx, _rx) = broadcast::channel(1024);

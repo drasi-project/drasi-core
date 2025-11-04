@@ -21,11 +21,10 @@ use crate::channels::ComponentStatus;
 /// Helper function to convert typed config to properties HashMap
 fn serialize_to_properties<T: serde::Serialize>(config: &T) -> HashMap<String, serde_json::Value> {
     match serde_json::to_value(config) {
-        Ok(serde_json::Value::Object(map)) => {
-            map.into_iter()
-                .filter(|(k, _)| k != "source_type" && k != "reaction_type")
-                .collect()
-        }
+        Ok(serde_json::Value::Object(map)) => map
+            .into_iter()
+            .filter(|(k, _)| k != "source_type" && k != "reaction_type")
+            .collect(),
         _ => HashMap::new(),
     }
 }
@@ -312,10 +311,7 @@ impl From<super::schema::DrasiServerCoreConfig> for RuntimeConfig {
     fn from(config: super::schema::DrasiServerCoreConfig) -> Self {
         // Get the global defaults (or hardcoded fallbacks)
         let global_priority_queue = config.server_core.priority_queue_capacity.unwrap_or(10000);
-        let global_dispatch_capacity = config
-            .server_core
-            .dispatch_buffer_capacity
-            .unwrap_or(1000);
+        let global_dispatch_capacity = config.server_core.dispatch_buffer_capacity.unwrap_or(1000);
 
         // Apply global defaults to sources that don't specify their own dispatch capacity
         let sources = config

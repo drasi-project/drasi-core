@@ -136,9 +136,8 @@ mod tests {
 
     #[test]
     fn test_source_with_bootstrap_config() {
-        let bootstrap_config = BootstrapProviderConfig::Postgres(
-            bootstrap::PostgresBootstrapConfig::default()
-        );
+        let bootstrap_config =
+            BootstrapProviderConfig::Postgres(bootstrap::PostgresBootstrapConfig::default());
 
         let source = Source::postgres("pg-source")
             .with_bootstrap(bootstrap_config)
@@ -177,7 +176,10 @@ mod tests {
         assert!(source.bootstrap_provider.is_some());
         match source.bootstrap_provider.unwrap() {
             BootstrapProviderConfig::Platform(config) => {
-                assert_eq!(config.query_api_url, Some("http://localhost:8080".to_string()));
+                assert_eq!(
+                    config.query_api_url,
+                    Some("http://localhost:8080".to_string())
+                );
                 assert_eq!(config.timeout_seconds, 300);
             }
             _ => panic!("Expected Platform bootstrap provider"),
@@ -311,7 +313,10 @@ mod tests {
 
         match source.bootstrap_provider.unwrap() {
             BootstrapProviderConfig::Platform(config) => {
-                assert_eq!(config.query_api_url, Some("http://localhost:8080".to_string()));
+                assert_eq!(
+                    config.query_api_url,
+                    Some("http://localhost:8080".to_string())
+                );
                 assert_eq!(config.timeout_seconds, 300); // Should be default
             }
             _ => panic!("Expected Platform bootstrap provider"),

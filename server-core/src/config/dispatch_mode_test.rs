@@ -72,7 +72,7 @@ mod tests {
 
     #[test]
     fn test_full_config_with_mixed_dispatch_modes() {
-        use crate::config::typed::{MockSourceConfig, LogReactionConfig};
+        use crate::config::typed::{LogReactionConfig, MockSourceConfig};
 
         let mut config = DrasiServerCoreConfig::default();
 
@@ -154,7 +154,10 @@ mod tests {
         });
 
         assert_eq!(config.sources.len(), 3);
-        assert_eq!(config.sources[0].dispatch_mode, Some(DispatchMode::Broadcast));
+        assert_eq!(
+            config.sources[0].dispatch_mode,
+            Some(DispatchMode::Broadcast)
+        );
         assert_eq!(config.sources[1].dispatch_mode, Some(DispatchMode::Channel));
         assert_eq!(config.sources[2].dispatch_mode, None);
 

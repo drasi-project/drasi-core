@@ -222,8 +222,8 @@ impl ReactionBase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::mpsc;
     use std::collections::HashMap;
+    use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn test_reaction_base_creation() {

@@ -17,12 +17,15 @@
 //! 2. Server global setting
 //! 3. Hardcoded default (1000)
 
+use drasi_server_core::config::typed::{
+    GrpcSourceConfig, HttpSourceConfig, MockSourceConfig, PlatformSourceConfig,
+    PostgresSourceConfig,
+};
+use drasi_server_core::config::SourceSpecificConfig;
 use drasi_server_core::{
     DrasiServerCoreConfig, DrasiServerCoreSettings, QueryConfig, QueryLanguage, RuntimeConfig,
     SourceConfig,
 };
-use drasi_server_core::config::SourceSpecificConfig;
-use drasi_server_core::config::typed::{MockSourceConfig, PostgresSourceConfig, HttpSourceConfig, GrpcSourceConfig, PlatformSourceConfig};
 
 /// Test that without any config, all use hardcoded default of 1000
 #[tokio::test]
@@ -35,7 +38,8 @@ async fn test_dispatch_buffer_capacity_hierarchy_all_defaults() {
         },
         sources: vec![
             SourceConfig {
-                id: "source1".to_string(),                auto_start: true,
+                id: "source1".to_string(),
+                auto_start: true,
                 config: SourceSpecificConfig::Mock(MockSourceConfig {
                     data_type: "counter".to_string(),
                     interval_ms: 1000,
@@ -45,7 +49,8 @@ async fn test_dispatch_buffer_capacity_hierarchy_all_defaults() {
                 dispatch_mode: None,
             },
             SourceConfig {
-                id: "source2".to_string(),                auto_start: true,
+                id: "source2".to_string(),
+                auto_start: true,
                 config: SourceSpecificConfig::Mock(MockSourceConfig {
                     data_type: "counter".to_string(),
                     interval_ms: 1000,
@@ -124,7 +129,8 @@ async fn test_dispatch_buffer_capacity_hierarchy_global_override() {
         },
         sources: vec![
             SourceConfig {
-                id: "source1".to_string(),                auto_start: true,
+                id: "source1".to_string(),
+                auto_start: true,
                 config: SourceSpecificConfig::Mock(MockSourceConfig {
                     data_type: "counter".to_string(),
                     interval_ms: 1000,
@@ -134,7 +140,8 @@ async fn test_dispatch_buffer_capacity_hierarchy_global_override() {
                 dispatch_mode: None,
             },
             SourceConfig {
-                id: "source2".to_string(),                auto_start: true,
+                id: "source2".to_string(),
+                auto_start: true,
                 config: SourceSpecificConfig::Postgres(PostgresSourceConfig {
                     host: "localhost".to_string(),
                     port: 5432,
@@ -163,7 +170,8 @@ async fn test_dispatch_buffer_capacity_hierarchy_global_override() {
             bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None, // No component override,
-                dispatch_mode: None,        }],
+            dispatch_mode: None,
+        }],
         reactions: vec![],
     };
 
@@ -200,7 +208,8 @@ async fn test_dispatch_buffer_capacity_hierarchy_component_override() {
         },
         sources: vec![
             SourceConfig {
-                id: "source1".to_string(),                auto_start: true,
+                id: "source1".to_string(),
+                auto_start: true,
                 config: SourceSpecificConfig::Mock(MockSourceConfig {
                     data_type: "counter".to_string(),
                     interval_ms: 1000,
@@ -210,7 +219,8 @@ async fn test_dispatch_buffer_capacity_hierarchy_component_override() {
                 dispatch_mode: None,
             },
             SourceConfig {
-                id: "source2".to_string(),                auto_start: true,
+                id: "source2".to_string(),
+                auto_start: true,
                 config: SourceSpecificConfig::Http(HttpSourceConfig {
                     host: "localhost".to_string(),
                     port: 8080,
@@ -306,7 +316,8 @@ async fn test_dispatch_buffer_capacity_hierarchy_mixed() {
         },
         sources: vec![
             SourceConfig {
-                id: "high_volume_source".to_string(),                auto_start: true,
+                id: "high_volume_source".to_string(),
+                auto_start: true,
                 config: SourceSpecificConfig::Postgres(PostgresSourceConfig {
                     host: "localhost".to_string(),
                     port: 5432,
@@ -324,7 +335,8 @@ async fn test_dispatch_buffer_capacity_hierarchy_mixed() {
                 dispatch_mode: None,
             },
             SourceConfig {
-                id: "standard_source".to_string(),                auto_start: true,
+                id: "standard_source".to_string(),
+                auto_start: true,
                 config: SourceSpecificConfig::Grpc(GrpcSourceConfig {
                     host: "localhost".to_string(),
                     port: 50051,
@@ -336,7 +348,8 @@ async fn test_dispatch_buffer_capacity_hierarchy_mixed() {
                 dispatch_mode: None,
             },
             SourceConfig {
-                id: "low_volume_source".to_string(),                auto_start: true,
+                id: "low_volume_source".to_string(),
+                auto_start: true,
                 config: SourceSpecificConfig::Mock(MockSourceConfig {
                     data_type: "counter".to_string(),
                     interval_ms: 1000,
@@ -369,7 +382,7 @@ async fn test_dispatch_buffer_capacity_hierarchy_mixed() {
                 joins: None,
                 enable_bootstrap: true,
                 bootstrap_buffer_size: 10000,
-                priority_queue_capacity: None,    // Uses global (50000)
+                priority_queue_capacity: None,  // Uses global (50000)
                 dispatch_buffer_capacity: None, // Uses global (3000),
                 dispatch_mode: None,
             },
@@ -431,7 +444,8 @@ async fn test_dispatch_buffer_capacity_hierarchy_nil_global_nil_component() {
             dispatch_buffer_capacity: None, // No global
         },
         sources: vec![SourceConfig {
-            id: "source1".to_string(),            auto_start: true,
+            id: "source1".to_string(),
+            auto_start: true,
             config: SourceSpecificConfig::Platform(PlatformSourceConfig {
                 redis_url: "redis://localhost:6379".to_string(),
                 stream_key: "test-stream".to_string(),
@@ -442,7 +456,8 @@ async fn test_dispatch_buffer_capacity_hierarchy_nil_global_nil_component() {
             }),
             bootstrap_provider: None,
             dispatch_buffer_capacity: None, // No component override,
-                dispatch_mode: None,        }],
+            dispatch_mode: None,
+        }],
         queries: vec![QueryConfig {
             id: "query1".to_string(),
             query: "MATCH (n) RETURN n".to_string(),
@@ -454,7 +469,8 @@ async fn test_dispatch_buffer_capacity_hierarchy_nil_global_nil_component() {
             bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None, // No component override,
-                dispatch_mode: None,        }],
+            dispatch_mode: None,
+        }],
         reactions: vec![],
     };
 

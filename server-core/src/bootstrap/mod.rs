@@ -254,7 +254,10 @@ impl BootstrapProviderFactory {
                 })?;
 
                 Ok(Box::new(
-                    providers::platform::PlatformBootstrapProvider::new(url, config.timeout_seconds)?,
+                    providers::platform::PlatformBootstrapProvider::new(
+                        url,
+                        config.timeout_seconds,
+                    )?,
                 ))
             }
             BootstrapProviderConfig::Noop => {
@@ -317,7 +320,10 @@ mod tests {
     #[test]
     fn test_scriptfile_bootstrap_config() {
         let config = BootstrapProviderConfig::ScriptFile(ScriptFileBootstrapConfig {
-            file_paths: vec!["/path/to/file1.jsonl".to_string(), "/path/to/file2.jsonl".to_string()],
+            file_paths: vec![
+                "/path/to/file1.jsonl".to_string(),
+                "/path/to/file2.jsonl".to_string(),
+            ],
         });
 
         let json = serde_json::to_string(&config).unwrap();
@@ -365,7 +371,10 @@ mod tests {
         assert!(json.contains("\"type\":\"application\""));
 
         let deserialized: BootstrapProviderConfig = serde_json::from_str(&json).unwrap();
-        assert!(matches!(deserialized, BootstrapProviderConfig::Application(_)));
+        assert!(matches!(
+            deserialized,
+            BootstrapProviderConfig::Application(_)
+        ));
     }
 
     #[test]

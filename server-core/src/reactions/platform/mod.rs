@@ -89,19 +89,32 @@ impl PlatformReaction {
     /// Create a new Platform Reaction
     pub fn new(config: ReactionConfig, event_tx: ComponentEventSender) -> Result<Self> {
         // Extract configuration from typed config
-        let (redis_url, pubsub_name, source_name, max_stream_length, emit_control_events, batch_enabled, batch_max_size, batch_max_wait_ms) = match &config.config {
-            crate::config::ReactionSpecificConfig::Platform(platform_config) => {
-                (
-                    platform_config.redis_url.clone(),
-                    platform_config.pubsub_name.clone().unwrap_or_else(|| "drasi-pubsub".to_string()),
-                    platform_config.source_name.clone().unwrap_or_else(|| "drasi-core".to_string()),
-                    platform_config.max_stream_length,
-                    platform_config.emit_control_events,
-                    platform_config.batch_enabled,
-                    platform_config.batch_max_size,
-                    platform_config.batch_max_wait_ms,
-                )
-            }
+        let (
+            redis_url,
+            pubsub_name,
+            source_name,
+            max_stream_length,
+            emit_control_events,
+            batch_enabled,
+            batch_max_size,
+            batch_max_wait_ms,
+        ) = match &config.config {
+            crate::config::ReactionSpecificConfig::Platform(platform_config) => (
+                platform_config.redis_url.clone(),
+                platform_config
+                    .pubsub_name
+                    .clone()
+                    .unwrap_or_else(|| "drasi-pubsub".to_string()),
+                platform_config
+                    .source_name
+                    .clone()
+                    .unwrap_or_else(|| "drasi-core".to_string()),
+                platform_config.max_stream_length,
+                platform_config.emit_control_events,
+                platform_config.batch_enabled,
+                platform_config.batch_max_size,
+                platform_config.batch_max_wait_ms,
+            ),
             _ => {
                 return Err(anyhow!("Invalid config type for Platform reaction"));
             }

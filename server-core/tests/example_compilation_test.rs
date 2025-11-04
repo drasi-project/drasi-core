@@ -93,7 +93,10 @@ fn test_all_example_files_compile() {
     let examples_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/configs");
 
     if !examples_dir.exists() {
-        println!("⚠️  Examples directory not found: {}", examples_dir.display());
+        println!(
+            "⚠️  Examples directory not found: {}",
+            examples_dir.display()
+        );
         return;
     }
 
@@ -137,10 +140,7 @@ fn test_all_example_files_compile() {
         for error in &errors {
             eprintln!("  - {}", error);
         }
-        panic!(
-            "\n{} example file(s) failed to compile",
-            errors.len()
-        );
+        panic!("\n{} example file(s) failed to compile", errors.len());
     }
 
     println!("\n✓ Example compilation validation complete:");
@@ -159,10 +159,7 @@ fn test_example_files_exist() {
     let examples_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/configs");
 
     if !examples_dir.exists() {
-        panic!(
-            "Examples directory not found: {}",
-            examples_dir.display()
-        );
+        panic!("Examples directory not found: {}", examples_dir.display());
     }
 
     // Expected example directories
@@ -191,15 +188,13 @@ fn test_example_files_exist() {
         let has_config = std::fs::read_dir(&example_dir)
             .ok()
             .map(|entries| {
-                entries
-                    .filter_map(Result::ok)
-                    .any(|entry| {
-                        if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
-                            ext == "yaml" || ext == "json"
-                        } else {
-                            false
-                        }
-                    })
+                entries.filter_map(Result::ok).any(|entry| {
+                    if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
+                        ext == "yaml" || ext == "json"
+                    } else {
+                        false
+                    }
+                })
             })
             .unwrap_or(false);
 

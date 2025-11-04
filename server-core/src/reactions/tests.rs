@@ -15,8 +15,8 @@
 #[cfg(test)]
 mod manager_tests {
     use super::super::*;
-    use crate::channels::*;
     use crate::channels::dispatcher::{BroadcastChangeDispatcher, ChangeDispatcher};
+    use crate::channels::*;
     use crate::config::QueryConfig;
     use crate::queries::Query;
     use crate::server_core::DrasiServerCore;
@@ -84,7 +84,9 @@ mod manager_tests {
             &self,
             _reaction_id: String,
         ) -> Result<QuerySubscriptionResponse, String> {
-            let receiver = self.dispatcher.create_receiver()
+            let receiver = self
+                .dispatcher
+                .create_receiver()
                 .map_err(|e| format!("Failed to create receiver: {}", e))?;
             Ok(QuerySubscriptionResponse {
                 query_id: self.config.id.clone(),
@@ -337,7 +339,8 @@ mod log_reaction_tests {
 
     impl MockQuery {
         fn new(query_id: &str) -> Self {
-            let dispatcher = Arc::new(crate::channels::BroadcastChangeDispatcher::<QueryResult>::new(1000));
+            let dispatcher =
+                Arc::new(crate::channels::BroadcastChangeDispatcher::<QueryResult>::new(1000));
             Self {
                 config: QueryConfig {
                     id: query_id.to_string(),
@@ -386,7 +389,9 @@ mod log_reaction_tests {
             &self,
             _reaction_id: String,
         ) -> Result<QuerySubscriptionResponse, String> {
-            let receiver = self.dispatcher.create_receiver()
+            let receiver = self
+                .dispatcher
+                .create_receiver()
                 .map_err(|e| format!("Failed to create receiver: {}", e))?;
             Ok(QuerySubscriptionResponse {
                 query_id: self.config.id.clone(),

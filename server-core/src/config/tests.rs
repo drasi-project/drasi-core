@@ -123,7 +123,7 @@ mod schema_tests {
 
     #[test]
     fn test_server_config_complete() {
-        use crate::config::typed::{MockSourceConfig, LogReactionConfig};
+        use crate::config::typed::{LogReactionConfig, MockSourceConfig};
 
         let mut config = DrasiServerCoreConfig::default();
 

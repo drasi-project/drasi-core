@@ -236,7 +236,10 @@ mod tests {
             .build()
             .await;
 
-        assert!(core.is_ok(), "Builder with priority_queue_capacity should work");
+        assert!(
+            core.is_ok(),
+            "Builder with priority_queue_capacity should work"
+        );
 
         // Verify the capacity was set in the config
         let core = core.unwrap();
@@ -262,7 +265,10 @@ mod tests {
             .build()
             .await;
 
-        assert!(core.is_ok(), "Builder with dispatch_buffer_capacity should work");
+        assert!(
+            core.is_ok(),
+            "Builder with dispatch_buffer_capacity should work"
+        );
 
         // Verify the capacity was set in the config
         let core = core.unwrap();

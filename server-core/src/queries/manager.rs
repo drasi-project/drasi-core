@@ -402,8 +402,12 @@ impl Query for DrasiQuery {
                 serde_json::json!(bootstrap_channels.len()),
             );
 
-            let control_result =
-                QueryResult::new(self.base.config.id.clone(), chrono::Utc::now(), vec![], metadata);
+            let control_result = QueryResult::new(
+                self.base.config.id.clone(),
+                chrono::Utc::now(),
+                vec![],
+                metadata,
+            );
 
             // Dispatch the control signal to all subscribed reactions
             self.base.dispatch_query_result(control_result).await.ok();
@@ -760,7 +764,8 @@ impl Query for DrasiQuery {
                             let arc_result = Arc::new(query_result);
                             let dispatchers = base_dispatchers.read().await;
                             for dispatcher in dispatchers.iter() {
-                                if let Err(e) = dispatcher.dispatch_change(arc_result.clone()).await {
+                                if let Err(e) = dispatcher.dispatch_change(arc_result.clone()).await
+                                {
                                     debug!(
                                         "Failed to dispatch result for query '{}': {}",
                                         query_id, e
@@ -847,7 +852,9 @@ impl Query for DrasiQuery {
         );
 
         // Use QueryBase's subscribe method which returns QuerySubscriptionResponse
-        self.base.subscribe(&reaction_id).await
+        self.base
+            .subscribe(&reaction_id)
+            .await
             .map_err(|e| format!("Failed to subscribe: {}", e))
     }
 }

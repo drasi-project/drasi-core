@@ -101,31 +101,31 @@ struct TableKeyConfig {
 impl PostgresConfig {
     fn from_context(context: &BootstrapContext) -> Result<Self> {
         match &context.source_config.config {
-            crate::config::SourceSpecificConfig::Postgres(postgres_config) => {
-                Ok(PostgresConfig {
-                    host: postgres_config.host.clone(),
-                    port: postgres_config.port,
-                    database: postgres_config.database.clone(),
-                    user: postgres_config.user.clone(),
-                    password: postgres_config.password.clone(),
-                    tables: postgres_config.tables.clone(),
-                    slot_name: postgres_config.slot_name.clone(),
-                    publication_name: postgres_config.publication_name.clone(),
-                    ssl_mode: postgres_config.ssl_mode.clone(),
-                    table_keys: postgres_config.table_keys.iter().map(|tk| TableKeyConfig {
+            crate::config::SourceSpecificConfig::Postgres(postgres_config) => Ok(PostgresConfig {
+                host: postgres_config.host.clone(),
+                port: postgres_config.port,
+                database: postgres_config.database.clone(),
+                user: postgres_config.user.clone(),
+                password: postgres_config.password.clone(),
+                tables: postgres_config.tables.clone(),
+                slot_name: postgres_config.slot_name.clone(),
+                publication_name: postgres_config.publication_name.clone(),
+                ssl_mode: postgres_config.ssl_mode.clone(),
+                table_keys: postgres_config
+                    .table_keys
+                    .iter()
+                    .map(|tk| TableKeyConfig {
                         table: tk.table.clone(),
                         key_columns: tk.key_columns.clone(),
-                    }).collect(),
-                })
-            }
-            _ => {
-                Err(anyhow!(
-                    "PostgreSQL bootstrap provider requires PostgreSQL source configuration. \
+                    })
+                    .collect(),
+            }),
+            _ => Err(anyhow!(
+                "PostgreSQL bootstrap provider requires PostgreSQL source configuration. \
                      Current source type: {}. \
                      This usually means the bootstrap provider type doesn't match the source type.",
-                    std::any::type_name_of_val(&context.source_config.config)
-                ))
-            }
+                std::any::type_name_of_val(&context.source_config.config)
+            )),
         }
     }
 }
@@ -626,10 +626,12 @@ impl PostgresBootstrapHandler {
                 timestamp: event.timestamp,
                 sequence,
             };
-            event_tx
-                .send(bootstrap_event)
-                .await
-                .map_err(|e| anyhow!("Failed to send bootstrap event to channel (channel may be closed): {}", e))?;
+            event_tx.send(bootstrap_event).await.map_err(|e| {
+                anyhow!(
+                    "Failed to send bootstrap event to channel (channel may be closed): {}",
+                    e
+                )
+            })?;
         }
         Ok(())
     }

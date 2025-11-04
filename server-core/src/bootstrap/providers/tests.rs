@@ -131,11 +131,10 @@ mod tests {
         assert!(provider.is_ok());
 
         // Test ScriptFile provider creation
-        let script_config = BootstrapProviderConfig::ScriptFile(
-            crate::bootstrap::ScriptFileBootstrapConfig {
+        let script_config =
+            BootstrapProviderConfig::ScriptFile(crate::bootstrap::ScriptFileBootstrapConfig {
                 file_paths: vec!["tests/fixtures/bootstrap_scripts/person_small.jsonl".to_string()],
-            }
-        );
+            });
         let provider = BootstrapProviderFactory::create_provider(&script_config);
         assert!(provider.is_ok());
     }

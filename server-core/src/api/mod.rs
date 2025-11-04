@@ -28,8 +28,8 @@
 //!     core.start().await?;
 //!
 //!     // Get handles to interact with components
-//!     let source_handle = core.source_handle("my-source")?;
-//!     let reaction_handle = core.reaction_handle("my-reaction")?;
+//!     let source_handle = core.source_handle("my-source").await?;
+//!     let reaction_handle = core.reaction_handle("my-reaction").await?;
 //!
 //!     Ok(())
 //! }

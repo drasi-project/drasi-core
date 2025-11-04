@@ -76,31 +76,36 @@ pub struct GrpcReaction {
 impl GrpcReaction {
     pub fn new(config: ReactionConfig, event_tx: ComponentEventSender) -> Self {
         // Extract gRPC-specific configuration
-        let (endpoint, batch_size, batch_flush_timeout_ms, timeout_ms, max_retries, connection_retry_attempts, initial_connection_timeout_ms, metadata) = match &config.config {
-            crate::config::ReactionSpecificConfig::Grpc(grpc_config) => {
-                (
-                    grpc_config.endpoint.clone(),
-                    grpc_config.batch_size,
-                    grpc_config.batch_flush_timeout_ms,
-                    grpc_config.timeout_ms,
-                    grpc_config.max_retries,
-                    grpc_config.connection_retry_attempts,
-                    grpc_config.initial_connection_timeout_ms,
-                    grpc_config.metadata.clone(),
-                )
-            }
-            _ => {
-                (
-                    "grpc://localhost:50052".to_string(),
-                    100,
-                    1000,
-                    5000,
-                    3,
-                    5,
-                    10000,
-                    HashMap::new(),
-                )
-            }
+        let (
+            endpoint,
+            batch_size,
+            batch_flush_timeout_ms,
+            timeout_ms,
+            max_retries,
+            connection_retry_attempts,
+            initial_connection_timeout_ms,
+            metadata,
+        ) = match &config.config {
+            crate::config::ReactionSpecificConfig::Grpc(grpc_config) => (
+                grpc_config.endpoint.clone(),
+                grpc_config.batch_size,
+                grpc_config.batch_flush_timeout_ms,
+                grpc_config.timeout_ms,
+                grpc_config.max_retries,
+                grpc_config.connection_retry_attempts,
+                grpc_config.initial_connection_timeout_ms,
+                grpc_config.metadata.clone(),
+            ),
+            _ => (
+                "grpc://localhost:50052".to_string(),
+                100,
+                1000,
+                5000,
+                3,
+                5,
+                10000,
+                HashMap::new(),
+            ),
         };
 
         Self {

@@ -24,11 +24,10 @@ mod test_support;
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_server_core::channels::{
-    ChangeDispatcher, ComponentEvent, ComponentStatus, QueryResult,
-    QuerySubscriptionResponse,
+    ChangeDispatcher, ComponentEvent, ComponentStatus, QueryResult, QuerySubscriptionResponse,
 };
-use drasi_server_core::config::{QueryConfig, ReactionConfig, ReactionSpecificConfig};
 use drasi_server_core::config::typed::PlatformReactionConfig;
+use drasi_server_core::config::{QueryConfig, ReactionConfig, ReactionSpecificConfig};
 use drasi_server_core::queries::Query;
 use drasi_server_core::reactions::platform::{
     CloudEvent, ControlSignal, PlatformReaction, ResultEvent,
@@ -52,7 +51,9 @@ struct MockQuery {
 
 impl MockQuery {
     fn new(query_id: &str) -> Self {
-        let dispatcher = Arc::new(drasi_server_core::channels::BroadcastChangeDispatcher::<QueryResult>::new(1000));
+        let dispatcher = Arc::new(drasi_server_core::channels::BroadcastChangeDispatcher::<
+            QueryResult,
+        >::new(1000));
         Self {
             config: QueryConfig {
                 id: query_id.to_string(),
@@ -102,7 +103,9 @@ impl Query for MockQuery {
     }
 
     async fn subscribe(&self, _reaction_id: String) -> Result<QuerySubscriptionResponse, String> {
-        let receiver = self.dispatcher.create_receiver()
+        let receiver = self
+            .dispatcher
+            .create_receiver()
             .map_err(|e| format!("Failed to create receiver: {}", e))?;
         Ok(QuerySubscriptionResponse {
             query_id: self.config.id.clone(),
@@ -112,9 +115,7 @@ impl Query for MockQuery {
 }
 
 /// Helper to create a test environment with DrasiServerCore and a mock query
-async fn create_test_server_with_query(
-    query_id: &str,
-) -> (Arc<DrasiServerCore>, Arc<MockQuery>) {
+async fn create_test_server_with_query(query_id: &str) -> (Arc<DrasiServerCore>, Arc<MockQuery>) {
     let mock_query = Arc::new(MockQuery::new(query_id));
 
     // Create DrasiServerCore using builder
@@ -326,8 +327,7 @@ async fn test_publish_update_results() -> Result<()> {
             None,
         )],
     );
-    mock_query
-        .send_result(query_result).await;
+    mock_query.send_result(query_result).await;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -369,8 +369,7 @@ async fn test_publish_delete_results() -> Result<()> {
 
     // Send delete result
     let query_result = build_query_result_delete(query_id, vec![json!({"id": "2", "name": "Bob"})]);
-    mock_query
-        .send_result(query_result).await;
+    mock_query.send_result(query_result).await;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -415,8 +414,7 @@ async fn test_mixed_result_types() -> Result<()> {
         metadata: HashMap::new(),
         profiling: None,
     };
-    mock_query
-        .send_result(query_result).await;
+    mock_query.send_result(query_result).await;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -452,8 +450,7 @@ async fn test_stream_naming_convention() -> Result<()> {
 
     // Send result
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    mock_query
-        .send_result(query_result).await;
+    mock_query.send_result(query_result).await;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -496,8 +493,7 @@ async fn test_metadata_preservation() -> Result<()> {
         metadata,
         profiling: None,
     };
-    mock_query
-        .send_result(query_result).await;
+    mock_query.send_result(query_result).await;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -534,8 +530,7 @@ async fn test_cloudevent_required_fields() -> Result<()> {
     sleep(Duration::from_millis(150)).await;
 
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    mock_query
-        .send_result(query_result).await;
+    mock_query.send_result(query_result).await;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -568,8 +563,7 @@ async fn test_cloudevent_topic_format() -> Result<()> {
     sleep(Duration::from_millis(150)).await;
 
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    mock_query
-        .send_result(query_result).await;
+    mock_query.send_result(query_result).await;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -598,8 +592,7 @@ async fn test_cloudevent_timestamp_format() -> Result<()> {
     sleep(Duration::from_millis(150)).await;
 
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    mock_query
-        .send_result(query_result).await;
+    mock_query.send_result(query_result).await;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -628,8 +621,7 @@ async fn test_cloudevent_data_content_type() -> Result<()> {
     sleep(Duration::from_millis(150)).await;
 
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    mock_query
-        .send_result(query_result).await;
+    mock_query.send_result(query_result).await;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -657,8 +649,7 @@ async fn test_dapr_metadata_fields() -> Result<()> {
     sleep(Duration::from_millis(150)).await;
 
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    mock_query
-        .send_result(query_result).await;
+    mock_query.send_result(query_result).await;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -694,8 +685,7 @@ async fn test_custom_pubsub_name() -> Result<()> {
     sleep(Duration::from_millis(150)).await;
 
     let query_result = build_query_result_add(query_id, vec![json!({"test": "data"})]);
-    mock_query
-        .send_result(query_result).await;
+    mock_query.send_result(query_result).await;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -782,8 +772,7 @@ async fn test_sequence_numbering() -> Result<()> {
     // Send 5 query results
     for i in 1..=5 {
         let query_result = build_query_result_add(query_id, vec![json!({"id": i})]);
-        mock_query
-            .send_result(query_result).await;
+        mock_query.send_result(query_result).await;
         sleep(Duration::from_millis(50)).await;
     }
 
@@ -830,8 +819,7 @@ async fn test_maxlen_stream_trimming() -> Result<()> {
     // Send 10 events
     for i in 1..=10 {
         let query_result = build_query_result_add(query_id, vec![json!({"id": i})]);
-        mock_query
-            .send_result(query_result).await;
+        mock_query.send_result(query_result).await;
         sleep(Duration::from_millis(30)).await;
     }
 
@@ -881,8 +869,7 @@ async fn test_update_with_grouping_keys() -> Result<()> {
             Some(vec!["key1".to_string(), "key2".to_string()]),
         )],
     );
-    mock_query
-        .send_result(query_result).await;
+    mock_query.send_result(query_result).await;
 
     sleep(Duration::from_millis(300)).await;
 
@@ -928,8 +915,7 @@ async fn test_empty_metadata_filtered() -> Result<()> {
         metadata: HashMap::new(), // Empty metadata
         profiling: None,
     };
-    mock_query
-        .send_result(query_result).await;
+    mock_query.send_result(query_result).await;
 
     sleep(Duration::from_millis(300)).await;
 

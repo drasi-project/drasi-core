@@ -39,25 +39,31 @@ pub struct AdaptiveGrpcReaction {
 impl AdaptiveGrpcReaction {
     pub fn new(config: ReactionConfig, event_tx: ComponentEventSender) -> Self {
         // Extract gRPC-specific configuration from typed config
-        let (endpoint, timeout_ms, max_retries, connection_retry_attempts, initial_connection_timeout_ms, metadata) =
-            match &config.config {
-                crate::config::ReactionSpecificConfig::Grpc(grpc_config) => (
-                    grpc_config.endpoint.clone(),
-                    grpc_config.timeout_ms,
-                    grpc_config.max_retries,
-                    grpc_config.connection_retry_attempts,
-                    grpc_config.initial_connection_timeout_ms,
-                    grpc_config.metadata.clone(),
-                ),
-                _ => (
-                    "grpc://localhost:50052".to_string(),
-                    5000u64,
-                    5u32,
-                    5u32,
-                    10000u64,
-                    HashMap::new(),
-                ),
-            };
+        let (
+            endpoint,
+            timeout_ms,
+            max_retries,
+            connection_retry_attempts,
+            initial_connection_timeout_ms,
+            metadata,
+        ) = match &config.config {
+            crate::config::ReactionSpecificConfig::Grpc(grpc_config) => (
+                grpc_config.endpoint.clone(),
+                grpc_config.timeout_ms,
+                grpc_config.max_retries,
+                grpc_config.connection_retry_attempts,
+                grpc_config.initial_connection_timeout_ms,
+                grpc_config.metadata.clone(),
+            ),
+            _ => (
+                "grpc://localhost:50052".to_string(),
+                5000u64,
+                5u32,
+                5u32,
+                10000u64,
+                HashMap::new(),
+            ),
+        };
 
         // Configure adaptive batching
         let mut adaptive_config = AdaptiveBatchConfig::default();
@@ -96,10 +102,7 @@ impl AdaptiveGrpcReaction {
             }
 
             // Check if adaptive mode is explicitly disabled
-            if let Some(enabled) = properties
-                .get("adaptive_enabled")
-                .and_then(|v| v.as_bool())
-            {
+            if let Some(enabled) = properties.get("adaptive_enabled").and_then(|v| v.as_bool()) {
                 adaptive_config.adaptive_enabled = enabled;
             }
         }

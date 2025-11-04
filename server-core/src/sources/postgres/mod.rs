@@ -86,10 +86,14 @@ impl PostgresReplicationSource {
                     slot_name: postgres_config.slot_name.clone(),
                     publication_name: postgres_config.publication_name.clone(),
                     ssl_mode: postgres_config.ssl_mode.clone(),
-                    table_keys: postgres_config.table_keys.iter().map(|tk| TableKeyConfig {
-                        table: tk.table.clone(),
-                        key_columns: tk.key_columns.clone(),
-                    }).collect(),
+                    table_keys: postgres_config
+                        .table_keys
+                        .iter()
+                        .map(|tk| TableKeyConfig {
+                            table: tk.table.clone(),
+                            key_columns: tk.key_columns.clone(),
+                        })
+                        .collect(),
                 })
             }
             _ => Err(anyhow::anyhow!("Invalid config type for PostgreSQL source")),
@@ -207,7 +211,6 @@ impl Source for PostgresReplicationSource {
             .await
     }
 
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -216,7 +219,9 @@ impl Source for PostgresReplicationSource {
 async fn run_replication(
     source_id: String,
     config: PostgresReplicationConfig,
-    dispatchers: Arc<RwLock<Vec<Box<dyn crate::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    dispatchers: Arc<
+        RwLock<Vec<Box<dyn crate::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>,
+    >,
     event_tx: ComponentEventSender,
     status: Arc<RwLock<ComponentStatus>>,
 ) -> Result<()> {

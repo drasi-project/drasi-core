@@ -51,8 +51,7 @@ use tokio::sync::RwLock;
 
 use crate::channels::{
     BroadcastChangeDispatcher, ChangeDispatcher, ChangeReceiver, ChannelChangeDispatcher,
-    ComponentEventSender, ComponentStatus, DispatchMode, QueryResult,
-    QuerySubscriptionResponse,
+    ComponentEventSender, ComponentStatus, DispatchMode, QueryResult, QuerySubscriptionResponse,
 };
 use crate::config::QueryConfig;
 // Profiling will be used when implementing performance tracking
@@ -163,10 +162,7 @@ impl QueryBase {
         let dispatchers = self.dispatchers.read().await;
         for dispatcher in dispatchers.iter() {
             if let Err(e) = dispatcher.dispatch_change(arc_result.clone()).await {
-                debug!(
-                    "[{}] Failed to dispatch result: {}",
-                    self.config.id, e
-                );
+                debug!("[{}] Failed to dispatch result: {}", self.config.id, e);
             }
         }
 
@@ -200,7 +196,10 @@ impl QueryBase {
                     error!("Query '{}' task panicked: {}", self.config.id, e);
                 }
                 Err(_) => {
-                    error!("Query '{}' task did not complete within timeout", self.config.id);
+                    error!(
+                        "Query '{}' task did not complete within timeout",
+                        self.config.id
+                    );
                 }
             }
         }

@@ -410,7 +410,7 @@ let core = DrasiServerCore::builder()
 core.start().await?;
 
 // Get handle for injection
-let source = core.source_handle("app")?;
+let source = core.source_handle("app").await?;
 
 // Inject test data
 source.send_node_insert(
@@ -529,7 +529,7 @@ let core = DrasiServerCore::builder()
 core.start().await?;
 
 // Get handle
-let source = core.source_handle("app-events")?;
+let source = core.source_handle("app-events").await?;
 
 // Insert node
 source.send_node_insert(
@@ -803,7 +803,7 @@ let core = DrasiServerCore::builder()
 core.start().await?;
 
 // Get handle
-let reaction = core.reaction_handle("processor")?;
+let reaction = core.reaction_handle("processor").await?;
 
 // Process changes asynchronously
 let processor = tokio::spawn(async move {
@@ -1255,8 +1255,8 @@ async fn test_alert_generation() {
 
     core.start().await.unwrap();
 
-    let source = core.source_handle("test").unwrap();
-    let reaction = core.reaction_handle("results").unwrap();
+    let source = core.source_handle("test").await.unwrap();
+    let reaction = core.reaction_handle("results").await.unwrap();
     let mut stream = reaction.as_stream().await.unwrap();
 
     // Send test data
@@ -1323,7 +1323,7 @@ async fn test_with_initial_data() {
 ```rust
 use drasi_server_core::{DrasiError, Result};
 
-match core.source_handle("nonexistent") {
+match core.source_handle("nonexistent").await {
     Ok(handle) => { /* use handle */ }
     Err(DrasiError::ComponentNotFound { kind, id }) => {
         eprintln!("{} '{}' not found", kind, id);
@@ -1393,9 +1393,9 @@ core.remove_source(&str) -> Future<Result>
 core.list_sources() -> Future<Vec<(String, ComponentStatus)>>
 core.get_source_info(&str) -> Future<SourceInfo>
 
-// Handles
-core.source_handle(&str) -> Result<ApplicationSourceHandle>
-core.reaction_handle(&str) -> Result<ApplicationReactionHandle>
+// Handles (async methods)
+core.source_handle(&str).await -> Result<ApplicationSourceHandle>
+core.reaction_handle(&str).await -> Result<ApplicationReactionHandle>
 ```
 
 ## Best Practices
@@ -1450,7 +1450,7 @@ Choose sources based on:
 
 ```rust
 // Check exact ID match
-let handle = core.source_handle("my-source")?;
+let handle = core.source_handle("my-source").await?;
 // ID must match: Source::application("my-source")
 ```
 

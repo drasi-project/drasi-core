@@ -85,9 +85,11 @@ pub mod test_fixtures {
                 batch_size: 10,
                 block_ms: 5000,
             }),
-            "application" => crate::config::SourceSpecificConfig::Application(ApplicationSourceConfig {
-                properties: HashMap::new(),
-            }),
+            "application" => {
+                crate::config::SourceSpecificConfig::Application(ApplicationSourceConfig {
+                    properties: HashMap::new(),
+                })
+            }
             _ => crate::config::SourceSpecificConfig::Application(ApplicationSourceConfig {
                 properties: HashMap::new(),
             }),

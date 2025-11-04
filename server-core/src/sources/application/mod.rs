@@ -68,7 +68,7 @@ use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChang
 /// # let core = DrasiServerCore::builder()
 /// #     .add_source(Source::application("events").build())
 /// #     .build().await?;
-/// let handle = core.source_handle("events")?;
+/// let handle = core.source_handle("events").await?;
 ///
 /// // Insert a Person node with properties
 /// let properties = PropertyMapBuilder::new()
@@ -98,7 +98,7 @@ use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChang
 /// # let core = DrasiServerCore::builder()
 /// #     .add_source(Source::application("events").build())
 /// #     .build().await?;
-/// let handle = core.source_handle("events")?;
+/// let handle = core.source_handle("events").await?;
 ///
 /// // Update a node's properties
 /// let properties = PropertyMapBuilder::new()
@@ -119,7 +119,7 @@ use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChang
 /// # let core = DrasiServerCore::builder()
 /// #     .add_source(Source::application("events").build())
 /// #     .build().await?;
-/// let handle = core.source_handle("events")?;
+/// let handle = core.source_handle("events").await?;
 ///
 /// // Insert a KNOWS relationship
 /// let properties = PropertyMapBuilder::new()
@@ -146,7 +146,7 @@ use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChang
 /// # let core = DrasiServerCore::builder()
 /// #     .add_source(Source::application("events").build())
 /// #     .build().await?;
-/// let handle = core.source_handle("events")?;
+/// let handle = core.source_handle("events").await?;
 ///
 /// // Delete a node or relationship
 /// handle.send_delete("person-1", vec!["Person"]).await?;
@@ -164,7 +164,7 @@ use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChang
 /// # let core = DrasiServerCore::builder()
 /// #     .add_source(Source::application("events").build())
 /// #     .build().await?;
-/// let handle = core.source_handle("events")?;
+/// let handle = core.source_handle("events").await?;
 ///
 /// // Prepare a batch of changes
 /// let changes: Vec<SourceChange> = vec![
@@ -185,7 +185,7 @@ use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChang
 /// # let core = DrasiServerCore::builder()
 /// #     .add_source(Source::application("events").build())
 /// #     .build().await?;
-/// let handle = core.source_handle("events")?;
+/// let handle = core.source_handle("events").await?;
 ///
 /// let properties = PropertyMapBuilder::new()
 ///     .with_string("name", "Bob")
@@ -267,7 +267,7 @@ impl ApplicationSourceHandle {
     /// # let core = DrasiServerCore::builder()
     /// #     .add_source(Source::application("events").build())
     /// #     .build().await?;
-    /// let handle = core.source_handle("events")?;
+    /// let handle = core.source_handle("events").await?;
     ///
     /// let properties = PropertyMapBuilder::new()
     ///     .with_string("name", "Alice")
@@ -402,7 +402,7 @@ impl ApplicationSourceHandle {
     /// # let core = DrasiServerCore::builder()
     /// #     .add_source(Source::application("events").build())
     /// #     .build().await?;
-    /// let handle = core.source_handle("events")?;
+    /// let handle = core.source_handle("events").await?;
     ///
     /// // Create FOLLOWS relationship from user-1 to user-2
     /// let properties = PropertyMapBuilder::new()
@@ -478,7 +478,7 @@ impl ApplicationSourceHandle {
     /// # let core = DrasiServerCore::builder()
     /// #     .add_source(Source::application("events").build())
     /// #     .build().await?;
-    /// let handle = core.source_handle("events")?;
+    /// let handle = core.source_handle("events").await?;
     ///
     /// // Create multiple changes
     /// let changes = vec![
@@ -513,7 +513,7 @@ impl ApplicationSourceHandle {
     /// # let core = DrasiServerCore::builder()
     /// #     .add_source(Source::application("events").build())
     /// #     .build().await?;
-    /// let handle = core.source_handle("events")?;
+    /// let handle = core.source_handle("events").await?;
     /// assert_eq!(handle.source_id(), "events");
     /// # Ok(())
     /// # }
@@ -613,12 +613,9 @@ impl ApplicationSource {
                 );
 
                 // Dispatch to all subscribers via helper
-                if let Err(e) = SourceBase::dispatch_from_task(
-                    base_dispatchers.clone(),
-                    wrapper,
-                    &source_name,
-                )
-                .await
+                if let Err(e) =
+                    SourceBase::dispatch_from_task(base_dispatchers.clone(), wrapper, &source_name)
+                        .await
                 {
                     debug!("Failed to dispatch change (no subscribers): {}", e);
                 }
@@ -824,7 +821,6 @@ impl Source for ApplicationSource {
             bootstrap_receiver,
         })
     }
-
 
     fn as_any(&self) -> &dyn std::any::Any {
         self

@@ -66,7 +66,7 @@ use crate::utils::log_component_start;
 /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
 /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
 /// #     .build().await?;
-/// let handle = core.reaction_handle("results")?;
+/// let handle = core.reaction_handle("results").await?;
 ///
 /// // Create a subscription with default options
 /// let mut subscription = handle.subscribe_with_options(
@@ -94,7 +94,7 @@ use crate::utils::log_component_start;
 /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
 /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
 /// #     .build().await?;
-/// let handle = core.reaction_handle("results")?;
+/// let handle = core.reaction_handle("results").await?;
 ///
 /// // Get as async stream
 /// if let Some(mut stream) = handle.as_stream().await {
@@ -116,7 +116,7 @@ use crate::utils::log_component_start;
 /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
 /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
 /// #     .build().await?;
-/// let handle = core.reaction_handle("results")?;
+/// let handle = core.reaction_handle("results").await?;
 ///
 /// // Process results with a callback (spawns background task)
 /// handle.subscribe(|result| {
@@ -140,7 +140,7 @@ use crate::utils::log_component_start;
 /// #     .add_query(Query::cypher("admins").query("MATCH (n:Admin) RETURN n").from_source("events").build())
 /// #     .add_reaction(Reaction::application("results").subscribe_to("users").subscribe_to("admins").build())
 /// #     .build().await?;
-/// let handle = core.reaction_handle("results")?;
+/// let handle = core.reaction_handle("results").await?;
 ///
 /// // Only receive results from specific queries
 /// handle.subscribe_filtered(
@@ -163,7 +163,7 @@ use crate::utils::log_component_start;
 /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
 /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
 /// #     .build().await?;
-/// let handle = core.reaction_handle("results")?;
+/// let handle = core.reaction_handle("results").await?;
 ///
 /// // Configure subscription behavior
 /// let options = SubscriptionOptions::default()
@@ -244,7 +244,7 @@ impl ApplicationReactionHandle {
     /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
     /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
     /// #     .build().await?;
-    /// let handle = core.reaction_handle("results")?;
+    /// let handle = core.reaction_handle("results").await?;
     ///
     /// handle.subscribe(|result| {
     ///     println!("Received {} results from query {}",
@@ -300,7 +300,7 @@ impl ApplicationReactionHandle {
     /// #     .add_query(Query::cypher("admins").query("MATCH (n:Admin) RETURN n").from_source("events").build())
     /// #     .add_reaction(Reaction::application("results").subscribe_to("users").subscribe_to("admins").build())
     /// #     .build().await?;
-    /// let handle = core.reaction_handle("results")?;
+    /// let handle = core.reaction_handle("results").await?;
     ///
     /// // Only process results from "users" query
     /// handle.subscribe_filtered(
@@ -360,7 +360,7 @@ impl ApplicationReactionHandle {
     /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
     /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
     /// #     .build().await?;
-    /// let handle = core.reaction_handle("results")?;
+    /// let handle = core.reaction_handle("results").await?;
     ///
     /// if let Some(mut stream) = handle.as_stream().await {
     ///     while let Some(result) = stream.next().await {
@@ -409,7 +409,7 @@ impl ApplicationReactionHandle {
     /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
     /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
     /// #     .build().await?;
-    /// let handle = core.reaction_handle("results")?;
+    /// let handle = core.reaction_handle("results").await?;
     ///
     /// // Configure subscription
     /// let options = SubscriptionOptions::default()
@@ -455,7 +455,7 @@ impl ApplicationReactionHandle {
     /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
     /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
     /// #     .build().await?;
-    /// let handle = core.reaction_handle("results")?;
+    /// let handle = core.reaction_handle("results").await?;
     /// assert_eq!(handle.reaction_id(), "results");
     /// # Ok(())
     /// # }
@@ -480,7 +480,7 @@ impl ApplicationReactionHandle {
 /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
 /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
 /// #     .build().await?;
-/// let handle = core.reaction_handle("results")?;
+/// let handle = core.reaction_handle("results").await?;
 ///
 /// if let Some(mut stream) = handle.as_stream().await {
 ///     while let Some(result) = stream.next().await {
@@ -514,7 +514,7 @@ impl ResultStream {
     /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
     /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
     /// #     .build().await?;
-    /// # let handle = core.reaction_handle("results")?;
+    /// # let handle = core.reaction_handle("results").await?;
     /// if let Some(mut stream) = handle.as_stream().await {
     ///     while let Some(result) = stream.next().await {
     ///         // Process result
@@ -543,7 +543,7 @@ impl ResultStream {
     /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
     /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
     /// #     .build().await?;
-    /// # let handle = core.reaction_handle("results")?;
+    /// # let handle = core.reaction_handle("results").await?;
     /// if let Some(mut stream) = handle.as_stream().await {
     ///     // Non-blocking check for results
     ///     if let Some(result) = stream.try_next() {

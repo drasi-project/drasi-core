@@ -473,7 +473,9 @@ impl DrasiServerCoreBuilder {
     /// ```
     pub async fn build(self) -> Result<DrasiServerCore> {
         let server_settings = DrasiServerCoreSettings {
-            id: self.server_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            id: self
+                .server_id
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             priority_queue_capacity: self.priority_queue_capacity,
             dispatch_buffer_capacity: self.dispatch_buffer_capacity,
         };

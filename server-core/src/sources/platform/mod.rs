@@ -23,8 +23,8 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
 use crate::channels::{
-    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType,
-    ControlOperation, SourceControl, SourceEvent, SourceEventWrapper, SubscriptionResponse,
+    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, ControlOperation,
+    SourceControl, SourceEvent, SourceEventWrapper, SubscriptionResponse,
 };
 use crate::config::SourceConfig;
 use crate::sources::base::SourceBase;
@@ -106,37 +106,45 @@ impl PlatformSource {
         config.redis_url = properties
             .get("redis_url")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!(
-                "Configuration error: Missing required field 'redis_url'. \
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Configuration error: Missing required field 'redis_url'. \
                  Platform source requires a Redis connection URL"
-            ))?
+                )
+            })?
             .to_string();
 
         config.stream_key = properties
             .get("stream_key")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!(
-                "Configuration error: Missing required field 'stream_key'. \
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Configuration error: Missing required field 'stream_key'. \
                  Platform source requires a Redis Stream key to read from"
-            ))?
+                )
+            })?
             .to_string();
 
         config.consumer_group = properties
             .get("consumer_group")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!(
-                "Configuration error: Missing required field 'consumer_group'. \
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Configuration error: Missing required field 'consumer_group'. \
                  Platform source requires a consumer group name"
-            ))?
+                )
+            })?
             .to_string();
 
         config.consumer_name = properties
             .get("consumer_name")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!(
-                "Configuration error: Missing required field 'consumer_name'. \
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Configuration error: Missing required field 'consumer_name'. \
                  Platform source requires a unique consumer name"
-            ))?
+                )
+            })?
             .to_string();
 
         // Optional fields
@@ -308,7 +316,11 @@ impl PlatformSource {
     async fn start_consumer_task(
         source_id: String,
         platform_config: PlatformConfig,
-        dispatchers: Arc<RwLock<Vec<Box<dyn crate::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+        dispatchers: Arc<
+            RwLock<
+                Vec<Box<dyn crate::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
+            >,
+        >,
         event_tx: ComponentEventSender,
         status: Arc<RwLock<ComponentStatus>>,
     ) -> JoinHandle<()> {
@@ -590,7 +602,10 @@ impl PlatformSource {
                                             .await
                                         {
                                             Ok(_) => {
-                                                debug!("Individually acknowledged message {}", stream_id);
+                                                debug!(
+                                                    "Individually acknowledged message {}",
+                                                    stream_id
+                                                );
                                             }
                                             Err(e) => {
                                                 error!(
@@ -654,22 +669,21 @@ impl Source for PlatformSource {
 
         // Extract configuration from typed config
         let platform_config = match &self.base.config.config {
-            crate::config::SourceSpecificConfig::Platform(platform_config) => {
-                PlatformConfig {
-                    redis_url: platform_config.redis_url.clone(),
-                    stream_key: platform_config.stream_key.clone(),
-                    consumer_group: platform_config.consumer_group.clone(),
-                    consumer_name: platform_config.consumer_name.clone().unwrap_or_else(|| {
-                        format!("drasi-consumer-{}", self.base.config.id)
-                    }),
-                    batch_size: platform_config.batch_size,
-                    block_ms: platform_config.block_ms,
-                    start_id: ">".to_string(),
-                    always_create_consumer_group: false,
-                    max_retries: 5,
-                    retry_delay_ms: 1000,
-                }
-            }
+            crate::config::SourceSpecificConfig::Platform(platform_config) => PlatformConfig {
+                redis_url: platform_config.redis_url.clone(),
+                stream_key: platform_config.stream_key.clone(),
+                consumer_group: platform_config.consumer_group.clone(),
+                consumer_name: platform_config
+                    .consumer_name
+                    .clone()
+                    .unwrap_or_else(|| format!("drasi-consumer-{}", self.base.config.id)),
+                batch_size: platform_config.batch_size,
+                block_ms: platform_config.block_ms,
+                start_id: ">".to_string(),
+                always_create_consumer_group: false,
+                max_retries: 5,
+                retry_delay_ms: 1000,
+            },
             _ => return Err(anyhow::anyhow!("Invalid config type for platform source")),
         };
 
@@ -731,7 +745,6 @@ impl Source for PlatformSource {
             .await
     }
 
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -742,7 +755,9 @@ impl PlatformSource {
     ///
     /// This method delegates to SourceBase and is provided for convenience in tests.
     /// Note: Use test_subscribe_async() in async contexts to avoid runtime issues.
-    pub fn test_subscribe(&self) -> Box<dyn crate::channels::ChangeReceiver<crate::channels::SourceEventWrapper>> {
+    pub fn test_subscribe(
+        &self,
+    ) -> Box<dyn crate::channels::ChangeReceiver<crate::channels::SourceEventWrapper>> {
         self.base.test_subscribe()
     }
 
@@ -750,8 +765,13 @@ impl PlatformSource {
     ///
     /// This method delegates to SourceBase and is provided for convenience in async tests.
     /// Prefer this method over test_subscribe() in async contexts.
-    pub async fn test_subscribe_async(&self) -> Box<dyn crate::channels::ChangeReceiver<crate::channels::SourceEventWrapper>> {
-        self.base.create_streaming_receiver().await.expect("Failed to create test subscription")
+    pub async fn test_subscribe_async(
+        &self,
+    ) -> Box<dyn crate::channels::ChangeReceiver<crate::channels::SourceEventWrapper>> {
+        self.base
+            .create_streaming_receiver()
+            .await
+            .expect("Failed to create test subscription")
     }
 }
 

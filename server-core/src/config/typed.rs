@@ -536,7 +536,6 @@ pub enum ReactionSpecificConfig {
     },
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,7 +574,6 @@ mod tests {
         assert!(matches!(deserialized, SourceSpecificConfig::Mock(_)));
     }
 
-
     #[test]
     fn test_log_reaction_config_defaults() {
         let config = LogReactionConfig::default();
@@ -598,7 +596,10 @@ mod tests {
     #[test]
     fn test_custom_source_config() {
         let mut properties = HashMap::new();
-        properties.insert("custom_field".to_string(), serde_json::Value::String("value".to_string()));
+        properties.insert(
+            "custom_field".to_string(),
+            serde_json::Value::String("value".to_string()),
+        );
 
         let config = SourceSpecificConfig::Custom { properties };
 

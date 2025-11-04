@@ -20,7 +20,7 @@ use std::path::Path;
 
 use crate::bootstrap::BootstrapProviderConfig;
 use crate::channels::DispatchMode;
-use crate::config::typed::{SourceSpecificConfig, ReactionSpecificConfig};
+use crate::config::typed::{ReactionSpecificConfig, SourceSpecificConfig};
 
 /// Query language for continuous queries
 ///
@@ -410,9 +410,10 @@ impl SourceConfig {
     /// Get typed configuration properties as HashMap for backward compatibility
     pub fn get_properties(&self) -> HashMap<String, serde_json::Value> {
         match serde_json::to_value(&self.config) {
-            Ok(serde_json::Value::Object(map)) => {
-                map.into_iter().filter(|(k, _)| k != "source_type").collect()
-            }
+            Ok(serde_json::Value::Object(map)) => map
+                .into_iter()
+                .filter(|(k, _)| k != "source_type")
+                .collect(),
             _ => HashMap::new(),
         }
     }
@@ -803,9 +804,10 @@ impl ReactionConfig {
     /// Get typed configuration properties as HashMap for backward compatibility
     pub fn get_properties(&self) -> HashMap<String, serde_json::Value> {
         match serde_json::to_value(&self.config) {
-            Ok(serde_json::Value::Object(map)) => {
-                map.into_iter().filter(|(k, _)| k != "reaction_type").collect()
-            }
+            Ok(serde_json::Value::Object(map)) => map
+                .into_iter()
+                .filter(|(k, _)| k != "reaction_type")
+                .collect(),
             _ => HashMap::new(),
         }
     }
@@ -1015,7 +1017,6 @@ fn default_enable_bootstrap() -> bool {
 fn default_bootstrap_buffer_size() -> usize {
     10000
 }
-
 
 // Conversion implementations for QueryJoin types
 impl From<QueryJoinKeyConfig> for drasi_core::models::QueryJoinKey {

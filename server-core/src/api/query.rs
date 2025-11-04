@@ -579,8 +579,8 @@ impl QueryBuilder {
             sources: self.sources,
             auto_start: self.auto_start,
             joins: self.joins,
-            enable_bootstrap: true,           // Default: bootstrap enabled
-            bootstrap_buffer_size: 10000,     // Default buffer size
+            enable_bootstrap: true,       // Default: bootstrap enabled
+            bootstrap_buffer_size: 10000, // Default buffer size
             priority_queue_capacity: self.priority_queue_capacity,
             dispatch_buffer_capacity: self.dispatch_buffer_capacity,
             dispatch_mode: self.dispatch_mode,

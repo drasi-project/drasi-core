@@ -64,9 +64,12 @@ impl HttpReaction {
     pub fn new(config: ReactionConfig, event_tx: ComponentEventSender) -> Self {
         // Extract HTTP-specific configuration
         let (base_url, token, timeout_ms, typed_query_configs) = match &config.config {
-            crate::config::ReactionSpecificConfig::Http(http_config) => {
-                (http_config.base_url.clone(), http_config.token.clone(), http_config.timeout_ms, http_config.queries.clone())
-            }
+            crate::config::ReactionSpecificConfig::Http(http_config) => (
+                http_config.base_url.clone(),
+                http_config.token.clone(),
+                http_config.timeout_ms,
+                http_config.queries.clone(),
+            ),
             _ => ("http://localhost".to_string(), None, 10000, HashMap::new()),
         };
 

@@ -37,7 +37,6 @@ impl MockSource {
             base: SourceBase::new(config, event_tx)?,
         })
     }
-
 }
 
 #[async_trait]
@@ -233,12 +232,9 @@ impl Source for MockSource {
                 );
 
                 // Dispatch to all subscribers via helper
-                if let Err(e) = SourceBase::dispatch_from_task(
-                    base_dispatchers.clone(),
-                    wrapper,
-                    &source_id,
-                )
-                .await
+                if let Err(e) =
+                    SourceBase::dispatch_from_task(base_dispatchers.clone(), wrapper, &source_id)
+                        .await
                 {
                     debug!("Failed to dispatch change: {}", e);
                 }
@@ -314,7 +310,6 @@ impl Source for MockSource {
             .await
     }
 
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -330,7 +325,9 @@ impl MockSource {
     /// Create a test subscription to this source
     ///
     /// This method delegates to SourceBase and is provided for convenience in tests.
-    pub fn test_subscribe(&self) -> Box<dyn crate::channels::ChangeReceiver<crate::channels::SourceEventWrapper>> {
+    pub fn test_subscribe(
+        &self,
+    ) -> Box<dyn crate::channels::ChangeReceiver<crate::channels::SourceEventWrapper>> {
         self.base.test_subscribe()
     }
 }

@@ -50,21 +50,15 @@ pub struct AdaptiveHttpReaction {
 impl AdaptiveHttpReaction {
     pub fn new(config: ReactionConfig, event_tx: ComponentEventSender) -> Self {
         // Extract HTTP-specific configuration from typed config
-        let (base_url, token, timeout_ms, query_configs) =
-            match &config.config {
-                crate::config::ReactionSpecificConfig::Http(http_config) => (
-                    http_config.base_url.clone(),
-                    http_config.token.clone(),
-                    http_config.timeout_ms,
-                    http_config.queries.clone(),
-                ),
-                _ => (
-                    "http://localhost".to_string(),
-                    None,
-                    10000,
-                    HashMap::new(),
-                ),
-            };
+        let (base_url, token, timeout_ms, query_configs) = match &config.config {
+            crate::config::ReactionSpecificConfig::Http(http_config) => (
+                http_config.base_url.clone(),
+                http_config.token.clone(),
+                http_config.timeout_ms,
+                http_config.queries.clone(),
+            ),
+            _ => ("http://localhost".to_string(), None, 10000, HashMap::new()),
+        };
 
         // Configure adaptive batching
         let mut adaptive_config = AdaptiveBatchConfig::default();
@@ -103,10 +97,7 @@ impl AdaptiveHttpReaction {
             }
 
             // Check if adaptive mode is explicitly disabled
-            if let Some(enabled) = properties
-                .get("adaptive_enabled")
-                .and_then(|v| v.as_bool())
-            {
+            if let Some(enabled) = properties.get("adaptive_enabled").and_then(|v| v.as_bool()) {
                 adaptive_config.adaptive_enabled = enabled;
             }
         }
