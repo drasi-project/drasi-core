@@ -22,6 +22,52 @@ use crate::bootstrap::BootstrapProviderConfig;
 use crate::channels::DispatchMode;
 use crate::config::typed::{SourceSpecificConfig, ReactionSpecificConfig};
 
+/// Query language for continuous queries
+///
+/// Drasi supports two query languages for continuous query processing:
+///
+/// # Query Languages
+///
+/// - **Cypher**: Default graph query language with pattern matching
+/// - **GQL**: GraphQL-style queries compiled to Cypher
+///
+/// # Default Behavior
+///
+/// If not specified, queries default to `QueryLanguage::Cypher`.
+///
+/// # Examples
+///
+/// ## Using Cypher (Default)
+///
+/// ```yaml
+/// queries:
+///   - id: active_orders
+///     query: "MATCH (o:Order) WHERE o.status = 'active' RETURN o"
+///     queryLanguage: Cypher  # Optional, this is the default
+///     sources: [orders_db]
+/// ```
+///
+/// ## Using GQL
+///
+/// ```yaml
+/// queries:
+///   - id: user_data
+///     query: |
+///       {
+///         users(status: "active") {
+///           id
+///           name
+///           email
+///         }
+///       }
+///     queryLanguage: GQL
+///     sources: [users_db]
+/// ```
+///
+/// # Important Limitations
+///
+/// **Unsupported Clauses**: ORDER BY, TOP, and LIMIT clauses are not supported in continuous
+/// queries as they conflict with incremental result computation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum QueryLanguage {
     Cypher,
@@ -34,6 +80,101 @@ impl Default for QueryLanguage {
     }
 }
 
+/// Root configuration for Drasi Server Core
+///
+/// `DrasiServerCoreConfig` is the top-level configuration structure for loading Drasi
+/// configurations from YAML or JSON files. It defines all sources, queries, reactions,
+/// and global server settings.
+///
+/// # Configuration File Structure
+///
+/// A typical configuration file has four main sections:
+///
+/// 1. **server_core**: Global server settings (optional)
+/// 2. **sources**: Data ingestion sources
+/// 3. **queries**: Continuous queries to process data
+/// 4. **reactions**: Output destinations for query results
+///
+/// # Thread Safety
+///
+/// This struct is `Clone` and can be safely shared across threads.
+///
+/// # Loading Configuration
+///
+/// Use [`DrasiServerCoreConfig::load_from_file()`] to load from YAML or JSON:
+///
+/// ```no_run
+/// use drasi_server_core::DrasiServerCoreConfig;
+///
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let config = DrasiServerCoreConfig::load_from_file("config.yaml")?;
+/// config.validate()?;  // Validate references between components
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Complete Configuration Example
+///
+/// ```yaml
+/// server_core:
+///   id: production-server
+///   priority_queue_capacity: 50000
+///   dispatch_buffer_capacity: 5000
+///
+/// sources:
+///   - id: orders_db
+///     source_type: postgres
+///     auto_start: true
+///     host: localhost
+///     port: 5432
+///     database: orders
+///     user: postgres
+///     password: secret
+///     tables: [orders, customers]
+///     table_keys:
+///       - table: orders
+///         key_columns: [order_id]
+///       - table: customers
+///         key_columns: [customer_id]
+///
+/// queries:
+///   - id: active_orders
+///     query: "MATCH (o:Order) WHERE o.status = 'active' RETURN o"
+///     queryLanguage: Cypher
+///     sources: [orders_db]
+///     auto_start: true
+///     enableBootstrap: true
+///     bootstrapBufferSize: 10000
+///
+/// reactions:
+///   - id: order_webhook
+///     reaction_type: http
+///     queries: [active_orders]
+///     auto_start: true
+///     base_url: "https://api.example.com/orders"
+///     timeout_ms: 10000
+/// ```
+///
+/// # Validation
+///
+/// Call [`validate()`](DrasiServerCoreConfig::validate) to check:
+/// - Unique component IDs
+/// - Valid source references in queries
+/// - Valid query references in reactions
+///
+/// # Conversion to Runtime Config
+///
+/// Convert to [`RuntimeConfig`](crate::RuntimeConfig) for server execution:
+///
+/// ```no_run
+/// use drasi_server_core::{DrasiServerCoreConfig, RuntimeConfig};
+///
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let config = DrasiServerCoreConfig::load_from_file("config.yaml")?;
+/// let runtime_config: RuntimeConfig = config.into();
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DrasiServerCoreConfig {
     #[serde(default)]
@@ -43,6 +184,71 @@ pub struct DrasiServerCoreConfig {
     pub reactions: Vec<ReactionConfig>,
 }
 
+/// Global server settings for Drasi Server Core
+///
+/// `DrasiServerCoreSettings` configures global behavior and default capacity settings
+/// that apply to all components unless overridden at the component level.
+///
+/// # Capacity Settings
+///
+/// - **priority_queue_capacity**: Default capacity for timestamp-ordered event queues in
+///   queries and reactions. Higher values support more out-of-order events but consume
+///   more memory. Default: 10000
+///
+/// - **dispatch_buffer_capacity**: Default capacity for event dispatch channels between
+///   components (sources → queries, queries → reactions). Higher values improve throughput
+///   under load but consume more memory. Default: 1000
+///
+/// # Component Overrides
+///
+/// Individual components can override these defaults by setting their own capacity values.
+/// This allows fine-tuning performance for specific high-throughput components while
+/// keeping reasonable defaults for others.
+///
+/// # Examples
+///
+/// ## Default Settings
+///
+/// ```yaml
+/// server_core:
+///   id: my-server
+/// # priority_queue_capacity defaults to 10000
+/// # dispatch_buffer_capacity defaults to 1000
+/// ```
+///
+/// ## High-Throughput Configuration
+///
+/// ```yaml
+/// server_core:
+///   id: production-server
+///   priority_queue_capacity: 50000   # Large queues for high event volumes
+///   dispatch_buffer_capacity: 5000   # Large buffers for throughput
+/// ```
+///
+/// ## Component-Specific Override
+///
+/// ```yaml
+/// server_core:
+///   priority_queue_capacity: 10000  # Default for most components
+///
+/// queries:
+///   - id: high_volume_query
+///     priority_queue_capacity: 100000  # Override for this specific query
+///     query: "MATCH (n) RETURN n"
+///     sources: [data_source]
+/// ```
+///
+/// # Performance Considerations
+///
+/// **Priority Queue Capacity**:
+/// - Too small: Out-of-order events may be dropped
+/// - Too large: Higher memory usage
+/// - Recommended: 10000-50000 for most workloads
+///
+/// **Dispatch Buffer Capacity**:
+/// - Too small: Backpressure may slow down upstream components
+/// - Too large: Higher memory usage, longer shutdown times
+/// - Recommended: 1000-10000 for most workloads
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DrasiServerCoreSettings {
     #[serde(default = "default_id")]
@@ -55,6 +261,117 @@ pub struct DrasiServerCoreSettings {
     pub dispatch_buffer_capacity: Option<usize>,
 }
 
+/// Configuration for a data ingestion source
+///
+/// `SourceConfig` defines how Drasi ingests data from external systems. Each source
+/// continuously monitors data changes and sends them to subscribed queries.
+///
+/// # Source Types
+///
+/// Sources are configured via the `source_type` discriminator field which determines
+/// the type-specific properties available:
+///
+/// - **postgres**: PostgreSQL replication via logical decoding
+/// - **http**: HTTP endpoint for change events (adaptive batching)
+/// - **grpc**: gRPC streaming endpoint
+/// - **mock**: Generated test data
+/// - **platform**: Redis Streams integration with Drasi Platform
+/// - **application**: Direct application integration via handles
+///
+/// # Bootstrap Providers
+///
+/// All sources support pluggable bootstrap providers for initial data delivery,
+/// independent from streaming configuration. This enables powerful patterns like
+/// "bootstrap from database, stream from HTTP" or "bootstrap from file for testing".
+///
+/// # Configuration Fields
+///
+/// - **id**: Unique identifier (referenced by queries)
+/// - **source_type**: Discriminator determining source implementation
+/// - **auto_start**: Whether to start automatically (default: true)
+/// - **bootstrap_provider**: Optional bootstrap configuration
+/// - **dispatch_buffer_capacity**: Event buffer size (overrides global default)
+/// - **dispatch_mode**: Broadcast or Channel routing mode
+///
+/// # Examples
+///
+/// ## PostgreSQL Source with Standard Bootstrap
+///
+/// ```yaml
+/// sources:
+///   - id: orders_db
+///     source_type: postgres
+///     auto_start: true
+///     host: localhost
+///     port: 5432
+///     database: orders
+///     user: postgres
+///     password: secret
+///     tables: [orders, customers]
+///     table_keys:
+///       - table: orders
+///         key_columns: [order_id]
+///     bootstrap_provider:
+///       type: postgres  # Use PostgreSQL snapshot bootstrap
+/// ```
+///
+/// ## HTTP Source with PostgreSQL Bootstrap (Mix-and-Match)
+///
+/// ```yaml
+/// sources:
+///   - id: http_with_db_bootstrap
+///     source_type: http
+///     host: localhost
+///     port: 8080
+///     database: mydb           # Used by postgres bootstrap provider
+///     user: dbuser
+///     password: dbpass
+///     tables: [stocks]
+///     table_keys:
+///       - table: stocks
+///         key_columns: [symbol]
+///     bootstrap_provider:
+///       type: postgres          # Bootstrap from PostgreSQL
+///     # HTTP source will stream changes after bootstrap completes
+/// ```
+///
+/// ## Mock Source with ScriptFile Bootstrap
+///
+/// ```yaml
+/// sources:
+///   - id: test_source
+///     source_type: mock
+///     data_type: sensor
+///     interval_ms: 1000
+///     bootstrap_provider:
+///       type: scriptfile
+///       file_paths:
+///         - "/path/to/test_data.jsonl"
+/// ```
+///
+/// ## Platform Source (Redis Streams)
+///
+/// ```yaml
+/// sources:
+///   - id: platform_events
+///     source_type: platform
+///     redis_url: "redis://localhost:6379"
+///     stream_key: "sensor-data:changes"
+///     consumer_group: "drasi-core"
+///     batch_size: 10
+/// ```
+///
+/// ## High-Throughput Configuration
+///
+/// ```yaml
+/// sources:
+///   - id: high_volume_source
+///     source_type: http
+///     host: localhost
+///     port: 9000
+///     dispatch_buffer_capacity: 10000  # Override global default
+///     dispatch_mode: Channel           # Or Broadcast for fanout
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceConfig {
     /// Unique identifier for the source
@@ -101,6 +418,122 @@ impl SourceConfig {
     }
 }
 
+/// Configuration for a continuous query
+///
+/// `QueryConfig` defines a continuous query that processes data changes from sources
+/// and emits incremental result updates. Queries subscribe to one or more sources and
+/// maintain materialized views that update automatically as data changes.
+///
+/// # Query Languages
+///
+/// Queries can be written in either:
+/// - **Cypher**: Default graph pattern matching language
+/// - **GQL**: GraphQL-style queries (compiled to Cypher)
+///
+/// **Important**: ORDER BY, TOP, and LIMIT clauses are not supported in continuous
+/// queries as they conflict with incremental result computation.
+///
+/// # Bootstrap Processing
+///
+/// - **enableBootstrap**: Controls whether the query processes initial data (default: true)
+/// - **bootstrapBufferSize**: Event buffer size during bootstrap phase (default: 10000)
+///
+/// During bootstrap, events are buffered to maintain ordering while initial data loads.
+/// After bootstrap completes, queries switch to incremental processing mode.
+///
+/// # Synthetic Joins
+///
+/// Queries can define synthetic relationships between node types from different sources
+/// via the `joins` field. This creates virtual edges based on property equality without
+/// requiring physical relationships in the source data.
+///
+/// # Configuration Fields
+///
+/// - **id**: Unique identifier (referenced by reactions)
+/// - **query**: Query string in specified language
+/// - **queryLanguage**: Cypher or GQL (default: Cypher)
+/// - **sources**: Source IDs to subscribe to
+/// - **auto_start**: Start automatically (default: true)
+/// - **joins**: Optional synthetic join definitions
+/// - **enableBootstrap**: Process initial data (default: true)
+/// - **bootstrapBufferSize**: Buffer size during bootstrap (default: 10000)
+/// - **priority_queue_capacity**: Out-of-order event queue size (overrides global)
+/// - **dispatch_buffer_capacity**: Output buffer size (overrides global)
+/// - **dispatch_mode**: Broadcast or Channel routing
+///
+/// # Examples
+///
+/// ## Basic Cypher Query
+///
+/// ```yaml
+/// queries:
+///   - id: active_orders
+///     query: "MATCH (o:Order) WHERE o.status = 'active' RETURN o"
+///     queryLanguage: Cypher  # Optional, this is default
+///     sources: [orders_db]
+///     auto_start: true
+///     enableBootstrap: true
+///     bootstrapBufferSize: 10000
+/// ```
+///
+/// ## Query with Multiple Sources
+///
+/// ```yaml
+/// queries:
+///   - id: order_customer_join
+///     query: |
+///       MATCH (o:Order)-[:BELONGS_TO]->(c:Customer)
+///       WHERE o.status = 'active'
+///       RETURN o, c
+///     sources: [orders_db, customers_db]
+/// ```
+///
+/// ## Query with Synthetic Joins
+///
+/// ```yaml
+/// queries:
+///   - id: synthetic_join_query
+///     query: |
+///       MATCH (o:Order)-[:CUSTOMER]->(c:Customer)
+///       RETURN o.id, c.name
+///     sources: [orders_db, customers_db]
+///     joins:
+///       - id: CUSTOMER              # Relationship type in query
+///         keys:
+///           - label: Order
+///             property: customer_id
+///           - label: Customer
+///             property: id
+/// ```
+///
+/// ## High-Throughput Query
+///
+/// ```yaml
+/// queries:
+///   - id: high_volume_processing
+///     query: "MATCH (n:Event) WHERE n.timestamp > timestamp() - 60000 RETURN n"
+///     sources: [event_stream]
+///     priority_queue_capacity: 100000  # Large queue for many out-of-order events
+///     dispatch_buffer_capacity: 10000  # Large output buffer
+///     bootstrapBufferSize: 50000       # Large bootstrap buffer
+/// ```
+///
+/// ## GQL Query
+///
+/// ```yaml
+/// queries:
+///   - id: gql_users
+///     query: |
+///       {
+///         users(status: "active") {
+///           id
+///           name
+///           email
+///         }
+///       }
+///     queryLanguage: GQL
+///     sources: [users_db]
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryConfig {
     /// Unique identifier for the query
@@ -138,6 +571,44 @@ pub struct QueryConfig {
     pub dispatch_mode: Option<DispatchMode>,
 }
 
+/// Synthetic join configuration for queries
+///
+/// `QueryJoinConfig` defines a virtual relationship between node types from different
+/// sources. This allows queries to join data without requiring physical relationships
+/// in the source systems.
+///
+/// # Join Semantics
+///
+/// Joins create synthetic edges by matching property values across nodes. The `id`
+/// field specifies the relationship type used in the query's MATCH pattern, and `keys`
+/// define which properties to match.
+///
+/// # Examples
+///
+/// ## Simple Join on Single Property
+///
+/// ```yaml
+/// joins:
+///   - id: CUSTOMER              # Use in query: MATCH (o:Order)-[:CUSTOMER]->(c:Customer)
+///     keys:
+///       - label: Order
+///         property: customer_id  # Order.customer_id
+///       - label: Customer
+///         property: id           # Customer.id
+///       # Creates edge when Order.customer_id == Customer.id
+/// ```
+///
+/// ## Multi-Source Join
+///
+/// ```yaml
+/// joins:
+///   - id: ASSIGNED_TO
+///     keys:
+///       - label: Task
+///         property: assignee_id
+///       - label: User
+///         property: user_id
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryJoinConfig {
     /// Unique identifier for the join (should match relationship type in query)
@@ -146,6 +617,24 @@ pub struct QueryJoinConfig {
     pub keys: Vec<QueryJoinKeyConfig>,
 }
 
+/// Join key specification for synthetic joins
+///
+/// `QueryJoinKeyConfig` specifies one side of a join condition by identifying
+/// a node label and the property to use for matching.
+///
+/// # Example
+///
+/// For joining orders to customers:
+///
+/// ```yaml
+/// keys:
+///   - label: Order
+///     property: customer_id
+///   - label: Customer
+///     property: id
+/// ```
+///
+/// This creates an edge when `Order.customer_id == Customer.id`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryJoinKeyConfig {
     /// Node label to match
@@ -154,6 +643,131 @@ pub struct QueryJoinKeyConfig {
     pub property: String,
 }
 
+/// Configuration for a reaction (output destination)
+///
+/// `ReactionConfig` defines how query results are delivered to external systems. Reactions
+/// subscribe to one or more queries and receive incremental result updates as data changes.
+///
+/// # Reaction Types
+///
+/// Reactions are configured via the `reaction_type` discriminator field which determines
+/// the type-specific properties available:
+///
+/// - **log**: Write results to application logs (debug/info/warn/error levels)
+/// - **http**: Send results to HTTP webhooks with configurable retry
+/// - **grpc**: Stream results via gRPC with batching support
+/// - **sse**: Expose Server-Sent Events endpoint for client subscriptions
+/// - **platform**: Publish to Redis Streams for Drasi Platform integration
+/// - **profiler**: Performance monitoring and profiling output
+/// - **application**: Direct application integration via handles
+///
+/// # Result Delivery
+///
+/// Reactions receive **three types of events** from queries:
+/// - **added**: New results matching the query
+/// - **updated**: Existing results that changed
+/// - **deleted**: Results that no longer match
+///
+/// Each reaction type handles these events according to its specific protocol.
+///
+/// # Configuration Fields
+///
+/// - **id**: Unique identifier
+/// - **reaction_type**: Discriminator determining reaction implementation
+/// - **queries**: Query IDs to subscribe to
+/// - **auto_start**: Start automatically (default: true)
+/// - **priority_queue_capacity**: Event queue size for out-of-order handling (overrides global)
+///
+/// # Examples
+///
+/// ## Log Reaction
+///
+/// ```yaml
+/// reactions:
+///   - id: debug_logger
+///     reaction_type: log
+///     queries: [active_orders]
+///     auto_start: true
+///     log_level: info  # trace, debug, info, warn, error
+/// ```
+///
+/// ## HTTP Webhook Reaction
+///
+/// ```yaml
+/// reactions:
+///   - id: order_webhook
+///     reaction_type: http
+///     queries: [active_orders, pending_orders]
+///     auto_start: true
+///     base_url: "https://api.example.com/webhooks/orders"
+///     token: "secret-token"
+///     timeout_ms: 10000
+///     queries:
+///       active_orders:
+///         added:
+///           url: "/new-order"
+///           method: POST
+///           body: "{{payload}}"
+///         updated:
+///           url: "/update-order"
+///           method: PUT
+///         deleted:
+///           url: "/cancel-order"
+///           method: DELETE
+/// ```
+///
+/// ## gRPC Streaming Reaction
+///
+/// ```yaml
+/// reactions:
+///   - id: grpc_stream
+///     reaction_type: grpc
+///     queries: [events]
+///     endpoint: "grpc://service.example.com:50051"
+///     token: "bearer-token"
+///     batch_size: 100
+///     batch_flush_timeout_ms: 1000
+///     max_retries: 3
+/// ```
+///
+/// ## Server-Sent Events Reaction
+///
+/// ```yaml
+/// reactions:
+///   - id: sse_endpoint
+///     reaction_type: sse
+///     queries: [live_updates]
+///     host: "0.0.0.0"
+///     port: 8080
+///     sse_path: "/events"
+///     heartbeat_interval_ms: 30000
+/// ```
+///
+/// ## Platform Reaction (Redis Streams)
+///
+/// ```yaml
+/// reactions:
+///   - id: platform_publisher
+///     reaction_type: platform
+///     queries: [processed_data]
+///     redis_url: "redis://localhost:6379"
+///     pubsub_name: "drasi-pubsub"
+///     source_name: "processed-results"
+///     emit_control_events: true
+///     batch_enabled: true
+///     batch_max_size: 100
+/// ```
+///
+/// ## High-Throughput Reaction
+///
+/// ```yaml
+/// reactions:
+///   - id: high_volume_reaction
+///     reaction_type: http
+///     queries: [event_stream]
+///     base_url: "https://api.example.com/events"
+///     priority_queue_capacity: 100000  # Large queue for out-of-order events
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReactionConfig {
     /// Unique identifier for the reaction
@@ -198,6 +812,43 @@ impl ReactionConfig {
 }
 
 impl DrasiServerCoreConfig {
+    /// Load configuration from a YAML or JSON file
+    ///
+    /// Attempts to parse the file as YAML first, then falls back to JSON if YAML parsing fails.
+    /// Returns a detailed error if both formats fail.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to configuration file (.yaml, .yml, or .json)
+    ///
+    /// # Returns
+    ///
+    /// Parsed configuration on success, or error describing parse failures.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if:
+    /// - File cannot be read
+    /// - Content is not valid YAML or JSON
+    /// - Configuration structure doesn't match expected schema
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use drasi_server_core::DrasiServerCoreConfig;
+    ///
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// // Load from YAML
+    /// let config = DrasiServerCoreConfig::load_from_file("config.yaml")?;
+    ///
+    /// // Load from JSON
+    /// let config_json = DrasiServerCoreConfig::load_from_file("config.json")?;
+    ///
+    /// // Validate the configuration
+    /// config.validate()?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path_ref = path.as_ref();
         let content = fs::read_to_string(path_ref).map_err(|e| {
@@ -225,12 +876,64 @@ impl DrasiServerCoreConfig {
         }
     }
 
+    /// Save configuration to a YAML file
+    ///
+    /// Serializes the configuration to YAML format and writes to the specified file path.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Destination file path
+    ///
+    /// # Errors
+    ///
+    /// Returns error if:
+    /// - Configuration cannot be serialized to YAML
+    /// - File cannot be written
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use drasi_server_core::DrasiServerCoreConfig;
+    ///
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = DrasiServerCoreConfig::load_from_file("config.yaml")?;
+    /// config.save_to_file("config_backup.yaml")?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         let content = serde_yaml::to_string(self)?;
         fs::write(path, content)?;
         Ok(())
     }
 
+    /// Validate configuration consistency and references
+    ///
+    /// Performs comprehensive validation checks:
+    /// - Ensures all component IDs (sources, queries, reactions) are unique
+    /// - Validates that queries reference existing sources
+    /// - Validates that reactions reference existing queries
+    ///
+    /// # Errors
+    ///
+    /// Returns error if validation fails with a description of the problem.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use drasi_server_core::DrasiServerCoreConfig;
+    ///
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = DrasiServerCoreConfig::load_from_file("config.yaml")?;
+    ///
+    /// // Validate before using
+    /// match config.validate() {
+    ///     Ok(()) => println!("Configuration is valid"),
+    ///     Err(e) => eprintln!("Invalid configuration: {}", e),
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn validate(&self) -> Result<()> {
         // Validate unique source ids
         let mut source_ids = std::collections::HashSet::new();

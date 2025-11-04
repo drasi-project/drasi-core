@@ -32,7 +32,175 @@ use crate::sources::base::SourceBase;
 use crate::sources::Source;
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 
-/// Handle for applications to send events to the ApplicationSource
+/// Handle for programmatic event injection into an Application Source
+///
+/// `ApplicationSourceHandle` provides a type-safe API for injecting graph data changes
+/// (node inserts, updates, deletes, and relationship inserts) directly from your application
+/// code into the Drasi continuous query processing pipeline.
+///
+/// # Usage Pattern
+///
+/// 1. Get the handle from `DrasiServerCore::source_handle()`
+/// 2. Use the fluent builder methods (`send_node_insert()`, `send_relation_insert()`, etc.)
+/// 3. Build properties using `.with_*()` methods from [`PropertyMapBuilder`]
+/// 4. Call `.send()` to inject the event
+///
+/// # Thread Safety
+///
+/// `ApplicationSourceHandle` is `Clone` and all methods are thread-safe. You can safely
+/// clone the handle and use it from multiple threads concurrently. The underlying channel
+/// has a buffer of 1000 events.
+///
+/// # Performance
+///
+/// - Each method creates a single event with a timestamp
+/// - Events are sent through an async channel (bounded to 1000)
+/// - For high-throughput scenarios, use `send_batch()` to reduce overhead
+/// - The `send()` method is async and may block if the channel buffer is full
+///
+/// # Examples
+///
+/// ## Inserting Nodes
+///
+/// ```no_run
+/// # use drasi_server_core::{DrasiServerCore, Source, PropertyMapBuilder};
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let core = DrasiServerCore::builder()
+/// #     .add_source(Source::application("events").build())
+/// #     .build().await?;
+/// let handle = core.source_handle("events")?;
+///
+/// // Insert a Person node with properties
+/// let properties = PropertyMapBuilder::new()
+///     .with_string("name", "Alice")
+///     .with_integer("age", 30)
+///     .with_bool("active", true)
+///     .build();
+///
+/// handle.send_node_insert("person-1", vec!["Person"], properties).await?;
+///
+/// // Insert with multiple labels
+/// let properties = PropertyMapBuilder::new()
+///     .with_string("username", "alice")
+///     .with_string("email", "alice@example.com")
+///     .build();
+///
+/// handle.send_node_insert("user-1", vec!["User", "Admin"], properties).await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## Updating Nodes
+///
+/// ```no_run
+/// # use drasi_server_core::{DrasiServerCore, Source, PropertyMapBuilder};
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let core = DrasiServerCore::builder()
+/// #     .add_source(Source::application("events").build())
+/// #     .build().await?;
+/// let handle = core.source_handle("events")?;
+///
+/// // Update a node's properties
+/// let properties = PropertyMapBuilder::new()
+///     .with_integer("age", 31)  // Update age
+///     .with_string("city", "Portland")  // Add new property
+///     .build();
+///
+/// handle.send_node_update("person-1", vec!["Person"], properties).await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## Inserting Relationships
+///
+/// ```no_run
+/// # use drasi_server_core::{DrasiServerCore, Source, PropertyMapBuilder};
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let core = DrasiServerCore::builder()
+/// #     .add_source(Source::application("events").build())
+/// #     .build().await?;
+/// let handle = core.source_handle("events")?;
+///
+/// // Insert a KNOWS relationship
+/// let properties = PropertyMapBuilder::new()
+///     .with_string("since", "2020")
+///     .with_integer("strength", 5)
+///     .build();
+///
+/// handle.send_relation_insert(
+///     "rel-1",
+///     vec!["KNOWS"],
+///     properties,
+///     "person-1",  // start node
+///     "person-2"   // end node
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## Deleting Elements
+///
+/// ```no_run
+/// # use drasi_server_core::{DrasiServerCore, Source};
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let core = DrasiServerCore::builder()
+/// #     .add_source(Source::application("events").build())
+/// #     .build().await?;
+/// let handle = core.source_handle("events")?;
+///
+/// // Delete a node or relationship
+/// handle.send_delete("person-1", vec!["Person"]).await?;
+/// handle.send_delete("rel-1", vec!["KNOWS"]).await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## Batch Operations
+///
+/// ```no_run
+/// # use drasi_server_core::{DrasiServerCore, Source};
+/// # use drasi_core::models::SourceChange;
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let core = DrasiServerCore::builder()
+/// #     .add_source(Source::application("events").build())
+/// #     .build().await?;
+/// let handle = core.source_handle("events")?;
+///
+/// // Prepare a batch of changes
+/// let changes: Vec<SourceChange> = vec![
+///     // ... create SourceChange instances ...
+/// ];
+///
+/// // Send all at once (more efficient for large batches)
+/// handle.send_batch(changes).await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## Error Handling
+///
+/// ```no_run
+/// # use drasi_server_core::{DrasiServerCore, Source, PropertyMapBuilder};
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let core = DrasiServerCore::builder()
+/// #     .add_source(Source::application("events").build())
+/// #     .build().await?;
+/// let handle = core.source_handle("events")?;
+///
+/// let properties = PropertyMapBuilder::new()
+///     .with_string("name", "Bob")
+///     .build();
+///
+/// match handle.send_node_insert("person-1", vec!["Person"], properties).await {
+///     Ok(_) => println!("Event sent successfully"),
+///     Err(e) => {
+///         // Channel closed - source may have been stopped or deleted
+///         eprintln!("Failed to send event: {}", e);
+///     }
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone)]
 pub struct ApplicationSourceHandle {
     tx: mpsc::Sender<SourceChange>,
@@ -40,7 +208,25 @@ pub struct ApplicationSourceHandle {
 }
 
 impl ApplicationSourceHandle {
-    /// Send a source change event
+    /// Send a raw source change event
+    ///
+    /// This is a low-level method for sending pre-constructed [`SourceChange`] events.
+    /// Most users should use the higher-level methods like [`send_node_insert()`](Self::send_node_insert),
+    /// [`send_node_update()`](Self::send_node_update), etc. instead.
+    ///
+    /// # Arguments
+    ///
+    /// * `change` - The source change event to send
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * The underlying channel is closed (source has been stopped or deleted)
+    /// * The channel buffer is full (blocks until space is available or channel closes)
+    ///
+    /// # Thread Safety
+    ///
+    /// This method is thread-safe and can be called concurrently from multiple threads.
     pub async fn send(&self, change: SourceChange) -> Result<()> {
         self.tx
             .send(change)
@@ -49,7 +235,49 @@ impl ApplicationSourceHandle {
         Ok(())
     }
 
-    /// Send an insert event for a node
+    /// Insert a new node into the graph
+    ///
+    /// Creates and sends a node insert event with the specified ID, labels, and properties.
+    /// The node will be timestamped with the current time.
+    ///
+    /// # Arguments
+    ///
+    /// * `element_id` - Unique identifier for the node (must be unique within this source)
+    /// * `labels` - One or more labels for the node (e.g., "Person", "User")
+    /// * `properties` - Property map containing node attributes
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if the event was successfully sent to the processing pipeline.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * The underlying channel is closed (`anyhow::Error`)
+    ///
+    /// # Thread Safety
+    ///
+    /// This method is thread-safe and can be called concurrently from multiple threads.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Source, PropertyMapBuilder};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let core = DrasiServerCore::builder()
+    /// #     .add_source(Source::application("events").build())
+    /// #     .build().await?;
+    /// let handle = core.source_handle("events")?;
+    ///
+    /// let properties = PropertyMapBuilder::new()
+    ///     .with_string("name", "Alice")
+    ///     .with_integer("age", 30)
+    ///     .build();
+    ///
+    /// handle.send_node_insert("user-1", vec!["User", "Person"], properties).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn send_node_insert(
         &self,
         element_id: impl Into<Arc<str>>,
@@ -71,7 +299,25 @@ impl ApplicationSourceHandle {
         self.send(SourceChange::Insert { element }).await
     }
 
-    /// Send an update event for a node
+    /// Update an existing node in the graph
+    ///
+    /// Creates and sends a node update event. The properties provided will update or add
+    /// to the node's existing properties. To remove properties, use a full replacement
+    /// or send a delete followed by an insert.
+    ///
+    /// # Arguments
+    ///
+    /// * `element_id` - Unique identifier for the node to update
+    /// * `labels` - Current labels for the node
+    /// * `properties` - Properties to update or add
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying channel is closed.
+    ///
+    /// # Thread Safety
+    ///
+    /// This method is thread-safe and can be called concurrently.
     pub async fn send_node_update(
         &self,
         element_id: impl Into<Arc<str>>,
@@ -93,7 +339,23 @@ impl ApplicationSourceHandle {
         self.send(SourceChange::Update { element }).await
     }
 
-    /// Send a delete event for an element
+    /// Delete a node or relationship from the graph
+    ///
+    /// Creates and sends a delete event for the specified element. This removes the element
+    /// from the graph and triggers any queries watching for deletions.
+    ///
+    /// # Arguments
+    ///
+    /// * `element_id` - Unique identifier for the element to delete
+    /// * `labels` - Labels of the element being deleted
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying channel is closed.
+    ///
+    /// # Thread Safety
+    ///
+    /// This method is thread-safe and can be called concurrently.
     pub async fn send_delete(
         &self,
         element_id: impl Into<Arc<str>>,
@@ -111,7 +373,52 @@ impl ApplicationSourceHandle {
         self.send(SourceChange::Delete { metadata }).await
     }
 
-    /// Send an insert event for a relation
+    /// Insert a new relationship into the graph
+    ///
+    /// Creates and sends a relationship insert event connecting two nodes. The relationship
+    /// is directed from `start_node_id` to `end_node_id`.
+    ///
+    /// # Arguments
+    ///
+    /// * `element_id` - Unique identifier for the relationship
+    /// * `labels` - One or more labels for the relationship (e.g., "KNOWS", "FOLLOWS")
+    /// * `properties` - Property map containing relationship attributes
+    /// * `start_node_id` - ID of the source/outgoing node
+    /// * `end_node_id` - ID of the target/incoming node
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying channel is closed.
+    ///
+    /// # Thread Safety
+    ///
+    /// This method is thread-safe and can be called concurrently.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Source, PropertyMapBuilder};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let core = DrasiServerCore::builder()
+    /// #     .add_source(Source::application("events").build())
+    /// #     .build().await?;
+    /// let handle = core.source_handle("events")?;
+    ///
+    /// // Create FOLLOWS relationship from user-1 to user-2
+    /// let properties = PropertyMapBuilder::new()
+    ///     .with_string("since", "2024-01-01")
+    ///     .build();
+    ///
+    /// handle.send_relation_insert(
+    ///     "follow-1",
+    ///     vec!["FOLLOWS"],
+    ///     properties,
+    ///     "user-1",  // follower
+    ///     "user-2"   // followee
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn send_relation_insert(
         &self,
         element_id: impl Into<Arc<str>>,
@@ -143,7 +450,46 @@ impl ApplicationSourceHandle {
         self.send(SourceChange::Insert { element }).await
     }
 
-    /// Send a batch of source changes
+    /// Send a batch of source changes efficiently
+    ///
+    /// Sends multiple source changes in sequence. This is more efficient than calling
+    /// individual send methods in a loop as it reduces overhead.
+    ///
+    /// # Arguments
+    ///
+    /// * `changes` - Vector of pre-constructed source change events
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying channel is closed or if any individual send fails.
+    /// If an error occurs, subsequent changes in the batch will not be sent.
+    ///
+    /// # Thread Safety
+    ///
+    /// This method is thread-safe and can be called concurrently.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Source, PropertyMapBuilder};
+    /// # use drasi_core::models::{SourceChange, Element, ElementMetadata, ElementReference};
+    /// # use std::sync::Arc;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let core = DrasiServerCore::builder()
+    /// #     .add_source(Source::application("events").build())
+    /// #     .build().await?;
+    /// let handle = core.source_handle("events")?;
+    ///
+    /// // Create multiple changes
+    /// let changes = vec![
+    ///     // ... construct SourceChange instances ...
+    /// ];
+    ///
+    /// // Send all at once
+    /// handle.send_batch(changes).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn send_batch(&self, changes: Vec<SourceChange>) -> Result<()> {
         for change in changes {
             self.send(change).await?;
@@ -151,7 +497,27 @@ impl ApplicationSourceHandle {
         Ok(())
     }
 
-    /// Get the source id for reference
+    /// Get the source ID that this handle is connected to
+    ///
+    /// Returns the unique identifier of the application source that this handle sends events to.
+    ///
+    /// # Thread Safety
+    ///
+    /// This method is thread-safe and can be called concurrently.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Source};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let core = DrasiServerCore::builder()
+    /// #     .add_source(Source::application("events").build())
+    /// #     .build().await?;
+    /// let handle = core.source_handle("events")?;
+    /// assert_eq!(handle.source_id(), "events");
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn source_id(&self) -> &str {
         &self.source_id
     }

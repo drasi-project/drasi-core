@@ -96,6 +96,9 @@ pub use sources::application::PropertyMapBuilder;
 /// Component status type for monitoring component states
 pub use channels::ComponentStatus;
 
+/// Dispatch mode for configuring event routing (Broadcast or Channel)
+pub use channels::DispatchMode;
+
 // ============================================================================
 // Configuration Types (for file-based config)
 // ============================================================================

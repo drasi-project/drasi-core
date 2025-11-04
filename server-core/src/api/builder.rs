@@ -22,7 +22,105 @@ use crate::config::{
 use crate::server_core::DrasiServerCore;
 use std::sync::Arc;
 
-/// Fluent builder for DrasiServerCore
+/// Fluent builder for constructing a DrasiServerCore instance
+///
+/// `DrasiServerCoreBuilder` provides a type-safe, ergonomic API for configuring and building
+/// a [`DrasiServerCore`] instance. It allows you to configure the server ID, performance settings,
+/// and add sources, queries, and reactions before initialization.
+///
+/// # Builder Pattern
+///
+/// The builder uses a fluent API where each method returns `self`, allowing you to chain
+/// configuration calls. Call `build()` at the end to create and initialize the server.
+///
+/// # Default Values
+///
+/// - **server_id**: Auto-generated UUID if not specified
+/// - **priority_queue_capacity**: 10000 (can be overridden per component)
+/// - **dispatch_buffer_capacity**: 1000 (can be overridden per component)
+///
+/// # Thread Safety
+///
+/// The builder is `Clone` and can be used to create multiple server instances with the
+/// same configuration.
+///
+/// # Examples
+///
+/// ## Minimal Configuration
+///
+/// ```no_run
+/// # use drasi_server_core::DrasiServerCore;
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// // Create a server with defaults
+/// let core = DrasiServerCore::builder()
+///     .build()
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## Full Configuration
+///
+/// ```no_run
+/// # use drasi_server_core::{DrasiServerCore, Source, Query, Reaction};
+/// # use serde_json::json;
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let core = DrasiServerCore::builder()
+///     .with_id("production-server")
+///     .with_priority_queue_capacity(50000)   // Large queue for high throughput
+///     .with_dispatch_buffer_capacity(5000)   // Large buffers
+///     .add_source(
+///         Source::postgres("orders_db")
+///             .with_property("host", json!("localhost"))
+///             .with_property("database", json!("orders"))
+///             .auto_start(true)
+///             .build()
+///     )
+///     .add_query(
+///         Query::cypher("active_orders")
+///             .query("MATCH (o:Order) WHERE o.status = 'active' RETURN o")
+///             .from_source("orders_db")
+///             .auto_start(true)
+///             .build()
+///     )
+///     .add_reaction(
+///         Reaction::http("order_webhook")
+///             .subscribe_to("active_orders")
+///             .with_property("base_url", json!("https://api.example.com/orders"))
+///             .auto_start(true)
+///             .build()
+///     )
+///     .build()
+///     .await?;
+///
+/// core.start().await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## Adding Multiple Components
+///
+/// ```no_run
+/// # use drasi_server_core::{DrasiServerCore, Source, Query, Reaction};
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let sources = vec![
+///     Source::application("source1").build(),
+///     Source::application("source2").build(),
+/// ];
+///
+/// let queries = vec![
+///     Query::cypher("query1").query("MATCH (n) RETURN n").from_source("source1").build(),
+///     Query::cypher("query2").query("MATCH (n) RETURN n").from_source("source2").build(),
+/// ];
+///
+/// let core = DrasiServerCore::builder()
+///     .add_sources(sources)
+///     .add_queries(queries)
+///     .build()
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct DrasiServerCoreBuilder {
     server_id: Option<String>,
@@ -34,7 +132,14 @@ pub struct DrasiServerCoreBuilder {
 }
 
 impl DrasiServerCoreBuilder {
-    /// Create a new builder
+    /// Create a new builder with default settings
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use drasi_server_core::DrasiServerCoreBuilder;
+    /// let builder = DrasiServerCoreBuilder::new();
+    /// ```
     pub fn new() -> Self {
         Self {
             server_id: None,
@@ -46,7 +151,26 @@ impl DrasiServerCoreBuilder {
         }
     }
 
-    /// Set the server ID (default: auto-generated UUID)
+    /// Set a custom server ID
+    ///
+    /// If not set, a random UUID will be generated automatically.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Unique identifier for this server instance
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::DrasiServerCore;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let core = DrasiServerCore::builder()
+    ///     .with_id("production-server-1")
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn with_id(mut self, id: impl Into<String>) -> Self {
         self.server_id = Some(id.into());
         self
@@ -54,10 +178,33 @@ impl DrasiServerCoreBuilder {
 
     /// Set global default priority queue capacity for queries and reactions
     ///
-    /// This sets the default capacity for priority queues used by queries and reactions.
-    /// Individual components can override this value in their configuration.
+    /// Priority queues are used to order query results by timestamp before delivering them
+    /// to reactions. A larger capacity allows for more out-of-order events but uses more memory.
     ///
-    /// Default: 10000 if not specified
+    /// Individual queries and reactions can override this value in their configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` - Maximum number of results to buffer (default: 10000)
+    ///
+    /// # Performance Implications
+    ///
+    /// - **Larger capacity**: Handles more out-of-order events, uses more memory
+    /// - **Smaller capacity**: Lower memory usage, may block if events arrive out of order
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::DrasiServerCore;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// // High-throughput configuration
+    /// let core = DrasiServerCore::builder()
+    ///     .with_priority_queue_capacity(50000)
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn with_priority_queue_capacity(mut self, capacity: usize) -> Self {
         self.priority_queue_capacity = Some(capacity);
         self
@@ -65,46 +212,227 @@ impl DrasiServerCoreBuilder {
 
     /// Set global default dispatch buffer capacity for sources and queries
     ///
-    /// This sets the default capacity for dispatch channels (both broadcast and mpsc)
-    /// used by sources and queries. Individual components can override this value.
+    /// Dispatch buffers are async channels used to send events from sources to queries and
+    /// from queries to reactions. A larger capacity allows for more buffering during bursts
+    /// but uses more memory.
     ///
-    /// Default: 1000 if not specified
+    /// Individual sources and queries can override this value in their configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` - Maximum number of events to buffer (default: 1000)
+    ///
+    /// # Performance Implications
+    ///
+    /// - **Larger capacity**: Better burst handling, higher memory usage
+    /// - **Smaller capacity**: Lower memory usage, backpressure during bursts
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::DrasiServerCore;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// // Low-latency configuration with small buffers
+    /// let core = DrasiServerCore::builder()
+    ///     .with_dispatch_buffer_capacity(100)
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn with_dispatch_buffer_capacity(mut self, capacity: usize) -> Self {
         self.dispatch_buffer_capacity = Some(capacity);
         self
     }
 
-    /// Add a source configuration
+    /// Add a source to the server configuration
+    ///
+    /// Sources ingest data changes from external systems (databases, APIs, applications, etc.).
+    /// Use the [`Source`](crate::Source) builder to create source configurations.
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - Source configuration created via `Source` builder
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Source};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let core = DrasiServerCore::builder()
+    ///     .add_source(
+    ///         Source::application("events")
+    ///             .auto_start(true)
+    ///             .build()
+    ///     )
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn add_source(mut self, source: SourceConfig) -> Self {
         self.sources.push(source);
         self
     }
 
-    /// Add multiple source configurations
+    /// Add multiple sources at once
+    ///
+    /// Convenient method for adding multiple source configurations in one call.
+    ///
+    /// # Arguments
+    ///
+    /// * `sources` - Vector of source configurations
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Source};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let sources = vec![
+    ///     Source::application("source1").build(),
+    ///     Source::application("source2").build(),
+    ///     Source::application("source3").build(),
+    /// ];
+    ///
+    /// let core = DrasiServerCore::builder()
+    ///     .add_sources(sources)
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn add_sources(mut self, sources: Vec<SourceConfig>) -> Self {
         self.sources.extend(sources);
         self
     }
 
-    /// Add a query configuration
+    /// Add a continuous query to the server configuration
+    ///
+    /// Queries process data changes using Cypher or GQL and emit results when the query
+    /// results change. Use the [`Query`](crate::Query) builder to create query configurations.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - Query configuration created via `Query` builder
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Source, Query};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let core = DrasiServerCore::builder()
+    ///     .add_source(Source::application("events").build())
+    ///     .add_query(
+    ///         Query::cypher("active_users")
+    ///             .query("MATCH (u:User) WHERE u.active = true RETURN u")
+    ///             .from_source("events")
+    ///             .auto_start(true)
+    ///             .build()
+    ///     )
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn add_query(mut self, query: QueryConfig) -> Self {
         self.queries.push(query);
         self
     }
 
-    /// Add multiple query configurations
+    /// Add multiple queries at once
+    ///
+    /// Convenient method for adding multiple query configurations in one call.
+    ///
+    /// # Arguments
+    ///
+    /// * `queries` - Vector of query configurations
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Source, Query};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let queries = vec![
+    ///     Query::cypher("query1").query("MATCH (n) RETURN n").from_source("events").build(),
+    ///     Query::cypher("query2").query("MATCH (n:User) RETURN n").from_source("events").build(),
+    /// ];
+    ///
+    /// let core = DrasiServerCore::builder()
+    ///     .add_source(Source::application("events").build())
+    ///     .add_queries(queries)
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn add_queries(mut self, queries: Vec<QueryConfig>) -> Self {
         self.queries.extend(queries);
         self
     }
 
-    /// Add a reaction configuration
+    /// Add a reaction to the server configuration
+    ///
+    /// Reactions subscribe to query results and deliver them to external systems (webhooks,
+    /// applications, logs, etc.). Use the [`Reaction`](crate::Reaction) builder to create
+    /// reaction configurations.
+    ///
+    /// # Arguments
+    ///
+    /// * `reaction` - Reaction configuration created via `Reaction` builder
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Source, Query, Reaction};
+    /// # use serde_json::json;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let core = DrasiServerCore::builder()
+    ///     .add_source(Source::application("events").build())
+    ///     .add_query(Query::cypher("users").query("MATCH (n) RETURN n").from_source("events").build())
+    ///     .add_reaction(
+    ///         Reaction::http("webhook")
+    ///             .subscribe_to("users")
+    ///             .with_property("base_url", json!("https://api.example.com/webhook"))
+    ///             .auto_start(true)
+    ///             .build()
+    ///     )
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn add_reaction(mut self, reaction: ReactionConfig) -> Self {
         self.reactions.push(reaction);
         self
     }
 
-    /// Add multiple reaction configurations
+    /// Add multiple reactions at once
+    ///
+    /// Convenient method for adding multiple reaction configurations in one call.
+    ///
+    /// # Arguments
+    ///
+    /// * `reactions` - Vector of reaction configurations
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Source, Query, Reaction};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let reactions = vec![
+    ///     Reaction::application("app_reaction").subscribe_to("query1").build(),
+    ///     Reaction::log("log_reaction").subscribe_to("query1").build(),
+    /// ];
+    ///
+    /// let core = DrasiServerCore::builder()
+    ///     .add_source(Source::application("events").build())
+    ///     .add_query(Query::cypher("query1").query("MATCH (n) RETURN n").from_source("events").build())
+    ///     .add_reactions(reactions)
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn add_reactions(mut self, reactions: Vec<ReactionConfig>) -> Self {
         self.reactions.extend(reactions);
         self
@@ -112,7 +440,37 @@ impl DrasiServerCoreBuilder {
 
     /// Build and initialize the DrasiServerCore instance
     ///
-    /// This performs all initialization and returns a ready-to-start server.
+    /// Creates a new [`DrasiServerCore`] with the configured sources, queries, and reactions,
+    /// then performs all initialization. The returned server is ready to be started with
+    /// [`start()`](crate::DrasiServerCore::start).
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(DrasiServerCore)` if initialization succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * Component initialization fails (invalid configuration, resource allocation, etc.)
+    /// * Bootstrap providers fail to initialize
+    /// * Query compilation fails
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Source};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let core = DrasiServerCore::builder()
+    ///     .with_id("my-server")
+    ///     .add_source(Source::application("events").build())
+    ///     .build()  // Initialize everything
+    ///     .await?;
+    ///
+    /// // Server is initialized but not started
+    /// core.start().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn build(self) -> Result<DrasiServerCore> {
         let server_settings = DrasiServerCoreSettings {
             id: self.server_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),

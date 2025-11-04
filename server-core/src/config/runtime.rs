@@ -30,12 +30,47 @@ fn serialize_to_properties<T: serde::Serialize>(config: &T) -> HashMap<String, s
     }
 }
 
-/// Runtime representation of a source with status
+/// Runtime representation of a source with execution status
+///
+/// `SourceRuntime` combines configuration with runtime state information like
+/// current execution status and error messages. It's used for monitoring and
+/// managing source lifecycle.
+///
+/// # Status Values
+///
+/// - `ComponentStatus::Stopped`: Source is configured but not running
+/// - `ComponentStatus::Starting`: Source is initializing
+/// - `ComponentStatus::Running`: Source is actively ingesting data
+/// - `ComponentStatus::Error`: Source encountered an error (see `error_message`)
+///
+/// # Thread Safety
+///
+/// This struct is `Clone` and `Serialize` for sharing across threads and APIs.
+///
+/// # Examples
+///
+/// ```no_run
+/// use drasi_server_core::{DrasiServerCore, ComponentStatus};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let core = DrasiServerCore::from_config_file("config.yaml").await?;
+/// core.start().await?;
+///
+/// // Get runtime information for a source
+/// let source_info = core.get_source_info("orders_db").await?;
+/// println!("Source {} is {:?}", source_info.id, source_info.status);
+///
+/// if let Some(error) = source_info.error_message {
+///     eprintln!("Source error: {}", error);
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceRuntime {
     /// Unique identifier for the source
     pub id: String,
-    /// Type of source (e.g., "mock", "kafka", "database")
+    /// Type of source (e.g., "postgres", "http", "mock", "platform")
     pub source_type: String,
     /// Current status of the source
     pub status: ComponentStatus,
@@ -46,12 +81,45 @@ pub struct SourceRuntime {
     pub properties: HashMap<String, serde_json::Value>,
 }
 
-/// Runtime representation of a query with status
+/// Runtime representation of a query with execution status
+///
+/// `QueryRuntime` combines query configuration with runtime state information.
+/// Used for monitoring query execution, tracking which sources it subscribes to,
+/// and inspecting any runtime errors.
+///
+/// # Status Values
+///
+/// - `ComponentStatus::Stopped`: Query is configured but not processing
+/// - `ComponentStatus::Starting`: Query is initializing (bootstrap phase)
+/// - `ComponentStatus::Running`: Query is actively processing events
+/// - `ComponentStatus::Error`: Query encountered an error (see `error_message`)
+///
+/// # Examples
+///
+/// ```no_run
+/// use drasi_server_core::{DrasiServerCore, ComponentStatus};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let core = DrasiServerCore::from_config_file("config.yaml").await?;
+/// core.start().await?;
+///
+/// // Get runtime information for a query
+/// let query_info = core.get_query_info("active_orders").await?;
+/// println!("Query: {}", query_info.query);
+/// println!("Status: {:?}", query_info.status);
+/// println!("Sources: {:?}", query_info.sources);
+///
+/// if let Some(joins) = query_info.joins {
+///     println!("Synthetic joins configured: {}", joins.len());
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryRuntime {
     /// Unique identifier for the query
     pub id: String,
-    /// Cypher query string
+    /// Cypher or GQL query string
     pub query: String,
     /// Current status of the query
     pub status: ComponentStatus,
@@ -65,12 +133,48 @@ pub struct QueryRuntime {
     pub joins: Option<Vec<super::schema::QueryJoinConfig>>,
 }
 
-/// Runtime representation of a reaction with status
+/// Runtime representation of a reaction with execution status
+///
+/// `ReactionRuntime` combines reaction configuration with runtime state information.
+/// Used for monitoring reaction execution, tracking which queries it subscribes to,
+/// and inspecting delivery status.
+///
+/// # Status Values
+///
+/// - `ComponentStatus::Stopped`: Reaction is configured but not running
+/// - `ComponentStatus::Starting`: Reaction is initializing connections
+/// - `ComponentStatus::Running`: Reaction is actively delivering results
+/// - `ComponentStatus::Error`: Reaction encountered an error (see `error_message`)
+///
+/// # Examples
+///
+/// ```no_run
+/// use drasi_server_core::{DrasiServerCore, ComponentStatus};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let core = DrasiServerCore::from_config_file("config.yaml").await?;
+/// core.start().await?;
+///
+/// // Get runtime information for a reaction
+/// let reaction_info = core.get_reaction_info("order_webhook").await?;
+/// println!("Reaction {} ({}) is {:?}",
+///     reaction_info.id,
+///     reaction_info.reaction_type,
+///     reaction_info.status
+/// );
+/// println!("Subscribed to queries: {:?}", reaction_info.queries);
+///
+/// if let Some(error) = reaction_info.error_message {
+///     eprintln!("Reaction error: {}", error);
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReactionRuntime {
     /// Unique identifier for the reaction
     pub id: String,
-    /// Type of reaction (e.g., "log", "webhook", "notification")
+    /// Type of reaction (e.g., "log", "http", "grpc", "sse", "platform")
     pub reaction_type: String,
     /// Current status of the reaction
     pub status: ComponentStatus,
@@ -128,7 +232,74 @@ impl From<ReactionConfig> for ReactionRuntime {
     }
 }
 
-/// Runtime configuration for the Drasi server
+/// Runtime configuration with applied defaults
+///
+/// `RuntimeConfig` represents a fully-resolved configuration with all global defaults
+/// applied to individual components. It's created from [`DrasiServerCoreConfig`](super::schema::DrasiServerCoreConfig)
+/// and used internally by [`DrasiServerCore`](crate::DrasiServerCore) for execution.
+///
+/// # Default Application
+///
+/// When converting from `DrasiServerCoreConfig` to `RuntimeConfig`, global capacity
+/// settings are applied to components that don't specify their own values:
+///
+/// - **priority_queue_capacity**: Applied to queries and reactions (default: 10000)
+/// - **dispatch_buffer_capacity**: Applied to sources and queries (default: 1000)
+///
+/// # Conversion
+///
+/// Automatically created via `From<DrasiServerCoreConfig>`:
+///
+/// ```no_run
+/// use drasi_server_core::{DrasiServerCoreConfig, RuntimeConfig};
+///
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let config = DrasiServerCoreConfig::load_from_file("config.yaml")?;
+/// let runtime_config: RuntimeConfig = config.into();
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Examples
+///
+/// ## Creating RuntimeConfig
+///
+/// ```no_run
+/// use drasi_server_core::{DrasiServerCore, DrasiServerCoreConfig, RuntimeConfig};
+/// use std::sync::Arc;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// // Load and convert to runtime config
+/// let config = DrasiServerCoreConfig::load_from_file("config.yaml")?;
+/// let runtime_config: RuntimeConfig = config.into();
+///
+/// // Use with DrasiServerCore (via from_config_file helper)
+/// let core = DrasiServerCore::from_config_file("config.yaml").await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## Understanding Default Application
+///
+/// ```yaml
+/// server_core:
+///   priority_queue_capacity: 50000  # Global default
+///
+/// queries:
+///   - id: q1
+///     query: "MATCH (n) RETURN n"
+///     sources: [s1]
+///     # priority_queue_capacity will be 50000 (inherited)
+///
+///   - id: q2
+///     query: "MATCH (m) RETURN m"
+///     sources: [s1]
+///     priority_queue_capacity: 100000  # Override global
+/// ```
+///
+/// After conversion to `RuntimeConfig`:
+/// - `q1` will have `priority_queue_capacity = Some(50000)`
+/// - `q2` will have `priority_queue_capacity = Some(100000)`
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     pub server_core: super::schema::DrasiServerCoreSettings,

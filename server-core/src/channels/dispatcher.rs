@@ -5,7 +5,158 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 
-/// Dispatch mode configuration for how changes are distributed to subscribers
+/// Event routing mode for distributing changes to subscribers
+///
+/// `DispatchMode` determines how events are routed from sources to queries and from
+/// queries to reactions. It affects memory usage, throughput, and fanout behavior.
+///
+/// # Modes
+///
+/// ## Broadcast Mode
+///
+/// Uses a single shared channel with multiple receivers (1-to-N fanout):
+///
+/// ```text
+/// Source → [Broadcast Channel] → Query 1
+///                              → Query 2
+///                              → Query 3
+/// ```
+///
+/// **Advantages**:
+/// - Lower memory usage (one copy of each event)
+/// - Better for high-fanout scenarios (many subscribers)
+/// - Automatic backpressure when slowest subscriber lags
+///
+/// **Disadvantages**:
+/// - All subscribers receive all events (no filtering)
+/// - Slowest subscriber can slow down entire system
+/// - Events may be dropped if buffers fill
+///
+/// ## Channel Mode (Default)
+///
+/// Uses dedicated channels per subscriber (1-to-1):
+///
+/// ```text
+/// Source → [Channel 1] → Query 1
+///       → [Channel 2] → Query 2
+///       → [Channel 3] → Query 3
+/// ```
+///
+/// **Advantages**:
+/// - Subscribers process independently
+/// - Slow subscriber doesn't affect others
+/// - More predictable behavior
+///
+/// **Disadvantages**:
+/// - Higher memory usage (one copy per subscriber)
+/// - More overhead for high-fanout scenarios
+///
+/// # Configuration
+///
+/// Set in YAML configuration or via builder API:
+///
+/// ```yaml
+/// sources:
+///   - id: data_source
+///     source_type: postgres
+///     dispatch_mode: broadcast  # or channel (default)
+///
+/// queries:
+///   - id: my_query
+///     query: "MATCH (n) RETURN n"
+///     sources: [data_source]
+///     dispatch_mode: channel
+/// ```
+///
+/// # Choosing a Mode
+///
+/// **Use Broadcast when**:
+/// - High fanout (10+ subscribers)
+/// - All subscribers need all events
+/// - Memory is constrained
+/// - All subscribers process at similar speeds
+///
+/// **Use Channel (default) when**:
+/// - Few subscribers (1-5)
+/// - Subscribers have different processing speeds
+/// - Isolation between subscribers is important
+/// - Memory is not constrained
+///
+/// # Examples
+///
+/// ## Builder API Configuration
+///
+/// ```no_run
+/// use drasi_server_core::{DrasiServerCore, Source, Query, DispatchMode};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let core = DrasiServerCore::builder()
+///     .add_source(
+///         Source::postgres("orders_db")
+///             .with_dispatch_mode(DispatchMode::Broadcast)  // High fanout
+///             .build()
+///     )
+///     .add_query(
+///         Query::cypher("active_orders")
+///             .query("MATCH (o:Order) WHERE o.status = 'active' RETURN o")
+///             .from_source("orders_db")
+///             .with_dispatch_mode(DispatchMode::Channel)    // Default, independent processing
+///             .build()
+///     )
+///     .build()
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## High-Fanout Scenario (Use Broadcast)
+///
+/// ```yaml
+/// sources:
+///   - id: event_stream
+///     source_type: http
+///     host: localhost
+///     port: 8080
+///     dispatch_mode: broadcast  # Many queries subscribe to this source
+///
+/// queries:
+///   - id: query1
+///     query: "MATCH (n:Type1) RETURN n"
+///     sources: [event_stream]
+///   - id: query2
+///     query: "MATCH (n:Type2) RETURN n"
+///     sources: [event_stream]
+///   # ... 20 more queries subscribing to event_stream
+/// ```
+///
+/// ## Independent Processing (Use Channel)
+///
+/// ```yaml
+/// sources:
+///   - id: sensor_data
+///     source_type: mock
+///     dispatch_mode: channel  # Default - each query processes independently
+///
+/// queries:
+///   - id: real_time_alerts
+///     query: "MATCH (s:Sensor) WHERE s.value > 100 RETURN s"
+///     sources: [sensor_data]
+///     # Fast processing
+///
+///   - id: historical_analysis
+///     query: "MATCH (s:Sensor) RETURN s"
+///     sources: [sensor_data]
+///     # Slow processing - won't affect real_time_alerts
+/// ```
+///
+/// # Performance Considerations
+///
+/// **Broadcast Memory Usage**: `O(buffer_size)` - single buffer shared
+/// **Channel Memory Usage**: `O(buffer_size * subscribers)` - buffer per subscriber
+///
+/// For 10 subscribers with 1000-event buffers:
+/// - Broadcast: ~1,000 events in memory
+/// - Channel: ~10,000 events in memory
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DispatchMode {

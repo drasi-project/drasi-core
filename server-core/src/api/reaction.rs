@@ -21,6 +21,158 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 /// Fluent builder for Reaction configuration
+///
+/// `ReactionBuilder` provides a type-safe, ergonomic API for configuring reactions in Drasi.
+/// Reactions subscribe to query results and deliver them to external systems or applications.
+///
+/// # Builder Pattern
+///
+/// The builder uses a fluent API where each method returns `self`, allowing you to chain
+/// configuration calls. Call `build()` at the end to create the [`ReactionConfig`].
+///
+/// # Reaction Types
+///
+/// Drasi supports multiple reaction types, each created via factory methods on [`Reaction`]:
+///
+/// - **Application**: Programmatic result consumption via API
+/// - **HTTP**: POST query results to HTTP webhooks
+/// - **gRPC**: Stream results via gRPC
+/// - **SSE**: Server-Sent Events for browser clients
+/// - **Platform**: Redis Streams/Pub-Sub for Drasi Platform integration
+/// - **Log**: Debug logging of results
+/// - **Profiler**: Performance profiling and metrics
+///
+/// # Data Flow
+///
+/// ```text
+/// Queries → [Priority Queue] → Reaction → External System
+/// ```
+///
+/// 1. Reaction subscribes to one or more queries via `subscribe_to()` or `subscribe_to_queries()`
+/// 2. Query results are buffered and timestamp-ordered in the priority queue
+/// 3. Results are delivered to the reaction in temporal order
+/// 4. Reaction forwards results to external system
+///
+/// # Performance Settings
+///
+/// - **priority_queue_capacity**: Buffer size for timestamp-ordered results (default: 10000)
+///
+/// # Default Values
+///
+/// - **auto_start**: true (reaction starts when server starts)
+///
+/// # Thread Safety
+///
+/// `ReactionBuilder` is `Clone` and can be used to create multiple reaction configurations.
+/// The built configuration is immutable and thread-safe.
+///
+/// # Examples
+///
+/// ## Application Reaction (Programmatic)
+///
+/// ```no_run
+/// # use drasi_server_core::{DrasiServerCore, Source, Query, Reaction};
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let core = DrasiServerCore::builder()
+///     .add_source(Source::application("events").build())
+///     .add_query(
+///         Query::cypher("active_users")
+///             .query("MATCH (u:User) WHERE u.active = true RETURN u")
+///             .from_source("events")
+///             .build()
+///     )
+///     .add_reaction(
+///         Reaction::application("app_reaction")
+///             .subscribe_to("active_users")
+///             .build()
+///     )
+///     .build()
+///     .await?;
+///
+/// // Get handle and consume results
+/// let handle = core.reaction_handle("app_reaction")?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## HTTP Webhook Reaction
+///
+/// ```no_run
+/// # use drasi_server_core::{DrasiServerCore, Source, Query, Reaction, Properties};
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let core = DrasiServerCore::builder()
+///     .add_source(Source::application("orders").build())
+///     .add_query(
+///         Query::cypher("urgent_orders")
+///             .query("MATCH (o:Order) WHERE o.priority = 'urgent' RETURN o")
+///             .from_source("orders")
+///             .build()
+///     )
+///     .add_reaction(
+///         Reaction::http("webhook")
+///             .subscribe_to("urgent_orders")
+///             .with_properties(
+///                 Properties::new()
+///                     .with_string("base_url", "https://api.example.com/webhooks/orders")
+///                     .with_string("token", "secret-token")
+///                     .with_int("timeout_ms", 5000)
+///             )
+///             .build()
+///     )
+///     .build()
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## Reaction Subscribing to Multiple Queries
+///
+/// ```no_run
+/// # use drasi_server_core::{DrasiServerCore, Source, Query, Reaction};
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let core = DrasiServerCore::builder()
+///     .add_source(Source::application("events").build())
+///     .add_query(Query::cypher("query1").query("MATCH (n:Event) RETURN n").from_source("events").build())
+///     .add_query(Query::cypher("query2").query("MATCH (n:Alert) RETURN n").from_source("events").build())
+///     .add_reaction(
+///         Reaction::log("combined_logger")
+///             .subscribe_to_queries(vec!["query1".to_string(), "query2".to_string()])
+///             .build()
+///     )
+///     .build()
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## High-Reliability Reaction with Large Buffer
+///
+/// ```no_run
+/// # use drasi_server_core::{DrasiServerCore, Source, Query, Reaction, Properties};
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let core = DrasiServerCore::builder()
+///     .add_source(Source::postgres("trading_db").build())
+///     .add_query(
+///         Query::cypher("stock_alerts")
+///             .query("MATCH (s:Stock) WHERE s.change_percent > 10 RETURN s")
+///             .from_source("trading_db")
+///             .build()
+///     )
+///     .add_reaction(
+///         Reaction::grpc("critical_alerts")
+///             .subscribe_to("stock_alerts")
+///             .with_priority_queue_capacity(500000)  // Large buffer for reliability
+///             .with_properties(
+///                 Properties::new()
+///                     .with_string("endpoint", "grpc://alerts-service:50052")
+///             )
+///             .build()
+///     )
+///     .build()
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct ReactionBuilder {
     id: String,
@@ -44,53 +196,266 @@ impl ReactionBuilder {
         }
     }
 
-    /// Subscribe to a query
+    /// Subscribe to a single query
+    ///
+    /// The reaction will receive all result changes from the specified query. Queries must be
+    /// added to the server before reactions that subscribe to them.
+    ///
+    /// # Arguments
+    ///
+    /// * `query_id` - ID of the query to subscribe to
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Source, Query, Reaction};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let core = DrasiServerCore::builder()
+    ///     .add_source(Source::application("events").build())
+    ///     .add_query(Query::cypher("my_query").query("MATCH (n) RETURN n").from_source("events").build())
+    ///     .add_reaction(
+    ///         Reaction::log("logger")
+    ///             .subscribe_to("my_query")  // Subscribe to single query
+    ///             .build()
+    ///     )
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn subscribe_to(mut self, query_id: impl Into<String>) -> Self {
         self.queries.push(query_id.into());
         self
     }
 
     /// Subscribe to multiple queries
+    ///
+    /// The reaction will receive result changes from all specified queries. This is useful for
+    /// aggregating results from multiple queries into a single output destination.
+    ///
+    /// # Arguments
+    ///
+    /// * `query_ids` - Vector of query IDs to subscribe to
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Source, Query, Reaction, Properties};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let core = DrasiServerCore::builder()
+    ///     .add_source(Source::application("events").build())
+    ///     .add_query(Query::cypher("high_priority").query("MATCH (e:Event) WHERE e.priority = 'high' RETURN e").from_source("events").build())
+    ///     .add_query(Query::cypher("critical").query("MATCH (e:Event) WHERE e.priority = 'critical' RETURN e").from_source("events").build())
+    ///     .add_reaction(
+    ///         Reaction::http("webhook")
+    ///             .subscribe_to_queries(vec!["high_priority".to_string(), "critical".to_string()])
+    ///             .with_properties(
+    ///                 Properties::new()
+    ///                     .with_string("base_url", "https://api.example.com/alerts")
+    ///             )
+    ///             .build()
+    ///     )
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn subscribe_to_queries(mut self, query_ids: Vec<String>) -> Self {
         self.queries.extend(query_ids);
         self
     }
 
-    /// Set whether to auto-start this reaction (default: true)
+    /// Set whether to auto-start this reaction when the server starts
+    ///
+    /// When `auto_start` is `true` (the default), the reaction will automatically begin processing
+    /// when [`DrasiServerCore::start()`](crate::DrasiServerCore::start) is called. When `false`,
+    /// the reaction must be started manually via the control API.
+    ///
+    /// # Arguments
+    ///
+    /// * `auto_start` - Whether to automatically start this reaction (default: true)
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Source, Query, Reaction};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// // Reaction that requires manual start (e.g., after external system is ready)
+    /// let core = DrasiServerCore::builder()
+    ///     .add_source(Source::application("events").build())
+    ///     .add_query(Query::cypher("my_query").query("MATCH (n) RETURN n").from_source("events").build())
+    ///     .add_reaction(
+    ///         Reaction::log("logger")
+    ///             .subscribe_to("my_query")
+    ///             .auto_start(false)  // Don't start automatically
+    ///             .build()
+    ///     )
+    ///     .build()
+    ///     .await?;
+    ///
+    /// // Start manually when ready
+    /// // control_api.start_reaction("logger").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn auto_start(mut self, auto_start: bool) -> Self {
         self.auto_start = auto_start;
         self
     }
 
-    /// Add a property
+    /// Add a single property as a raw JSON value
+    ///
+    /// This method allows setting properties using raw `serde_json::Value` types. For a more
+    /// ergonomic API with type safety, use [`with_properties()`](Self::with_properties) with
+    /// the [`Properties`] builder instead.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - Property name
+    /// * `value` - Property value as `serde_json::Value`
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Source, Query, Reaction};
+    /// # use serde_json::json;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let core = DrasiServerCore::builder()
+    ///     .add_query(Query::cypher("q").query("MATCH (n) RETURN n").from_source("s").build())
+    ///     .add_reaction(
+    ///         Reaction::http("webhook")
+    ///             .subscribe_to("q")
+    ///             .with_property("base_url", json!("https://api.example.com"))
+    ///             .with_property("timeout_ms", json!(5000))
+    ///             .build()
+    ///     )
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn with_property(mut self, key: impl Into<String>, value: Value) -> Self {
         self.properties.insert(key.into(), value);
         self
     }
 
-    /// Set properties using the Properties builder
+    /// Set all properties using the Properties builder (recommended)
+    ///
+    /// This is the recommended way to configure reaction properties as it provides a type-safe,
+    /// ergonomic API. Use [`Properties::new()`] to create a builder, then chain property setters,
+    /// and pass the result to this method.
+    ///
+    /// This method replaces any previously set properties.
+    ///
+    /// # Arguments
+    ///
+    /// * `properties` - Properties builder instance
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Source, Query, Reaction, Properties};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let core = DrasiServerCore::builder()
+    ///     .add_query(Query::cypher("q").query("MATCH (n) RETURN n").from_source("s").build())
+    ///     .add_reaction(
+    ///         Reaction::http("webhook")
+    ///             .subscribe_to("q")
+    ///             .with_properties(
+    ///                 Properties::new()
+    ///                     .with_string("base_url", "https://api.example.com/webhook")
+    ///                     .with_string("token", "secret-token")
+    ///                     .with_int("timeout_ms", 10000)
+    ///             )
+    ///             .build()
+    ///     )
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn with_properties(mut self, properties: Properties) -> Self {
         self.properties = properties.build();
         self
     }
 
-    /// Set the priority queue capacity for this reaction
+    /// Set the priority queue capacity for this reaction (performance tuning)
     ///
-    /// This overrides the global default priority queue capacity.
-    /// Controls the internal event buffering capacity for timestamp-ordered processing.
+    /// Priority queues buffer query results and order them by timestamp before delivering to
+    /// the reaction. This ensures the reaction receives events in the correct temporal order
+    /// even if queries emit events out of order.
     ///
-    /// Default: Inherits from server global setting (or 10000 if not specified)
+    /// This setting overrides the global default for this specific reaction.
     ///
-    /// Recommended values:
-    /// - Critical reactions: 100000-1000000 (high reliability)
-    /// - Normal reactions: 10000 (default)
-    /// - Memory-constrained: 1000-5000
+    /// # Arguments
+    ///
+    /// * `capacity` - Maximum number of results to buffer (default: inherits from server, typically 10000)
+    ///
+    /// # Performance Implications
+    ///
+    /// - **Larger capacity**: Handles more out-of-order events, uses more memory, higher reliability
+    /// - **Smaller capacity**: Lower memory usage, may block or drop events if they arrive very out of order
+    ///
+    /// # Recommended Values
+    ///
+    /// - **Critical reactions**: 100000-1000000 (high reliability, must not lose events)
+    /// - **Normal reactions**: 10000 (default, suitable for most use cases)
+    /// - **Memory-constrained**: 1000-5000 (when memory is limited)
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Source, Query, Reaction, Properties};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let core = DrasiServerCore::builder()
+    ///     .add_query(Query::cypher("q").query("MATCH (n) RETURN n").from_source("s").build())
+    ///     .add_reaction(
+    ///         Reaction::grpc("critical_alerts")
+    ///             .subscribe_to("q")
+    ///             .with_priority_queue_capacity(500000)  // Large buffer for critical system
+    ///             .with_properties(
+    ///                 Properties::new()
+    ///                     .with_string("endpoint", "grpc://alerts:50052")
+    ///             )
+    ///             .build()
+    ///     )
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn with_priority_queue_capacity(mut self, capacity: usize) -> Self {
         self.priority_queue_capacity = Some(capacity);
         self
     }
 
     /// Build the reaction configuration
+    ///
+    /// Consumes the builder and creates the final [`ReactionConfig`] that can be passed to
+    /// [`DrasiServerCoreBuilder::add_reaction()`](crate::DrasiServerCoreBuilder::add_reaction).
+    ///
+    /// # Returns
+    ///
+    /// Returns the configured [`ReactionConfig`] ready for use.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Source, Query, Reaction};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let reaction_config = Reaction::log("logger")
+    ///     .subscribe_to("my_query")
+    ///     .build();  // Build returns ReactionConfig
+    ///
+    /// let core = DrasiServerCore::builder()
+    ///     .add_source(Source::application("events").build())
+    ///     .add_query(Query::cypher("my_query").query("MATCH (n) RETURN n").from_source("events").build())
+    ///     .add_reaction(reaction_config)
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn build(self) -> ReactionConfig {
         // Convert properties HashMap to typed config based on reaction_type
         let config = self.build_typed_config();
@@ -296,7 +661,87 @@ impl ReactionBuilder {
     }
 }
 
-/// Reaction configuration factory
+/// Reaction configuration factory for creating reactions with type-safe builders
+///
+/// `Reaction` is a zero-sized type that provides factory methods for creating different types
+/// of reactions. Each factory method returns a [`ReactionBuilder`] configured for that reaction type.
+///
+/// # Reaction Types
+///
+/// - **Application**: Programmatic result consumption via [`ApplicationReactionHandle`](crate::ApplicationReactionHandle)
+/// - **HTTP**: POST query results to HTTP webhooks
+/// - **gRPC**: Stream results via gRPC to external services
+/// - **SSE**: Server-Sent Events for browser clients and real-time dashboards
+/// - **Platform**: Redis Streams/Pub-Sub for Drasi Platform integration
+/// - **Log**: Debug logging of query results
+/// - **Profiler**: Performance profiling and metrics collection
+///
+/// # Examples
+///
+/// ## Application Reaction
+///
+/// ```no_run
+/// # use drasi_server_core::{DrasiServerCore, Source, Query, Reaction};
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let core = DrasiServerCore::builder()
+///     .add_source(Source::application("events").build())
+///     .add_query(Query::cypher("my_query").query("MATCH (n) RETURN n").from_source("events").build())
+///     .add_reaction(
+///         Reaction::application("app_reaction")
+///             .subscribe_to("my_query")
+///             .build()
+///     )
+///     .build()
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## HTTP Webhook Reaction
+///
+/// ```no_run
+/// # use drasi_server_core::{DrasiServerCore, Source, Query, Reaction, Properties};
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let core = DrasiServerCore::builder()
+///     .add_source(Source::application("orders").build())
+///     .add_query(Query::cypher("q").query("MATCH (o:Order) RETURN o").from_source("orders").build())
+///     .add_reaction(
+///         Reaction::http("webhook")
+///             .subscribe_to("q")
+///             .with_properties(
+///                 Properties::new()
+///                     .with_string("base_url", "https://api.example.com/webhook")
+///                     .with_string("token", "secret-token")
+///             )
+///             .build()
+///     )
+///     .build()
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## Multiple Reactions on Same Query
+///
+/// ```no_run
+/// # use drasi_server_core::{DrasiServerCore, Source, Query, Reaction, Properties};
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let core = DrasiServerCore::builder()
+///     .add_source(Source::application("events").build())
+///     .add_query(Query::cypher("alerts").query("MATCH (a:Alert) RETURN a").from_source("events").build())
+///     .add_reaction(Reaction::log("logger").subscribe_to("alerts").build())
+///     .add_reaction(
+///         Reaction::http("webhook")
+///             .subscribe_to("alerts")
+///             .with_properties(Properties::new().with_string("base_url", "https://api.example.com"))
+///             .build()
+///     )
+///     .add_reaction(Reaction::sse("dashboard").subscribe_to("alerts").build())
+///     .build()
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct Reaction;
 
 impl Reaction {
@@ -333,12 +778,160 @@ impl Reaction {
         ReactionBuilder::new(id, "http")
     }
 
-    /// Create a gRPC reaction
+    /// Create a gRPC reaction for streaming results via gRPC
+    ///
+    /// gRPC reactions stream query results to external gRPC services using the Drasi protocol
+    /// buffer definitions. Supports batching, retries, and automatic reconnection.
+    ///
+    /// # Required Properties
+    ///
+    /// - `endpoint`: gRPC endpoint URL (e.g., "grpc://service:50052")
+    ///
+    /// # Optional Properties
+    ///
+    /// - `token`: Authentication token for the gRPC service
+    /// - `timeout_ms`: Request timeout in milliseconds (default: 5000)
+    /// - `batch_size`: Number of results to batch before sending (default: 10)
+    /// - `batch_flush_timeout_ms`: Max time to wait before flushing batch (default: 1000)
+    /// - `max_retries`: Maximum retry attempts per request (default: 3)
+    /// - `connection_retry_attempts`: Connection retry attempts (default: 5)
+    /// - `initial_connection_timeout_ms`: Initial connection timeout (default: 10000)
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Unique identifier for this reaction
+    ///
+    /// # Examples
+    ///
+    /// ## Basic gRPC Reaction
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Source, Query, Reaction, Properties};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let core = DrasiServerCore::builder()
+    ///     .add_source(Source::application("events").build())
+    ///     .add_query(Query::cypher("q").query("MATCH (n) RETURN n").from_source("events").build())
+    ///     .add_reaction(
+    ///         Reaction::grpc("grpc_output")
+    ///             .subscribe_to("q")
+    ///             .with_properties(
+    ///                 Properties::new()
+    ///                     .with_string("endpoint", "grpc://external-service:50052")
+    ///             )
+    ///             .build()
+    ///     )
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// ## gRPC with Batching and Retries
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Source, Query, Reaction, Properties};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let core = DrasiServerCore::builder()
+    ///     .add_query(Query::cypher("q").query("MATCH (n) RETURN n").from_source("s").build())
+    ///     .add_reaction(
+    ///         Reaction::grpc("high_throughput")
+    ///             .subscribe_to("q")
+    ///             .with_properties(
+    ///                 Properties::new()
+    ///                     .with_string("endpoint", "grpc://analytics:50052")
+    ///                     .with_string("token", "secret-token")
+    ///                     .with_int("batch_size", 100)
+    ///                     .with_int("batch_flush_timeout_ms", 500)
+    ///                     .with_int("max_retries", 5)
+    ///             )
+    ///             .build()
+    ///     )
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn grpc(id: impl Into<String>) -> ReactionBuilder {
         ReactionBuilder::new(id, "grpc")
     }
 
-    /// Create an SSE (Server-Sent Events) reaction
+    /// Create an SSE (Server-Sent Events) reaction for real-time browser clients
+    ///
+    /// SSE reactions expose an HTTP endpoint that streams query results to connected clients
+    /// using Server-Sent Events. Perfect for real-time dashboards, live notifications, and
+    /// browser-based applications.
+    ///
+    /// # Required Properties
+    ///
+    /// - `host`: Hostname or IP to bind to (e.g., "0.0.0.0", "localhost")
+    /// - `port`: Port number to listen on (e.g., 8080)
+    ///
+    /// # Optional Properties
+    ///
+    /// - `sse_path`: HTTP path for SSE endpoint (default: "/sse")
+    /// - `heartbeat_interval_ms`: Heartbeat interval to keep connections alive (default: 30000)
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Unique identifier for this reaction
+    ///
+    /// # Examples
+    ///
+    /// ## Basic SSE Reaction for Dashboard
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Source, Query, Reaction, Properties};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let core = DrasiServerCore::builder()
+    ///     .add_source(Source::application("metrics").build())
+    ///     .add_query(
+    ///         Query::cypher("live_metrics")
+    ///             .query("MATCH (m:Metric) RETURN m.name, m.value")
+    ///             .from_source("metrics")
+    ///             .build()
+    ///     )
+    ///     .add_reaction(
+    ///         Reaction::sse("dashboard")
+    ///             .subscribe_to("live_metrics")
+    ///             .with_properties(
+    ///                 Properties::new()
+    ///                     .with_string("host", "0.0.0.0")
+    ///                     .with_int("port", 8080)
+    ///                     .with_string("sse_path", "/metrics-stream")
+    ///             )
+    ///             .build()
+    ///     )
+    ///     .build()
+    ///     .await?;
+    ///
+    /// // Browser clients can connect to: http://localhost:8080/metrics-stream
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// ## SSE with Custom Heartbeat
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Source, Query, Reaction, Properties};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let core = DrasiServerCore::builder()
+    ///     .add_query(Query::cypher("q").query("MATCH (n) RETURN n").from_source("s").build())
+    ///     .add_reaction(
+    ///         Reaction::sse("realtime")
+    ///             .subscribe_to("q")
+    ///             .with_properties(
+    ///                 Properties::new()
+    ///                     .with_string("host", "0.0.0.0")
+    ///                     .with_int("port", 3000)
+    ///                     .with_int("heartbeat_interval_ms", 10000)  // 10s heartbeat
+    ///             )
+    ///             .build()
+    ///     )
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn sse(id: impl Into<String>) -> ReactionBuilder {
         ReactionBuilder::new(id, "sse")
     }
@@ -357,7 +950,41 @@ impl Reaction {
         ReactionBuilder::new(id, "log")
     }
 
-    /// Create a custom reaction with specified type
+    /// Create a custom reaction with a user-defined type
+    ///
+    /// Custom reactions allow you to define your own reaction types and implementations.
+    /// This is useful for integrating with reaction plugins or extensions that are not
+    /// part of the core Drasi reaction types.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Unique identifier for this reaction
+    /// * `reaction_type` - Custom reaction type identifier (used to select the implementation)
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Source, Query, Reaction, Properties};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// // Custom reaction type (requires corresponding implementation to be registered)
+    /// let core = DrasiServerCore::builder()
+    ///     .add_source(Source::application("events").build())
+    ///     .add_query(Query::cypher("q").query("MATCH (n) RETURN n").from_source("events").build())
+    ///     .add_reaction(
+    ///         Reaction::custom("kafka_output", "kafka")
+    ///             .subscribe_to("q")
+    ///             .with_properties(
+    ///                 Properties::new()
+    ///                     .with_string("bootstrap_servers", "localhost:9092")
+    ///                     .with_string("topic", "drasi-results")
+    ///             )
+    ///             .build()
+    ///     )
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn custom(id: impl Into<String>, reaction_type: impl Into<String>) -> ReactionBuilder {
         ReactionBuilder::new(id, reaction_type)
     }

@@ -24,6 +24,9 @@ pub trait Timestamped {
     fn timestamp(&self) -> chrono::DateTime<chrono::Utc>;
 }
 
+/// Type of Drasi component
+///
+/// Used for identifying component types in events and monitoring.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ComponentType {
     Source,
@@ -31,6 +34,128 @@ pub enum ComponentType {
     Reaction,
 }
 
+/// Execution status of a Drasi component
+///
+/// `ComponentStatus` represents the current lifecycle state of sources, queries, and reactions.
+/// Components transition through these states during their lifecycle, from creation through
+/// execution to shutdown.
+///
+/// # Status Lifecycle
+///
+/// A typical component lifecycle follows this progression:
+///
+/// ```text
+/// Stopped → Starting → Running → Stopping → Stopped
+///                ↓
+///              Error
+/// ```
+///
+/// # Status Values
+///
+/// - **Starting**: Component is initializing (connecting to resources, loading data, etc.)
+/// - **Running**: Component is actively processing (ingesting, querying, or delivering)
+/// - **Stopping**: Component is shutting down gracefully
+/// - **Stopped**: Component is not running (initial or final state)
+/// - **Error**: Component encountered an error and cannot continue (see error_message)
+///
+/// # Usage
+///
+/// Status is available through runtime information methods on [`DrasiServerCore`](crate::DrasiServerCore):
+///
+/// - [`get_source_status()`](crate::DrasiServerCore::get_source_status)
+/// - [`get_query_status()`](crate::DrasiServerCore::get_query_status)
+/// - [`get_reaction_status()`](crate::DrasiServerCore::get_reaction_status)
+///
+/// And through runtime info structs:
+///
+/// - [`SourceRuntime`](crate::SourceRuntime)
+/// - [`QueryRuntime`](crate::QueryRuntime)
+/// - [`ReactionRuntime`](crate::ReactionRuntime)
+///
+/// # Examples
+///
+/// ## Monitoring Component Status
+///
+/// ```no_run
+/// use drasi_server_core::{DrasiServerCore, ComponentStatus};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let core = DrasiServerCore::from_config_file("config.yaml").await?;
+/// core.start().await?;
+///
+/// // Check source status
+/// let source_status = core.get_source_status("orders_db").await?;
+/// match source_status {
+///     ComponentStatus::Running => println!("Source is running"),
+///     ComponentStatus::Error => println!("Source has errors"),
+///     ComponentStatus::Starting => println!("Source is starting up"),
+///     _ => println!("Source status: {:?}", source_status),
+/// }
+///
+/// // Get detailed info with status
+/// let source_info = core.get_source_info("orders_db").await?;
+/// if source_info.status == ComponentStatus::Error {
+///     if let Some(error) = source_info.error_message {
+///         eprintln!("Error: {}", error);
+///     }
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## Waiting for Component to Start
+///
+/// ```no_run
+/// use drasi_server_core::{DrasiServerCore, ComponentStatus};
+/// use tokio::time::{sleep, Duration};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let core = DrasiServerCore::from_config_file("config.yaml").await?;
+/// core.start_source("orders_db").await?;
+///
+/// // Poll until source is running
+/// loop {
+///     let status = core.get_source_status("orders_db").await?;
+///     match status {
+///         ComponentStatus::Running => break,
+///         ComponentStatus::Error => return Err("Source failed to start".into()),
+///         _ => sleep(Duration::from_millis(100)).await,
+///     }
+/// }
+/// println!("Source is now running");
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## Checking All Components
+///
+/// ```no_run
+/// use drasi_server_core::{DrasiServerCore, ComponentStatus};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let core = DrasiServerCore::from_config_file("config.yaml").await?;
+/// core.start().await?;
+///
+/// // Check all sources
+/// let sources = core.list_sources().await?;
+/// for (id, status) in sources {
+///     println!("Source {}: {:?}", id, status);
+/// }
+///
+/// // Check all queries
+/// let queries = core.list_queries().await?;
+/// for (id, status) in queries {
+///     println!("Query {}: {:?}", id, status);
+/// }
+///
+/// // Check all reactions
+/// let reactions = core.list_reactions().await?;
+/// for (id, status) in reactions {
+///     println!("Reaction {}: {:?}", id, status);
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ComponentStatus {
     Starting,

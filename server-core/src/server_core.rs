@@ -27,7 +27,173 @@ use crate::reactions::ApplicationReactionHandle;
 use crate::reactions::ReactionManager;
 use crate::sources::{ApplicationSourceHandle, SourceManager};
 
-/// Core Drasi Server functionality without web API
+/// Core Drasi Server for continuous query processing
+///
+/// `DrasiServerCore` is the main entry point for embedding Drasi functionality in your application.
+/// It manages sources (data ingestion), queries (continuous Cypher/GQL queries), and reactions
+/// (output destinations) with a reactive event-driven architecture.
+///
+/// # Architecture
+///
+/// - **Sources**: Data ingestion points (PostgreSQL, HTTP, gRPC, Application, Mock, Platform)
+/// - **Queries**: Continuous Cypher or GQL queries that process data changes in real-time
+/// - **Reactions**: Output destinations that receive query results (HTTP, gRPC, Application, Log)
+///
+/// # Lifecycle States
+///
+/// The server progresses through these states:
+/// 1. **Created** (via `new()`, `builder()`, `from_config_file()`, or `from_config_str()`)
+/// 2. **Initialized** (one-time setup, automatic with builder/config loaders)
+/// 3. **Running** (after `start()`)
+/// 4. **Stopped** (after `stop()`, can be restarted)
+///
+/// Components (sources, queries, reactions) have independent lifecycle states:
+/// - `Stopped`: Component exists but is not processing
+/// - `Starting`: Component is initializing
+/// - `Running`: Component is actively processing
+/// - `Stopping`: Component is shutting down
+///
+/// # Thread Safety
+///
+/// `DrasiServerCore` is `Clone` (all clones share the same underlying state) and all methods
+/// are thread-safe. You can safely share clones across threads and call methods concurrently.
+///
+/// # Examples
+///
+/// ## Builder Pattern
+///
+/// ```no_run
+/// use drasi_server_core::{DrasiServerCore, Source, Query, Reaction};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let core = DrasiServerCore::builder()
+///     .with_id("my-server")
+///     .add_source(
+///         Source::application("events")
+///             .auto_start(true)
+///             .build()
+///     )
+///     .add_query(
+///         Query::cypher("my-query")
+///             .query("MATCH (n:Person) RETURN n.name, n.age")
+///             .from_source("events")
+///             .auto_start(true)
+///             .build()
+///     )
+///     .add_reaction(
+///         Reaction::application("results")
+///             .subscribe_to("my-query")
+///             .auto_start(true)
+///             .build()
+///     )
+///     .build()
+///     .await?;
+///
+/// // Start all auto-start components
+/// core.start().await?;
+///
+/// // Get handles for programmatic interaction
+/// let source_handle = core.source_handle("events")?;
+/// let reaction_handle = core.reaction_handle("results")?;
+///
+/// // Inject data into source
+/// let properties = drasi_server_core::PropertyMapBuilder::new()
+///     .with_string("name", "Alice")
+///     .with_integer("age", 30)
+///     .build();
+///
+/// source_handle.send_node_insert("1", vec!["Person"], properties).await?;
+///
+/// // Consume results from reaction
+/// let mut sub = reaction_handle.subscribe_with_options(
+///     drasi_server_core::SubscriptionOptions::default()
+/// ).await?;
+/// if let Some(result) = sub.recv().await {
+///     println!("Result: {:?}", result);
+/// }
+///
+/// // Stop server
+/// core.stop().await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## Configuration File
+///
+/// ```no_run
+/// use drasi_server_core::DrasiServerCore;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// // Load from YAML configuration
+/// let core = DrasiServerCore::from_config_file("config.yaml").await?;
+/// core.start().await?;
+///
+/// // ... use the server ...
+///
+/// core.stop().await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## Dynamic Runtime Configuration
+///
+/// ```no_run
+/// use drasi_server_core::{DrasiServerCore, Source, Query};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let core = DrasiServerCore::builder()
+///     .with_id("dynamic-server")
+///     .build()
+///     .await?;
+///
+/// core.start().await?;
+///
+/// // Add components at runtime
+/// core.create_source(
+///     Source::application("new-source")
+///         .auto_start(true)
+///         .build()
+/// ).await?;
+///
+/// core.create_query(
+///     Query::cypher("new-query")
+///         .query("MATCH (n) RETURN n")
+///         .from_source("new-source")
+///         .auto_start(true)
+///         .build()
+/// ).await?;
+///
+/// // Start/stop individual components
+/// core.stop_query("new-query").await?;
+/// core.start_query("new-query").await?;
+///
+/// // Remove components
+/// core.remove_query("new-query").await?;
+/// core.remove_source("new-source").await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## Restart Behavior
+///
+/// When you call `stop()` and then `start()` again, the server remembers which components
+/// were running and will restart them automatically:
+///
+/// ```no_run
+/// # use drasi_server_core::DrasiServerCore;
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let core = DrasiServerCore::builder().build().await?;
+/// core.start().await?;
+/// // ... components are running ...
+///
+/// core.stop().await?;
+/// // ... all components stopped ...
+///
+/// core.start().await?;
+/// // ... previously running components automatically restarted ...
+/// # Ok(())
+/// # }
+/// ```
 pub struct DrasiServerCore {
     config: Arc<RuntimeConfig>,
     source_manager: Arc<SourceManager>,
@@ -119,6 +285,36 @@ impl DrasiServerCore {
     }
 
     /// Start the server and all auto-start components
+    ///
+    /// This starts all components (sources, queries, reactions) that have `auto_start` set to `true`,
+    /// as well as any components that were running when `stop()` was last called.
+    ///
+    /// Components are started in dependency order: Sources → Queries → Reactions
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * The server is not initialized (`DrasiError::InvalidState`)
+    /// * The server is already running (`anyhow::Error`)
+    /// * Any component fails to start (propagated from component)
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::DrasiServerCore;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let core = DrasiServerCore::builder()
+    ///     .with_id("my-server")
+    ///     .build()
+    ///     .await?;
+    ///
+    /// // Start server and all auto-start components
+    /// core.start().await?;
+    ///
+    /// assert!(core.is_running().await);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn start(&self) -> Result<()> {
         let mut running = self.running.write().await;
         if *running {
@@ -143,6 +339,35 @@ impl DrasiServerCore {
     }
 
     /// Stop the server and all running components
+    ///
+    /// This stops all currently running components (sources, queries, reactions) and saves their
+    /// state so they can be automatically restarted on the next `start()` call.
+    ///
+    /// Components are stopped in reverse dependency order: Reactions → Queries → Sources
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * The server is not running (`anyhow::Error`)
+    /// * Any component fails to stop (logged as error, but doesn't prevent other components from stopping)
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::DrasiServerCore;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let core = DrasiServerCore::builder().build().await?;
+    /// # core.start().await?;
+    /// // Stop server and all running components
+    /// core.stop().await?;
+    ///
+    /// assert!(!core.is_running().await);
+    ///
+    /// // Components will be automatically restarted on next start()
+    /// core.start().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn stop(&self) -> Result<()> {
         let mut running = self.running.write().await;
         if !*running {
@@ -168,16 +393,57 @@ impl DrasiServerCore {
     // New Public API - Handle Access
     // ============================================================================
 
-    /// Get a handle to an application source by ID
+    /// Get a handle to an application source for programmatic event injection
     ///
-    /// # Example
+    /// Returns an [`ApplicationSourceHandle`] that allows you to programmatically inject
+    /// graph data changes (node inserts, updates, deletes, relation inserts) into the source.
+    ///
+    /// The handle is cached after first retrieval for efficiency.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The unique identifier of the application source
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(ApplicationSourceHandle)` if the source exists and is an application source.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * The source doesn't exist (`DrasiError::ComponentNotFound`)
+    /// * The source is not an application source type
+    ///
+    /// # Thread Safety
+    ///
+    /// This method is thread-safe and can be called concurrently. The returned handle can
+    /// also be cloned and used across multiple threads.
+    ///
+    /// # Examples
+    ///
     /// ```no_run
-    /// # use drasi_server_core::DrasiServerCore;
-    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
-    /// let handle = core.source_handle("my-source")?;
+    /// # use drasi_server_core::{DrasiServerCore, Source};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let core = DrasiServerCore::builder()
+    ///     .add_source(Source::application("events").build())
+    ///     .build()
+    ///     .await?;
+    ///
+    /// // Get handle to inject events
+    /// let handle = core.source_handle("events")?;
+    ///
+    /// // Inject a node insert
+    /// let properties = drasi_server_core::PropertyMapBuilder::new()
+    ///     .with_string("name", "Alice")
+    ///     .with_integer("age", 30)
+    ///     .build();
+    ///
+    /// handle.send_node_insert("user-1", vec!["User"], properties).await?;
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// See also: [`ApplicationSourceHandle`] for available operations
     pub fn source_handle(&self, id: &str) -> crate::api::Result<ApplicationSourceHandle> {
         // Try to get from handle registry first
         if let Ok(handle) = futures::executor::block_on(self.handle_registry.get_source_handle(id))
@@ -200,30 +466,85 @@ impl DrasiServerCore {
         })
     }
 
-    /// Get a handle to an application reaction by ID
+    /// Get direct access to the query manager (advanced usage)
     ///
-    /// # Example
-    /// ```no_run
-    /// # use drasi_server_core::DrasiServerCore;
-    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
-    /// let handle = core.reaction_handle("my-reaction")?;
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// This provides low-level access to the query manager for advanced scenarios.
+    /// Most users should use the higher-level methods like `get_query_info()`,
+    /// `start_query()`, etc. instead.
+    ///
+    /// # Thread Safety
+    ///
+    /// The returned reference is thread-safe and can be used across threads.
     pub fn query_manager(&self) -> &QueryManager {
         &self.query_manager
     }
 
-    /// Get a handle to an application reaction for programmatic interaction
+    /// Get a handle to an application reaction for programmatic result consumption
     ///
-    /// # Example
+    /// Returns an [`ApplicationReactionHandle`] that allows you to subscribe to and
+    /// consume query results programmatically in your application code.
+    ///
+    /// The handle is cached after first retrieval for efficiency.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The unique identifier of the application reaction
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(ApplicationReactionHandle)` if the reaction exists and is an application reaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * The reaction doesn't exist (`DrasiError::ComponentNotFound`)
+    /// * The reaction is not an application reaction type
+    ///
+    /// # Thread Safety
+    ///
+    /// This method is thread-safe and can be called concurrently. The returned handle can
+    /// also be cloned and used across multiple threads.
+    ///
+    /// # Examples
+    ///
+    /// ## Subscribe and Receive Results
+    ///
     /// ```no_run
-    /// # use drasi_server_core::DrasiServerCore;
-    /// # fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
-    /// let handle = core.reaction_handle("my-app-reaction")?;
+    /// # use drasi_server_core::{DrasiServerCore, Source, Query, Reaction};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let core = DrasiServerCore::builder()
+    ///     .add_source(Source::application("events").build())
+    ///     .add_query(
+    ///         Query::cypher("users")
+    ///             .query("MATCH (n:User) RETURN n")
+    ///             .from_source("events")
+    ///             .build()
+    ///     )
+    ///     .add_reaction(
+    ///         Reaction::application("results")
+    ///             .subscribe_to("users")
+    ///             .build()
+    ///     )
+    ///     .build()
+    ///     .await?;
+    ///
+    /// // Get handle to consume results
+    /// let handle = core.reaction_handle("results")?;
+    ///
+    /// // Subscribe to results
+    /// let mut subscription = handle.subscribe_with_options(
+    ///     drasi_server_core::SubscriptionOptions::default()
+    /// ).await?;
+    ///
+    /// // Receive results as they arrive
+    /// while let Some(result) = subscription.recv().await {
+    ///     println!("Received result: {:?}", result);
+    /// }
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// See also: [`ApplicationReactionHandle`] for available operations
     pub fn reaction_handle(&self, id: &str) -> crate::api::Result<ApplicationReactionHandle> {
         // Try to get from handle registry first
         if let Ok(handle) =
@@ -1204,11 +1525,64 @@ impl DrasiServerCore {
     // ============================================================================
 
     /// Check if the server is currently running
+    ///
+    /// Returns `true` if `start()` has been called and the server is actively processing,
+    /// `false` if the server is stopped or has not been started yet.
+    ///
+    /// # Thread Safety
+    ///
+    /// This method is thread-safe and can be called concurrently.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::DrasiServerCore;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let core = DrasiServerCore::builder().build().await?;
+    ///
+    /// assert!(!core.is_running().await); // Not started yet
+    ///
+    /// core.start().await?;
+    /// assert!(core.is_running().await); // Now running
+    ///
+    /// core.stop().await?;
+    /// assert!(!core.is_running().await); // Stopped again
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn is_running(&self) -> bool {
         *self.running.read().await
     }
 
     /// Get the runtime configuration
+    ///
+    /// Returns a reference to the immutable runtime configuration containing server settings
+    /// and all component configurations. This is the configuration that was provided during
+    /// initialization (via builder, config file, or config string).
+    ///
+    /// For a current snapshot of the configuration including runtime additions, use
+    /// [`get_current_config()`](Self::get_current_config) instead.
+    ///
+    /// # Thread Safety
+    ///
+    /// This method is thread-safe and can be called concurrently.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::DrasiServerCore;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let core = DrasiServerCore::builder()
+    ///     .with_id("my-server")
+    ///     .build()
+    ///     .await?;
+    ///
+    /// let config = core.get_config();
+    /// println!("Server ID: {}", config.server_core.id);
+    /// println!("Number of sources: {}", config.sources.len());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn get_config(&self) -> &RuntimeConfig {
         &self.config
     }
