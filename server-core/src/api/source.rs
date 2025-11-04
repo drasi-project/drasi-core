@@ -15,7 +15,7 @@
 //! Source configuration builders
 
 use crate::api::Properties;
-use crate::bootstrap::BootstrapProviderConfig;
+use crate::bootstrap::{self, BootstrapProviderConfig};
 use crate::channels::DispatchMode;
 use crate::config::{SourceConfig, SourceSpecificConfig};
 use crate::config::typed::*;
@@ -74,7 +74,9 @@ impl SourceBuilder {
 
     /// Set a script file bootstrap provider
     pub fn with_script_bootstrap(mut self, file_paths: Vec<String>) -> Self {
-        self.bootstrap_provider = Some(BootstrapProviderConfig::ScriptFile { file_paths });
+        self.bootstrap_provider = Some(BootstrapProviderConfig::ScriptFile(
+            bootstrap::ScriptFileBootstrapConfig { file_paths }
+        ));
         self
     }
 
@@ -84,19 +86,20 @@ impl SourceBuilder {
         query_api_url: impl Into<String>,
         timeout_seconds: Option<u64>,
     ) -> Self {
-        self.bootstrap_provider = Some(BootstrapProviderConfig::Platform {
-            query_api_url: Some(query_api_url.into()),
-            timeout_seconds,
-            config: HashMap::new(),
-        });
+        self.bootstrap_provider = Some(BootstrapProviderConfig::Platform(
+            bootstrap::PlatformBootstrapConfig {
+                query_api_url: Some(query_api_url.into()),
+                timeout_seconds: timeout_seconds.unwrap_or(300),
+            }
+        ));
         self
     }
 
     /// Set a PostgreSQL bootstrap provider
     pub fn with_postgres_bootstrap(mut self) -> Self {
-        self.bootstrap_provider = Some(BootstrapProviderConfig::Postgres {
-            config: HashMap::new(),
-        });
+        self.bootstrap_provider = Some(BootstrapProviderConfig::Postgres(
+            bootstrap::PostgresBootstrapConfig::default()
+        ));
         self
     }
 

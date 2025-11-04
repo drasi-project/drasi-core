@@ -24,7 +24,6 @@
 
 use anyhow::Result;
 use log::{error, info, warn};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -224,6 +223,7 @@ impl ReactionBase {
 mod tests {
     use super::*;
     use tokio::sync::mpsc;
+    use std::collections::HashMap;
 
     #[tokio::test]
     async fn test_reaction_base_creation() {

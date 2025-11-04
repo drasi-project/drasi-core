@@ -98,6 +98,7 @@ impl PlatformSource {
     /// In production, queries subscribe to sources through the SourceManager.
 
     /// Parse configuration from properties
+    #[allow(dead_code)]
     fn parse_config(properties: &HashMap<String, Value>) -> Result<PlatformConfig> {
         let mut config = PlatformConfig::default();
 

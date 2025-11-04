@@ -17,9 +17,8 @@
 #[cfg(test)]
 mod tests {
     use crate::api::{Properties, Source};
-    use crate::bootstrap::BootstrapProviderConfig;
+    use crate::bootstrap::{self, BootstrapProviderConfig};
     use serde_json::json;
-    use std::collections::HashMap;
 
     #[test]
     fn test_source_application() {
@@ -137,9 +136,9 @@ mod tests {
 
     #[test]
     fn test_source_with_bootstrap_config() {
-        let bootstrap_config = BootstrapProviderConfig::Postgres {
-            config: HashMap::new(),
-        };
+        let bootstrap_config = BootstrapProviderConfig::Postgres(
+            bootstrap::PostgresBootstrapConfig::default()
+        );
 
         let source = Source::postgres("pg-source")
             .with_bootstrap(bootstrap_config)
@@ -147,7 +146,7 @@ mod tests {
 
         assert!(source.bootstrap_provider.is_some());
         match source.bootstrap_provider.unwrap() {
-            BootstrapProviderConfig::Postgres { .. } => {}
+            BootstrapProviderConfig::Postgres(_) => {}
             _ => panic!("Expected Postgres bootstrap provider"),
         }
     }
@@ -161,7 +160,8 @@ mod tests {
 
         assert!(source.bootstrap_provider.is_some());
         match source.bootstrap_provider.unwrap() {
-            BootstrapProviderConfig::ScriptFile { file_paths } => {
+            BootstrapProviderConfig::ScriptFile(config) => {
+                let file_paths = config.file_paths;
                 assert_eq!(file_paths, files);
             }
             _ => panic!("Expected ScriptFile bootstrap provider"),
@@ -176,13 +176,9 @@ mod tests {
 
         assert!(source.bootstrap_provider.is_some());
         match source.bootstrap_provider.unwrap() {
-            BootstrapProviderConfig::Platform {
-                query_api_url,
-                timeout_seconds,
-                ..
-            } => {
-                assert_eq!(query_api_url, Some("http://localhost:8080".to_string()));
-                assert_eq!(timeout_seconds, Some(300));
+            BootstrapProviderConfig::Platform(config) => {
+                assert_eq!(config.query_api_url, Some("http://localhost:8080".to_string()));
+                assert_eq!(config.timeout_seconds, 300);
             }
             _ => panic!("Expected Platform bootstrap provider"),
         }
@@ -299,9 +295,9 @@ mod tests {
             .build();
 
         match source.bootstrap_provider.unwrap() {
-            BootstrapProviderConfig::ScriptFile { file_paths } => {
-                assert_eq!(file_paths.len(), 3);
-                assert_eq!(file_paths, files);
+            BootstrapProviderConfig::ScriptFile(config) => {
+                assert_eq!(config.file_paths.len(), 3);
+                assert_eq!(config.file_paths, files);
             }
             _ => panic!("Expected ScriptFile bootstrap provider"),
         }
@@ -314,13 +310,9 @@ mod tests {
             .build();
 
         match source.bootstrap_provider.unwrap() {
-            BootstrapProviderConfig::Platform {
-                query_api_url,
-                timeout_seconds,
-                ..
-            } => {
-                assert_eq!(query_api_url, Some("http://localhost:8080".to_string()));
-                assert_eq!(timeout_seconds, None);
+            BootstrapProviderConfig::Platform(config) => {
+                assert_eq!(config.query_api_url, Some("http://localhost:8080".to_string()));
+                assert_eq!(config.timeout_seconds, 300); // Should be default
             }
             _ => panic!("Expected Platform bootstrap provider"),
         }

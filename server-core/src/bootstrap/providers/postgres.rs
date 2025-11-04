@@ -81,9 +81,13 @@ struct PostgresConfig {
     pub database: String,
     pub user: String,
     pub password: String,
+    #[allow(dead_code)]
     pub tables: Vec<String>,
+    #[allow(dead_code)]
     pub slot_name: String,
+    #[allow(dead_code)]
     pub publication_name: String,
+    #[allow(dead_code)]
     pub ssl_mode: String,
     pub table_keys: Vec<TableKeyConfig>,
 }

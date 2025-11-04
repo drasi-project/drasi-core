@@ -22,7 +22,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -104,41 +103,128 @@ pub trait BootstrapProvider: Send + Sync {
     ) -> Result<usize>;
 }
 
+// Typed configuration structs for each bootstrap provider type
+
+/// PostgreSQL bootstrap provider configuration
+///
+/// This provider bootstraps initial data from a PostgreSQL database using
+/// the COPY protocol for efficient data transfer. The provider extracts
+/// connection details from the parent source configuration, so no additional
+/// configuration is needed here.
+///
+/// # Example
+/// ```yaml
+/// bootstrap_provider:
+///   type: postgres
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PostgresBootstrapConfig {
+    // No additional config needed - uses parent source config
+    // Include this struct for consistency and future extensibility
+}
+
+impl Default for PostgresBootstrapConfig {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+/// Application bootstrap provider configuration
+///
+/// This provider bootstraps data from in-memory storage maintained by
+/// application sources. It replays stored insert events to provide initial
+/// data. No additional configuration is required as it uses shared state
+/// from the application source.
+///
+/// # Example
+/// ```yaml
+/// bootstrap_provider:
+///   type: application
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ApplicationBootstrapConfig {
+    // No config needed - uses shared state
+    // Include for consistency and future extensibility
+}
+
+impl Default for ApplicationBootstrapConfig {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+/// Script file bootstrap provider configuration
+///
+/// This provider reads bootstrap data from JSONL (JSON Lines) files containing
+/// structured data. Files are processed in the order specified. Each file should
+/// contain one JSON record per line with record types: Header (required first),
+/// Node, Relation, Comment (filtered), Label (checkpoint), and Finish (optional end).
+///
+/// # Example
+/// ```yaml
+/// bootstrap_provider:
+///   type: scriptfile
+///   file_paths:
+///     - "/data/initial_nodes.jsonl"
+///     - "/data/initial_relations.jsonl"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ScriptFileBootstrapConfig {
+    /// List of JSONL files to read (in order)
+    pub file_paths: Vec<String>,
+}
+
+/// Platform bootstrap provider configuration
+///
+/// This provider bootstraps data from a Query API service running in a remote
+/// Drasi environment via HTTP streaming. It's designed for cross-Drasi integration
+/// scenarios where one Drasi instance needs initial data from another.
+///
+/// # Example
+/// ```yaml
+/// bootstrap_provider:
+///   type: platform
+///   query_api_url: "http://remote-drasi:8080"
+///   timeout_seconds: 600
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlatformBootstrapConfig {
+    /// URL of the Query API service (e.g., "http://my-source-query-api:8080")
+    /// If not specified, falls back to `query_api_url` property from source config
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query_api_url: Option<String>,
+
+    /// Timeout for HTTP requests in seconds (default: 300)
+    #[serde(default = "default_platform_timeout")]
+    pub timeout_seconds: u64,
+}
+
+fn default_platform_timeout() -> u64 {
+    300
+}
+
+impl Default for PlatformBootstrapConfig {
+    fn default() -> Self {
+        Self {
+            query_api_url: None,
+            timeout_seconds: default_platform_timeout(),
+        }
+    }
+}
+
 /// Configuration for different types of bootstrap providers
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum BootstrapProviderConfig {
     /// PostgreSQL bootstrap provider
-    Postgres {
-        /// Additional configuration specific to PostgreSQL bootstrap
-        #[serde(flatten)]
-        config: HashMap<String, serde_json::Value>,
-    },
+    Postgres(PostgresBootstrapConfig),
     /// Application-based bootstrap provider
-    Application {
-        /// Additional configuration for application bootstrap
-        #[serde(flatten)]
-        config: HashMap<String, serde_json::Value>,
-    },
+    Application(ApplicationBootstrapConfig),
     /// Script file bootstrap provider
-    ScriptFile {
-        /// List of JSONL files to read (in order)
-        file_paths: Vec<String>,
-    },
+    ScriptFile(ScriptFileBootstrapConfig),
     /// Platform bootstrap provider for remote Drasi sources
     /// Bootstraps data from a Query API service running in a remote Drasi environment
-    Platform {
-        /// URL of the Query API service (e.g., "http://my-source-query-api:8080")
-        /// If not specified, falls back to `query_api_url` property from source config
-        #[serde(default)]
-        query_api_url: Option<String>,
-        /// Timeout for HTTP requests in seconds (default: 300)
-        #[serde(default)]
-        timeout_seconds: Option<u64>,
-        /// Additional configuration
-        #[serde(flatten)]
-        config: HashMap<String, serde_json::Value>,
-    },
+    Platform(PlatformBootstrapConfig),
     /// No-op bootstrap provider (returns no data)
     Noop,
 }
@@ -150,36 +236,214 @@ impl BootstrapProviderFactory {
     /// Create a bootstrap provider from configuration
     pub fn create_provider(config: &BootstrapProviderConfig) -> Result<Box<dyn BootstrapProvider>> {
         match config {
-            BootstrapProviderConfig::Postgres { .. } => Ok(Box::new(
+            BootstrapProviderConfig::Postgres(_) => Ok(Box::new(
                 providers::postgres::PostgresBootstrapProvider::new(),
             )),
-            BootstrapProviderConfig::Application { .. } => Ok(Box::new(
+            BootstrapProviderConfig::Application(_) => Ok(Box::new(
                 providers::application::ApplicationBootstrapProvider::new(),
             )),
-            BootstrapProviderConfig::ScriptFile { file_paths } => Ok(Box::new(
-                providers::script_file::ScriptFileBootstrapProvider::new(file_paths.clone()),
+            BootstrapProviderConfig::ScriptFile(config) => Ok(Box::new(
+                providers::script_file::ScriptFileBootstrapProvider::new(config.file_paths.clone()),
             )),
-            BootstrapProviderConfig::Platform {
-                query_api_url,
-                timeout_seconds,
-                ..
-            } => {
+            BootstrapProviderConfig::Platform(config) => {
                 // Use provided query_api_url or will be extracted from source properties later
-                let url = query_api_url.clone().ok_or_else(|| {
+                let url = config.query_api_url.clone().ok_or_else(|| {
                     anyhow::anyhow!(
                         "query_api_url must be provided in bootstrap config or source properties"
                     )
                 })?;
 
-                let timeout = timeout_seconds.unwrap_or(300);
-
                 Ok(Box::new(
-                    providers::platform::PlatformBootstrapProvider::new(url, timeout)?,
+                    providers::platform::PlatformBootstrapProvider::new(url, config.timeout_seconds)?,
                 ))
             }
             BootstrapProviderConfig::Noop => {
                 Ok(Box::new(providers::noop::NoOpBootstrapProvider::new()))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_platform_bootstrap_config_defaults() {
+        let config = PlatformBootstrapConfig {
+            query_api_url: Some("http://test:8080".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(config.timeout_seconds, 300);
+        assert_eq!(config.query_api_url, Some("http://test:8080".to_string()));
+    }
+
+    #[test]
+    fn test_postgres_bootstrap_config_defaults() {
+        let config = PostgresBootstrapConfig::default();
+        // Should be empty struct for now
+        assert_eq!(config, PostgresBootstrapConfig {});
+    }
+
+    #[test]
+    fn test_application_bootstrap_config_defaults() {
+        let config = ApplicationBootstrapConfig::default();
+        // Should be empty struct for now
+        assert_eq!(config, ApplicationBootstrapConfig {});
+    }
+
+    #[test]
+    fn test_platform_bootstrap_config_serialization() {
+        let config = BootstrapProviderConfig::Platform(PlatformBootstrapConfig {
+            query_api_url: Some("http://test:8080".to_string()),
+            timeout_seconds: 600,
+        });
+
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"type\":\"platform\""));
+        assert!(json.contains("\"query_api_url\":\"http://test:8080\""));
+        assert!(json.contains("\"timeout_seconds\":600"));
+
+        let deserialized: BootstrapProviderConfig = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            BootstrapProviderConfig::Platform(cfg) => {
+                assert_eq!(cfg.query_api_url, Some("http://test:8080".to_string()));
+                assert_eq!(cfg.timeout_seconds, 600);
+            }
+            _ => panic!("Expected Platform variant"),
+        }
+    }
+
+    #[test]
+    fn test_scriptfile_bootstrap_config() {
+        let config = BootstrapProviderConfig::ScriptFile(ScriptFileBootstrapConfig {
+            file_paths: vec!["/path/to/file1.jsonl".to_string(), "/path/to/file2.jsonl".to_string()],
+        });
+
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"type\":\"scriptfile\""));
+        assert!(json.contains("\"file_paths\""));
+
+        let deserialized: BootstrapProviderConfig = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            BootstrapProviderConfig::ScriptFile(cfg) => {
+                assert_eq!(cfg.file_paths.len(), 2);
+                assert_eq!(cfg.file_paths[0], "/path/to/file1.jsonl");
+                assert_eq!(cfg.file_paths[1], "/path/to/file2.jsonl");
+            }
+            _ => panic!("Expected ScriptFile variant"),
+        }
+    }
+
+    #[test]
+    fn test_noop_bootstrap_config() {
+        let config = BootstrapProviderConfig::Noop;
+
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"type\":\"noop\""));
+
+        let deserialized: BootstrapProviderConfig = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deserialized, BootstrapProviderConfig::Noop));
+    }
+
+    #[test]
+    fn test_postgres_bootstrap_config_serialization() {
+        let config = BootstrapProviderConfig::Postgres(PostgresBootstrapConfig::default());
+
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"type\":\"postgres\""));
+
+        let deserialized: BootstrapProviderConfig = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deserialized, BootstrapProviderConfig::Postgres(_)));
+    }
+
+    #[test]
+    fn test_application_bootstrap_config_serialization() {
+        let config = BootstrapProviderConfig::Application(ApplicationBootstrapConfig::default());
+
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"type\":\"application\""));
+
+        let deserialized: BootstrapProviderConfig = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deserialized, BootstrapProviderConfig::Application(_)));
+    }
+
+    #[test]
+    fn test_yaml_deserialization_platform() {
+        let yaml = r#"
+type: platform
+query_api_url: "http://remote:8080"
+timeout_seconds: 300
+"#;
+
+        let config: BootstrapProviderConfig = serde_yaml::from_str(yaml).unwrap();
+        match config {
+            BootstrapProviderConfig::Platform(cfg) => {
+                assert_eq!(cfg.query_api_url, Some("http://remote:8080".to_string()));
+                assert_eq!(cfg.timeout_seconds, 300);
+            }
+            _ => panic!("Expected Platform variant"),
+        }
+    }
+
+    #[test]
+    fn test_yaml_deserialization_scriptfile() {
+        let yaml = r#"
+type: scriptfile
+file_paths:
+  - "/data/file1.jsonl"
+  - "/data/file2.jsonl"
+"#;
+
+        let config: BootstrapProviderConfig = serde_yaml::from_str(yaml).unwrap();
+        match config {
+            BootstrapProviderConfig::ScriptFile(cfg) => {
+                assert_eq!(cfg.file_paths.len(), 2);
+                assert_eq!(cfg.file_paths[0], "/data/file1.jsonl");
+            }
+            _ => panic!("Expected ScriptFile variant"),
+        }
+    }
+
+    #[test]
+    fn test_platform_config_with_defaults() {
+        let yaml = r#"
+type: platform
+query_api_url: "http://test:8080"
+"#;
+
+        let config: BootstrapProviderConfig = serde_yaml::from_str(yaml).unwrap();
+        match config {
+            BootstrapProviderConfig::Platform(cfg) => {
+                assert_eq!(cfg.timeout_seconds, 300); // Should use default
+            }
+            _ => panic!("Expected Platform variant"),
+        }
+    }
+
+    #[test]
+    fn test_bootstrap_config_equality() {
+        let config1 = BootstrapProviderConfig::Platform(PlatformBootstrapConfig {
+            query_api_url: Some("http://test:8080".to_string()),
+            timeout_seconds: 300,
+        });
+
+        let config2 = BootstrapProviderConfig::Platform(PlatformBootstrapConfig {
+            query_api_url: Some("http://test:8080".to_string()),
+            timeout_seconds: 300,
+        });
+
+        assert_eq!(config1, config2);
+    }
+
+    #[test]
+    fn test_backward_compatibility_yaml() {
+        // This YAML format should still work
+        let yaml = r#"
+type: postgres
+"#;
+
+        let config: BootstrapProviderConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(matches!(config, BootstrapProviderConfig::Postgres(_)));
     }
 }
