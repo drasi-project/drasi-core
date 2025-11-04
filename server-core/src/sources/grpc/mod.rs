@@ -161,7 +161,6 @@ impl Source for GrpcSource {
             .await
     }
 
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -170,7 +169,9 @@ impl Source for GrpcSource {
 /// gRPC service implementation
 struct GrpcSourceService {
     source_id: String,
-    dispatchers: Arc<RwLock<Vec<Box<dyn crate::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    dispatchers: Arc<
+        RwLock<Vec<Box<dyn crate::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>,
+    >,
 }
 
 #[tonic::async_trait]
@@ -197,12 +198,14 @@ impl SourceService for GrpcSourceService {
 
                     debug!("[{}] Processing gRPC event: {:?}", self.source_id, &wrapper);
 
-                    // Dispatch via helper (using block_on for sync context)
-                    if let Err(e) = futures::executor::block_on(SourceBase::dispatch_from_task(
+                    // Dispatch via helper
+                    if let Err(e) = SourceBase::dispatch_from_task(
                         self.dispatchers.clone(),
                         wrapper,
                         &self.source_id,
-                    )) {
+                    )
+                    .await
+                    {
                         debug!(
                             "[{}] Failed to dispatch (no subscribers): {}",
                             self.source_id, e
@@ -275,10 +278,7 @@ impl SourceService for GrpcSourceService {
                         )
                         .await
                         {
-                            debug!(
-                                "[{}] Failed to dispatch (no subscribers): {}",
-                                source_id, e
-                            );
+                            debug!("[{}] Failed to dispatch (no subscribers): {}", source_id, e);
                         }
 
                         events_processed += 1;
@@ -432,20 +432,18 @@ fn convert_proto_element_to_core(
             let metadata = convert_proto_metadata_to_core(metadata, source_id)?;
             let properties = convert_proto_properties(&relation.properties)?;
 
-            let in_node = relation
-                .in_node
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!(
+            let in_node = relation.in_node.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
                     "Validation error: Relation missing required 'in_node' field. \
                      Relations must specify both source and target nodes."
-                ))?;
-            let out_node = relation
-                .out_node
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!(
+                )
+            })?;
+            let out_node = relation.out_node.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
                     "Validation error: Relation missing required 'out_node' field. \
                      Relations must specify both source and target nodes."
-                ))?;
+                )
+            })?;
 
             Ok(Element::Relation {
                 metadata,

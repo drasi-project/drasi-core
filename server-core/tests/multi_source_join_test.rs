@@ -177,6 +177,7 @@ async fn test_three_way_join_incremental() -> Result<()> {
     let collection_task = tokio::spawn(async move {
         let handle = core_clone
             .reaction_handle("test-reaction")
+            .await
             .expect("Failed to get reaction handle");
 
         let mut stream = handle
@@ -228,9 +229,9 @@ async fn test_three_way_join_incremental() -> Result<()> {
     // ============================================================================
 
     // Get source handles
-    let customer_source = core.source_handle("customer-source")?;
-    let order_source = core.source_handle("order-source")?;
-    let product_source = core.source_handle("product-source")?;
+    let customer_source = core.source_handle("customer-source").await?;
+    let order_source = core.source_handle("order-source").await?;
+    let product_source = core.source_handle("product-source").await?;
 
     // Push Customer C1 (Alice)
     customer_source

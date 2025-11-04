@@ -313,10 +313,14 @@ where
     fn create_receiver(&self) -> Result<Box<dyn ChangeReceiver<T>>> {
         // For channel mode, we can only create one receiver
         // Take the receiver out of the option
+        // NOTE: This blocking call is acceptable because:
+        // 1. It's only used during initialization, not in hot paths
+        // 2. The lock is held very briefly just to extract the receiver
+        // 3. Making this async would require changing the trait and all callers
         let mut rx_opt = futures::executor::block_on(self.rx.lock());
-        let rx = rx_opt
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("Receiver already created for this channel dispatcher"))?;
+        let rx = rx_opt.take().ok_or_else(|| {
+            anyhow::anyhow!("Receiver already created for this channel dispatcher")
+        })?;
         Ok(Box::new(ChannelChangeReceiver { rx }))
     }
 }

@@ -93,8 +93,8 @@ use crate::sources::{ApplicationSourceHandle, SourceManager};
 /// core.start().await?;
 ///
 /// // Get handles for programmatic interaction
-/// let source_handle = core.source_handle("events")?;
-/// let reaction_handle = core.reaction_handle("results")?;
+/// let source_handle = core.source_handle("events").await?;
+/// let reaction_handle = core.reaction_handle("results").await?;
 ///
 /// // Inject data into source
 /// let properties = drasi_server_core::PropertyMapBuilder::new()
@@ -430,7 +430,7 @@ impl DrasiServerCore {
     ///     .await?;
     ///
     /// // Get handle to inject events
-    /// let handle = core.source_handle("events")?;
+    /// let handle = core.source_handle("events").await?;
     ///
     /// // Inject a node insert
     /// let properties = drasi_server_core::PropertyMapBuilder::new()
@@ -444,26 +444,23 @@ impl DrasiServerCore {
     /// ```
     ///
     /// See also: [`ApplicationSourceHandle`] for available operations
-    pub fn source_handle(&self, id: &str) -> crate::api::Result<ApplicationSourceHandle> {
+    pub async fn source_handle(&self, id: &str) -> crate::api::Result<ApplicationSourceHandle> {
         // Try to get from handle registry first
-        if let Ok(handle) = futures::executor::block_on(self.handle_registry.get_source_handle(id))
-        {
+        if let Ok(handle) = self.handle_registry.get_source_handle(id).await {
             return Ok(handle);
         }
 
         // If not in registry, try to get from source manager
         // This handles the case where the source exists but handle isn't registered yet
-        futures::executor::block_on(async {
-            if let Some(handle) = self.source_manager.get_application_handle(id).await {
-                // Register it for future use
-                self.handle_registry
-                    .register_source_handle(id.to_string(), handle.clone())
-                    .await;
-                Ok(handle)
-            } else {
-                Err(DrasiError::component_not_found("source", id))
-            }
-        })
+        if let Some(handle) = self.source_manager.get_application_handle(id).await {
+            // Register it for future use
+            self.handle_registry
+                .register_source_handle(id.to_string(), handle.clone())
+                .await;
+            Ok(handle)
+        } else {
+            Err(DrasiError::component_not_found("source", id))
+        }
     }
 
     /// Get direct access to the query manager (advanced usage)
@@ -529,7 +526,7 @@ impl DrasiServerCore {
     ///     .await?;
     ///
     /// // Get handle to consume results
-    /// let handle = core.reaction_handle("results")?;
+    /// let handle = core.reaction_handle("results").await?;
     ///
     /// // Subscribe to results
     /// let mut subscription = handle.subscribe_with_options(
@@ -545,26 +542,22 @@ impl DrasiServerCore {
     /// ```
     ///
     /// See also: [`ApplicationReactionHandle`] for available operations
-    pub fn reaction_handle(&self, id: &str) -> crate::api::Result<ApplicationReactionHandle> {
+    pub async fn reaction_handle(&self, id: &str) -> crate::api::Result<ApplicationReactionHandle> {
         // Try to get from handle registry first
-        if let Ok(handle) =
-            futures::executor::block_on(self.handle_registry.get_reaction_handle(id))
-        {
+        if let Ok(handle) = self.handle_registry.get_reaction_handle(id).await {
             return Ok(handle);
         }
 
         // If not in registry, try to get from reaction manager
-        futures::executor::block_on(async {
-            if let Some(handle) = self.reaction_manager.get_application_handle(id).await {
-                // Register it for future use
-                self.handle_registry
-                    .register_reaction_handle(id.to_string(), handle.clone())
-                    .await;
-                Ok(handle)
-            } else {
-                Err(DrasiError::component_not_found("reaction", id))
-            }
-        })
+        if let Some(handle) = self.reaction_manager.get_application_handle(id).await {
+            // Register it for future use
+            self.handle_registry
+                .register_reaction_handle(id.to_string(), handle.clone())
+                .await;
+            Ok(handle)
+        } else {
+            Err(DrasiError::component_not_found("reaction", id))
+        }
     }
 
     // ============================================================================
@@ -820,7 +813,7 @@ impl DrasiServerCore {
                     DrasiError::component_error(
                         "source",
                         id,
-                        format!("Failed to start source: {}", e)
+                        format!("Failed to start source: {}", e),
                     )
                 }
             })
@@ -853,7 +846,7 @@ impl DrasiServerCore {
                     DrasiError::component_error(
                         "source",
                         id,
-                        format!("Failed to stop source: {}", e)
+                        format!("Failed to stop source: {}", e),
                     )
                 }
             })
@@ -2127,7 +2120,7 @@ reactions: []
     async fn test_source_handle_for_nonexistent_source() {
         let core = DrasiServerCore::builder().build().await.unwrap();
 
-        let result = core.source_handle("nonexistent");
+        let result = core.source_handle("nonexistent").await;
         assert!(
             result.is_err(),
             "Should return error for nonexistent source"
@@ -2146,7 +2139,7 @@ reactions: []
     async fn test_reaction_handle_for_nonexistent_reaction() {
         let core = DrasiServerCore::builder().build().await.unwrap();
 
-        let result = core.reaction_handle("nonexistent");
+        let result = core.reaction_handle("nonexistent").await;
         assert!(
             result.is_err(),
             "Should return error for nonexistent reaction"

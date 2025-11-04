@@ -234,7 +234,7 @@ impl SubscriptionOptions {
 /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
 /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
 /// #     .build().await?;
-/// let handle = core.reaction_handle("results")?;
+/// let handle = core.reaction_handle("results").await?;
 ///
 /// let mut subscription = handle.subscribe_with_options(
 ///     SubscriptionOptions::default()
@@ -258,7 +258,7 @@ impl SubscriptionOptions {
 /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
 /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
 /// #     .build().await?;
-/// let handle = core.reaction_handle("results")?;
+/// let handle = core.reaction_handle("results").await?;
 ///
 /// let mut subscription = handle.subscribe_with_options(
 ///     SubscriptionOptions::default().with_batch_size(50)
@@ -287,7 +287,7 @@ impl SubscriptionOptions {
 /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
 /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
 /// #     .build().await?;
-/// let handle = core.reaction_handle("results")?;
+/// let handle = core.reaction_handle("results").await?;
 ///
 /// let mut subscription = handle.subscribe_with_options(
 ///     SubscriptionOptions::default()
@@ -333,7 +333,7 @@ impl Subscription {
     /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
     /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
     /// #     .build().await?;
-    /// # let handle = core.reaction_handle("results")?;
+    /// # let handle = core.reaction_handle("results").await?;
     /// let mut subscription = handle.subscribe_with_options(
     ///     SubscriptionOptions::default()
     /// ).await?;
@@ -371,7 +371,7 @@ impl Subscription {
     /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
     /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
     /// #     .build().await?;
-    /// # let handle = core.reaction_handle("results")?;
+    /// # let handle = core.reaction_handle("results").await?;
     /// let mut subscription = handle.subscribe_with_options(
     ///     SubscriptionOptions::default()
     /// ).await?;
@@ -413,7 +413,7 @@ impl Subscription {
     /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
     /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
     /// #     .build().await?;
-    /// # let handle = core.reaction_handle("results")?;
+    /// # let handle = core.reaction_handle("results").await?;
     /// let mut subscription = handle.subscribe_with_options(
     ///     SubscriptionOptions::default().with_batch_size(100)
     /// ).await?;
@@ -467,7 +467,7 @@ impl Subscription {
     /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
     /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
     /// #     .build().await?;
-    /// # let handle = core.reaction_handle("results")?;
+    /// # let handle = core.reaction_handle("results").await?;
     /// let subscription = handle.subscribe_with_options(
     ///     SubscriptionOptions::default()
     /// ).await?;
@@ -499,7 +499,7 @@ impl Subscription {
 /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
 /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
 /// #     .build().await?;
-/// # let handle = core.reaction_handle("results")?;
+/// # let handle = core.reaction_handle("results").await?;
 /// let subscription = handle.subscribe_with_options(
 ///     SubscriptionOptions::default()
 /// ).await?;
@@ -533,7 +533,7 @@ impl SubscriptionStream {
     /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
     /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
     /// #     .build().await?;
-    /// # let handle = core.reaction_handle("results")?;
+    /// # let handle = core.reaction_handle("results").await?;
     /// let subscription = handle.subscribe_with_options(
     ///     SubscriptionOptions::default()
     /// ).await?;

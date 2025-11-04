@@ -33,8 +33,8 @@ async fn main() -> Result<()> {
     core.start().await?;
 
     // Get handles for bidirectional communication
-    let source = core.source_handle("app-source")?;
-    let reaction = core.reaction_handle("app-reaction")?;
+    let source = core.source_handle("app-source").await?;
+    let reaction = core.reaction_handle("app-reaction").await?;
 
     // Spawn task to receive results
     let receiver = tokio::spawn(async move {

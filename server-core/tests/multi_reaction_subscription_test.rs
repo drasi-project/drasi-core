@@ -78,7 +78,7 @@ async fn collect_results_with_timeout(
     reaction_id: String,
     timeout_duration: Duration,
 ) -> Result<Vec<serde_json::Value>> {
-    let handle = core.reaction_handle(&reaction_id)?;
+    let handle = core.reaction_handle(&reaction_id).await?;
     let mut stream = handle
         .as_stream()
         .await
@@ -151,7 +151,7 @@ async fn test_multiple_reactions_subscribe_to_single_query() -> Result<()> {
     let core = Arc::new(core);
 
     // Get source handle to inject data
-    let source_handle = core.source_handle("test-source")?;
+    let source_handle = core.source_handle("test-source").await?;
 
     // Spawn tasks to collect results from all 3 reactions concurrently
     let core_clone1 = Arc::clone(&core);
@@ -303,7 +303,7 @@ async fn test_data_flow_with_all_event_types() -> Result<()> {
     core.start().await?;
 
     let core = Arc::new(core);
-    let source_handle = core.source_handle("test-source")?;
+    let source_handle = core.source_handle("test-source").await?;
 
     // Spawn tasks to collect results from both reactions
     let core_clone1 = Arc::clone(&core);
@@ -496,7 +496,7 @@ async fn test_concurrent_reaction_processing() -> Result<()> {
     core.start().await?;
 
     let core = Arc::new(core);
-    let source_handle = core.source_handle("test-source")?;
+    let source_handle = core.source_handle("test-source").await?;
 
     // Spawn tasks to collect results from all 5 reactions
     let mut tasks = Vec::new();
@@ -645,7 +645,7 @@ async fn test_reaction_subscription_with_manual_query_start() -> Result<()> {
     core.start().await?;
 
     let core = Arc::new(core);
-    let source_handle = core.source_handle("test-source")?;
+    let source_handle = core.source_handle("test-source").await?;
 
     // Spawn tasks to collect results
     let core_clone1 = Arc::clone(&core);
@@ -756,7 +756,7 @@ async fn test_query_with_no_reactions() -> Result<()> {
 
     core.start().await?;
 
-    let source_handle = core.source_handle("test-source")?;
+    let source_handle = core.source_handle("test-source").await?;
 
     // Send events even though no reactions are listening
     source_handle
@@ -826,7 +826,7 @@ async fn test_many_reactions_performance() -> Result<()> {
     core.start().await?;
 
     let core = Arc::new(core);
-    let source_handle = core.source_handle("test-source")?;
+    let source_handle = core.source_handle("test-source").await?;
 
     // Spawn tasks to collect results from all reactions
     let mut tasks = Vec::new();

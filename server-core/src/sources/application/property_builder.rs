@@ -55,7 +55,7 @@ use std::sync::Arc;
 /// # let core = DrasiServerCore::builder()
 /// #     .add_source(Source::application("events").build())
 /// #     .build().await?;
-/// let handle = core.source_handle("events")?;
+/// let handle = core.source_handle("events").await?;
 ///
 /// // Create a user node with multiple properties
 /// let properties = PropertyMapBuilder::new()
