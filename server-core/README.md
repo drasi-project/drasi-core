@@ -5,15 +5,27 @@
 
 DrasiServerCore is a Rust library for building change-driven solutions that detect and react to data changes with precision. It simplifies the complex task of tracking specific, contextual data transitions across distributed systems, enabling you to build responsive applications faster with less complexity.
 
-## Overview
+## Table of Contents
 
-DrasiServerCore enables **change-driven solutions** through a powerful **Source → Query → Reaction** pattern:
-
-- **Sources** capture data changes from your existing systems
-- **Continuous Queries** detect precisely the changes that matter using openCypher graph queries
-- **Reactions** respond to those changes by triggering downstream actions
-
-Unlike traditional event-driven systems that require complex event parsing and state management, DrasiServerCore uses continuous queries to maintain live result sets that automatically update as your data changes. This transforms complex change detection into declarative, cost-effective implementations.
+1. [Why DrasiServerCore?](#why-drasiServercore)
+2. [Key Use Cases](#key-use-cases)
+3. [Core Concepts](#core-concepts)
+4. [Architecture Overview](#architecture-overview)
+5. [Getting Started](#getting-started)
+6. [Building Change-Driven Solutions](#building-change-driven-solutions)
+7. [Sources - Data Ingestion](#sources---data-ingestion)
+8. [Queries - Change Detection](#queries---change-detection)
+9. [Reactions - Response Actions](#reactions---response-actions)
+10. [Bootstrap System](#bootstrap-system)
+11. [Data Flow and Transformations](#data-flow-and-transformations)
+12. [Advanced Topics](#advanced-topics)
+13. [API Reference](#api-reference)
+15. [Best Practices](#best-practices)
+16. [Troubleshooting](#troubleshooting)
+17. [Contributing](#contributing)
+18. [License](#license)
+19. [Support](#support)
+20. [Related Projects](#related-projects)
 
 ## Why DrasiServerCore?
 
@@ -25,6 +37,8 @@ Traditional event-driven architectures often struggle with:
 
 DrasiServerCore solves these challenges by focusing on **precise change semantics** - detecting not just that data changed, but understanding exactly what changed and why it matters to your business logic.
 
+Unlike traditional event-driven systems that require complex event parsing and state management, DrasiServerCore uses continuous queries to maintain live result sets that automatically update as your data changes. This transforms complex change detection into declarative, cost-effective implementations.
+
 ## Key Use Cases
 
 - **Infrastructure Health Monitoring**: Track resource utilization across VMs, containers, and services to detect anomalies and optimize costs
@@ -34,7 +48,149 @@ DrasiServerCore solves these challenges by focusing on **precise change semantic
 - **Compliance & Audit**: Track sensitive data changes with full context for regulatory requirements
 - **Real-time Personalization**: Update user experiences instantly based on behavior changes
 
-## Quick Start
+## Core Concepts
+
+DrasiServerCore is a library for building **change-driven solutions** - applications that automatically detect and respond to meaningful data changes in real-time. Unlike traditional event-driven systems that process streams of generic events, DrasiServerCore uses continuous queries to maintain live result sets that update automatically as your data changes.
+
+### The Source → Query → Reaction Pattern
+
+```
+┌─────────────┐      ┌─────────────────┐      ┌──────────────┐
+│   Sources   │ ───> │ Continuous      │ ───> │  Reactions   │
+│             │      │ Queries         │      │              │
+├─────────────┤      ├─────────────────┤      ├──────────────┤
+│ • PostgreSQL│      │ • Cypher-based  │      │ • Webhooks   │
+│ • HTTP API  │      │ • Live results  │      │ • gRPC       │
+│ • gRPC      │      │ • Incremental   │      │ • SSE        │
+│ • In-app    │      │ • Multi-source  │      │ • In-app     │
+└─────────────┘      └─────────────────┘      └──────────────┘
+     ↓                      ↓                        ↓
+  Change Events        Change Detection        Change Actions
+```
+
+1. **Sources** emit changes as graph elements (nodes and relationships)
+2. **Continuous Queries** maintain live result sets that update incrementally
+3. **Reactions** receive precise change notifications with before/after states
+
+### Graph Data Model
+
+DrasiServerCore uses a labeled property graph model:
+
+```
+Node Example:
+(:Server {id: "srv-01", cpu: 85, memory: 4096})
+     ↑        ↑
+   Label   Properties
+
+Relationship Example:
+(:Application)-[:RUNS_ON]->(:Server)
+                    ↑
+              Relationship Type
+```
+
+This model naturally represents:
+- **Entities**: Nodes with labels and properties
+- **Relationships**: Connections providing context
+- **Changes**: Insert, Update, Delete operations
+
+### Change Semantics
+
+DrasiServerCore tracks three types of changes in query results:
+
+```rust
+pub enum QueryResult {
+    Adding { after: HashMap<String, Value> },      // New result row
+    Updating { before: HashMap<String, Value>,     // Changed result
+               after: HashMap<String, Value> },
+    Removing { before: HashMap<String, Value> },   // Removed result
+}
+```
+
+### Key Differentiators
+
+| Traditional Event Systems | DrasiServerCore |
+|--------------------------|-----------------|
+| Process all events, filter later | Query-first: only process relevant changes |
+| Complex state management | Automatic state tracking via continuous queries |
+| Hard-coded change detection | Declarative change detection with Cypher |
+| Event parsing and transformation | Graph model with semantic relationships |
+| Manual correlation across events | Built-in join support across sources |
+
+### When to Use DrasiServerCore
+
+✅ **Perfect for:**
+- Real-time monitoring and alerting
+- Business exception detection
+- Infrastructure health tracking
+- Compliance and audit trails
+- Change data capture (CDC) pipelines
+- IoT sensor monitoring
+- Resource optimization
+
+❌ **Not ideal for:**
+- Simple CRUD applications
+- Batch processing workloads
+- Static data analysis
+- Applications without real-time requirements
+
+## Architecture Overview
+
+### Component Architecture
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                    DrasiServerCore                       │
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
+│  │   Sources    │  │   Queries    │  │  Reactions   │  │
+│  ├──────────────┤  ├──────────────┤  ├──────────────┤  │
+│  │ PostgreSQL   │  │ Continuous   │  │ HTTP         │  │
+│  │ HTTP         │  │ Query Engine │  │ gRPC         │  │
+│  │ gRPC         │  │              │  │ SSE          │  │
+│  │ Application  │  │ Multi-Source │  │ Application  │  │
+│  │ Platform     │  │ Joins        │  │ Log          │  │
+│  │ Mock         │  │              │  │ Profiler     │  │
+│  └──────────────┘  └──────────────┘  └──────────────┘  │
+│         ↓                 ↓                 ↓           │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │              Event Routing Layer                 │  │
+│  ├──────────────────────────────────────────────────┤  │
+│  │ • DataRouter: Source → Query routing             │  │
+│  │ • SubscriptionRouter: Query → Reaction routing   │  │
+│  │ • BootstrapRouter: Initial data delivery         │  │
+│  │ • Broadcast channels for fan-out                 │  │
+│  └──────────────────────────────────────────────────┘  │
+│                                                          │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │            Bootstrap Provider System             │  │
+│  ├──────────────────────────────────────────────────┤  │
+│  │ • PostgreSQL: Database snapshots                 │  │
+│  │ • ScriptFile: JSONL test data                   │  │
+│  │ • Application: Stored events                    │  │
+│  │ • Platform: Remote Drasi Query API              │  │
+│  │ • NoOp: No initial data                         │  │
+│  └──────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────┘
+```
+
+### Component Lifecycle
+
+```
+┌────────┐     ┌────────────┐     ┌─────────┐     ┌─────────┐
+│ Create │ ──> │ Initialize │ ──> │  Start  │ ──> │ Running │
+└────────┘     └────────────┘     └─────────┘     └─────────┘
+                      │                                  ↓
+               ┌──────────────┐                   ┌─────────┐
+               │  Bootstrap   │                   │  Stop   │
+               │  (if needed) │                   └─────────┘
+               └──────────────┘                         ↓
+                                                  ┌─────────┐
+                                                  │ Stopped │
+                                                  └─────────┘
+```
+
+## Getting Started
 
 ### Installation
 
@@ -45,11 +201,12 @@ Add DrasiServerCore to your `Cargo.toml`:
 drasi-server-core = "0.1.0"
 tokio = { version = "1", features = ["full"] }
 serde_json = "1.0"
+anyhow = "1.0"
 ```
 
-### Basic Example - Builder API
+### Your First Change-Driven Solution
 
-Create a change detection pipeline using the fluent builder API:
+Here's a complete example that monitors temperature sensors:
 
 ```rust
 use drasi_server_core::{DrasiServerCore, Source, Query, Reaction, Properties};
@@ -57,255 +214,290 @@ use serde_json::json;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Configure a change-driven pipeline using the fluent builder API
+    // Build the server configuration
     let core = DrasiServerCore::builder()
-        .with_id("my-server")
+        .with_id("temperature-monitor")
+
+        // Add a mock source for testing
         .add_source(
-            Source::mock("sensor-data")
+            Source::mock("sensors")
                 .with_properties(
                     Properties::new()
                         .with_string("data_type", "sensor")
-                        .with_int("interval_ms", 1000)
+                        .with_int("interval_ms", 2000)
                 )
                 .build()
         )
+
+        // Add a query to detect high temperatures
         .add_query(
-            Query::cypher("anomaly-detection")
-                .query("MATCH (s:Sensor) WHERE s.temperature > 75 RETURN s.id, s.temperature")
-                .from_source("sensor-data")
+            Query::cypher("high-temp-alert")
+                .query(r#"
+                    MATCH (s:Sensor)
+                    WHERE s.temperature > 75
+                    RETURN s.id, s.location, s.temperature
+                "#)
+                .from_source("sensors")
                 .build()
         )
+
+        // Add a reaction to log alerts
         .add_reaction(
-            Reaction::log("alert-handler")
-                .subscribe_to("anomaly-detection")
-                .with_property("log_level", json!("info"))
+            Reaction::log("alert-logger")
+                .subscribe_to("high-temp-alert")
+                .with_property("log_level", json!("warn"))
                 .build()
         )
+
         .build()
         .await?;
 
-    // Start the change detection engine
+    // Start processing
     core.start().await?;
 
-    // Run for 10 seconds
-    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+    println!("Monitoring temperatures... Press Ctrl+C to stop");
+
+    // Wait for shutdown signal
+    tokio::signal::ctrl_c().await?;
 
     // Graceful shutdown
     core.stop().await?;
+
     Ok(())
 }
 ```
 
-### Loading from Configuration File
+### Understanding the Example
 
-Load pre-existing YAML/JSON configuration:
+1. **Source**: Generates mock sensor data every 2 seconds
+2. **Query**: Continuously monitors for sensors with temperature > 75
+3. **Reaction**: Logs alerts when high temperatures are detected
+4. **Change Detection**: Automatic - you only see changes when:
+   - A sensor crosses the 75° threshold (Adding)
+   - A high-temp sensor's reading changes (Updating)
+   - A sensor drops below 75° (Removing)
+
+## Building Change-Driven Solutions
+
+### Configuration Approaches
+
+DrasiServerCore offers three ways to configure your solution:
+
+#### 1. Fluent Builder API (Recommended)
+
+Type-safe, ergonomic configuration in code:
 
 ```rust
-use drasi_server_core::DrasiServerCore;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Load and initialize from config file in one step
-    let core = DrasiServerCore::from_config_file("config.yaml").await?;
-
-    core.start().await?;
-
-    // ... your application logic ...
-
-    core.stop().await?;
-    Ok(())
-}
-```
-
-## Architecture
-
-DrasiServerCore implements a change-driven architecture with these key components:
-
-### The Continuous Query Pattern
-
-```
-Sources → [Change Events] → Continuous Queries → [Change Notifications] → Reactions
-```
-
-1. **Sources** emit changes as graph elements (nodes and relationships)
-2. **Continuous Queries** maintain live result sets that update incrementally
-3. **Reactions** receive precise change notifications with before/after states
-
-### Data Model
-
-DrasiServerCore uses a labeled property graph model that naturally represents complex relationships:
-- **Nodes**: Entities with labels and properties (e.g., `(:VM {id: "vm-1", cpu: 85})`)
-- **Relationships**: Connections that provide context (e.g., `[:HOSTED_ON]`)
-- **Changes**: Insert, Update, or Delete operations with full change semantics
-
-This model enables queries that understand not just individual changes, but changes in context - like detecting when a VM's CPU usage exceeds threshold while it's hosting critical services.
-
-## Bootstrap System
-
-Before continuous queries can detect changes, they need an initial data snapshot. This is **bootstrap** - loading the starting state so queries know what "changed" means.
-
-### Universal Bootstrap Architecture
-
-**Key Innovation:** DrasiServerCore features a **universal pluggable bootstrap provider system** where ALL sources support configurable bootstrap providers, completely separating bootstrap (initial data delivery) from source streaming logic.
-
-**Architectural Principle**: Bootstrap providers are independent from sources. Any source can use any bootstrap provider, enabling powerful use cases like "bootstrap from PostgreSQL database, stream changes from HTTP endpoint."
-
-### All Sources Support Bootstrap Providers
-
-- **PostgresReplicationSource**: ✅ Delegates to configured provider
-- **HttpSource**: ✅ Delegates to configured provider
-- **GrpcSource**: ✅ Delegates to configured provider
-- **MockSource**: ✅ Delegates to configured provider
-- **PlatformSource**: ✅ Delegates to configured provider
-- **ApplicationSource**: ✅ Delegates to configured provider (falls back to internal if no provider configured)
-
-### Bootstrap Provider Types
-
-**NoOp Provider** (default): No initial data
-```rust
-Source::mock("test").build()  // No bootstrap
-```
-
-**ScriptFile Provider**: Load from JSONL files (perfect for testing and development)
-```rust
-Source::mock("test")
-    .with_bootstrap_script("data/initial.jsonl")
+let core = DrasiServerCore::builder()
+    .with_id("my-server")
+    .add_source(Source::postgres("db").build())
+    .add_query(Query::cypher("q1").build())
+    .add_reaction(Reaction::http("webhook").build())
     .build()
+    .await?;
 ```
 
-**Script File Format**: JSONL (JSON Lines) with record types:
-- **Header** (required first): `{"type":"header","version":"1.0"}`
-- **Node**: `{"type":"node","id":"n1","labels":["Person"],"properties":{"name":"Alice"}}`
-- **Relation**: `{"type":"relation","id":"r1","startNode":"n1","endNode":"n2","type":"KNOWS","properties":{}}`
-- **Comment** (filtered): Lines starting with `#`
-- **Label** (checkpoint): For restart support
-- **Finish** (optional): Marks end
+#### 2. YAML Configuration
 
-Supports multi-file reading in sequence.
+Declarative configuration in files:
 
-**PostgreSQL Provider**: Snapshot of current database state
-```rust
-Source::postgres("db")
-    .with_postgres_bootstrap()  // Snapshot at startup
-    .build()
-```
-
-**Application Provider**: Replay stored events
-```rust
-Source::application("app")
-    .with_application_bootstrap()
-    .build()
-```
-
-**Platform Provider**: Load from remote Drasi Query API
-```rust
-Source::platform("external")
-    .with_platform_bootstrap("http://api:8080", Some(300))
-    .build()
-```
-
-### Mix-and-Match Bootstrap Configuration
-
-**Standard Configuration** (source and provider match):
 ```yaml
+server_core:
+  id: my-server
+
 sources:
-  - id: my_postgres_source
+  - id: db
     source_type: postgres
-    bootstrap_provider:
-      type: postgres
     properties:
       host: localhost
       database: mydb
+
+queries:
+  - id: q1
+    query: "MATCH (n) RETURN n"
+    sources: [db]
+
+reactions:
+  - id: webhook
+    reaction_type: http
+    queries: [q1]
+    properties:
+      endpoint: https://api.example.com
 ```
 
-**Mix-and-Match Configuration** (any source with any provider):
-```yaml
-sources:
-  # HTTP source with PostgreSQL bootstrap - bootstrap 1M records from DB, stream changes via HTTP
-  - id: http_with_postgres_bootstrap
-    source_type: http
-    bootstrap_provider:
-      type: postgres  # Bootstrap from PostgreSQL
-    properties:
-      host: localhost
-      port: 9000
-      database: mydb  # Used by postgres bootstrap provider
-      user: dbuser
-      password: dbpass
-
-  # gRPC source with ScriptFile bootstrap - load test data from file, stream changes via gRPC
-  - id: grpc_with_file_bootstrap
-    source_type: grpc
-    bootstrap_provider:
-      type: scriptfile
-      file_paths:
-        - "/path/to/initial_data.jsonl"
-    properties:
-      endpoint: "0.0.0.0:50051"
-
-  # Mock source with ScriptFile bootstrap - for testing
-  - id: test_source
-    source_type: mock
-    bootstrap_provider:
-      type: scriptfile
-      file_paths:
-        - "/path/to/test_data.jsonl"
-    properties:
-      interval_ms: 1000
+Load with:
+```rust
+let core = DrasiServerCore::from_config_file("config.yaml").await?;
 ```
 
-### When Bootstrap Happens
+#### 3. Dynamic Runtime Management
 
-Bootstrap runs automatically when you call `core.start()`:
-1. Sources bootstrap first (load initial data)
-2. Queries receive bootstrap data and build initial result sets
-3. Streaming begins - sources emit live changes
+Add/remove components while running:
 
-### Timing Considerations
+```rust
+// Add a new source at runtime
+core.add_source_runtime(
+    Source::http("new-api")
+        .with_property("port", json!(9000))
+        .auto_start(true)
+        .build()
+).await?;
 
-- `core.start()` is **async but non-blocking** for bootstrap
-- Bootstrap runs in background; queries start processing as data arrives
-- Use component status to monitor bootstrap completion
-- Streaming begins immediately after bootstrap for each source
+// Later, remove it
+core.remove_source("new-api").await?;
+```
 
-## Sources
+### Design Patterns
 
-Sources are adapters that capture changes from your existing systems and convert them into the graph model.
+#### Pattern 1: Multi-Stage Processing
+
+Chain queries for complex logic:
+
+```rust
+// Stage 1: Detect anomalies
+Query::cypher("anomalies")
+    .query("MATCH (s:Sensor) WHERE s.value > s.threshold RETURN s")
+    .from_source("sensors")
+
+// Stage 2: Correlate with location
+Query::cypher("location-alerts")
+    .query(r#"
+        MATCH (s:Sensor)-[:LOCATED_IN]->(l:Location)
+        WHERE s.anomaly = true AND l.critical = true
+        RETURN s, l
+    "#)
+    .from_source("anomalies")  // Chain from previous query
+```
+
+#### Pattern 2: Fan-Out Processing
+
+Multiple reactions for different purposes:
+
+```rust
+let core = DrasiServerCore::builder()
+    .add_query(Query::cypher("changes").build())
+
+    // Fan out to multiple reactions
+    .add_reaction(
+        Reaction::http("webhook")
+            .subscribe_to("changes")
+            .build()
+    )
+    .add_reaction(
+        Reaction::application("in-app")
+            .subscribe_to("changes")
+            .build()
+    )
+    .add_reaction(
+        Reaction::log("audit")
+            .subscribe_to("changes")
+            .build()
+    )
+    .build()
+    .await?;
+```
+
+#### Pattern 3: Programmatic Data Injection
+
+Use ApplicationSource for testing or integration:
+
+```rust
+let core = DrasiServerCore::builder()
+    .add_source(Source::application("app").build())
+    .build()
+    .await?;
+
+core.start().await?;
+
+// Get handle for injection
+let source = core.source_handle("app")?;
+
+// Inject test data
+source.send_node_insert(
+    "test-1",
+    vec!["TestNode"],
+    PropertyMapBuilder::new()
+        .with_string("name", "Test")
+        .with_integer("value", 42)
+        .build()
+).await?;
+```
+
+## Sources - Data Ingestion
+
+Sources adapt external data into DrasiServerCore's graph model. Each source handles:
+- **Bootstrap**: Loading initial data snapshot
+- **Streaming**: Emitting live changes
+- **Transformation**: Converting to graph elements
+
+### Available Sources
+
+| Source | Use Case | Bootstrap Support | Key Features |
+|--------|----------|-------------------|--------------|
+| PostgreSQL | Database CDC | ✅ Native + All | Logical replication, WAL decoding |
+| HTTP | Webhooks/REST | ✅ All providers | Adaptive batching, async handling |
+| gRPC | High-throughput | ✅ All providers | Bidirectional streaming, protobuf |
+| Application | In-process | ✅ Internal + All | Direct API, testing |
+| Platform | Drasi integration | ✅ All providers | Redis Streams, horizontal scaling |
+| Mock | Testing/Demo | ✅ All providers | Configurable data generation |
 
 > **Detailed Documentation:** Each source has comprehensive documentation in its respective directory with configuration properties, examples, input/output formats, and troubleshooting guides.
 >
 > See: `src/sources/{source-name}/README.md`
 
-### Available Sources
+### PostgreSQL Source
 
-**Mock Source** - Generate test data for development and testing.
+Real-time change data capture from PostgreSQL:
 
-**HTTP Source** - Accept changes via REST API for webhook-based integrations with adaptive batching.
+```rust
+Source::postgres("orders-db")
+    .with_properties(
+        Properties::new()
+            .with_string("host", "db.example.com")
+            .with_int("port", 5432)
+            .with_string("database", "orders")
+            .with_string("user", "drasi")
+            .with_string("password", "secret")
+            .with_array("tables", json!(["orders", "customers"]))
+            .with_object("table_keys", json!({
+                "orders": {"key_columns": ["order_id"]},
+                "customers": {"key_columns": ["customer_id"]}
+            }))
+    )
+    .with_postgres_bootstrap()  // Snapshot existing data
+    .build()
+```
 
-**gRPC Source** - High-performance bidirectional streaming for high-throughput scenarios.
+**Database Setup:**
+```sql
+-- Enable logical replication
+ALTER SYSTEM SET wal_level = logical;
 
-**PostgreSQL Source** - Stream changes from PostgreSQL using logical replication for real-time change data capture.
+-- Create publication
+CREATE PUBLICATION drasi_pub FOR TABLE orders, customers;
 
-**Application Source** - Embed change detection directly in your application for in-process data integration.
+-- Grant replication
+ALTER USER drasi REPLICATION;
+```
 
-**Platform Source** - Consume events from external Drasi Platform sources via Redis Streams.
-
-### Example: HTTP Source
+### HTTP Source
 
 Accept changes via REST API:
 
 ```rust
-Source::http("http-ingestion")
+Source::http("webhook-receiver")
     .with_properties(
         Properties::new()
             .with_string("host", "0.0.0.0")
             .with_int("port", 9000)
             .with_string("path", "/changes")
+            .with_bool("adaptive_batching", true)
+            .with_int("max_batch_size", 100)
     )
     .build()
 ```
 
-Send changes via HTTP POST:
+**Send changes:**
 ```bash
 curl -X POST http://localhost:9000/changes \
   -H "Content-Type: application/json" \
@@ -316,413 +508,292 @@ curl -X POST http://localhost:9000/changes \
       "id": "order-123",
       "labels": ["Order"],
       "properties": {
-        "status": "pending",
-        "created_at": "2024-01-15T10:00:00Z"
+        "total": 99.99,
+        "status": "pending"
       }
     }
   }'
 ```
 
-### Example: Application Source
+### Application Source
 
-Programmatically inject changes:
+Direct programmatic injection:
 
 ```rust
+// Setup
 let core = DrasiServerCore::builder()
-    .add_source(Source::application("app-source").build())
+    .add_source(Source::application("app-events").build())
     .build()
     .await?;
 
 core.start().await?;
 
-// Get handle for programmatic injection
-let source = core.source_handle("app-source")?;
+// Get handle
+let source = core.source_handle("app-events")?;
 
 // Insert node
 source.send_node_insert(
-    "customer-123",
+    "customer-1",
     vec!["Customer"],
     PropertyMapBuilder::new()
         .with_string("name", "Alice")
-        .with_string("email", "alice@example.com")
+        .with_string("tier", "gold")
         .build()
 ).await?;
 
 // Update node
 source.send_node_update(
-    "customer-123",
+    "customer-1",
     vec!["Customer"],
     PropertyMapBuilder::new()
-        .with_string("name", "Alice Smith")
-        .with_string("email", "alice@example.com")
+        .with_string("name", "Alice")
+        .with_string("tier", "platinum")  // Changed
+        .build()
+).await?;
+
+// Insert relationship
+source.send_relationship_insert(
+    "rel-1",
+    "customer-1",
+    "order-1",
+    vec!["PLACED"],
+    PropertyMapBuilder::new()
+        .with_string("date", "2024-01-01")
         .build()
 ).await?;
 
 // Delete node
-source.send_node_delete("customer-123", vec!["Customer"]).await?;
+source.send_node_delete("customer-1", vec!["Customer"]).await?;
 ```
 
-For detailed configuration, data formats, and examples, see:
-- **[Mock Source README](src/sources/mock/README.md)**
-- **[HTTP Source README](src/sources/http/README.md)**
-- **[gRPC Source README](src/sources/grpc/README.md)**
-- **[PostgreSQL Source README](src/sources/postgres/README.md)**
-- **[Application Source README](src/sources/application/README.md)**
-- **[Platform Source README](src/sources/platform/README.md)**
+### Source Configuration Reference
 
-## Continuous Queries
+All sources support:
+- `auto_start`: Whether to start automatically (default: true)
+- `bootstrap_provider`: Initial data configuration
+- `enable_profiling`: Performance tracking (default: false)
+- `dispatch_buffer_capacity`: Event buffer size
 
-Continuous queries are the heart of DrasiServerCore's change detection capabilities. Written in openCypher, they declaratively specify what changes matter to your application.
+## Queries - Change Detection
 
-### Understanding Query Results
+Queries are the intelligence layer - they define what changes matter to your application using Cypher.
 
-When your application reaction receives changes, it gets a `QueryResult` containing:
+### Cypher Query Basics
 
-```rust
-pub enum QueryResult {
-    Adding { after: HashMap<String, Value> },      // New row matched query
-    Updating { before: HashMap<String, Value>,     // Row changed
-               after: HashMap<String, Value> },
-    Removing { before: HashMap<String, Value> },   // Row no longer matches
-}
-```
-
-**How RETURN clauses map to results:**
-- Each field in your RETURN becomes a key in the HashMap
-- Values are JSON types (String, Number, Bool, Object, Array, Null)
-
-**Example:**
 ```cypher
-MATCH (s:Sensor) WHERE s.temperature > 75
-RETURN s.id AS sensor_id, s.temperature AS temp
+-- Pattern matching
+MATCH (n:Label)-[r:TYPE]->(m:Label2)
+
+-- Filtering
+WHERE n.property > 100
+
+-- Returning results
+RETURN n.id, m.name, r.weight
 ```
 
-If sensor-123 changes from 70°→80°, you receive:
-```rust
-QueryResult::Adding {
-    after: {
-        "sensor_id": "123",
-        "temp": 80
-    }
-}
-```
+### Query Examples
 
-If it changes 80°→85°:
-```rust
-QueryResult::Updating {
-    before: { "sensor_id": "123", "temp": 80 },
-    after: { "sensor_id": "123", "temp": 85 }
-}
-```
-
-If it drops to 70°:
-```rust
-QueryResult::Removing {
-    before: { "sensor_id": "123", "temp": 80 }
-}
-```
-
-**Key concept:** Continuous queries emit **diffs**, not full result sets. You only receive changes when:
-- A new row starts matching the query (Adding)
-- A matching row's properties change (Updating)
-- A row stops matching the query (Removing)
-
-### Multi-Source Queries and Joins
-
-DrasiServerCore supports querying across multiple sources and creating **synthetic joins** - relationships between data from different sources based on matching properties.
-
-#### Multi-Source Queries
-
-Subscribe to multiple sources:
+#### Simple Property Filtering
 
 ```rust
-Query::cypher("multi-source-query")
-    .query("MATCH (n) RETURN n")
-    .from_source("source1")
-    .from_source("source2")
-    .from_source("source3")
-    .build()
-```
-
-Or with array:
-```rust
-Query::cypher("multi-source-query")
-    .query("MATCH (n) RETURN n")
-    .from_sources(vec!["source1", "source2", "source3"])
-    .build()
-```
-
-#### Synthetic Joins
-
-Create relationships between nodes from different sources based on property values:
-
-```rust
-use drasi_server_core::config::{QueryJoinConfig, QueryJoinKeyConfig};
-
-let join_config = QueryJoinConfig {
-    id: "DRIVES".to_string(),  // Relationship type in query
-    keys: vec![
-        QueryJoinKeyConfig {
-            label: "Driver".to_string(),
-            property: "vehicle_id".to_string(),
-        },
-        QueryJoinKeyConfig {
-            label: "Vehicle".to_string(),
-            property: "id".to_string(),
-        },
-    ],
-};
-
-Query::cypher("driver-vehicle-query")
+Query::cypher("high-cpu-vms")
     .query(r#"
-        MATCH (d:Driver)-[:DRIVES]->(v:Vehicle)
-        WHERE v.status = 'available'
-        RETURN d.name, v.license_plate
-    "#)
-    .from_source("driver-database")
-    .from_source("vehicle-database")
-    .with_join(join_config)
-    .build()
-```
-
-**How Joins Work:**
-- Join creates synthetic `[:DRIVES]` relationships
-- When `Driver.vehicle_id` matches `Vehicle.id`, a relationship is created
-- Query can then use this relationship in MATCH patterns
-- Joins update automatically as data changes
-
-**Multiple Joins Example:**
-```rust
-// Join customers to orders, orders to products
-let customer_order_join = QueryJoinConfig {
-    id: "PLACED".to_string(),
-    keys: vec![
-        QueryJoinKeyConfig {
-            label: "Customer".to_string(),
-            property: "customer_id".to_string(),
-        },
-        QueryJoinKeyConfig {
-            label: "Order".to_string(),
-            property: "customer_id".to_string(),
-        },
-    ],
-};
-
-let order_product_join = QueryJoinConfig {
-    id: "CONTAINS".to_string(),
-    keys: vec![
-        QueryJoinKeyConfig {
-            label: "Order".to_string(),
-            property: "product_id".to_string(),
-        },
-        QueryJoinKeyConfig {
-            label: "Product".to_string(),
-            property: "product_id".to_string(),
-        },
-    ],
-};
-
-Query::cypher("customer-orders-query")
-    .query(r#"
-        MATCH (c:Customer)-[:PLACED]->(o:Order)-[:CONTAINS]->(p:Product)
-        WHERE o.status = 'pending'
-        RETURN c.name, o.id, p.name, o.total
-    "#)
-    .from_sources(vec!["customers", "orders", "products"])
-    .with_joins(vec![customer_order_join, order_product_join])
-    .build()
-```
-
-### Query Capabilities
-
-- **Pattern Matching**: Detect complex relationships between entities
-- **Temporal Operations**: Track time-based conditions and durations
-- **Aggregations**: Compute running totals, averages, and other metrics
-- **Contextual Detection**: Understand changes in relation to surrounding data
-- **Multi-Source Joins**: Correlate changes across different systems
-
-### Example Continuous Queries
-
-**Detect Resource Anomalies**:
-```rust
-Query::cypher("resource-anomalies")
-    .query(r#"
-        MATCH (vm:VM)-[:HOSTS]->(app:Application)
-        WHERE vm.cpu > 80 AND app.tier = 'production'
-          AND duration.between(vm.high_cpu_start, datetime()) > duration('PT5M')
-        RETURN vm.id, vm.name, app.name, vm.cpu, vm.high_cpu_start
+        MATCH (vm:VM)
+        WHERE vm.cpu_usage > 80
+        RETURN vm.id, vm.name, vm.cpu_usage
     "#)
     .from_source("infrastructure")
     .build()
 ```
 
-**Track Inventory Depletion**:
-```rust
-Query::cypher("low-inventory")
-    .query(r#"
-        MATCH (p:Product)-[:STORED_IN]->(w:Warehouse)
-        WHERE p.quantity < p.reorder_point
-          AND NOT EXISTS((p)<-[:PENDING]-(:PurchaseOrder))
-        RETURN p.sku, p.name, w.location, p.quantity, p.reorder_point
-    "#)
-    .from_sources(vec!["inventory-db".into(), "purchasing-db".into()])
-    .build()
-```
+#### Relationship Patterns
 
-**Monitor Service Dependencies**:
 ```rust
-Query::cypher("service-health")
+Query::cypher("critical-dependencies")
     .query(r#"
-        MATCH path = (s1:Service)-[:DEPENDS_ON*1..3]->(s2:Service)
-        WHERE s2.status = 'unhealthy'
-        RETURN s1.name as affected_service,
-               [n IN nodes(path) | n.name] as dependency_chain,
-               s2.name as failed_service
+        MATCH (app:Application)-[:DEPENDS_ON]->(db:Database)
+        WHERE app.tier = 'production' AND db.status = 'down'
+        RETURN app.name, db.name, db.error_message
     "#)
     .from_source("service-mesh")
     .build()
 ```
 
-### Query Limitations
+#### Temporal Conditions
 
-DrasiServerCore continuous queries don't support certain stateful Cypher operations:
-
-**NOT SUPPORTED:**
-- ORDER BY
-- LIMIT/SKIP
-- TOP
-
-**Why?** Continuous queries emit diffs. Ordering is a stateful operation that requires the full result set. With continuous queries, you receive changes as they happen, not the complete ordered set.
-
-**Workaround - Client-side ranking:**
 ```rust
+Query::cypher("long-running-tasks")
+    .query(r#"
+        MATCH (t:Task)
+        WHERE t.status = 'running'
+          AND duration.between(t.started_at, datetime()) > duration('PT1H')
+        RETURN t.id, t.name, t.started_at
+    "#)
+    .from_source("task-queue")
+    .build()
+```
+
+#### Aggregations
+
+```rust
+Query::cypher("order-totals")
+    .query(r#"
+        MATCH (c:Customer)-[:PLACED]->(o:Order)
+        WHERE o.created_at > datetime('2024-01-01')
+        RETURN c.id, c.name, count(o) as order_count, sum(o.total) as total_spent
+    "#)
+    .from_source("sales-db")
+    .build()
+```
+
+### Multi-Source Queries and Joins
+
+Query across multiple data sources with synthetic joins:
+
+```rust
+// Define how to join data from different sources
+let join = QueryJoinConfig {
+    id: "ASSIGNED_TO".to_string(),
+    keys: vec![
+        QueryJoinKeyConfig {
+            label: "Ticket".to_string(),
+            property: "assignee_id".to_string(),
+        },
+        QueryJoinKeyConfig {
+            label: "Employee".to_string(),
+            property: "employee_id".to_string(),
+        },
+    ],
+};
+
+Query::cypher("ticket-assignments")
+    .query(r#"
+        MATCH (t:Ticket)-[:ASSIGNED_TO]->(e:Employee)
+        WHERE t.priority = 'high' AND e.available = true
+        RETURN t.id, t.title, e.name, e.skills
+    "#)
+    .from_sources(vec!["ticketing-system", "hr-database"])
+    .with_join(join)
+    .build()
+```
+
+### Understanding Query Results
+
+Results arrive as diffs with semantic meaning:
+
+```rust
+// Process results from ApplicationReaction
 let mut stream = reaction.as_stream().await.unwrap();
-let mut items = Vec::new();
 
 while let Some(result) = stream.next().await {
-    // Update in-memory collection
-    update_items(&mut items, result);
-
-    // Sort when needed
-    items.sort_by_key(|item| item.value);
-
-    // Take top 10
-    let top_10 = items.iter().take(10);
+    match result.results[0] {
+        QueryResult::Adding { after } => {
+            // New row matches query
+            println!("New match: {:?}", after);
+        }
+        QueryResult::Updating { before, after } => {
+            // Existing row changed
+            println!("Changed from {:?} to {:?}", before, after);
+        }
+        QueryResult::Removing { before } => {
+            // Row no longer matches
+            println!("No longer matches: {:?}", before);
+        }
+    }
 }
 ```
 
-### Query Configuration Options
+### Query Limitations
 
+Continuous queries don't support:
+- `ORDER BY` - Results arrive as changes occur
+- `LIMIT/SKIP` - All matching changes are emitted
+- `TOP` - Maintain top-N client-side
+
+**Workaround for Top-N:**
 ```rust
-Query::cypher("my-query")
-    .query("MATCH (n) RETURN n")
-    .from_source("source1")
-    .auto_start(true)  // Auto-start on server start (default: true)
-    .with_property("priority_queue_capacity", json!(50000))  // Optional override
-    .build()
+// Client-side top-10 tracking
+let mut items = BTreeMap::new();
+
+while let Some(result) = stream.next().await {
+    // Update local state
+    update_items(&mut items, result);
+
+    // Get top 10
+    let top_10: Vec<_> = items
+        .iter()
+        .sorted_by_key(|(_, v)| v.score)
+        .take(10)
+        .collect();
+}
 ```
 
-**Bootstrap Configuration:**
-- Bootstrap is enabled by default for queries
-- Initial data loaded before streaming begins
-- Configurable via source bootstrap provider
+## Reactions - Response Actions
 
-**Priority Queue Configuration:**
-- Each query has an internal priority queue for ordering events by timestamp
-- Uses **three-level hierarchy**: component override → global default → hardcoded 10,000
-- Configure globally via `server_core.priority_queue_capacity` in config
-- Override per-query for high-volume scenarios
-- Larger capacities handle burst traffic better but use more memory
-- See [Priority Queue Configuration](#priority-queue-configuration) and [Priority Queue Tuning](#priority-queue-tuning) sections for complete details
-
-## Reactions
-
-Reactions respond to detected changes by triggering downstream actions.
-
-> **Detailed Documentation:** Each reaction has comprehensive documentation in its respective directory with configuration properties, examples, input/output formats, and troubleshooting guides.
->
-> See: `src/reactions/{reaction-name}/README.md`
+Reactions respond to detected changes by triggering actions.
 
 ### Available Reactions
 
-**Log Reaction** - Debug and monitor detected changes by logging to stdout.
+| Reaction | Use Case | Batching | Key Features |
+|----------|----------|----------|--------------|
+| HTTP | Webhooks, REST APIs | ✅ Adaptive | Connection pooling, retries |
+| gRPC | High-throughput streaming | ✅ Adaptive | Bidirectional, protobuf |
+| SSE | Browser push | ❌ | Real-time web updates |
+| Application | In-process handling | ❌ | Direct API, async streams |
+| Log | Debugging, audit | ❌ | Configurable levels |
+| Platform | Drasi integration | ❌ | Redis Streams output |
+| Profiler | Performance analysis | ❌ | Latency metrics, percentiles |
 
-**HTTP Reaction** - Trigger webhooks and REST APIs with detected changes.
+> **Detailed Documentation:** Each reaction has comprehensive documentation in its respective directory.
+>
+> See: `src/reactions/{reaction-name}/README.md`
 
-**HTTP Adaptive Reaction** - HTTP reaction with adaptive batching for high-volume scenarios.
+### HTTP Reaction
 
-**gRPC Reaction** - High-performance change streaming via gRPC.
-
-**gRPC Adaptive Reaction** - gRPC reaction with adaptive batching for high-volume scenarios.
-
-**SSE Reaction** - Stream changes to web applications via Server-Sent Events.
-
-**Application Reaction** - Process detected changes in-process within your application.
-
-**Platform Reaction** - Publish changes to Redis Streams for Drasi Platform integration.
-
-**Profiler Reaction** - Collect and report performance statistics for the query processing pipeline.
-
-### Adaptive Reactions
-
-Adaptive reactions (HTTP and gRPC) feature **dynamic batch size optimization** for high-throughput scenarios:
-
-**Key Features:**
-- Monitors throughput and latency in real-time
-- Dynamically adjusts batch size to meet target latency
-- Uses Welford's algorithm for online variance calculation
-- Priority queue for maintaining change order
-- Connection pooling for efficiency
-
-**Configuration:**
-```rust
-Reaction::http("adaptive-webhook")
-    .subscribe_to("high-volume-query")
-    .with_properties(
-        Properties::new()
-            .with_string("base_url", "http://api.example.com")
-            .with_bool("batch_endpoints_enabled", true)
-            .with_int("adaptive_max_batch_size", 100)
-            .with_int("adaptive_min_batch_size", 1)
-            .with_int("adaptive_target_latency_ms", 100)
-            .with_float("adaptive_adjustment_factor", 0.1)
-    )
-    .build()
-```
-
-**How It Works:**
-1. Reaction measures actual throughput and latency
-2. Compares to target latency (default 100ms)
-3. Adjusts batch size up or down dynamically
-4. Optimizes for maximum throughput within latency budget
-
-**Use Case:** Processing 10,000+ changes/second while maintaining sub-100ms latency.
-
-### Example: HTTP Reaction
-
-Trigger webhooks when changes are detected:
+Trigger webhooks with detected changes:
 
 ```rust
-Reaction::http("alert-webhook")
-    .subscribe_to("anomaly-detection")
+Reaction::http("order-webhook")
+    .subscribe_to("delayed-orders")
     .with_properties(
         Properties::new()
             .with_string("endpoint", "https://api.example.com/alerts")
             .with_string("method", "POST")
-            .with_string("token", "Bearer secret-token")
+            .with_object("headers", json!({
+                "Authorization": "Bearer token",
+                "X-Source": "drasi"
+            }))
             .with_int("timeout_ms", 5000)
+            .with_int("retry_count", 3)
+            .with_int("retry_delay_ms", 1000)
     )
     .build()
 ```
 
-### Example: Application Reaction
+**Adaptive batching for high volume:**
+```rust
+Reaction::http("high-volume-webhook")
+    .subscribe_to("all-changes")
+    .with_properties(
+        Properties::new()
+            .with_string("endpoint", "https://api.example.com/batch")
+            .with_bool("adaptive_batching", true)
+            .with_int("max_batch_size", 100)
+            .with_int("target_latency_ms", 100)
+            .with_float("adjustment_factor", 0.1)
+    )
+    .build()
+```
 
-Process changes in-process:
+### Application Reaction
+
+Process changes in your application:
 
 ```rust
+// Setup reaction
 let core = DrasiServerCore::builder()
     .add_reaction(
-        Reaction::application("change-handler")
+        Reaction::application("processor")
             .subscribe_to("my-query")
             .build()
     )
@@ -731,798 +802,451 @@ let core = DrasiServerCore::builder()
 
 core.start().await?;
 
-// Get handle to receive changes
-let reaction = core.reaction_handle("change-handler")?;
+// Get handle
+let reaction = core.reaction_handle("processor")?;
 
 // Process changes asynchronously
-let mut stream = reaction.as_stream().await.unwrap();
-while let Some(result) = stream.next().await {
-    println!("Detected change: {:?}", result);
-    // Handle the change...
-}
-```
+let processor = tokio::spawn(async move {
+    let mut stream = reaction.as_stream().await.unwrap();
 
-For detailed configuration, data formats, and examples, see:
-- **[Log Reaction README](src/reactions/log/README.md)**
-- **[HTTP Reaction README](src/reactions/http/README.md)**
-- **[HTTP Adaptive Reaction README](src/reactions/http_adaptive/README.md)**
-- **[gRPC Reaction README](src/reactions/grpc/README.md)**
-- **[gRPC Adaptive Reaction README](src/reactions/grpc_adaptive/README.md)**
-- **[SSE Reaction README](src/reactions/sse/README.md)**
-- **[Application Reaction README](src/reactions/application/README.md)**
-- **[Platform Reaction README](src/reactions/platform/README.md)**
-- **[Profiler Reaction README](src/reactions/profiler/README.md)**
+    while let Some(change) = stream.next().await {
+        println!("Query: {}", change.query_id);
+        println!("Timestamp: {}", change.timestamp);
 
-## Performance Profiling
-
-DrasiServerCore includes built-in profiling capabilities to track end-to-end latency through the Source → Query → Reaction pipeline.
-
-### Profiler Reaction
-
-The Profiler reaction provides comprehensive performance monitoring:
-
-**9 Timestamp Capture Points:**
-1. Source send
-2. Query receive
-3. Query core call
-4. Query core return
-5. Query send
-6. Reaction receive
-7. Reaction complete
-8-9. Additional markers
-
-**5 Key Latency Metrics:**
-1. **Source → Query**: Time from source emit to query receive
-2. **Query Processing**: Time spent in query evaluation
-3. **Query → Reaction**: Time from query emit to reaction receive
-4. **Reaction Processing**: Time spent in reaction
-5. **Total End-to-End**: Complete pipeline latency
-
-**Statistical Analysis:**
-- Mean, variance, standard deviation
-- Min/max values
-- Percentiles: p50 (median), p95, p99
-- Welford's algorithm for online variance
-- Sliding window for accurate percentile calculation
-
-### Quick Start
-
-Enable profiling for any source and add a Profiler reaction:
-
-```rust
-let core = DrasiServerCore::builder()
-    .add_source(
-        Source::mock("profiled-source")
-            .with_properties(
-                Properties::new()
-                    .with_bool("enable_profiling", true)  // Enable profiling
-            )
-            .build()
-    )
-    .add_query(
-        Query::cypher("my-query")
-            .query("MATCH (n:Node) RETURN n")
-            .from_source("profiled-source")
-            .build()
-    )
-    .add_reaction(
-        Reaction::custom("profiler", "profiler")
-            .subscribe_to("my-query")
-            .with_properties(
-                Properties::new()
-                    .with_int("window_size", 1000)
-                    .with_int("report_interval_secs", 30)
-            )
-            .build()
-    )
-    .build()
-    .await?;
-```
-
-The Profiler reaction automatically logs detailed statistics:
-
-```
-Profiling Statistics (1000 samples):
-
-Source → Query Latency:
-  count: 1000, mean: 245.3 μs, std dev: 78.2 μs
-  min: 120.5 μs, max: 892.1 μs
-  p50: 235.0 μs, p95: 387.5 μs, p99: 524.8 μs
-
-Query Processing Time:
-  count: 1000, mean: 1.2 ms, std dev: 0.4 ms
-  min: 0.5 ms, max: 3.8 ms
-  p50: 1.1 ms, p95: 1.9 ms, p99: 2.4 ms
-
-Total End-to-End:
-  count: 1000, mean: 2.5 ms, std dev: 0.6 ms
-  min: 1.2 ms, max: 5.3 ms
-  p50: 2.4 ms, p95: 3.6 ms, p99: 4.2 ms
-```
-
-### Configuration
-
-**Profiler Reaction Properties:**
-- `window_size` - Sample window size for percentile calculation (default: 1000)
-- `report_interval_secs` - How often to log statistics (default: 60)
-
-**Source Configuration:**
-- Set `enable_profiling: true` in source properties
-- Adds ~100ns overhead per event
-
-### Use Cases
-
-- **Performance Tuning**: Identify bottlenecks in your pipeline
-- **SLO Monitoring**: Set Service Level Objectives based on p95/p99 latency
-- **Capacity Planning**: Understand throughput vs. latency tradeoffs
-- **Regression Detection**: Monitor for performance degradation over time
-
-### Best Practices
-
-1. **Monitor p99**: The 99th percentile reveals tail latency issues
-2. **Compare Metrics**: Identify bottlenecks by comparing latencies across pipeline stages
-3. **Enable Selectively**: Profiling adds overhead - enable only when needed
-4. **Sliding Window**: Use appropriate window size for your workload (larger for stable metrics, smaller for rapid changes)
-
-For comprehensive profiling documentation, see:
-- **[Profiler Reaction README](src/reactions/profiler/README.md)** - Complete profiler reaction documentation
-- **[PROFILING.md](docs/PROFILING.md)** - Overall profiling system architecture
-
-## Component Management API
-
-DrasiServerCore provides a comprehensive API for complete runtime control over sources, queries, and reactions. You can list, inspect, start, stop, add, and remove components dynamically.
-
-### Component Lifecycle Control
-
-Start and stop individual components without affecting others:
-
-```rust
-// Create components with auto_start disabled
-let core = DrasiServerCore::builder()
-    .add_source(Source::mock("source1").auto_start(false).build())
-    .add_query(
-        Query::cypher("query1")
-            .query("MATCH (n) RETURN n")
-            .from_source("source1")
-            .auto_start(false)
-            .build()
-    )
-    .add_reaction(
-        Reaction::log("reaction1")
-            .subscribe_to("query1")
-            .auto_start(false)
-            .build()
-    )
-    .build()
-    .await?;
-
-// Start components manually when needed
-core.start_source("source1").await?;
-core.start_query("query1").await?;
-core.start_reaction("reaction1").await?;
-
-// Stop components independently
-core.stop_reaction("reaction1").await?;
-core.stop_query("query1").await?;
-core.stop_source("source1").await?;
-```
-
-**Available lifecycle methods:**
-- `start_source(id: &str)` - Start a stopped source
-- `stop_source(id: &str)` - Stop a running source
-- `start_query(id: &str)` - Start a stopped query
-- `stop_query(id: &str)` - Stop a running query
-- `start_reaction(id: &str)` - Start a stopped reaction
-- `stop_reaction(id: &str)` - Stop a running reaction
-
-### Listing and Inspection
-
-Get information about all components or specific ones:
-
-```rust
-// List all components with their status
-let sources = core.list_sources().await?;
-for (id, status) in sources {
-    println!("Source {}: {:?}", id, status);
-}
-
-let queries = core.list_queries().await?;
-let reactions = core.list_reactions().await?;
-
-// Get detailed information about specific components
-let source_info = core.get_source_info("my-source").await?;
-println!("Type: {}", source_info.source_type);
-println!("Status: {:?}", source_info.status);
-println!("Properties: {:?}", source_info.properties);
-
-let query_info = core.get_query_info("my-query").await?;
-println!("Query: {}", query_info.query);
-println!("Sources: {:?}", query_info.sources);
-
-let reaction_info = core.get_reaction_info("my-reaction").await?;
-println!("Type: {}", reaction_info.reaction_type);
-println!("Queries: {:?}", reaction_info.queries);
-
-// Check component status
-let status = core.get_source_status("my-source").await?;
-let status = core.get_query_status("my-query").await?;
-let status = core.get_reaction_status("my-reaction").await?;
-
-// Get current query results
-let results = core.get_query_results("my-query").await?;
-println!("Current result set: {} items", results.len());
-
-// Get complete configuration snapshot
-let config = core.get_current_config().await?;
-```
-
-### Dynamic Runtime Configuration
-
-Add or remove components while the server is running:
-
-```rust
-// Add components at runtime
-core.add_source_runtime(
-    Source::postgres("new-db")
-        .with_properties(
-            Properties::new()
-                .with_string("host", "localhost")
-                .with_string("database", "newdb")
-        )
-        .auto_start(true)
-        .build()
-).await?;
-
-core.add_query_runtime(
-    Query::cypher("new-query")
-        .query("MATCH (n) RETURN n")
-        .from_source("new-db")
-        .auto_start(true)
-        .build()
-).await?;
-
-core.add_reaction_runtime(
-    Reaction::http("new-webhook")
-        .subscribe_to("new-query")
-        .with_property("endpoint", json!("https://api.example.com"))
-        .auto_start(true)
-        .build()
-).await?;
-
-// Remove components when no longer needed
-// Note: Remove in dependency order (reactions → queries → sources)
-core.remove_reaction("new-webhook").await?;
-core.remove_query("new-query").await?;
-core.remove_source("new-db").await?;
-```
-
-### Component States
-
-Each source, query, and reaction has a status:
-
-```rust
-pub enum ComponentStatus {
-    Starting,   // Initializing, bootstrapping
-    Running,    // Active and processing
-    Stopping,   // Shutting down
-    Stopped,    // Halted
-    Error,      // Failed with error
-}
-```
-
-### Use Cases
-
-**Selective Component Activation:**
-```rust
-// Start only specific components based on configuration
-let active_queries = vec!["query1", "query3"];
-
-for query_id in active_queries {
-    core.start_query(query_id).await?;
-}
-```
-
-**Health Monitoring and Recovery:**
-```rust
-// Monitor and restart failed components
-tokio::spawn(async move {
-    loop {
-        tokio::time::sleep(Duration::from_secs(30)).await;
-
-        // Check component health
-        if let Ok(status) = core.get_query_status("critical-query").await {
-            if matches!(status, ComponentStatus::Error) {
-                println!("Query failed, restarting...");
-                let _ = core.stop_query("critical-query").await;
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                let _ = core.start_query("critical-query").await;
+        for result in change.results {
+            match result {
+                QueryResult::Adding { after } => {
+                    handle_new_match(after).await;
+                }
+                QueryResult::Updating { before, after } => {
+                    handle_update(before, after).await;
+                }
+                QueryResult::Removing { before } => {
+                    handle_removal(before).await;
+                }
             }
         }
     }
 });
 ```
 
-**Dynamic Monitoring:**
-```rust
-// Add monitoring for new services dynamically
-async fn monitor_service(core: &DrasiServerCore, service_id: &str) -> Result<()> {
-    let query_id = format!("monitor-{}", service_id);
+### SSE Reaction
 
-    // Add query to detect issues
-    core.add_query_runtime(
-        Query::cypher(&query_id)
-            .query(format!("MATCH (s:Service {{id: '{}'}}) WHERE s.status = 'down' RETURN s", service_id))
-            .from_source("services")
-            .auto_start(true)
-            .build()
-    ).await?;
-
-    // Add reaction to alert on issues
-    core.add_reaction_runtime(
-        Reaction::http(&format!("alert-{}", service_id))
-            .subscribe_to(&query_id)
-            .with_property("endpoint", json!("https://alerts.example.com"))
-            .auto_start(true)
-            .build()
-    ).await?;
-
-    Ok(())
-}
-```
-
-## Configuration
-
-### Fluent Builder API (Recommended)
-
-Build configurations programmatically with type-safe, fluent API:
+Stream to web browsers:
 
 ```rust
-use drasi_server_core::{DrasiServerCore, Source, Query, Reaction, Properties};
-use serde_json::json;
-
-let core = DrasiServerCore::builder()
-    .with_id("order-monitoring")
-    // Configure a PostgreSQL source for change data capture
-    .add_source(
-        Source::postgres("orders-db")
-            .with_properties(
-                Properties::new()
-                    .with_string("host", "localhost")
-                    .with_int("port", 5432)
-                    .with_string("database", "orders")
-                    .with_string("user", "postgres")
-                    .with_string("password", "secret")
-            )
-            .with_postgres_bootstrap()
-            .build()
-    )
-    // Define a continuous query to detect business exceptions
-    .add_query(
-        Query::cypher("delayed-orders")
-            .query(r#"
-                MATCH (o:Order)-[:CONTAINS]->(i:OrderItem)
-                WHERE o.status = 'pending'
-                  AND duration.between(o.created_at, datetime()) > duration('PT24H')
-                RETURN o.id, o.customer_id, sum(i.quantity * i.price) as total
-            "#)
-            .from_source("orders-db")
-            .build()
-    )
-    // Configure HTTP reaction for alerts
-    .add_reaction(
-        Reaction::http("alert-webhook")
-            .subscribe_to("delayed-orders")
-            .with_properties(
-                Properties::new()
-                    .with_string("endpoint", "https://api.example.com/alerts")
-                    .with_string("method", "POST")
-            )
-            .build()
+Reaction::custom("sse", "sse")
+    .subscribe_to("live-updates")
+    .with_properties(
+        Properties::new()
+            .with_string("host", "0.0.0.0")
+            .with_int("port", 8080)
+            .with_string("path", "/events")
+            .with_object("cors", json!({
+                "allowed_origins": ["https://app.example.com"],
+                "allowed_methods": ["GET"],
+                "allowed_headers": ["Content-Type"]
+            }))
     )
     .build()
-    .await?;
-
-core.start().await?;
 ```
 
-### YAML Configuration
+**Client-side JavaScript:**
+```javascript
+const events = new EventSource('http://localhost:8080/events');
 
-Load change detection pipelines from YAML or JSON files:
+events.onmessage = (event) => {
+    const change = JSON.parse(event.data);
+    console.log('Change detected:', change);
+    updateUI(change);
+};
+```
+
+### Profiler Reaction
+
+Analyze pipeline performance:
 
 ```rust
-use drasi_server_core::DrasiServerCore;
-
-// Load configuration from YAML file
-let core = DrasiServerCore::from_config_file("config.yaml").await?;
-core.start().await?;
-```
-
-Example YAML configuration (`config.yaml`):
-
-```yaml
-server_core:
-  id: infrastructure-monitor
-  priority_queue_capacity: 50000  # Global default for all queries and reactions
-
-sources:
-  - id: infrastructure-metrics
-    source_type: postgres
-    auto_start: true
-    bootstrap_provider:
-      type: postgres
-    properties:
-      host: metrics.example.com
-      port: 5432
-      database: telemetry
-      user: drasi_user
-      password: secret
-
-queries:
-  - id: vm-health-monitor
-    query: |
-      MATCH (vm:VM)-[:RUNS]->(s:Service)
-      WHERE vm.cpu_usage > 80 OR vm.memory_usage > 90
-      RETURN vm.id, vm.name, collect(s.name) as services,
-             vm.cpu_usage, vm.memory_usage
-    sources:
-      - infrastructure-metrics
-    auto_start: true
-    priority_queue_capacity: 100000  # Override for high-volume query
-
-reactions:
-  - id: ops-alerts
-    reaction_type: http
-    queries:
-      - vm-health-monitor
-    auto_start: true
-    priority_queue_capacity: 75000  # Override for this reaction
-    properties:
-      endpoint: https://ops.example.com/alerts
-      method: POST
-```
-
-#### Priority Queue Configuration
-
-Priority queues maintain event ordering by timestamp before processing. DrasiServerCore uses a **three-level configuration hierarchy** that allows fine-grained control while providing sensible defaults:
-
-**Level 1: Component-Specific Override** (highest priority)
-```yaml
-queries:
-  - id: high-volume-query
-    query: "MATCH (n) RETURN n"
-    sources: ["source1"]
-    priority_queue_capacity: 100000  # This query uses 100,000
-
-reactions:
-  - id: critical-reaction
-    reaction_type: log
-    queries: ["high-volume-query"]
-    priority_queue_capacity: 150000  # This reaction uses 150,000
-```
-
-**Level 2: Global Server Default**
-```yaml
-server_core:
-  id: my-server
-  priority_queue_capacity: 50000  # All queries/reactions without overrides use 50,000
-```
-
-**Level 3: Hardcoded Fallback** (lowest priority)
-- If neither component nor global capacity is specified, the hardcoded default of **10,000** is used
-
-**How the Hierarchy Works:**
-
-The system resolves capacity using this precedence order:
-1. If a query/reaction specifies `priority_queue_capacity` → use that value
-2. Else if server_core specifies `priority_queue_capacity` → use that value
-3. Else → use hardcoded default of 10,000
-
-**Example with Mixed Configuration:**
-```yaml
-server_core:
-  priority_queue_capacity: 30000  # Global default
-
-queries:
-  - id: query1
-    query: "MATCH (n) RETURN n"
-    sources: ["source1"]
-    priority_queue_capacity: 75000  # Uses 75,000 (component override)
-
-  - id: query2
-    query: "MATCH (m) RETURN m"
-    sources: ["source1"]
-    # No override → uses 30,000 (global default)
-
-reactions:
-  - id: reaction1
-    reaction_type: log
-    queries: ["query1"]
-    priority_queue_capacity: 100000  # Uses 100,000 (component override)
-
-  - id: reaction2
-    reaction_type: log
-    queries: ["query2"]
-    # No override → uses 30,000 (global default)
-```
-
-**Builder API:**
-```rust
-DrasiServerCore::builder()
-    // Component overrides take precedence
-    .add_query(
-        Query::cypher("high-volume")
-            .query("MATCH (n) RETURN n")
-            .from_source("source1")
-            .with_property("priority_queue_capacity", json!(100000))
-            .build()
+Reaction::custom("profiler", "profiler")
+    .subscribe_to("my-query")
+    .with_properties(
+        Properties::new()
+            .with_int("window_size", 1000)
+            .with_int("report_interval_secs", 60)
     )
     .build()
-    .await?
 ```
 
-**When to Adjust:**
-- **Increase** for burst traffic scenarios (e.g., 100,000+ for data migrations)
-- **Decrease** for memory-constrained environments (e.g., 1,000 for IoT devices)
-- **Default (10,000)** works well for most production workloads
-- **Use global setting** to set a consistent baseline across all components
-- **Use component overrides** for specific high-volume or critical paths
+**Output:**
+```
+Profiling Statistics (1000 samples):
 
-#### Broadcast Channel Configuration
+Source → Query Latency:
+  mean: 245.3 μs, p50: 235.0 μs, p95: 387.5 μs, p99: 524.8 μs
 
-Broadcast channels distribute events from sources to queries, and from queries to reactions. DrasiServerCore uses the same **three-level configuration hierarchy**:
+Query Processing Time:
+  mean: 1.2 ms, p50: 1.1 ms, p95: 1.9 ms, p99: 2.4 ms
 
-**Level 1: Component-Specific Override** (highest priority)
+Total End-to-End:
+  mean: 2.5 ms, p50: 2.4 ms, p95: 3.6 ms, p99: 4.2 ms
+```
+
+## Bootstrap System
+
+Bootstrap provides initial data before streaming begins. This is critical for continuous queries to establish their initial result set.
+
+### Universal Bootstrap Architecture
+
+**Key Innovation**: ANY source can use ANY bootstrap provider. This separation enables powerful patterns:
+
 ```yaml
 sources:
-  - id: high-volume-source
-    source_type: postgres
-    dispatch_buffer_capacity: 10000  # This source uses 10,000
-
-queries:
-  - id: high-throughput-query
-    query: "MATCH (n) RETURN n"
-    sources: ["high-volume-source"]
-    dispatch_buffer_capacity: 5000  # This query uses 5,000
-```
-
-**Level 2: Global Server Default**
-```yaml
-server_core:
-  id: my-server
-  dispatch_buffer_capacity: 2000  # All sources/queries without overrides use 2,000
-```
-
-**Level 3: Hardcoded Fallback**
-- Default value: **1,000** (optimized for typical event distribution patterns)
-
-**When to Adjust:**
-- **Increase** for high fan-out scenarios (one source → many queries, or one query → many reactions)
-- **Increase** for burst traffic where consumers may lag temporarily
-- **Default (1,000)** works well for most production workloads
-- Larger capacities help prevent lagging subscribers from losing events
-
-**Memory Considerations:**
-- Each broadcast channel buffers recent events for late subscribers
-- 1,000 capacity ≈ 1-10 MB depending on event size
-- 10,000 capacity ≈ 10-100 MB per component
-
-**Complete Configuration Example:**
-```yaml
-server_core:
-  id: production-server
-  priority_queue_capacity: 50000          # Global default for queries/reactions
-  dispatch_buffer_capacity: 2000        # Global default for sources/queries
-
-sources:
-  - id: high-volume-postgres
-    source_type: postgres
-    dispatch_buffer_capacity: 10000     # Override: high fan-out to many queries
-    properties:
-      host: localhost
-      database: mydb
-
-  - id: standard-source
+  # HTTP source with PostgreSQL bootstrap
+  - id: api-with-db-bootstrap
     source_type: http
-    # No override → uses 2000 (global default)
+    bootstrap_provider:
+      type: postgres  # Bootstrap from database
+    properties:
+      # HTTP properties for streaming
+      port: 9000
+      # PostgreSQL properties for bootstrap
+      database: mydb
+      host: db.example.com
+
+  # Mock source with file bootstrap (testing)
+  - id: test-source
+    source_type: mock
+    bootstrap_provider:
+      type: scriptfile
+      file_paths: ["test-data.jsonl"]
+```
+
+### Bootstrap Providers
+
+#### ScriptFile Provider (Testing/Development)
+
+JSONL format for test data:
+
+```json
+{"type":"header","version":"1.0"}
+{"type":"node","id":"n1","labels":["Person"],"properties":{"name":"Alice","age":30}}
+{"type":"node","id":"n2","labels":["Person"],"properties":{"name":"Bob","age":25}}
+{"type":"relation","id":"r1","startNode":"n1","endNode":"n2","type":"KNOWS","properties":{}}
+```
+
+Use in code:
+```rust
+Source::mock("test")
+    .with_bootstrap_script("test-data.jsonl")
+    .build()
+```
+
+#### PostgreSQL Provider
+
+Snapshot database state:
+
+```rust
+Source::postgres("db")
+    .with_postgres_bootstrap()  // Use native snapshot
+    .build()
+```
+
+#### Platform Provider
+
+Bootstrap from remote Drasi:
+
+```rust
+Source::platform("external")
+    .with_platform_bootstrap("http://drasi.example.com:8080", Some(300))
+    .build()
+```
+
+### Bootstrap Timing
+
+```
+core.start() called
+     ↓
+Bootstrap Phase (async, non-blocking)
+     ├─ Sources load initial data
+     ├─ Queries build initial result sets
+     └─ Bootstrap complete events fired
+     ↓
+Streaming Phase
+     ├─ Sources emit live changes
+     └─ Queries update incrementally
+```
+
+Monitor bootstrap:
+```rust
+// Check if bootstrap is complete
+let status = core.get_source_status("my-source").await?;
+match status {
+    ComponentStatus::Starting => println!("Still bootstrapping..."),
+    ComponentStatus::Running => println!("Bootstrap complete, streaming"),
+    _ => {}
+}
+```
+
+## Data Flow and Transformations
+
+### Data Flow Sequence
+
+```
+1. Source Event Generation
+   └─> SourceChange { op, element, timestamp }
+
+2. Router Distribution
+   └─> Broadcast to subscribed queries
+
+3. Query Processing
+   └─> Continuous query evaluation
+   └─> Result diff generation
+
+4. Result Distribution
+   └─> QueryResultEvent { results, timestamp }
+
+5. Reaction Processing
+   └─> Transform and deliver to destination
+```
+
+### Schema at Each Stage
+
+#### Stage 1: Source Change
+
+```rust
+pub struct SourceChange {
+    pub op: SourceOperation,      // Insert, Update, Delete
+    pub element: Element,         // Node or Relation
+    pub timestamp: DateTime<Utc>,
+}
+
+pub enum Element {
+    Node {
+        id: String,
+        labels: Vec<String>,
+        properties: HashMap<String, Value>,
+    },
+    Relation {
+        id: String,
+        start_node: String,
+        end_node: String,
+        labels: Vec<String>,
+        properties: HashMap<String, Value>,
+    },
+}
+```
+
+#### Stage 2: Query Input
+
+Changes are grouped and ordered:
+```rust
+pub struct QueryInput {
+    pub changes: Vec<SourceChange>,
+    pub source_id: String,
+    pub sequence: u64,
+}
+```
+
+#### Stage 3: Query Result
+
+```rust
+pub struct QueryResultEvent {
+    pub query_id: String,
+    pub results: Vec<QueryResult>,
+    pub timestamp: DateTime<Utc>,
+}
+
+pub enum QueryResult {
+    Adding {
+        after: HashMap<String, Value>
+    },
+    Updating {
+        before: HashMap<String, Value>,
+        after: HashMap<String, Value>
+    },
+    Removing {
+        before: HashMap<String, Value>
+    },
+}
+```
+
+#### Stage 4: Reaction Output
+
+Format depends on reaction type:
+
+**HTTP/gRPC**: JSON serialization
+```json
+{
+  "query_id": "high-temp",
+  "timestamp": "2024-01-01T12:00:00Z",
+  "results": [
+    {
+      "type": "Adding",
+      "after": {
+        "sensor_id": "s1",
+        "temperature": 80
+      }
+    }
+  ]
+}
+```
+
+**Application**: Direct struct access
+```rust
+QueryResultEvent {
+    query_id: String,
+    results: Vec<QueryResult>,
+    timestamp: DateTime<Utc>,
+}
+```
+
+### Transformation Examples
+
+#### Source to Graph
+
+PostgreSQL row to node:
+```sql
+-- Table: customers (id, name, tier)
+-- Row: (1, 'Alice', 'gold')
+```
+
+Transforms to:
+```rust
+Element::Node {
+    id: "customer-1",
+    labels: vec!["Customer"],
+    properties: {
+        "id": 1,
+        "name": "Alice",
+        "tier": "gold"
+    }
+}
+```
+
+#### Query Result Mapping
+
+Cypher RETURN to result:
+```cypher
+RETURN s.id AS sensor, s.temp AS temperature
+```
+
+Maps to:
+```rust
+QueryResult::Adding {
+    after: {
+        "sensor": "s1",
+        "temperature": 80
+    }
+}
+```
+
+## Advanced Topics
+
+### Performance Optimization
+
+#### Priority Queue Tuning
+
+Configure queue capacity based on workload:
+
+```yaml
+server_core:
+  priority_queue_capacity: 50000  # Global default
 
 queries:
-  - id: high-throughput-query
-    query: "MATCH (n:Event) RETURN n"
-    sources: ["high-volume-postgres"]
-    priority_queue_capacity: 100000       # Override: large buffer for processing
-    dispatch_buffer_capacity: 5000      # Override: many reactions subscribe
+  - id: high-volume
+    priority_queue_capacity: 100000  # Override for this query
 
-  - id: standard-query
-    query: "MATCH (n:Alert) RETURN n"
-    sources: ["standard-source"]
-    # No overrides → uses global defaults (50000 for priority, 2000 for broadcast)
-
-reactions:
-  - id: critical-webhook
-    reaction_type: http
-    queries: ["high-throughput-query"]
-    priority_queue_capacity: 150000       # Override: critical path
-    # Note: Reactions don't create dispatch channels, so no dispatch_buffer_capacity
+  - id: normal-volume
+    # Uses global default (50000)
 ```
 
-## Async Integration Patterns
+Sizing guidelines:
+- Steady production: 10,000 (default)
+- High throughput: 50,000-100,000
+- Bulk migration: 100,000-1,000,000
+- IoT/Edge: 1,000-5,000
 
-DrasiServerCore is built on Tokio and requires proper async runtime setup.
+#### Adaptive Batching
 
-### Tokio Runtime Requirements
+For high-volume scenarios:
 
-**Minimum:** Multi-threaded runtime with all features
 ```rust
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Your code here
-}
+Reaction::http("batch-processor")
+    .with_properties(
+        Properties::new()
+            .with_bool("adaptive_batching", true)
+            .with_int("target_latency_ms", 100)
+            .with_int("max_batch_size", 500)
+            .with_float("adjustment_factor", 0.2)
+    )
+    .build()
 ```
 
-Or manually:
+The system automatically adjusts batch size to maintain target latency.
+
+### Component Management
+
+#### Dynamic Component Lifecycle
+
 ```rust
-fn main() {
-    tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(async {
-            // Your code here
-        })
-}
+// Add source at runtime
+core.add_source_runtime(
+    Source::postgres("new-db")
+        .auto_start(false)  // Don't start immediately
+        .build()
+).await?;
+
+// Start when ready
+core.start_source("new-db").await?;
+
+// Stop temporarily
+core.stop_source("new-db").await?;
+
+// Remove completely
+core.remove_source("new-db").await?;
 ```
 
-### Concurrent Operations
-
-Handle operations are Send + Clone - use them freely across tasks:
+#### Health Monitoring
 
 ```rust
-let source = core.source_handle("my-source")?;
-
-// Send changes from multiple tasks
-let source_clone = source.clone();
+// Monitor component health
 tokio::spawn(async move {
-    source_clone.send_node_insert(...).await?;
-    Ok::<_, anyhow::Error>(())
-});
+    loop {
+        tokio::time::sleep(Duration::from_secs(30)).await;
 
-// Original still works
-source.send_node_insert(...).await?;
-```
+        let sources = core.list_sources().await?;
+        for (id, status) in sources {
+            if matches!(status, ComponentStatus::Error) {
+                log::error!("Source {} failed", id);
 
-### Graceful Shutdown
-
-Use signals for clean shutdown:
-
-```rust
-use tokio::signal;
-
-let core = DrasiServerCore::builder().build().await?;
-core.start().await?;
-
-// Wait for Ctrl+C
-signal::ctrl_c().await?;
-
-println!("Shutting down...");
-core.stop().await?;
-```
-
-### Processing Results Asynchronously
-
-```rust
-let reaction = core.reaction_handle("my-reaction")?;
-
-tokio::spawn(async move {
-    let mut stream = reaction.as_stream().await.unwrap();
-    while let Some(result) = stream.next().await {
-        // Process asynchronously
-        process_result(result).await;
-    }
-});
-```
-
-### Timeouts and Backpressure
-
-```rust
-use tokio::time::{timeout, Duration};
-
-// Set timeout for operations
-match timeout(Duration::from_secs(5), source.send_node_insert(...)).await {
-    Ok(Ok(_)) => println!("Sent successfully"),
-    Ok(Err(e)) => eprintln!("Send error: {}", e),
-    Err(_) => eprintln!("Timeout"),
-}
-```
-
-### Example: Complete Async Integration
-
-See [`examples/bidirectional/`](examples/bidirectional/) for full bidirectional integration showing:
-- Spawning concurrent receivers
-- Async result processing
-- Clean shutdown handling
-
-## Error Handling
-
-The API provides typed errors for better error handling:
-
-```rust
-use drasi_server_core::{DrasiError, Result};
-
-match core.start().await {
-    Ok(_) => println!("Started successfully"),
-    Err(DrasiError::Configuration(msg)) => {
-        eprintln!("Configuration error: {}", msg);
-    }
-    Err(DrasiError::ComponentNotFound { kind, id }) => {
-        eprintln!("{} '{}' not found", kind, id);
-    }
-    Err(DrasiError::InvalidState(msg)) => {
-        eprintln!("Invalid state: {}", msg);
-    }
-    Err(e) => eprintln!("Error: {}", e),
-}
-```
-
-### Common Error Scenarios
-
-**Component Not Found:**
-```rust
-// Ensure IDs match exactly
-let source = core.source_handle("my-source")?;  // Must match Source::application("my-source")
-```
-
-**Channel Closed:**
-```rust
-// Reaction handle consumed - can only call once
-let stream = reaction.as_stream().await;  // First call - OK
-let stream2 = reaction.as_stream().await; // Returns None - receiver already taken
-```
-
-**Invalid State:**
-```rust
-// Can't get handles before starting
-core.start().await?;
-let handle = core.source_handle("app-source")?;  // OK now
-```
-
-### Recovery Patterns
-
-```rust
-// Retry with backoff
-let mut attempts = 0;
-loop {
-    match source.send_node_insert(...).await {
-        Ok(_) => break,
-        Err(e) if attempts < 3 => {
-            attempts += 1;
-            tokio::time::sleep(Duration::from_millis(100 * attempts)).await;
+                // Attempt recovery
+                core.stop_source(&id).await?;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                core.start_source(&id).await?;
+            }
         }
-        Err(e) => return Err(e),
     }
-}
+});
 ```
 
-## Testing Patterns
+### Testing Strategies
 
-### Unit Testing with Mock Sources
-
-Use mock sources to test query logic without external dependencies:
+#### Unit Testing with Mock Sources
 
 ```rust
-use drasi_server_core::{DrasiServerCore, Source, Query, Reaction, PropertyMapBuilder};
-
 #[tokio::test]
-async fn test_temperature_alert() {
-    // Setup: Create server with mock source
+async fn test_alert_generation() {
     let core = DrasiServerCore::builder()
-        .add_source(Source::mock("test-sensors").build())
+        .add_source(Source::mock("test").build())
         .add_query(
-            Query::cypher("high-temp")
-                .query("MATCH (s:Sensor) WHERE s.temperature > 75 RETURN s.id")
-                .from_source("test-sensors")
+            Query::cypher("alerts")
+                .query("MATCH (n:Alert) WHERE n.severity = 'high' RETURN n")
+                .from_source("test")
                 .build()
         )
         .add_reaction(
-            Reaction::application("test-output")
-                .subscribe_to("high-temp")
+            Reaction::application("results")
+                .subscribe_to("alerts")
                 .build()
         )
         .build()
@@ -1531,48 +1255,51 @@ async fn test_temperature_alert() {
 
     core.start().await.unwrap();
 
-    // Get handles
-    let source = core.source_handle("test-sensors").unwrap();
-    let reaction = core.reaction_handle("test-output").unwrap();
+    let source = core.source_handle("test").unwrap();
+    let reaction = core.reaction_handle("results").unwrap();
+    let mut stream = reaction.as_stream().await.unwrap();
 
-    // Execute: Send test data
+    // Send test data
     source.send_node_insert(
-        "sensor-1",
-        vec!["Sensor"],
+        "alert-1",
+        vec!["Alert"],
         PropertyMapBuilder::new()
-            .with_string("id", "sensor-1")
-            .with_integer("temperature", 80)
+            .with_string("severity", "high")
             .build()
     ).await.unwrap();
 
-    // Verify: Check results
-    let mut stream = reaction.as_stream().await.unwrap();
+    // Verify result
     let result = stream.next().await.unwrap();
-
-    assert_eq!(result.query_id, "high-temp");
     assert_eq!(result.results.len(), 1);
 
     core.stop().await.unwrap();
 }
 ```
 
-### Integration Testing with ScriptFile Bootstrap
-
-Load test data from files:
+#### Integration Testing with Bootstrap
 
 ```rust
 #[tokio::test]
-async fn test_with_bootstrap_data() {
+async fn test_with_initial_data() {
+    // Create test data file
+    let test_data = r#"
+{"type":"header","version":"1.0"}
+{"type":"node","id":"n1","labels":["TestNode"],"properties":{"value":100}}
+{"type":"node","id":"n2","labels":["TestNode"],"properties":{"value":200}}
+"#;
+
+    std::fs::write("test.jsonl", test_data).unwrap();
+
     let core = DrasiServerCore::builder()
         .add_source(
-            Source::mock("test-data")
-                .with_bootstrap_script("tests/data/initial.jsonl")
+            Source::mock("test")
+                .with_bootstrap_script("test.jsonl")
                 .build()
         )
         .add_query(
-            Query::cypher("test-query")
-                .query("MATCH (n:TestNode) RETURN n")
-                .from_source("test-data")
+            Query::cypher("sum")
+                .query("MATCH (n:TestNode) RETURN sum(n.value) as total")
+                .from_source("test")
                 .build()
         )
         .build()
@@ -1581,301 +1308,172 @@ async fn test_with_bootstrap_data() {
 
     core.start().await.unwrap();
 
-    // Query has initial data from script file
-    // Test your logic here
+    // Query should have initial sum of 300
+    let results = core.get_query_results("sum").await.unwrap();
+    assert_eq!(results[0]["total"], 300);
 
     core.stop().await.unwrap();
 }
 ```
 
-**Script file format (tests/data/initial.jsonl):**
-```json
-{"type":"header","version":"1.0"}
-{"type":"node","id":"n1","labels":["TestNode"],"properties":{"value":42}}
-{"type":"node","id":"n2","labels":["TestNode"],"properties":{"value":100}}
-```
+### Error Handling
 
-### Testing Multi-Source Joins
-
-Test synthetic joins across multiple sources:
+#### Typed Errors
 
 ```rust
-use drasi_server_core::config::{QueryJoinConfig, QueryJoinKeyConfig};
+use drasi_server_core::{DrasiError, Result};
 
-#[tokio::test]
-async fn test_three_way_join() {
-    let join1 = QueryJoinConfig {
-        id: "CUSTOMER_ORDER".to_string(),
-        keys: vec![
-            QueryJoinKeyConfig {
-                label: "Customer".to_string(),
-                property: "customer_id".to_string(),
-            },
-            QueryJoinKeyConfig {
-                label: "Order".to_string(),
-                property: "customer_id".to_string(),
-            },
-        ],
-    };
-
-    let join2 = QueryJoinConfig {
-        id: "ORDER_PRODUCT".to_string(),
-        keys: vec![
-            QueryJoinKeyConfig {
-                label: "Order".to_string(),
-                property: "product_id".to_string(),
-            },
-            QueryJoinKeyConfig {
-                label: "Product".to_string(),
-                property: "product_id".to_string(),
-            },
-        ],
-    };
-
-    let core = DrasiServerCore::builder()
-        .add_source(Source::application("customers").build())
-        .add_source(Source::application("orders").build())
-        .add_source(Source::application("products").build())
-        .add_query(
-            Query::cypher("join-query")
-                .query(r#"
-                    MATCH (c:Customer)-[:CUSTOMER_ORDER]->(o:Order)-[:ORDER_PRODUCT]->(p:Product)
-                    RETURN c.customer_id, o.order_id, p.product_name
-                "#)
-                .from_sources(vec!["customers", "orders", "products"])
-                .with_joins(vec![join1, join2])
-                .build()
-        )
-        .add_reaction(
-            Reaction::application("results")
-                .subscribe_to("join-query")
-                .build()
-        )
-        .build()
-        .await
-        .unwrap();
-
-    core.start().await.unwrap();
-
-    // Inject data and verify joins
-    // See tests/multi_source_join_test.rs for complete example
-
-    core.stop().await.unwrap();
+match core.source_handle("nonexistent") {
+    Ok(handle) => { /* use handle */ }
+    Err(DrasiError::ComponentNotFound { kind, id }) => {
+        eprintln!("{} '{}' not found", kind, id);
+    }
+    Err(e) => eprintln!("Unexpected error: {}", e),
 }
 ```
 
-### Testing Async Behavior
+#### Retry Logic
 
 ```rust
-use tokio::time::{timeout, Duration};
+async fn send_with_retry(
+    source: &ApplicationSourceHandle,
+    max_retries: u32,
+) -> Result<()> {
+    let mut attempts = 0;
 
-#[tokio::test]
-async fn test_result_timing() {
-    let core = /* setup */;
-    let reaction = core.reaction_handle("test-output").unwrap();
-    let mut stream = reaction.as_stream().await.unwrap();
-
-    // Send data
-    source.send_node_insert(/*...*/).await.unwrap();
-
-    // Verify result arrives within timeout
-    let result = timeout(Duration::from_secs(1), stream.next())
-        .await
-        .expect("Timeout waiting for result")
-        .expect("Stream closed");
-
-    assert!(result.results.len() > 0);
+    loop {
+        match source.send_node_insert(...).await {
+            Ok(_) => return Ok(()),
+            Err(e) if attempts < max_retries => {
+                attempts += 1;
+                let delay = Duration::from_millis(100 * attempts as u64);
+                tokio::time::sleep(delay).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 ```
 
-## Performance Optimization
+## API Reference
 
-### Query Optimization
+### Core Types
 
-1. **Use Specific Patterns**: Be precise in your MATCH clauses
-2. **Filter Early**: Apply WHERE conditions as early as possible
-3. **Index Properties**: Ensure frequently queried properties are indexed
+For detailed API documentation, see:
+- [`src/lib.rs`](src/lib.rs) - Public API exports
+- [`src/config.rs`](src/config.rs) - Configuration types
+- [`src/error.rs`](src/error.rs) - Error types
 
-### Source Tuning
+### Builder API
 
-1. **Batch Changes**: Group related changes together
-2. **Buffer Sizing**: Configure appropriate buffer sizes for throughput
-3. **Connection Pooling**: Use connection pools for database sources
+Key builder methods:
 
-### Priority Queue Tuning
-
-Priority queues maintain timestamp-ordered event processing. DrasiServerCore uses a **three-level hierarchy** (component override → global default → hardcoded 10,000) for configuring capacity. See the [Priority Queue Configuration](#priority-queue-configuration) section for complete details.
-
-**Symptoms of Undersized Queues:**
-- Events dropped due to capacity (check metrics)
-- Warning logs about queue capacity reached
-- Missing data in query results during bursts
-
-**Sizing Guidelines:**
-
-| Scenario | Recommended Capacity | Configuration Level |
-|----------|---------------------|---------------------|
-| Steady-state production | 10,000 (default) | No configuration needed |
-| High-throughput streaming | 50,000 - 100,000 | Global default |
-| Bulk data migration | 100,000 - 1,000,000 | Per-query override |
-| IoT / Edge devices | 1,000 - 5,000 | Global default |
-| Testing / Development | 1,000 - 5,000 | Global default |
-
-**Configuration Example (Using Hierarchy):**
-```yaml
-server_core:
-  priority_queue_capacity: 50000  # Global default for all components
-
-queries:
-  - id: steady-state-query
-    query: "MATCH (n:Regular) RETURN n"
-    sources: ["standard"]
-    # No override → uses 50,000 (global default)
-
-  - id: data-migration-query
-    query: "MATCH (n) RETURN n"
-    sources: ["bulk-import"]
-    priority_queue_capacity: 1000000  # Temporary override for migration
-
-reactions:
-  - id: standard-webhook
-    reaction_type: http
-    queries: ["steady-state-query"]
-    # No override → uses 50,000 (global default)
-
-  - id: critical-alerts
-    reaction_type: http
-    queries: ["high-priority-query"]
-    priority_queue_capacity: 100000  # Override for critical path
+```rust
+DrasiServerCore::builder()
+    .with_id(&str)
+    .add_source(SourceConfig)
+    .add_query(QueryConfig)
+    .add_reaction(ReactionConfig)
+    .with_property(key, value)
+    .build() -> Future<DrasiServerCore>
 ```
 
-**Memory Considerations:**
-- Each event in queue: ~1-2 KB (varies by payload)
-- 10,000 capacity ≈ 10-20 MB per component
-- 100,000 capacity ≈ 100-200 MB per component
-- Monitor actual memory usage with your data model
+### Runtime Management API
 
-**Best Practices:**
-- Set a **global default** that works for most of your workload
-- Use **component overrides** only for outliers (very high volume or critical paths)
-- Start with defaults and adjust based on observed metrics
-- Temporarily increase capacity for known burst scenarios (migrations, batch imports)
+```rust
+// Lifecycle control
+core.start() -> Future<Result>
+core.stop() -> Future<Result>
+core.start_source(&str) -> Future<Result>
+core.stop_source(&str) -> Future<Result>
 
-### Reaction Optimization
+// Component management
+core.add_source_runtime(SourceConfig) -> Future<Result>
+core.remove_source(&str) -> Future<Result>
+core.list_sources() -> Future<Vec<(String, ComponentStatus)>>
+core.get_source_info(&str) -> Future<SourceInfo>
 
-1. **Enable Batching**: Use adaptive reactions for high-volume scenarios
-2. **Async Processing**: Use async reactions for better throughput
-3. **Timeout Configuration**: Set appropriate timeouts for reliability
-
-### Profiling-Driven Optimization
-
-1. **Enable Profiler**: Add Profiler reaction to identify bottlenecks
-2. **Monitor p95/p99**: Focus on tail latency for SLO compliance
-3. **Compare Stages**: Identify which pipeline stage is slowest
-4. **Check Queue Metrics**: Monitor priority queue drops and depth
-5. **Iterate**: Adjust configuration and measure impact
-
-## Building from Source
-
-### Prerequisites
-
-- Rust 1.75 or later
-- Protocol Buffers compiler (`protoc`)
-
-### Build Steps
-
-```bash
-# Clone the repository
-git clone https://github.com/drasi-project/drasi-core
-cd drasi-core/server-core
-
-# Build the library
-cargo build --release
-
-# Run tests
-cargo test
-
-# Build documentation
-cargo doc --open
+// Handles
+core.source_handle(&str) -> Result<ApplicationSourceHandle>
+core.reaction_handle(&str) -> Result<ApplicationReactionHandle>
 ```
 
-## Examples
+## Best Practices
 
-The `examples/` directory contains working demonstrations:
+### 1. Query Design
 
-### Basic Integration
-Builder API and config file usage:
-```bash
-# Run with fluent builder API
-cd examples/basic_integration
-cargo run -- builder
+✅ **DO:**
+- Be specific in patterns
+- Filter early with WHERE
+- Return only needed fields
+- Use meaningful aliases
 
-# Run with YAML config
-cargo run -- config config/basic.yaml
-```
+❌ **DON'T:**
+- Use `MATCH (n) RETURN n` in production
+- Rely on ORDER BY (not supported)
+- Create overly complex patterns
 
-### Bidirectional Integration
-Complete ApplicationSource and ApplicationReaction example:
-```bash
-# Shows sending data and receiving query results
-cd examples/bidirectional
-cargo run
-```
+### 2. Source Selection
 
-This example demonstrates:
-- Getting source and reaction handles
-- Sending node inserts, updates, and deletes
-- Receiving query results asynchronously
-- Understanding Adding/Updating/Removing semantics
+Choose sources based on:
+- **PostgreSQL**: When you need CDC from existing database
+- **HTTP/gRPC**: For service integration
+- **Application**: For testing and in-process events
+- **Platform**: For Drasi Platform integration
 
-### Configuration Examples
-See `examples/configs/` for YAML configuration templates:
-- `basic-mock-source/` - Mock source with log reaction
-- `multi-source-pipeline/` - Multiple sources feeding one query
-- `file-bootstrap-source/` - Using ScriptFile bootstrap provider
+### 3. Bootstrap Strategy
 
-## Integration Testing
+- **Always bootstrap** for queries that need complete state
+- **Skip bootstrap** for event-only processing
+- **Use ScriptFile** for consistent test data
+- **Mix providers** for complex scenarios
 
-Run the test suite:
+### 4. Performance
 
-```bash
-# Run all tests
-cargo test
+- **Profile first**: Use Profiler reaction to find bottlenecks
+- **Tune queues**: Adjust capacity based on metrics
+- **Enable batching**: For high-volume reactions
+- **Monitor memory**: Larger queues = more memory
 
-# Run with logging
-RUST_LOG=debug cargo test -- --nocapture
+### 5. Error Handling
 
-# Run specific test
-cargo test test_builder_api
-
-# Run specific test module
-cargo test --test multi_source_join_test
-```
+- **Use Result types**: Don't unwrap in production
+- **Implement retries**: For transient failures
+- **Monitor health**: Check component status regularly
+- **Log errors**: With context for debugging
 
 ## Troubleshooting
 
 ### Common Issues
 
-**Component Not Found**:
+#### "Component not found"
+
 ```rust
-// Ensure component IDs match
+// Check exact ID match
 let handle = core.source_handle("my-source")?;
+// ID must match: Source::application("my-source")
 ```
 
-**PostgreSQL Replication Not Working**:
-- Ensure `wal_level = logical`
-- Check replication user permissions
-- Verify publication includes desired tables
+#### PostgreSQL replication not working
 
-**Query Not Detecting Changes**:
-- Verify query syntax with Cypher validator
-- Check that sources emit expected labels
-- Enable debug logging to trace change flow
+1. Check WAL level: `SHOW wal_level;` (should be 'logical')
+2. Verify publication exists: `\dRp`
+3. Check user permissions: needs REPLICATION role
+4. Review logs for connection errors
 
-**Join Not Working**:
-- Verify join key properties exist on both node types
-- Check that labels match exactly
-- Ensure sources are providing data
+#### Query not detecting changes
+
+1. Verify query syntax with online Cypher validator
+2. Check source is emitting expected labels
+3. Enable debug logging: `RUST_LOG=debug`
+4. Use Profiler reaction to trace flow
+
+#### High memory usage
+
+1. Reduce priority queue capacity
+2. Lower dispatch buffer capacity
+3. Enable adaptive batching for reactions
+4. Monitor with memory profiler
 
 ### Debug Logging
 
@@ -1883,28 +1481,33 @@ let handle = core.source_handle("my-source")?;
 // Enable detailed logging
 std::env::set_var("RUST_LOG", "drasi_server_core=debug");
 env_logger::init();
+
+// Log specific modules
+std::env::set_var("RUST_LOG", "drasi_server_core::sources=trace");
 ```
 
-## API Migration
+### Performance Debugging
 
-For users migrating from the old API, see the key changes:
+Use built-in profiling:
 
-**Old API (Deprecated)**:
 ```rust
-let config = Arc::new(RuntimeConfig { ... });
-let mut core = DrasiServerCore::new(config);
-core.initialize().await?;  // Two-phase
-core.start().await?;
-```
-
-**New API (Recommended)**:
-```rust
-let core = DrasiServerCore::builder()
-    .add_source(Source::mock("test").build())
+Source::mock("test")
+    .with_property("enable_profiling", json!(true))
     .build()
-    .await?;  // Single-phase
-core.start().await?;
+
+// Add profiler reaction
+Reaction::custom("profiler", "profiler")
+    .subscribe_to("my-query")
+    .build()
 ```
+
+## Next Steps
+
+1. **Run Examples**: Start with `examples/basic_integration/`
+2. **Read Source Docs**: Each source has detailed README
+3. **Experiment**: Use ApplicationSource for testing
+4. **Profile**: Understand your performance characteristics
+5. **Build**: Create your change-driven solution!
 
 ## Contributing
 
@@ -1924,3 +1527,7 @@ DrasiServerCore is licensed under the [Apache License 2.0](LICENSE).
 
 - [Drasi Platform](https://github.com/drasi-project/drasi-platform): Complete Drasi deployment platform
 - [Drasi Core](https://github.com/drasi-project/drasi-core): Core continuous query engine
+
+---
+
+*Built with DrasiServerCore - Precise change detection for modern applications*
