@@ -21,6 +21,7 @@ This is a Cargo workspace with the following key components:
 - **middleware** - Query middleware components
 - **examples** - Usage examples and demonstrations
 - **query-perf** - Performance testing utilities
+- **server-core** - Library that lets you run Drasi as a fully functional embedded library with sources, queries, reactions, and bootstrap providers
 - **shared-tests** - Common test utilities
 
 ## Development Commands
