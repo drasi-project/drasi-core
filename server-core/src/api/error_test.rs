@@ -158,4 +158,107 @@ mod tests {
         assert!(query_err.to_string().contains("query"));
         assert!(reaction_err.to_string().contains("reaction"));
     }
+
+    #[test]
+    fn test_database_error_creation() {
+        let pg_err = tokio_postgres::Error::__private_api_timeout();
+        let err = DrasiError::Database {
+            operation: "test query".to_string(),
+            source: pg_err,
+        };
+        assert!(matches!(err, DrasiError::Database { .. }));
+        assert!(err.to_string().contains("Database error"));
+        assert!(err.to_string().contains("test query"));
+    }
+
+    #[test]
+    fn test_network_error_creation() {
+        let err = DrasiError::Network {
+            message: "Connection refused".to_string(),
+            source: None,
+        };
+        assert!(matches!(err, DrasiError::Network { .. }));
+        assert!(err.to_string().contains("Network error"));
+        assert!(err.to_string().contains("Connection refused"));
+    }
+
+    #[test]
+    fn test_bootstrap_error_creation() {
+        let err = DrasiError::Bootstrap {
+            message: "Provider not found".to_string(),
+        };
+        assert!(matches!(err, DrasiError::Bootstrap { .. }));
+        assert!(err.to_string().contains("Bootstrap error"));
+        assert!(err.to_string().contains("Provider not found"));
+    }
+
+    #[test]
+    fn test_query_error_creation() {
+        let err = DrasiError::Query {
+            message: "Parse failed".to_string(),
+        };
+        assert!(matches!(err, DrasiError::Query { .. }));
+        assert!(err.to_string().contains("Query error"));
+        assert!(err.to_string().contains("Parse failed"));
+    }
+
+    #[test]
+    fn test_timeout_error_creation() {
+        let err = DrasiError::Timeout {
+            operation: "database connection".to_string(),
+        };
+        assert!(matches!(err, DrasiError::Timeout { .. }));
+        assert!(err.to_string().contains("timed out"));
+        assert!(err.to_string().contains("database connection"));
+    }
+
+    #[test]
+    fn test_helper_network_timeout() {
+        let err = DrasiError::network_timeout("API call");
+        assert!(matches!(err, DrasiError::Timeout { .. }));
+        assert!(err.to_string().contains("API call"));
+    }
+
+    #[test]
+    fn test_helper_network_connection_failed() {
+        let err = DrasiError::network_connection_failed("example.com");
+        assert!(matches!(err, DrasiError::Network { .. }));
+        assert!(err.to_string().contains("example.com"));
+    }
+
+    #[test]
+    fn test_helper_bootstrap_provider_not_found() {
+        let err = DrasiError::bootstrap_provider_not_found("postgres");
+        assert!(matches!(err, DrasiError::Bootstrap { .. }));
+        assert!(err.to_string().contains("postgres"));
+    }
+
+    #[test]
+    fn test_helper_bootstrap_incompatible_config() {
+        let err = DrasiError::bootstrap_incompatible_config("Wrong source type");
+        assert!(matches!(err, DrasiError::Bootstrap { .. }));
+        assert!(err.to_string().contains("Wrong source type"));
+    }
+
+    #[test]
+    fn test_helper_query_parse_error() {
+        let err = DrasiError::query_parse_error("SELECT * FROM", "Unexpected EOF");
+        assert!(matches!(err, DrasiError::Query { .. }));
+        assert!(err.to_string().contains("SELECT * FROM"));
+        assert!(err.to_string().contains("Unexpected EOF"));
+    }
+
+    #[test]
+    fn test_helper_query_compilation_error() {
+        let err = DrasiError::query_compilation_error("Unknown function");
+        assert!(matches!(err, DrasiError::Query { .. }));
+        assert!(err.to_string().contains("Unknown function"));
+    }
+
+    #[test]
+    fn test_from_tokio_postgres_error() {
+        let pg_err = tokio_postgres::Error::__private_api_timeout();
+        let err: DrasiError = pg_err.into();
+        assert!(matches!(err, DrasiError::Database { .. }));
+    }
 }

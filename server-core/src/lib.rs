@@ -32,8 +32,6 @@ pub mod bootstrap;
 #[cfg_attr(not(test), doc(hidden))]
 pub mod channels;
 #[cfg_attr(not(test), doc(hidden))]
-pub mod error;
-#[cfg_attr(not(test), doc(hidden))]
 pub mod queries;
 #[cfg_attr(not(test), doc(hidden))]
 pub mod reactions;

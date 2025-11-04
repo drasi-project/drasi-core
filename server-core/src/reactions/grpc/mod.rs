@@ -201,7 +201,8 @@ impl GrpcReaction {
                         if retries >= max_retries {
                             error!("Max retries exceeded - giving up. Error: {}", resp.error);
                             return Err(anyhow::anyhow!(
-                                "gRPC call failed after {} retries: {}",
+                                "gRPC reaction failed: Server returned error after {} retries: {}. \
+                                 Check server logs and verify the gRPC endpoint is functioning correctly.",
                                 max_retries,
                                 resp.error
                             ));
@@ -373,7 +374,8 @@ impl GrpcReaction {
                         error!("gRPC call failed (type: application): {}", e);
                         if retries >= max_retries {
                             return Err(anyhow::anyhow!(
-                                "gRPC call failed after {} retries: {}",
+                                "gRPC reaction failed: Application error after {} retries: {}. \
+                                 This indicates an error in the receiving application, not a connection issue.",
                                 max_retries,
                                 e
                             ));

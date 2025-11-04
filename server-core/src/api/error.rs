@@ -12,7 +12,81 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Error types for Drasi Server Core API
+//! Error types for the Drasi Server-Core library
+//!
+//! # Error Handling Strategy
+//!
+//! Server-Core uses a two-tier error handling approach:
+//! - **Internal**: Modules use `anyhow::Result` for implementation flexibility
+//! - **Public API**: All public functions return `Result<T, DrasiError>`
+//!
+//! ## Creating Errors
+//!
+//! Use helper methods for common scenarios:
+//! ```
+//! # use drasi_server_core::api::DrasiError;
+//! // Component not found
+//! let err = DrasiError::component_not_found("source", "my-source");
+//!
+//! // Configuration error
+//! let err = DrasiError::configuration("Missing required field: database");
+//!
+//! // Database operation error
+//! # let pg_error = tokio_postgres::Error::__private_api_timeout();
+//! let err = DrasiError::database_query("SELECT * FROM users", pg_error);
+//!
+//! // Network timeout
+//! let err = DrasiError::network_timeout("HTTP request");
+//!
+//! // Bootstrap error
+//! let err = DrasiError::bootstrap_incompatible_config("PostgreSQL provider requires PostgreSQL source");
+//!
+//! // Query error
+//! let err = DrasiError::query_parse_error("MATCH (n)", "Unexpected token");
+//! ```
+//!
+//! ## Error Categories
+//!
+//! - **Configuration**: Invalid or missing configuration
+//! - **Initialization**: Server failed to initialize
+//! - **ComponentNotFound**: Component lookup failed
+//! - **InvalidState**: Operation not allowed in current state
+//! - **ComponentError**: Error from source, query, or reaction
+//! - **Validation**: Configuration validation failed
+//! - **Database**: PostgreSQL operations
+//! - **Network**: Network communication failures
+//! - **Redis**: Redis operations
+//! - **Http**: HTTP client operations
+//! - **Grpc**: gRPC operations
+//! - **Bootstrap**: Bootstrap provider errors
+//! - **Query**: Query compilation/execution errors
+//! - **Timeout**: Operation timeouts
+//! - **Io**: File system or network I/O errors
+//! - **Serialization**: YAML/JSON parsing errors
+//! - **Internal**: Unexpected internal errors
+//!
+//! ## Error Conversion
+//!
+//! External error types are automatically converted via the `From` trait:
+//! ```
+//! # use drasi_server_core::api::DrasiError;
+//! // PostgreSQL errors auto-convert
+//! # fn example() -> Result<(), DrasiError> {
+//! #     let pg_error = tokio_postgres::Error::__private_api_timeout();
+//! let result: Result<(), DrasiError> = Err(pg_error.into());
+//! #     Ok(())
+//! # }
+//! ```
+//!
+//! Supported auto-conversions:
+//! - `tokio_postgres::Error` → `DrasiError::Database`
+//! - `redis::RedisError` → `DrasiError::Redis`
+//! - `reqwest::Error` → `DrasiError::Http`
+//! - `tonic::Status` → `DrasiError::Grpc`
+//! - `std::io::Error` → `DrasiError::Io`
+//! - `serde_json::Error` → `DrasiError::Serialization`
+//! - `serde_yaml::Error` → `DrasiError::Serialization`
+//! - `anyhow::Error` → `DrasiError::Internal`
 
 use thiserror::Error;
 
@@ -65,6 +139,57 @@ pub enum DrasiError {
     /// Internal error - unexpected internal error
     #[error("Internal error: {0}")]
     Internal(String),
+
+    /// Database error - PostgreSQL operations
+    #[error("Database error: {operation}")]
+    Database {
+        operation: String,
+        #[source]
+        source: tokio_postgres::Error,
+    },
+
+    /// Network error - network communication errors
+    #[error("Network error: {message}")]
+    Network {
+        message: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
+
+    /// Redis error - Redis operations
+    #[error("Redis error: {operation}")]
+    Redis {
+        operation: String,
+        #[source]
+        source: redis::RedisError,
+    },
+
+    /// gRPC error - gRPC operations
+    #[error("gRPC error: {message}")]
+    Grpc {
+        message: String,
+        status: Option<String>,
+    },
+
+    /// HTTP error - HTTP client operations
+    #[error("HTTP error: {message}")]
+    Http {
+        message: String,
+        #[source]
+        source: Option<reqwest::Error>,
+    },
+
+    /// Bootstrap error - bootstrap provider errors
+    #[error("Bootstrap error: {message}")]
+    Bootstrap { message: String },
+
+    /// Query error - query compilation/execution errors
+    #[error("Query error: {message}")]
+    Query { message: String },
+
+    /// Timeout error - operation timed out
+    #[error("Operation timed out: {operation}")]
+    Timeout { operation: String },
 }
 
 impl DrasiError {
@@ -126,6 +251,68 @@ impl DrasiError {
     pub fn internal(msg: impl Into<String>) -> Self {
         Self::Internal(msg.into())
     }
+
+    /// Create a database connection error
+    pub fn database_connection(details: impl Into<String>) -> Self {
+        let details = details.into();
+        // Create a synthetic error for connection failures
+        let pg_error = tokio_postgres::Error::__private_api_timeout();
+        Self::Database {
+            operation: format!("connection: {}", details),
+            source: pg_error,
+        }
+    }
+
+    /// Create a database query error
+    pub fn database_query(query: impl Into<String>, err: tokio_postgres::Error) -> Self {
+        Self::Database {
+            operation: format!("query: {}", query.into()),
+            source: err,
+        }
+    }
+
+    /// Create a network timeout error
+    pub fn network_timeout(operation: impl Into<String>) -> Self {
+        Self::Timeout {
+            operation: operation.into(),
+        }
+    }
+
+    /// Create a network connection failed error
+    pub fn network_connection_failed(host: impl Into<String>) -> Self {
+        Self::Network {
+            message: format!("Failed to connect to {}", host.into()),
+            source: None,
+        }
+    }
+
+    /// Create a bootstrap provider not found error
+    pub fn bootstrap_provider_not_found(provider: impl Into<String>) -> Self {
+        Self::Bootstrap {
+            message: format!("Bootstrap provider not found: {}", provider.into()),
+        }
+    }
+
+    /// Create a bootstrap incompatible config error
+    pub fn bootstrap_incompatible_config(reason: impl Into<String>) -> Self {
+        Self::Bootstrap {
+            message: format!("Incompatible bootstrap configuration: {}", reason.into()),
+        }
+    }
+
+    /// Create a query parse error
+    pub fn query_parse_error(query: impl Into<String>, error: impl Into<String>) -> Self {
+        Self::Query {
+            message: format!("Failed to parse query '{}': {}", query.into(), error.into()),
+        }
+    }
+
+    /// Create a query compilation error
+    pub fn query_compilation_error(details: impl Into<String>) -> Self {
+        Self::Query {
+            message: format!("Query compilation failed: {}", details.into()),
+        }
+    }
 }
 
 // Convert from anyhow::Error to DrasiError for internal error boundaries
@@ -146,5 +333,45 @@ impl From<serde_yaml::Error> for DrasiError {
 impl From<serde_json::Error> for DrasiError {
     fn from(err: serde_json::Error) -> Self {
         Self::Serialization(err.to_string())
+    }
+}
+
+// Convert from tokio_postgres::Error
+impl From<tokio_postgres::Error> for DrasiError {
+    fn from(err: tokio_postgres::Error) -> Self {
+        Self::Database {
+            operation: "database operation".to_string(),
+            source: err,
+        }
+    }
+}
+
+// Convert from redis::RedisError
+impl From<redis::RedisError> for DrasiError {
+    fn from(err: redis::RedisError) -> Self {
+        Self::Redis {
+            operation: "redis operation".to_string(),
+            source: err,
+        }
+    }
+}
+
+// Convert from reqwest::Error
+impl From<reqwest::Error> for DrasiError {
+    fn from(err: reqwest::Error) -> Self {
+        Self::Http {
+            message: err.to_string(),
+            source: Some(err),
+        }
+    }
+}
+
+// Convert from tonic::Status
+impl From<tonic::Status> for DrasiError {
+    fn from(status: tonic::Status) -> Self {
+        Self::Grpc {
+            message: status.message().to_string(),
+            status: Some(status.code().to_string()),
+        }
     }
 }

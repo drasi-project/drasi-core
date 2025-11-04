@@ -119,7 +119,12 @@ impl PostgresConfig {
                 })
             }
             _ => {
-                Err(anyhow!("PostgreSQL bootstrap provider requires PostgreSQL source config"))
+                Err(anyhow!(
+                    "PostgreSQL bootstrap provider requires PostgreSQL source configuration. \
+                     Current source type: {}. \
+                     This usually means the bootstrap provider type doesn't match the source type.",
+                    std::any::type_name_of_val(&context.source_config.config)
+                ))
             }
         }
     }
@@ -624,7 +629,7 @@ impl PostgresBootstrapHandler {
             event_tx
                 .send(bootstrap_event)
                 .await
-                .map_err(|e| anyhow!("Failed to send bootstrap event: {}", e))?;
+                .map_err(|e| anyhow!("Failed to send bootstrap event to channel (channel may be closed): {}", e))?;
         }
         Ok(())
     }

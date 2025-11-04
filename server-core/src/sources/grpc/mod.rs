@@ -407,7 +407,10 @@ fn convert_proto_element_to_core(
             let metadata = node
                 .metadata
                 .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("Node missing metadata"))?;
+                .ok_or_else(|| anyhow::anyhow!(
+                    "Validation error: Node element missing required 'metadata' field in gRPC message. \
+                     Ensure the gRPC client sends complete node data."
+                ))?;
 
             let metadata = convert_proto_metadata_to_core(metadata, source_id)?;
             let properties = convert_proto_properties(&node.properties)?;
@@ -421,7 +424,10 @@ fn convert_proto_element_to_core(
             let metadata = relation
                 .metadata
                 .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("Relation missing metadata"))?;
+                .ok_or_else(|| anyhow::anyhow!(
+                    "Validation error: Relation element missing required 'metadata' field in gRPC message. \
+                     Ensure the gRPC client sends complete relation data."
+                ))?;
 
             let metadata = convert_proto_metadata_to_core(metadata, source_id)?;
             let properties = convert_proto_properties(&relation.properties)?;
@@ -429,11 +435,17 @@ fn convert_proto_element_to_core(
             let in_node = relation
                 .in_node
                 .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("Relation missing in_node"))?;
+                .ok_or_else(|| anyhow::anyhow!(
+                    "Validation error: Relation missing required 'in_node' field. \
+                     Relations must specify both source and target nodes."
+                ))?;
             let out_node = relation
                 .out_node
                 .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("Relation missing out_node"))?;
+                .ok_or_else(|| anyhow::anyhow!(
+                    "Validation error: Relation missing required 'out_node' field. \
+                     Relations must specify both source and target nodes."
+                ))?;
 
             Ok(Element::Relation {
                 metadata,

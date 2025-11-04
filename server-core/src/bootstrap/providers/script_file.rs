@@ -48,7 +48,12 @@ impl ScriptFileBootstrapProvider {
         } else if node.properties.is_null() {
             Default::default()
         } else {
-            return Err(anyhow!("Node properties must be an object or null"));
+            return Err(anyhow!(
+                "ScriptFile bootstrap error: Node '{}' has invalid properties type. \
+                 Properties must be a JSON object or null, found: {}",
+                node.id,
+                node.properties
+            ));
         };
 
         // Convert labels to Arc slice
@@ -77,7 +82,12 @@ impl ScriptFileBootstrapProvider {
         } else if relation.properties.is_null() {
             Default::default()
         } else {
-            return Err(anyhow!("Relation properties must be an object or null"));
+            return Err(anyhow!(
+                "ScriptFile bootstrap error: Relation '{}' has invalid properties type. \
+                 Properties must be a JSON object or null, found: {}",
+                relation.id,
+                relation.properties
+            ));
         };
 
         // Convert labels to Arc slice

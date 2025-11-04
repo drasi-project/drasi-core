@@ -106,25 +106,37 @@ impl PlatformSource {
         config.redis_url = properties
             .get("redis_url")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required field: redis_url"))?
+            .ok_or_else(|| anyhow::anyhow!(
+                "Configuration error: Missing required field 'redis_url'. \
+                 Platform source requires a Redis connection URL"
+            ))?
             .to_string();
 
         config.stream_key = properties
             .get("stream_key")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required field: stream_key"))?
+            .ok_or_else(|| anyhow::anyhow!(
+                "Configuration error: Missing required field 'stream_key'. \
+                 Platform source requires a Redis Stream key to read from"
+            ))?
             .to_string();
 
         config.consumer_group = properties
             .get("consumer_group")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required field: consumer_group"))?
+            .ok_or_else(|| anyhow::anyhow!(
+                "Configuration error: Missing required field 'consumer_group'. \
+                 Platform source requires a consumer group name"
+            ))?
             .to_string();
 
         config.consumer_name = properties
             .get("consumer_name")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required field: consumer_name"))?
+            .ok_or_else(|| anyhow::anyhow!(
+                "Configuration error: Missing required field 'consumer_name'. \
+                 Platform source requires a unique consumer name"
+            ))?
             .to_string();
 
         // Optional fields
@@ -157,16 +169,28 @@ impl PlatformSource {
 
         // Validate
         if config.redis_url.is_empty() {
-            return Err(anyhow::anyhow!("redis_url cannot be empty"));
+            return Err(anyhow::anyhow!(
+                "Validation error: redis_url cannot be empty. \
+                 Please provide a valid Redis connection URL (e.g., redis://localhost:6379)"
+            ));
         }
         if config.stream_key.is_empty() {
-            return Err(anyhow::anyhow!("stream_key cannot be empty"));
+            return Err(anyhow::anyhow!(
+                "Validation error: stream_key cannot be empty. \
+                 Please specify the Redis Stream key to read from"
+            ));
         }
         if config.consumer_group.is_empty() {
-            return Err(anyhow::anyhow!("consumer_group cannot be empty"));
+            return Err(anyhow::anyhow!(
+                "Validation error: consumer_group cannot be empty. \
+                 Please specify a consumer group name for this source"
+            ));
         }
         if config.consumer_name.is_empty() {
-            return Err(anyhow::anyhow!("consumer_name cannot be empty"));
+            return Err(anyhow::anyhow!(
+                "Validation error: consumer_name cannot be empty. \
+                 Please specify a unique consumer name within the consumer group"
+            ));
         }
 
         Ok(config)

@@ -967,7 +967,10 @@ impl QueryManager {
         if let Some(query) = queries.get(query_id) {
             Ok(Arc::clone(query))
         } else {
-            Err(format!("Query not found: {}", query_id))
+            Err(format!(
+                "Query '{}' not found. Available queries can be listed using list_queries().",
+                query_id
+            ))
         }
     }
 

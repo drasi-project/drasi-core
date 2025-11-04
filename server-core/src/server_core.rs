@@ -496,7 +496,11 @@ impl DrasiServerCore {
                 if e.to_string().contains("not found") {
                     DrasiError::component_not_found("source", id)
                 } else {
-                    DrasiError::invalid_state(e.to_string())
+                    DrasiError::component_error(
+                        "source",
+                        id,
+                        format!("Failed to start source: {}", e)
+                    )
                 }
             })
     }
@@ -525,7 +529,11 @@ impl DrasiServerCore {
                 if e.to_string().contains("not found") {
                     DrasiError::component_not_found("source", id)
                 } else {
-                    DrasiError::invalid_state(e.to_string())
+                    DrasiError::component_error(
+                        "source",
+                        id,
+                        format!("Failed to stop source: {}", e)
+                    )
                 }
             })
     }
