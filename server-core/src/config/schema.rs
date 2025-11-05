@@ -878,6 +878,43 @@ impl DrasiServerCoreConfig {
         }
     }
 
+    /// Load and validate configuration from a file in one step
+    ///
+    /// This is a convenience method that loads the configuration and automatically
+    /// validates it. Use this instead of calling `load_from_file()` and `validate()`
+    /// separately to ensure configuration is always validated before use.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Configuration file path (YAML or JSON)
+    ///
+    /// # Errors
+    ///
+    /// Returns error if:
+    /// - File cannot be read
+    /// - Content cannot be parsed as YAML or JSON
+    /// - Configuration validation fails (duplicate IDs, invalid references, etc.)
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use drasi_server_core::DrasiServerCoreConfig;
+    ///
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// // Load and validate in one step - recommended approach
+    /// let config = DrasiServerCoreConfig::load_and_validate("config.yaml")?;
+    ///
+    /// // Now safe to use - configuration is guaranteed to be valid
+    /// println!("Loaded {} sources", config.sources.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn load_and_validate<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let config = Self::load_from_file(path)?;
+        config.validate()?;
+        Ok(config)
+    }
+
     /// Save configuration to a YAML file
     ///
     /// Serializes the configuration to YAML format and writes to the specified file path.

@@ -569,6 +569,18 @@ fn parse_data_row(body: &[u8]) -> Result<BackendMessage> {
 }
 
 fn parse_copy_both_response(_body: &[u8]) -> Result<BackendMessage> {
-    // TODO: Parse format codes if needed
+    // Note: PostgreSQL CopyBothResponse includes format codes (overall format + per-column formats),
+    // but we don't need to parse them for replication streaming because:
+    // 1. Replication protocol uses a known binary format
+    // 2. We handle the actual data parsing in the replication-specific message handlers
+    // 3. Format codes are primarily useful for COPY operations with variable formats
+    //
+    // PostgreSQL protocol spec for CopyBothResponse ('W'):
+    // - Int32: message length
+    // - Int8: overall copy format (0=text, 1=binary)
+    // - Int16: number of columns
+    // - Int16[]: format code for each column (0=text, 1=binary)
+    //
+    // If variable format support is needed in the future, parse format codes here.
     Ok(BackendMessage::CopyBothResponse)
 }

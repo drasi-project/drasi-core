@@ -88,7 +88,7 @@ struct PostgresConfig {
     #[allow(dead_code)]
     pub publication_name: String,
     #[allow(dead_code)]
-    pub ssl_mode: String,
+    pub ssl_mode: crate::config::typed::SslMode,
     pub table_keys: Vec<TableKeyConfig>,
 }
 
@@ -110,7 +110,7 @@ impl PostgresConfig {
                 tables: postgres_config.tables.clone(),
                 slot_name: postgres_config.slot_name.clone(),
                 publication_name: postgres_config.publication_name.clone(),
-                ssl_mode: postgres_config.ssl_mode.clone(),
+                ssl_mode: postgres_config.ssl_mode,
                 table_keys: postgres_config
                     .table_keys
                     .iter()

@@ -160,15 +160,11 @@ mod tests {
     }
 
     #[test]
-    fn test_database_error_creation() {
-        let pg_err = tokio_postgres::Error::__private_api_timeout();
-        let err = DrasiError::Database {
-            operation: "test query".to_string(),
-            source: pg_err,
-        };
-        assert!(matches!(err, DrasiError::Database { .. }));
-        assert!(err.to_string().contains("Database error"));
-        assert!(err.to_string().contains("test query"));
+    fn test_database_connection_error_creation() {
+        let err = DrasiError::database_connection("localhost:5432");
+        assert!(matches!(err, DrasiError::DatabaseConnection { .. }));
+        assert!(err.to_string().contains("Database connection error"));
+        assert!(err.to_string().contains("localhost:5432"));
     }
 
     #[test]
@@ -257,6 +253,9 @@ mod tests {
 
     #[test]
     fn test_from_tokio_postgres_error() {
+        // Note: Using __private_api_timeout() in test only to verify From<tokio_postgres::Error> trait.
+        // Production code should use DrasiError::database_connection() for connection errors
+        // or pass real PostgreSQL errors to DrasiError::database_query().
         let pg_err = tokio_postgres::Error::__private_api_timeout();
         let err: DrasiError = pg_err.into();
         assert!(matches!(err, DrasiError::Database { .. }));

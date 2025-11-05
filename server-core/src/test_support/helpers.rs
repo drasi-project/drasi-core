@@ -51,7 +51,7 @@ pub mod test_fixtures {
                 tables: vec![],
                 slot_name: "drasi_slot".to_string(),
                 publication_name: "drasi_publication".to_string(),
-                ssl_mode: "prefer".to_string(),
+                ssl_mode: crate::config::typed::SslMode::Prefer,
                 table_keys: vec![],
             }),
             "http" => crate::config::SourceSpecificConfig::Http(HttpSourceConfig {
@@ -150,7 +150,7 @@ pub mod test_fixtures {
             queries,
             auto_start: true,
             config: crate::config::ReactionSpecificConfig::Log(LogReactionConfig {
-                log_level: "info".to_string(),
+                log_level: crate::config::typed::LogLevel::Info,
             }),
             priority_queue_capacity: None,
         }

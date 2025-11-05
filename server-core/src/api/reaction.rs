@@ -477,8 +477,15 @@ impl ReactionBuilder {
                     .properties
                     .get("log_level")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("info")
-                    .to_string();
+                    .and_then(|s| match s {
+                        "trace" => Some(crate::config::typed::LogLevel::Trace),
+                        "debug" => Some(crate::config::typed::LogLevel::Debug),
+                        "info" => Some(crate::config::typed::LogLevel::Info),
+                        "warn" => Some(crate::config::typed::LogLevel::Warn),
+                        "error" => Some(crate::config::typed::LogLevel::Error),
+                        _ => None,
+                    })
+                    .unwrap_or(crate::config::typed::LogLevel::Info);
                 ReactionSpecificConfig::Log(LogReactionConfig { log_level })
             }
             "http" => {

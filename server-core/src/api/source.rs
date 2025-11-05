@@ -847,8 +847,13 @@ impl SourceBuilder {
                     .properties
                     .get("ssl_mode")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("prefer")
-                    .to_string();
+                    .and_then(|s| match s {
+                        "disable" => Some(crate::config::typed::SslMode::Disable),
+                        "prefer" => Some(crate::config::typed::SslMode::Prefer),
+                        "require" => Some(crate::config::typed::SslMode::Require),
+                        _ => None,
+                    })
+                    .unwrap_or(crate::config::typed::SslMode::Prefer);
 
                 SourceSpecificConfig::Postgres(PostgresSourceConfig {
                     host,

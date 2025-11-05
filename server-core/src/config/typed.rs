@@ -21,6 +21,72 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // =============================================================================
+// Common Enums
+// =============================================================================
+
+/// SSL mode for PostgreSQL connections
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SslMode {
+    /// Disable SSL encryption
+    Disable,
+    /// Prefer SSL but allow unencrypted connections
+    Prefer,
+    /// Require SSL encryption
+    Require,
+}
+
+impl Default for SslMode {
+    fn default() -> Self {
+        Self::Prefer
+    }
+}
+
+impl std::fmt::Display for SslMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Disable => write!(f, "disable"),
+            Self::Prefer => write!(f, "prefer"),
+            Self::Require => write!(f, "require"),
+        }
+    }
+}
+
+/// Log level for log reactions
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    /// Trace level logging
+    Trace,
+    /// Debug level logging
+    Debug,
+    /// Info level logging
+    Info,
+    /// Warning level logging
+    Warn,
+    /// Error level logging
+    Error,
+}
+
+impl Default for LogLevel {
+    fn default() -> Self {
+        Self::Info
+    }
+}
+
+impl std::fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Trace => write!(f, "trace"),
+            Self::Debug => write!(f, "debug"),
+            Self::Info => write!(f, "info"),
+            Self::Warn => write!(f, "warn"),
+            Self::Error => write!(f, "error"),
+        }
+    }
+}
+
+// =============================================================================
 // Source Configuration Types
 // =============================================================================
 
@@ -86,9 +152,9 @@ pub struct PostgresSourceConfig {
     #[serde(default = "default_publication_name")]
     pub publication_name: String,
 
-    /// SSL mode: "disable", "prefer", "require"
-    #[serde(default = "default_ssl_mode")]
-    pub ssl_mode: String,
+    /// SSL mode
+    #[serde(default)]
+    pub ssl_mode: SslMode,
 
     /// Table key configurations
     #[serde(default)]
@@ -109,10 +175,6 @@ fn default_slot_name() -> String {
 
 fn default_publication_name() -> String {
     "drasi_publication".to_string()
-}
-
-fn default_ssl_mode() -> String {
-    "prefer".to_string()
 }
 
 /// Table key configuration for PostgreSQL
@@ -278,19 +340,15 @@ pub enum SourceSpecificConfig {
 /// Log reaction configuration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LogReactionConfig {
-    /// Log level: "trace", "debug", "info", "warn", "error"
-    #[serde(default = "default_log_level")]
-    pub log_level: String,
-}
-
-fn default_log_level() -> String {
-    "info".to_string()
+    /// Log level
+    #[serde(default)]
+    pub log_level: LogLevel,
 }
 
 impl Default for LogReactionConfig {
     fn default() -> Self {
         Self {
-            log_level: default_log_level(),
+            log_level: LogLevel::default(),
         }
     }
 }
@@ -577,13 +635,13 @@ mod tests {
     #[test]
     fn test_log_reaction_config_defaults() {
         let config = LogReactionConfig::default();
-        assert_eq!(config.log_level, "info");
+        assert_eq!(config.log_level, LogLevel::Info);
     }
 
     #[test]
     fn test_reaction_specific_config_enum() {
         let config = ReactionSpecificConfig::Log(LogReactionConfig {
-            log_level: "debug".to_string(),
+            log_level: LogLevel::Debug,
         });
 
         let json = serde_json::to_string(&config).unwrap();

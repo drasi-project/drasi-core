@@ -31,9 +31,8 @@
 //! // Configuration error
 //! let err = DrasiError::configuration("Missing required field: database");
 //!
-//! // Database operation error
-//! # let pg_error = tokio_postgres::Error::__private_api_timeout();
-//! let err = DrasiError::database_query("SELECT * FROM users", pg_error);
+//! // Database connection error
+//! let err = DrasiError::database_connection("Failed to connect to localhost:5432");
 //!
 //! // Network timeout
 //! let err = DrasiError::network_timeout("HTTP request");
@@ -70,10 +69,10 @@
 //! External error types are automatically converted via the `From` trait:
 //! ```
 //! # use drasi_server_core::api::DrasiError;
-//! // PostgreSQL errors auto-convert
+//! // Connection errors can be created directly
 //! # fn example() -> Result<(), DrasiError> {
-//! #     let pg_error = tokio_postgres::Error::__private_api_timeout();
-//! let result: Result<(), DrasiError> = Err(pg_error.into());
+//! let err = DrasiError::database_connection("Connection refused");
+//! let result: Result<(), DrasiError> = Err(err);
 //! #     Ok(())
 //! # }
 //! ```
@@ -140,13 +139,17 @@ pub enum DrasiError {
     #[error("Internal error: {0}")]
     Internal(String),
 
-    /// Database error - PostgreSQL operations
+    /// Database error - PostgreSQL operations with source error
     #[error("Database error: {operation}")]
     Database {
         operation: String,
         #[source]
         source: tokio_postgres::Error,
     },
+
+    /// Database connection error - connection failures without underlying error
+    #[error("Database connection error: {details}")]
+    DatabaseConnection { details: String },
 
     /// Network error - network communication errors
     #[error("Network error: {message}")]
@@ -254,12 +257,8 @@ impl DrasiError {
 
     /// Create a database connection error
     pub fn database_connection(details: impl Into<String>) -> Self {
-        let details = details.into();
-        // Create a synthetic error for connection failures
-        let pg_error = tokio_postgres::Error::__private_api_timeout();
-        Self::Database {
-            operation: format!("connection: {}", details),
-            source: pg_error,
+        Self::DatabaseConnection {
+            details: details.into(),
         }
     }
 

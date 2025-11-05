@@ -148,7 +148,7 @@ mod tests {
             queries: vec!["query1".to_string()],
             auto_start: true,
             config: crate::config::ReactionSpecificConfig::Log(LogReactionConfig {
-                log_level: "info".to_string(),
+                log_level: crate::config::typed::LogLevel::Info,
             }),
             priority_queue_capacity: None,
         });

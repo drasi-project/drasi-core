@@ -48,18 +48,14 @@ pub struct PostgresReplicationConfig {
     pub slot_name: String,
     #[serde(default = "default_publication_name")]
     pub publication_name: String,
-    #[serde(default = "default_ssl_mode")]
-    pub ssl_mode: String,
+    #[serde(default)]
+    pub ssl_mode: crate::config::typed::SslMode,
     #[serde(default)]
     pub table_keys: Vec<TableKeyConfig>,
 }
 
 fn default_publication_name() -> String {
     "drasi_publication".to_string()
-}
-
-fn default_ssl_mode() -> String {
-    "prefer".to_string()
 }
 
 pub struct PostgresReplicationSource {
@@ -85,7 +81,7 @@ impl PostgresReplicationSource {
                     tables: postgres_config.tables.clone(),
                     slot_name: postgres_config.slot_name.clone(),
                     publication_name: postgres_config.publication_name.clone(),
-                    ssl_mode: postgres_config.ssl_mode.clone(),
+                    ssl_mode: postgres_config.ssl_mode,
                     table_keys: postgres_config
                         .table_keys
                         .iter()

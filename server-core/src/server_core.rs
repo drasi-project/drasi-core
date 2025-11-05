@@ -232,6 +232,15 @@ impl Clone for DrasiServerCore {
 }
 
 impl DrasiServerCore {
+    /// Create an Arc-wrapped reference to self
+    ///
+    /// Since DrasiServerCore contains all Arc-wrapped fields, cloning is cheap
+    /// (just increments ref counts), but this helper makes the intent clearer
+    /// and provides a single place to document this pattern.
+    fn as_arc(&self) -> Arc<Self> {
+        Arc::new(self.clone())
+    }
+
     /// Internal constructor - creates uninitialized server
     /// Use `builder()`, `from_config_file()`, or `from_config_str()` instead
     pub(crate) fn new(config: Arc<RuntimeConfig>) -> Self {
@@ -355,7 +364,7 @@ impl DrasiServerCore {
 
         // Start all configured components
         let lifecycle = self.lifecycle.read().await;
-        lifecycle.start_components(Arc::new(self.clone())).await?;
+        lifecycle.start_components(self.as_arc()).await?;
 
         *running = true;
         info!("Drasi Server Core started successfully");
@@ -909,7 +918,7 @@ impl DrasiServerCore {
             .ok_or_else(|| DrasiError::component_not_found("reaction", id))?;
 
         // Start the reaction with QuerySubscriber for query subscriptions
-        let subscriber: Arc<dyn crate::reactions::base::QuerySubscriber> = Arc::new(self.clone());
+        let subscriber: Arc<dyn crate::reactions::base::QuerySubscriber> = self.as_arc();
         map_state_error(
             self.reaction_manager
                 .start_reaction(id.to_string(), subscriber)
@@ -1417,8 +1426,7 @@ impl DrasiServerCore {
         // Start if auto-start is enabled and allowed
         if should_auto_start && allow_auto_start {
             // Pass QuerySubscriber to reaction for query subscriptions
-            let subscriber: Arc<dyn crate::reactions::base::QuerySubscriber> =
-                Arc::new(self.clone());
+            let subscriber: Arc<dyn crate::reactions::base::QuerySubscriber> = self.as_arc();
             self.reaction_manager
                 .start_reaction(reaction_id.clone(), subscriber)
                 .await?;

@@ -18,6 +18,7 @@ use log::{debug, error, info, trace, warn};
 use std::sync::Arc;
 
 use crate::channels::{ComponentEventSender, ComponentStatus};
+use crate::config::typed::LogLevel;
 use crate::config::ReactionConfig;
 use crate::reactions::base::ReactionBase;
 use crate::reactions::Reaction;
@@ -25,14 +26,14 @@ use crate::utils::log_component_start;
 
 pub struct LogReaction {
     base: ReactionBase,
-    log_level: String,
+    log_level: LogLevel,
 }
 
 impl LogReaction {
     pub fn new(config: ReactionConfig, event_tx: ComponentEventSender) -> Self {
         let log_level = match &config.config {
-            crate::config::ReactionSpecificConfig::Log(log_config) => log_config.log_level.clone(),
-            _ => "info".to_string(),
+            crate::config::ReactionSpecificConfig::Log(log_config) => log_config.log_level,
+            _ => LogLevel::Info,
         };
 
         Self {
@@ -64,13 +65,12 @@ impl LogReaction {
     }
 
     fn log_result(&self, message: &str) {
-        match self.log_level.as_str() {
-            "trace" => trace!("[{}] {}", self.base.config.id, message),
-            "debug" => debug!("[{}] {}", self.base.config.id, message),
-            "info" => info!("[{}] {}", self.base.config.id, message),
-            "warn" => warn!("[{}] {}", self.base.config.id, message),
-            "error" => error!("[{}] {}", self.base.config.id, message),
-            _ => info!("[{}] {}", self.base.config.id, message),
+        match self.log_level {
+            LogLevel::Trace => trace!("[{}] {}", self.base.config.id, message),
+            LogLevel::Debug => debug!("[{}] {}", self.base.config.id, message),
+            LogLevel::Info => info!("[{}] {}", self.base.config.id, message),
+            LogLevel::Warn => warn!("[{}] {}", self.base.config.id, message),
+            LogLevel::Error => error!("[{}] {}", self.base.config.id, message),
         }
     }
 }
@@ -110,17 +110,16 @@ impl Reaction for LogReaction {
         // Spawn processing task to dequeue and process results in timestamp order
         let priority_queue = self.base.priority_queue.clone();
         let reaction_name = self.base.config.id.clone();
-        let log_level = self.log_level.clone();
+        let log_level = self.log_level;
         let config_name = self.base.config.id.clone();
 
         let processing_task = tokio::spawn(async move {
-            let log_fn = |message: &str| match log_level.as_str() {
-                "trace" => trace!("[{}] {}", config_name, message),
-                "debug" => debug!("[{}] {}", config_name, message),
-                "info" => info!("[{}] {}", config_name, message),
-                "warn" => warn!("[{}] {}", config_name, message),
-                "error" => error!("[{}] {}", config_name, message),
-                _ => info!("[{}] {}", config_name, message),
+            let log_fn = |message: &str| match log_level {
+                LogLevel::Trace => trace!("[{}] {}", config_name, message),
+                LogLevel::Debug => debug!("[{}] {}", config_name, message),
+                LogLevel::Info => info!("[{}] {}", config_name, message),
+                LogLevel::Warn => warn!("[{}] {}", config_name, message),
+                LogLevel::Error => error!("[{}] {}", config_name, message),
             };
 
             loop {
