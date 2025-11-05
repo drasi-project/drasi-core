@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use log::{debug, error, info, warn};
 use std::collections::HashMap;
@@ -139,15 +139,15 @@ impl DrasiQuery {
         config: QueryConfig,
         event_tx: ComponentEventSender,
         source_manager: Arc<SourceManager>,
-    ) -> Self {
+    ) -> Result<Self> {
         // Create priority queue with configured capacity (fallback to 10000 if not set)
         let priority_capacity = config.priority_queue_capacity.unwrap_or(10000);
         let priority_queue = PriorityQueue::new(priority_capacity);
 
         // Create QueryBase for common functionality
-        let base = QueryBase::new(config, event_tx).expect("Failed to create QueryBase");
+        let base = QueryBase::new(config, event_tx).context("Failed to create QueryBase")?;
 
-        Self {
+        Ok(Self {
             base,
             continuous_query: None,
             current_results: Arc::new(RwLock::new(Vec::new())),
@@ -155,7 +155,7 @@ impl DrasiQuery {
             source_manager,
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
             bootstrap_state: Arc::new(RwLock::new(HashMap::new())),
-        }
+        })
     }
 
     pub async fn get_current_results(&self) -> Vec<serde_json::Value> {
@@ -910,7 +910,7 @@ impl QueryManager {
             config.clone(),
             self.event_tx.clone(),
             self.source_manager.clone(),
-        );
+        )?;
 
         let query: Arc<dyn Query> = Arc::new(query);
 
@@ -933,8 +933,12 @@ impl QueryManager {
     }
 
     pub async fn start_query(&self, id: String) -> Result<()> {
-        let queries = self.queries.read().await;
-        if let Some(query) = queries.get(&id) {
+        let query = {
+            let queries = self.queries.read().await;
+            queries.get(&id).cloned()
+        };
+
+        if let Some(query) = query {
             let status = query.status().await;
             is_operation_valid(&status, &Operation::Start).map_err(|e| anyhow::anyhow!(e))?;
             query.start().await?;
@@ -946,8 +950,12 @@ impl QueryManager {
     }
 
     pub async fn stop_query(&self, id: String) -> Result<()> {
-        let queries = self.queries.read().await;
-        if let Some(query) = queries.get(&id) {
+        let query = {
+            let queries = self.queries.read().await;
+            queries.get(&id).cloned()
+        };
+
+        if let Some(query) = query {
             let status = query.status().await;
             is_operation_valid(&status, &Operation::Stop).map_err(|e| anyhow::anyhow!(e))?;
             query.stop().await?;
@@ -959,8 +967,12 @@ impl QueryManager {
     }
 
     pub async fn get_query_status(&self, id: String) -> Result<ComponentStatus> {
-        let queries = self.queries.read().await;
-        if let Some(query) = queries.get(&id) {
+        let query = {
+            let queries = self.queries.read().await;
+            queries.get(&id).cloned()
+        };
+
+        if let Some(query) = query {
             Ok(query.status().await)
         } else {
             Err(anyhow::anyhow!("Query not found: {}", id))
@@ -982,8 +994,12 @@ impl QueryManager {
     }
 
     pub async fn get_query(&self, id: String) -> Result<QueryRuntime> {
-        let queries = self.queries.read().await;
-        if let Some(query) = queries.get(&id) {
+        let query = {
+            let queries = self.queries.read().await;
+            queries.get(&id).cloned()
+        };
+
+        if let Some(query) = query {
             let status = query.status().await;
             let config = query.get_config();
             let runtime = QueryRuntime {
@@ -1004,27 +1020,29 @@ impl QueryManager {
     }
 
     pub async fn update_query(&self, id: String, config: QueryConfig) -> Result<()> {
-        let queries = self.queries.read().await;
-        if let Some(query) = queries.get(&id) {
-            let status = query.status().await;
-            let was_running =
-                matches!(status, ComponentStatus::Running | ComponentStatus::Starting);
+        let (query, was_running) = {
+            let queries = self.queries.read().await;
+            let query = queries.get(&id).cloned();
+            if let Some(ref q) = query {
+                let status = q.status().await;
+                let was_running =
+                    matches!(status, ComponentStatus::Running | ComponentStatus::Starting);
+                (query, was_running)
+            } else {
+                return Err(anyhow::anyhow!("Query not found: {}", id));
+            }
+        };
 
+        if let Some(query) = query {
             // If running, we need to stop it first
             if was_running {
-                drop(queries);
                 self.stop_query(id.clone()).await?;
-                // Re-acquire lock after stop
-                let queries = self.queries.read().await;
-                if let Some(query) = queries.get(&id) {
-                    let status = query.status().await;
-                    is_operation_valid(&status, &Operation::Update)
-                        .map_err(|e| anyhow::anyhow!(e))?;
-                }
-                drop(queries);
-            } else {
+                // Validate the operation after stop
+                let status = query.status().await;
                 is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
-                drop(queries);
+            } else {
+                let status = query.status().await;
+                is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
             }
 
             // For now, update means remove and re-add
@@ -1036,8 +1054,6 @@ impl QueryManager {
                 // Query will subscribe directly to sources when started
                 self.start_query(id).await?;
             }
-        } else {
-            return Err(anyhow::anyhow!("Query not found: {}", id));
         }
 
         Ok(())
@@ -1085,12 +1101,18 @@ impl QueryManager {
     }
 
     pub async fn list_queries(&self) -> Vec<(String, ComponentStatus)> {
-        let queries = self.queries.read().await;
-        let mut result = Vec::new();
+        let queries_snapshot = {
+            let queries = self.queries.read().await;
+            queries
+                .iter()
+                .map(|(id, query)| (id.clone(), Arc::clone(query)))
+                .collect::<Vec<_>>()
+        };
 
-        for (id, query) in queries.iter() {
+        let mut result = Vec::new();
+        for (id, query) in queries_snapshot {
             let status = query.status().await;
-            result.push((id.clone(), status));
+            result.push((id, status));
         }
 
         result
@@ -1102,8 +1124,12 @@ impl QueryManager {
     }
 
     pub async fn get_query_results(&self, id: &str) -> Result<Vec<serde_json::Value>> {
-        let queries = self.queries.read().await;
-        if let Some(query) = queries.get(id) {
+        let query = {
+            let queries = self.queries.read().await;
+            queries.get(id).cloned()
+        };
+
+        if let Some(query) = query {
             // Check if the query is running
             let status = query.status().await;
             if status != ComponentStatus::Running {
@@ -1124,10 +1150,17 @@ impl QueryManager {
     }
 
     pub async fn start_all(&self) -> Result<()> {
-        let queries = self.queries.read().await;
+        let queries_snapshot = {
+            let queries = self.queries.read().await;
+            queries
+                .iter()
+                .map(|(id, query)| (id.clone(), Arc::clone(query)))
+                .collect::<Vec<_>>()
+        };
+
         let mut failed_queries = Vec::new();
 
-        for (id, query) in queries.iter() {
+        for (id, query) in queries_snapshot {
             let config = query.get_config();
             if config.auto_start {
                 info!("Auto-starting query: {}", id);

@@ -256,7 +256,8 @@ impl DrasiServerCore {
             config.clone(),
         );
 
-        let components_running_before_stop = Arc::new(RwLock::new(ComponentsRunningState::default()));
+        let components_running_before_stop =
+            Arc::new(RwLock::new(ComponentsRunningState::default()));
 
         let lifecycle = Arc::new(RwLock::new(LifecycleManager::new(
             config.clone(),
@@ -354,9 +355,7 @@ impl DrasiServerCore {
 
         // Start all configured components
         let lifecycle = self.lifecycle.read().await;
-        lifecycle
-            .start_components(Arc::new(self.clone()))
-            .await?;
+        lifecycle.start_components(Arc::new(self.clone())).await?;
 
         *running = true;
         info!("Drasi Server Core started successfully");
@@ -909,10 +908,11 @@ impl DrasiServerCore {
             .await
             .ok_or_else(|| DrasiError::component_not_found("reaction", id))?;
 
-        // Start the reaction with server core reference for query subscriptions
+        // Start the reaction with QuerySubscriber for query subscriptions
+        let subscriber: Arc<dyn crate::reactions::base::QuerySubscriber> = Arc::new(self.clone());
         map_state_error(
             self.reaction_manager
-                .start_reaction(id.to_string(), Arc::new(self.clone()))
+                .start_reaction(id.to_string(), subscriber)
                 .await,
             "reaction",
             id,
@@ -1416,12 +1416,26 @@ impl DrasiServerCore {
 
         // Start if auto-start is enabled and allowed
         if should_auto_start && allow_auto_start {
-            // Pass server core to reaction for direct query subscriptions
+            // Pass QuerySubscriber to reaction for query subscriptions
+            let subscriber: Arc<dyn crate::reactions::base::QuerySubscriber> =
+                Arc::new(self.clone());
             self.reaction_manager
-                .start_reaction(reaction_id.clone(), Arc::new(self.clone()))
+                .start_reaction(reaction_id.clone(), subscriber)
                 .await?;
         }
 
         Ok(())
+    }
+}
+
+// Implement QuerySubscriber trait for DrasiServerCore
+// This breaks the circular dependency by providing a minimal interface for reactions
+#[async_trait::async_trait]
+impl crate::reactions::base::QuerySubscriber for DrasiServerCore {
+    async fn get_query_instance(&self, id: &str) -> Result<Arc<dyn crate::queries::Query>> {
+        self.query_manager
+            .get_query_instance(id)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
     }
 }

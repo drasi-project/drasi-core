@@ -98,7 +98,7 @@ impl SourceBase {
                 // For broadcast mode, use the single dispatcher
                 let dispatchers = self.dispatchers.read().await;
                 if let Some(dispatcher) = dispatchers.first() {
-                    dispatcher.create_receiver()?
+                    dispatcher.create_receiver().await?
                 } else {
                     return Err(anyhow::anyhow!("No broadcast dispatcher available"));
                 }
@@ -107,7 +107,7 @@ impl SourceBase {
                 // For channel mode, create a new dispatcher for this subscription
                 let capacity = self.config.dispatch_buffer_capacity.unwrap_or(1000);
                 let dispatcher = ChannelChangeDispatcher::<SourceEventWrapper>::new(capacity);
-                let receiver = dispatcher.create_receiver()?;
+                let receiver = dispatcher.create_receiver().await?;
 
                 // Add the new dispatcher to our list
                 let mut dispatchers = self.dispatchers.write().await;

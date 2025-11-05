@@ -21,6 +21,7 @@ use tokio::sync::RwLock;
 
 use crate::channels::*;
 use crate::config::{ReactionConfig, ReactionRuntime};
+use crate::reactions::base::QuerySubscriber;
 use crate::server_core::DrasiServerCore;
 use crate::utils::*;
 
@@ -48,19 +49,18 @@ use super::{
 /// - Independent scaling of query and reaction components
 #[async_trait]
 pub trait Reaction: Send + Sync {
-    /// Start the reaction with access to the server core for query subscriptions.
+    /// Start the reaction with access to query subscriptions.
     ///
     /// # Parameters
-    /// - `server_core`: Arc reference to DrasiServerCore, providing access to QueryManager
-    ///   for subscribing to queries
+    /// - `query_subscriber`: Trait object providing access to query instances for subscriptions
     ///
     /// # Implementation Notes
     /// Implementations should:
-    /// 1. Access QueryManager via `server_core.query_manager()`
-    /// 2. For each query_id in config.queries, get the query instance and subscribe
+    /// 1. For each query_id in config.queries, get the query instance via `query_subscriber.get_query_instance()`
+    /// 2. Subscribe to each query using `query.subscribe(reaction_id)`
     /// 3. Create a priority queue for timestamp-ordered processing
     /// 4. Spawn task(s) to process results from all subscriptions
-    async fn start(&self, server_core: Arc<DrasiServerCore>) -> Result<()>;
+    async fn start(&self, query_subscriber: Arc<dyn QuerySubscriber>) -> Result<()>;
 
     /// Stop the reaction, cleaning up all subscriptions and tasks
     async fn stop(&self) -> Result<()>;
@@ -90,7 +90,7 @@ impl MockReaction {
 
 #[async_trait]
 impl Reaction for MockReaction {
-    async fn start(&self, _server_core: Arc<DrasiServerCore>) -> Result<()> {
+    async fn start(&self, _query_subscriber: Arc<dyn QuerySubscriber>) -> Result<()> {
         log_component_start("Reaction", &self.config.id);
 
         *self.status.write().await = ComponentStatus::Starting;
@@ -268,17 +268,21 @@ impl ReactionManager {
     ///
     /// # Parameters
     /// - `id`: The reaction ID to start
-    /// - `server_core`: Arc reference to DrasiServerCore for query subscriptions
+    /// - `query_subscriber`: Trait object providing access to query instances for subscriptions
     pub async fn start_reaction(
         &self,
         id: String,
-        server_core: Arc<DrasiServerCore>,
+        query_subscriber: Arc<dyn QuerySubscriber>,
     ) -> Result<()> {
-        let reactions = self.reactions.read().await;
-        if let Some(reaction) = reactions.get(&id) {
+        let reaction = {
+            let reactions = self.reactions.read().await;
+            reactions.get(&id).cloned()
+        };
+
+        if let Some(reaction) = reaction {
             let status = reaction.status().await;
             is_operation_valid(&status, &Operation::Start).map_err(|e| anyhow::anyhow!(e))?;
-            reaction.start(server_core).await?;
+            reaction.start(query_subscriber).await?;
         } else {
             return Err(anyhow::anyhow!("Reaction not found: {}", id));
         }
@@ -287,8 +291,12 @@ impl ReactionManager {
     }
 
     pub async fn stop_reaction(&self, id: String) -> Result<()> {
-        let reactions = self.reactions.read().await;
-        if let Some(reaction) = reactions.get(&id) {
+        let reaction = {
+            let reactions = self.reactions.read().await;
+            reactions.get(&id).cloned()
+        };
+
+        if let Some(reaction) = reaction {
             let status = reaction.status().await;
             is_operation_valid(&status, &Operation::Stop).map_err(|e| anyhow::anyhow!(e))?;
             reaction.stop().await?;
@@ -300,8 +308,12 @@ impl ReactionManager {
     }
 
     pub async fn get_reaction_status(&self, id: String) -> Result<ComponentStatus> {
-        let reactions = self.reactions.read().await;
-        if let Some(reaction) = reactions.get(&id) {
+        let reaction = {
+            let reactions = self.reactions.read().await;
+            reactions.get(&id).cloned()
+        };
+
+        if let Some(reaction) = reaction {
             Ok(reaction.status().await)
         } else {
             Err(anyhow::anyhow!("Reaction not found: {}", id))
@@ -309,8 +321,12 @@ impl ReactionManager {
     }
 
     pub async fn get_reaction(&self, id: String) -> Result<ReactionRuntime> {
-        let reactions = self.reactions.read().await;
-        if let Some(reaction) = reactions.get(&id) {
+        let reaction = {
+            let reactions = self.reactions.read().await;
+            reactions.get(&id).cloned()
+        };
+
+        if let Some(reaction) = reaction {
             let status = reaction.status().await;
             let config = reaction.get_config();
             let runtime = ReactionRuntime {
@@ -335,54 +351,56 @@ impl ReactionManager {
     /// # Parameters
     /// - `id`: The reaction ID to update
     /// - `config`: The new configuration
-    /// - `server_core`: Optional server core reference. Required if the reaction is currently running
+    /// - `query_subscriber`: Optional query subscriber. Required if the reaction is currently running
     ///   and needs to be restarted after the update.
     pub async fn update_reaction(
         &self,
         id: String,
         config: ReactionConfig,
-        server_core: Option<Arc<DrasiServerCore>>,
+        query_subscriber: Option<Arc<dyn QuerySubscriber>>,
     ) -> Result<()> {
-        let reactions = self.reactions.read().await;
-        if let Some(reaction) = reactions.get(&id) {
-            let status = reaction.status().await;
-            let was_running =
-                matches!(status, ComponentStatus::Running | ComponentStatus::Starting);
+        // Check status outside lock
+        let reaction = {
+            let reactions = self.reactions.read().await;
+            reactions.get(&id).cloned()
+        }
+        .ok_or_else(|| anyhow::anyhow!("Reaction not found: {}", id))?;
 
-            // If running, we need to stop it first
-            if was_running {
-                drop(reactions);
-                self.stop_reaction(id.clone()).await?;
-                // Re-acquire lock after stop
+        let status = reaction.status().await;
+        let was_running = matches!(status, ComponentStatus::Running | ComponentStatus::Starting);
+
+        // If running, we need to stop it first
+        if was_running {
+            self.stop_reaction(id.clone()).await?;
+
+            // Verify stopped state
+            let reaction_check = {
                 let reactions = self.reactions.read().await;
-                if let Some(reaction) = reactions.get(&id) {
-                    let status = reaction.status().await;
-                    is_operation_valid(&status, &Operation::Update)
-                        .map_err(|e| anyhow::anyhow!(e))?;
-                }
-                drop(reactions);
-            } else {
+                reactions.get(&id).cloned()
+            };
+
+            if let Some(reaction) = reaction_check {
+                let status = reaction.status().await;
                 is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
-                drop(reactions);
-            }
-
-            // For now, update means remove and re-add
-            self.delete_reaction(id.clone()).await?;
-            self.add_reaction(config).await?;
-
-            // If it was running, restart it
-            if was_running {
-                if let Some(core) = server_core {
-                    self.start_reaction(id, core).await?;
-                } else {
-                    return Err(anyhow::anyhow!(
-                        "Cannot restart reaction '{}' after update: server_core parameter required",
-                        id
-                    ));
-                }
             }
         } else {
-            return Err(anyhow::anyhow!("Reaction not found: {}", id));
+            is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
+        }
+
+        // For now, update means remove and re-add
+        self.delete_reaction(id.clone()).await?;
+        self.add_reaction(config).await?;
+
+        // If it was running, restart it
+        if was_running {
+            if let Some(subscriber) = query_subscriber {
+                self.start_reaction(id, subscriber).await?;
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Cannot restart reaction '{}' after update: query_subscriber parameter required",
+                    id
+                ));
+            }
         }
 
         Ok(())
@@ -430,12 +448,18 @@ impl ReactionManager {
     }
 
     pub async fn list_reactions(&self) -> Vec<(String, ComponentStatus)> {
-        let reactions = self.reactions.read().await;
-        let mut result = Vec::new();
+        let reactions_snapshot = {
+            let reactions = self.reactions.read().await;
+            reactions
+                .iter()
+                .map(|(id, r)| (id.clone(), r.clone()))
+                .collect::<Vec<_>>()
+        };
 
-        for (id, reaction) in reactions.iter() {
+        let mut result = Vec::new();
+        for (id, reaction) in reactions_snapshot {
             let status = reaction.status().await;
-            result.push((id.clone(), status));
+            result.push((id, status));
         }
 
         result
@@ -460,7 +484,8 @@ impl ReactionManager {
             let config = reaction.get_config();
             if config.auto_start {
                 info!("Auto-starting reaction: {}", id);
-                if let Err(e) = reaction.start(Arc::clone(&server_core)).await {
+                let subscriber: Arc<dyn QuerySubscriber> = server_core.clone();
+                if let Err(e) = reaction.start(subscriber).await {
                     error!("Failed to start reaction {}: {}", id, e);
                     failed_reactions.push((id.clone(), e.to_string()));
                     // Continue starting other reactions instead of returning early

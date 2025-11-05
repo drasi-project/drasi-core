@@ -23,6 +23,7 @@
 //! - Event reporting
 
 use anyhow::Result;
+use async_trait::async_trait;
 use log::{error, info, warn};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -32,7 +33,17 @@ use crate::channels::{
     ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, QueryResult,
 };
 use crate::config::ReactionConfig;
-use crate::server_core::DrasiServerCore;
+use crate::queries::Query;
+
+/// Trait for subscribing to queries without requiring full DrasiServerCore dependency.
+///
+/// This trait breaks the circular dependency between reactions and DrasiServerCore by
+/// providing a minimal interface for reactions to access queries.
+#[async_trait]
+pub trait QuerySubscriber: Send + Sync {
+    /// Get a query instance by ID
+    async fn get_query_instance(&self, id: &str) -> Result<Arc<dyn Query>>;
+}
 
 /// Base implementation for common reaction functionality
 pub struct ReactionBase {
@@ -102,27 +113,24 @@ impl ReactionBase {
     /// Subscribe to all configured queries and spawn forwarder tasks
     ///
     /// This method handles the common pattern of:
-    /// 1. Getting QueryManager from server_core
+    /// 1. Getting query instances via QuerySubscriber
     /// 2. Subscribing to each configured query
     /// 3. Spawning forwarder tasks to enqueue results to priority queue
     ///
     /// # Arguments
-    /// * `server_core` - Reference to DrasiServerCore for accessing QueryManager
+    /// * `query_subscriber` - Trait object providing access to query instances
     ///
     /// # Returns
     /// * `Ok(())` if all subscriptions succeeded
     /// * `Err(...)` if any subscription failed
-    pub async fn subscribe_to_queries(&self, server_core: Arc<DrasiServerCore>) -> Result<()> {
-        // Get QueryManager from server_core
-        let query_manager = server_core.query_manager();
-
+    pub async fn subscribe_to_queries(
+        &self,
+        query_subscriber: Arc<dyn QuerySubscriber>,
+    ) -> Result<()> {
         // Subscribe to all configured queries and spawn forwarder tasks
         for query_id in &self.config.queries {
-            // Get the query instance
-            let query = query_manager
-                .get_query_instance(query_id)
-                .await
-                .map_err(|e| anyhow::anyhow!(e))?;
+            // Get the query instance via QuerySubscriber
+            let query = query_subscriber.get_query_instance(query_id).await?;
 
             // Subscribe to the query
             let subscription_response = query

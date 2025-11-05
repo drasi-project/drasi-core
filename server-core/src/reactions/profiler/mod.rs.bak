@@ -24,6 +24,7 @@ use crate::config::ReactionConfig;
 use crate::profiling::ProfilingMetadata;
 use crate::reactions::base::ReactionBase;
 use crate::reactions::Reaction;
+use crate::server_core::DrasiServerCore;
 use crate::utils::log_component_start;
 
 /// Statistics for a specific metric
@@ -399,10 +400,7 @@ impl ProfilerReaction {
 
 #[async_trait]
 impl Reaction for ProfilerReaction {
-    async fn start(
-        &self,
-        query_subscriber: Arc<dyn crate::reactions::base::QuerySubscriber>,
-    ) -> Result<()> {
+    async fn start(&self, query_subscriber: Arc<dyn crate::reactions::base::QuerySubscriber>) -> Result<()> {
         log_component_start("Reaction", &self.base.config.id);
 
         // Transition to Starting
@@ -414,7 +412,7 @@ impl Reaction for ProfilerReaction {
             .await?;
 
         // Subscribe to all configured queries using ReactionBase
-        self.base.subscribe_to_queries(query_subscriber).await?;
+        self.base.subscribe_to_queries(server_core).await?;
 
         // Transition to Running
         self.base

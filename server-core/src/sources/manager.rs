@@ -199,8 +199,12 @@ impl SourceManager {
     }
 
     pub async fn start_source(&self, id: String) -> Result<()> {
-        let sources = self.sources.read().await;
-        if let Some(source) = sources.get(&id) {
+        let source = {
+            let sources = self.sources.read().await;
+            sources.get(&id).cloned()
+        };
+
+        if let Some(source) = source {
             let status = source.status().await;
             is_operation_valid(&status, &Operation::Start).map_err(|e| anyhow::anyhow!(e))?;
             source.start().await?;
@@ -212,8 +216,12 @@ impl SourceManager {
     }
 
     pub async fn stop_source(&self, id: String) -> Result<()> {
-        let sources = self.sources.read().await;
-        if let Some(source) = sources.get(&id) {
+        let source = {
+            let sources = self.sources.read().await;
+            sources.get(&id).cloned()
+        };
+
+        if let Some(source) = source {
             let status = source.status().await;
             is_operation_valid(&status, &Operation::Stop).map_err(|e| anyhow::anyhow!(e))?;
             source.stop().await?;
@@ -225,8 +233,12 @@ impl SourceManager {
     }
 
     pub async fn get_source_status(&self, id: String) -> Result<ComponentStatus> {
-        let sources = self.sources.read().await;
-        if let Some(source) = sources.get(&id) {
+        let source = {
+            let sources = self.sources.read().await;
+            sources.get(&id).cloned()
+        };
+
+        if let Some(source) = source {
             Ok(source.status().await)
         } else {
             Err(anyhow::anyhow!("Source not found: {}", id))
@@ -234,12 +246,18 @@ impl SourceManager {
     }
 
     pub async fn list_sources(&self) -> Vec<(String, ComponentStatus)> {
-        let sources = self.sources.read().await;
-        let mut result = Vec::new();
+        let sources: Vec<(String, Arc<dyn Source>)> = {
+            let sources = self.sources.read().await;
+            sources
+                .iter()
+                .map(|(id, source)| (id.clone(), source.clone()))
+                .collect()
+        };
 
-        for (id, source) in sources.iter() {
+        let mut result = Vec::new();
+        for (id, source) in sources {
             let status = source.status().await;
-            result.push((id.clone(), status));
+            result.push((id, status));
         }
 
         result
@@ -251,8 +269,12 @@ impl SourceManager {
     }
 
     pub async fn get_source(&self, id: String) -> Result<SourceRuntime> {
-        let sources = self.sources.read().await;
-        if let Some(source) = sources.get(&id) {
+        let source = {
+            let sources = self.sources.read().await;
+            sources.get(&id).cloned()
+        };
+
+        if let Some(source) = source {
             let status = source.status().await;
             let config = source.get_config();
             let runtime = SourceRuntime {
@@ -272,27 +294,33 @@ impl SourceManager {
     }
 
     pub async fn update_source(&self, id: String, config: SourceConfig) -> Result<()> {
-        let sources = self.sources.read().await;
-        if let Some(source) = sources.get(&id) {
+        let source = {
+            let sources = self.sources.read().await;
+            sources.get(&id).cloned()
+        };
+
+        if let Some(source) = source {
             let status = source.status().await;
             let was_running =
                 matches!(status, ComponentStatus::Running | ComponentStatus::Starting);
 
             // If running, we need to stop it first
             if was_running {
-                drop(sources);
                 self.stop_source(id.clone()).await?;
-                // Re-acquire lock after stop
-                let sources = self.sources.read().await;
-                if let Some(source) = sources.get(&id) {
+
+                // Re-check status after stop
+                let source = {
+                    let sources = self.sources.read().await;
+                    sources.get(&id).cloned()
+                };
+
+                if let Some(source) = source {
                     let status = source.status().await;
                     is_operation_valid(&status, &Operation::Update)
                         .map_err(|e| anyhow::anyhow!(e))?;
                 }
-                drop(sources);
             } else {
                 is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
-                drop(sources);
             }
 
             // For now, update means remove and re-add
@@ -353,10 +381,14 @@ impl SourceManager {
     }
 
     pub async fn start_all(&self) -> Result<()> {
-        let sources = self.sources.read().await;
+        let sources: Vec<Arc<dyn Source>> = {
+            let sources = self.sources.read().await;
+            sources.values().cloned().collect()
+        };
+
         let mut failed_sources = Vec::new();
 
-        for source in sources.values() {
+        for source in sources {
             let config = source.get_config();
             if config.auto_start {
                 info!("Auto-starting source: {}", config.id);
@@ -390,8 +422,12 @@ impl SourceManager {
     }
 
     pub async fn stop_all(&self) -> Result<()> {
-        let sources = self.sources.read().await;
-        for source in sources.values() {
+        let sources: Vec<Arc<dyn Source>> = {
+            let sources = self.sources.read().await;
+            sources.values().cloned().collect()
+        };
+
+        for source in sources {
             if let Err(e) = source.stop().await {
                 log_component_error("Source", &source.get_config().id, &e.to_string());
             }

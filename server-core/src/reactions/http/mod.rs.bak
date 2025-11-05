@@ -29,6 +29,7 @@ use crate::channels::{ComponentEventSender, ComponentStatus};
 use crate::config::ReactionConfig;
 use crate::reactions::base::ReactionBase;
 use crate::reactions::Reaction;
+use crate::server_core::DrasiServerCore;
 use crate::utils::log_component_start;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,10 +255,7 @@ impl HttpReaction {
 
 #[async_trait]
 impl Reaction for HttpReaction {
-    async fn start(
-        &self,
-        query_subscriber: Arc<dyn crate::reactions::base::QuerySubscriber>,
-    ) -> Result<()> {
+    async fn start(&self, query_subscriber: Arc<dyn crate::reactions::base::QuerySubscriber>) -> Result<()> {
         log_component_start("HTTP Reaction", &self.base.config.id);
 
         info!(
@@ -274,7 +272,7 @@ impl Reaction for HttpReaction {
             .await?;
 
         // Subscribe to all configured queries using ReactionBase
-        self.base.subscribe_to_queries(query_subscriber).await?;
+        self.base.subscribe_to_queries(server_core).await?;
 
         // Transition to Running
         self.base

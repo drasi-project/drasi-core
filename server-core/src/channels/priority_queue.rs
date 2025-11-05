@@ -17,6 +17,7 @@ use log::{debug, warn};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::fmt::Debug;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
 
@@ -69,14 +70,49 @@ where
     }
 }
 
-/// Metrics for monitoring priority queue performance
-#[derive(Debug, Clone, Default)]
+/// Metrics for monitoring priority queue performance (lock-free using atomics)
+#[derive(Debug)]
 pub struct PriorityQueueMetrics {
+    pub total_enqueued: AtomicU64,
+    pub total_dequeued: AtomicU64,
+    pub current_depth: AtomicUsize,
+    pub max_depth_seen: AtomicUsize,
+    pub drops_due_to_capacity: AtomicU64,
+}
+
+impl PriorityQueueMetrics {
+    /// Get a snapshot of the metrics as a MetricsSnapshot for easy access
+    pub fn snapshot(&self) -> MetricsSnapshot {
+        MetricsSnapshot {
+            total_enqueued: self.total_enqueued.load(AtomicOrdering::Relaxed),
+            total_dequeued: self.total_dequeued.load(AtomicOrdering::Relaxed),
+            current_depth: self.current_depth.load(AtomicOrdering::Relaxed),
+            max_depth_seen: self.max_depth_seen.load(AtomicOrdering::Relaxed),
+            drops_due_to_capacity: self.drops_due_to_capacity.load(AtomicOrdering::Relaxed),
+        }
+    }
+}
+
+/// Non-atomic snapshot of priority queue metrics for easy reading
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetricsSnapshot {
     pub total_enqueued: u64,
     pub total_dequeued: u64,
     pub current_depth: usize,
     pub max_depth_seen: usize,
     pub drops_due_to_capacity: u64,
+}
+
+impl Default for PriorityQueueMetrics {
+    fn default() -> Self {
+        Self {
+            total_enqueued: AtomicU64::new(0),
+            total_dequeued: AtomicU64::new(0),
+            current_depth: AtomicUsize::new(0),
+            max_depth_seen: AtomicUsize::new(0),
+            drops_due_to_capacity: AtomicU64::new(0),
+        }
+    }
 }
 
 /// Thread-safe generic priority queue for ordering events by timestamp
@@ -90,8 +126,8 @@ where
     notify: Arc<Notify>,
     /// Maximum queue capacity (for backpressure)
     max_capacity: usize,
-    /// Metrics
-    metrics: Arc<Mutex<PriorityQueueMetrics>>,
+    /// Metrics (using atomic operations for lock-free updates)
+    metrics: Arc<PriorityQueueMetrics>,
 }
 
 impl<T> PriorityQueue<T>
@@ -104,7 +140,7 @@ where
             heap: Arc::new(Mutex::new(BinaryHeap::new())),
             notify: Arc::new(Notify::new()),
             max_capacity,
-            metrics: Arc::new(Mutex::new(PriorityQueueMetrics::default())),
+            metrics: Arc::new(PriorityQueueMetrics::default()),
         }
     }
 
@@ -119,9 +155,9 @@ where
                 "Priority queue at capacity ({}), dropping event: {:?}",
                 self.max_capacity, event
             );
-            let mut metrics = self.metrics.lock().await;
-            metrics.drops_due_to_capacity += 1;
-            drop(metrics);
+            self.metrics
+                .drops_due_to_capacity
+                .fetch_add(1, AtomicOrdering::Relaxed);
             drop(heap);
             return false;
         }
@@ -129,14 +165,29 @@ where
         // Enqueue event
         heap.push(PriorityQueueEvent::new(event));
 
-        // Update metrics
-        let mut metrics = self.metrics.lock().await;
-        metrics.total_enqueued += 1;
-        metrics.current_depth = heap.len();
-        if metrics.current_depth > metrics.max_depth_seen {
-            metrics.max_depth_seen = metrics.current_depth;
+        // Update metrics using atomic operations (lock-free)
+        self.metrics
+            .total_enqueued
+            .fetch_add(1, AtomicOrdering::Relaxed);
+        let current_depth = heap.len();
+        self.metrics
+            .current_depth
+            .store(current_depth, AtomicOrdering::Relaxed);
+
+        // Update max_depth_seen if needed (using compare-exchange loop)
+        let mut max_seen = self.metrics.max_depth_seen.load(AtomicOrdering::Relaxed);
+        while current_depth > max_seen {
+            match self.metrics.max_depth_seen.compare_exchange_weak(
+                max_seen,
+                current_depth,
+                AtomicOrdering::Relaxed,
+                AtomicOrdering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(x) => max_seen = x,
+            }
         }
-        drop(metrics);
+
         drop(heap);
 
         // Notify waiting dequeuers
@@ -152,9 +203,12 @@ where
         let event = heap.pop().map(|pq_event| pq_event.event);
 
         if event.is_some() {
-            let mut metrics = self.metrics.lock().await;
-            metrics.total_dequeued += 1;
-            metrics.current_depth = heap.len();
+            self.metrics
+                .total_dequeued
+                .fetch_add(1, AtomicOrdering::Relaxed);
+            self.metrics
+                .current_depth
+                .store(heap.len(), AtomicOrdering::Relaxed);
         }
 
         event
@@ -167,10 +221,12 @@ where
             let mut heap = self.heap.lock().await;
             if let Some(pq_event) = heap.pop() {
                 let event = pq_event.event;
-                let mut metrics = self.metrics.lock().await;
-                metrics.total_dequeued += 1;
-                metrics.current_depth = heap.len();
-                drop(metrics);
+                self.metrics
+                    .total_dequeued
+                    .fetch_add(1, AtomicOrdering::Relaxed);
+                self.metrics
+                    .current_depth
+                    .store(heap.len(), AtomicOrdering::Relaxed);
                 drop(heap);
                 return event;
             }
@@ -194,15 +250,25 @@ where
     }
 
     /// Get current metrics snapshot
-    pub async fn metrics(&self) -> PriorityQueueMetrics {
-        let metrics = self.metrics.lock().await;
-        metrics.clone()
+    pub async fn metrics(&self) -> MetricsSnapshot {
+        self.metrics.snapshot()
     }
 
     /// Reset metrics
     pub async fn reset_metrics(&self) {
-        let mut metrics = self.metrics.lock().await;
-        *metrics = PriorityQueueMetrics::default();
+        self.metrics
+            .total_enqueued
+            .store(0, AtomicOrdering::Relaxed);
+        self.metrics
+            .total_dequeued
+            .store(0, AtomicOrdering::Relaxed);
+        self.metrics.current_depth.store(0, AtomicOrdering::Relaxed);
+        self.metrics
+            .max_depth_seen
+            .store(0, AtomicOrdering::Relaxed);
+        self.metrics
+            .drops_due_to_capacity
+            .store(0, AtomicOrdering::Relaxed);
     }
 
     /// Drain all events from the queue (for shutdown)
@@ -210,8 +276,7 @@ where
         let mut heap = self.heap.lock().await;
         let events: Vec<Arc<T>> = heap.drain().map(|pq_event| pq_event.event).collect();
 
-        let mut metrics = self.metrics.lock().await;
-        metrics.current_depth = 0;
+        self.metrics.current_depth.store(0, AtomicOrdering::Relaxed);
 
         debug!("Drained {} events from priority queue", events.len());
         events

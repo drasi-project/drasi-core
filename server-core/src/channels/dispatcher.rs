@@ -190,7 +190,7 @@ where
     }
 
     /// Create a new receiver for this dispatcher
-    fn create_receiver(&self) -> Result<Box<dyn ChangeReceiver<T>>>;
+    async fn create_receiver(&self) -> Result<Box<dyn ChangeReceiver<T>>>;
 }
 
 /// Trait for receiving changes from a dispatcher
@@ -237,7 +237,7 @@ where
         Ok(())
     }
 
-    fn create_receiver(&self) -> Result<Box<dyn ChangeReceiver<T>>> {
+    async fn create_receiver(&self) -> Result<Box<dyn ChangeReceiver<T>>> {
         let rx = self.tx.subscribe();
         Ok(Box::new(BroadcastChangeReceiver { rx }))
     }
@@ -310,14 +310,10 @@ where
         Ok(())
     }
 
-    fn create_receiver(&self) -> Result<Box<dyn ChangeReceiver<T>>> {
+    async fn create_receiver(&self) -> Result<Box<dyn ChangeReceiver<T>>> {
         // For channel mode, we can only create one receiver
         // Take the receiver out of the option
-        // NOTE: This blocking call is acceptable because:
-        // 1. It's only used during initialization, not in hot paths
-        // 2. The lock is held very briefly just to extract the receiver
-        // 3. Making this async would require changing the trait and all callers
-        let mut rx_opt = futures::executor::block_on(self.rx.lock());
+        let mut rx_opt = self.rx.lock().await;
         let rx = rx_opt.take().ok_or_else(|| {
             anyhow::anyhow!("Receiver already created for this channel dispatcher")
         })?;
@@ -360,7 +356,7 @@ mod tests {
     #[tokio::test]
     async fn test_broadcast_dispatcher_single_receiver() {
         let dispatcher = BroadcastChangeDispatcher::<TestMessage>::new(100);
-        let mut receiver = dispatcher.create_receiver().unwrap();
+        let mut receiver = dispatcher.create_receiver().await.unwrap();
 
         let msg = Arc::new(TestMessage {
             id: 1,
@@ -376,8 +372,8 @@ mod tests {
     #[tokio::test]
     async fn test_broadcast_dispatcher_multiple_receivers() {
         let dispatcher = BroadcastChangeDispatcher::<TestMessage>::new(100);
-        let mut receiver1 = dispatcher.create_receiver().unwrap();
-        let mut receiver2 = dispatcher.create_receiver().unwrap();
+        let mut receiver1 = dispatcher.create_receiver().await.unwrap();
+        let mut receiver2 = dispatcher.create_receiver().await.unwrap();
 
         let msg = Arc::new(TestMessage {
             id: 1,
@@ -396,7 +392,7 @@ mod tests {
     #[tokio::test]
     async fn test_broadcast_dispatcher_dispatch_changes() {
         let dispatcher = BroadcastChangeDispatcher::<TestMessage>::new(100);
-        let mut receiver = dispatcher.create_receiver().unwrap();
+        let mut receiver = dispatcher.create_receiver().await.unwrap();
 
         let messages = vec![
             Arc::new(TestMessage {
@@ -424,7 +420,7 @@ mod tests {
     #[tokio::test]
     async fn test_channel_dispatcher_single_receiver() {
         let dispatcher = ChannelChangeDispatcher::<TestMessage>::new(100);
-        let mut receiver = dispatcher.create_receiver().unwrap();
+        let mut receiver = dispatcher.create_receiver().await.unwrap();
 
         let msg = Arc::new(TestMessage {
             id: 1,
@@ -440,10 +436,10 @@ mod tests {
     #[tokio::test]
     async fn test_channel_dispatcher_only_one_receiver() {
         let dispatcher = ChannelChangeDispatcher::<TestMessage>::new(100);
-        let _receiver1 = dispatcher.create_receiver().unwrap();
+        let _receiver1 = dispatcher.create_receiver().await.unwrap();
 
         // Attempting to create a second receiver should fail
-        let result = dispatcher.create_receiver();
+        let result = dispatcher.create_receiver().await;
         assert!(result.is_err());
         if let Err(e) = result {
             assert!(e.to_string().contains("Receiver already created"));
@@ -453,7 +449,7 @@ mod tests {
     #[tokio::test]
     async fn test_channel_dispatcher_dispatch_changes() {
         let dispatcher = ChannelChangeDispatcher::<TestMessage>::new(100);
-        let mut receiver = dispatcher.create_receiver().unwrap();
+        let mut receiver = dispatcher.create_receiver().await.unwrap();
 
         let messages = vec![
             Arc::new(TestMessage {
@@ -478,7 +474,7 @@ mod tests {
     async fn test_broadcast_receiver_handles_lag() {
         // Create a small capacity broadcaster to force lag
         let dispatcher = BroadcastChangeDispatcher::<TestMessage>::new(2);
-        let mut receiver = dispatcher.create_receiver().unwrap();
+        let mut receiver = dispatcher.create_receiver().await.unwrap();
 
         // Send more messages than capacity without reading
         for i in 0..5 {

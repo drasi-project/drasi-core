@@ -106,6 +106,7 @@ impl Query for MockQuery {
         let receiver = self
             .dispatcher
             .create_receiver()
+            .await
             .map_err(|e| format!("Failed to create receiver: {}", e))?;
         Ok(QuerySubscriptionResponse {
             query_id: self.config.id.clone(),

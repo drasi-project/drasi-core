@@ -28,6 +28,7 @@ use crate::channels::{ComponentEventSender, ComponentStatus};
 use crate::config::ReactionConfig;
 use crate::reactions::base::ReactionBase;
 use crate::reactions::Reaction;
+use crate::server_core::DrasiServerCore;
 use crate::utils::log_component_start;
 
 /// SSE reaction exposes query results to browser clients via Server-Sent Events.
@@ -67,10 +68,7 @@ impl SseReaction {
 
 #[async_trait]
 impl Reaction for SseReaction {
-    async fn start(
-        &self,
-        query_subscriber: Arc<dyn crate::reactions::base::QuerySubscriber>,
-    ) -> anyhow::Result<()> {
+    async fn start(&self, query_subscriber: Arc<dyn crate::reactions::base::QuerySubscriber>) -> anyhow::Result<()> {
         log_component_start("SSE Reaction", &self.base.config.id);
 
         // Transition to Starting
@@ -82,7 +80,7 @@ impl Reaction for SseReaction {
             .await?;
 
         // Subscribe to all configured queries using ReactionBase
-        self.base.subscribe_to_queries(query_subscriber).await?;
+        self.base.subscribe_to_queries(server_core).await?;
 
         // Transition to Running
         self.base
