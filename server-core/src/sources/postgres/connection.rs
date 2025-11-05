@@ -524,7 +524,8 @@ fn compute_md5_password(user: &str, password: &str, salt: &[u8; 4]) -> String {
     // Convert to hex string
     let mut hex_hash = String::with_capacity(32);
     for byte in pass_user_hash.iter() {
-        write!(&mut hex_hash, "{:02x}", byte).unwrap();
+        // Writing to a String should never fail, but handle gracefully
+        let _ = write!(&mut hex_hash, "{:02x}", byte);
     }
 
     // Second MD5: hex_hash + salt
@@ -536,7 +537,8 @@ fn compute_md5_password(user: &str, password: &str, salt: &[u8; 4]) -> String {
     // Convert to hex string with "md5" prefix
     let mut result = String::from("md5");
     for byte in final_hash.iter() {
-        write!(&mut result, "{:02x}", byte).unwrap();
+        // Writing to a String should never fail, but handle gracefully
+        let _ = write!(&mut result, "{:02x}", byte);
     }
 
     result

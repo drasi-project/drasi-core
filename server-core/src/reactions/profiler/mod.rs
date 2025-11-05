@@ -184,7 +184,18 @@ impl ProfilingStats {
             return (0.0, 0.0, 0.0, 0.0, 0.0);
         }
 
-        values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        // Sort with NaN handling - NaN values are placed at the end
+        values.sort_by(|a, b| {
+            a.partial_cmp(b).unwrap_or_else(|| {
+                if a.is_nan() && b.is_nan() {
+                    std::cmp::Ordering::Equal
+                } else if a.is_nan() {
+                    std::cmp::Ordering::Greater // NaN goes to end
+                } else {
+                    std::cmp::Ordering::Less // b is NaN, goes to end
+                }
+            })
+        });
 
         let min = values[0];
         let max = values[values.len() - 1];

@@ -13,9 +13,14 @@
 // limitations under the License.
 
 pub mod adaptive_batcher;
+pub mod conversion;
 pub mod logging;
 pub mod state_validation;
+pub mod time;
 
 pub use adaptive_batcher::*;
 pub use logging::*;
 pub use state_validation::*;
+
+#[cfg(test)]
+mod tests;

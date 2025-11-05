@@ -77,10 +77,14 @@ pub fn convert_direct_to_source_change(
     // Get timestamp or use current time in nanoseconds
     let get_timestamp = |ts: Option<u64>| -> u64 {
         ts.unwrap_or_else(|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos() as u64
+            crate::utils::time::get_system_time_nanos().unwrap_or_else(|e| {
+                log::warn!(
+                    "Failed to get system time for HTTP event: {}, using fallback",
+                    e
+                );
+                // Use current milliseconds * 1M as fallback
+                (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
+            })
         })
     };
 

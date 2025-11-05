@@ -303,8 +303,14 @@ pub enum OutputDestination {
 pub fn timestamp_ns() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("System time is before UNIX epoch")
-        .as_nanos() as u64
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or_else(|e| {
+            log::warn!(
+                "System time before UNIX epoch in profiling: {:?}, using 0",
+                e
+            );
+            0 // Use 0 for profiling when system time is invalid
+        })
 }
 
 /// Convert nanoseconds to milliseconds with decimal precision

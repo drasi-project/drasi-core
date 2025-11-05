@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use rand::Rng;
 use sha2::{Digest, Sha256};
@@ -106,10 +106,13 @@ impl ScramClient {
         self.auth_message = Some(auth_message.clone());
 
         // Calculate proof
-        let salted_password = pbkdf2_sha256(self.password.as_bytes(), salt, iterations);
-        let client_key = hmac_sha256(&salted_password, b"Client Key");
+        let salted_password = pbkdf2_sha256(self.password.as_bytes(), salt, iterations)
+            .context("Failed to derive salted password with PBKDF2")?;
+        let client_key = hmac_sha256(&salted_password, b"Client Key")
+            .context("Failed to calculate client key")?;
         let stored_key = sha256(&client_key);
-        let client_signature = hmac_sha256(&stored_key, auth_message.as_bytes());
+        let client_signature = hmac_sha256(&stored_key, auth_message.as_bytes())
+            .context("Failed to calculate client signature")?;
         let client_proof = xor_bytes(&client_key, &client_signature);
 
         // Build final message
@@ -139,9 +142,12 @@ impl ScramClient {
                 .iterations
                 .ok_or_else(|| anyhow!("Iterations not set"))?;
 
-            let salted_password = pbkdf2_sha256(self.password.as_bytes(), salt, iterations);
-            let server_key = hmac_sha256(&salted_password, b"Server Key");
-            let expected_sig = hmac_sha256(&server_key, auth_message.as_bytes());
+            let salted_password = pbkdf2_sha256(self.password.as_bytes(), salt, iterations)
+                .context("Failed to derive salted password for verification")?;
+            let server_key = hmac_sha256(&salted_password, b"Server Key")
+                .context("Failed to calculate server key")?;
+            let expected_sig = hmac_sha256(&server_key, auth_message.as_bytes())
+                .context("Failed to calculate expected server signature")?;
 
             let server_sig = BASE64.decode(server_sig_b64)?;
             if server_sig != expected_sig {
@@ -178,19 +184,21 @@ fn parse_scram_message(message: &str) -> Result<HashMap<String, String>> {
     Ok(params)
 }
 
-fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32) -> Vec<u8> {
+fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32) -> Result<Vec<u8>> {
     let mut result = vec![0u8; 32];
-    pbkdf2::pbkdf2::<hmac::Hmac<sha2::Sha256>>(password, salt, iterations, &mut result).unwrap();
-    result
+    pbkdf2::pbkdf2::<hmac::Hmac<sha2::Sha256>>(password, salt, iterations, &mut result)
+        .map_err(|e| anyhow::anyhow!("PBKDF2 failed: {:?}", e))?;
+    Ok(result)
 }
 
-fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
+fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<Vec<u8>> {
     use hmac::{Hmac, Mac};
     type HmacSha256 = Hmac<Sha256>;
 
-    let mut mac = HmacSha256::new_from_slice(key).unwrap();
+    let mut mac = HmacSha256::new_from_slice(key)
+        .map_err(|e| anyhow::anyhow!("Invalid HMAC key length: {}", e))?;
     mac.update(data);
-    mac.finalize().into_bytes().to_vec()
+    Ok(mac.finalize().into_bytes().to_vec())
 }
 
 fn sha256(data: &[u8]) -> Vec<u8> {

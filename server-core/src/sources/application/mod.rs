@@ -21,7 +21,7 @@ pub use property_builder::PropertyMapBuilder;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use log::{debug, info};
+use log::{debug, info, warn};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
@@ -284,6 +284,16 @@ impl ApplicationSourceHandle {
         labels: Vec<impl Into<Arc<str>>>,
         properties: drasi_core::models::ElementPropertyMap,
     ) -> Result<()> {
+        let effective_from =
+            crate::utils::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
+                warn!(
+                    "Failed to get timestamp for node insert: {}, using fallback",
+                    e
+                );
+                // Use current milliseconds * 1M as fallback
+                (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
+            });
+
         let element = Element::Node {
             metadata: ElementMetadata {
                 reference: ElementReference {
@@ -291,7 +301,7 @@ impl ApplicationSourceHandle {
                     element_id: element_id.into(),
                 },
                 labels: Arc::from(labels.into_iter().map(|l| l.into()).collect::<Vec<_>>()),
-                effective_from: chrono::Utc::now().timestamp_nanos_opt().unwrap() as u64,
+                effective_from,
             },
             properties,
         };
@@ -324,6 +334,16 @@ impl ApplicationSourceHandle {
         labels: Vec<impl Into<Arc<str>>>,
         properties: drasi_core::models::ElementPropertyMap,
     ) -> Result<()> {
+        let effective_from =
+            crate::utils::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
+                warn!(
+                    "Failed to get timestamp for node update: {}, using fallback",
+                    e
+                );
+                // Use current milliseconds * 1M as fallback
+                (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
+            });
+
         let element = Element::Node {
             metadata: ElementMetadata {
                 reference: ElementReference {
@@ -331,7 +351,7 @@ impl ApplicationSourceHandle {
                     element_id: element_id.into(),
                 },
                 labels: Arc::from(labels.into_iter().map(|l| l.into()).collect::<Vec<_>>()),
-                effective_from: chrono::Utc::now().timestamp_nanos_opt().unwrap() as u64,
+                effective_from,
             },
             properties,
         };
@@ -361,13 +381,20 @@ impl ApplicationSourceHandle {
         element_id: impl Into<Arc<str>>,
         labels: Vec<impl Into<Arc<str>>>,
     ) -> Result<()> {
+        let effective_from =
+            crate::utils::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
+                warn!("Failed to get timestamp for delete: {}, using fallback", e);
+                // Use current milliseconds * 1M as fallback
+                (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
+            });
+
         let metadata = ElementMetadata {
             reference: ElementReference {
                 source_id: Arc::from(self.source_id.as_str()),
                 element_id: element_id.into(),
             },
             labels: Arc::from(labels.into_iter().map(|l| l.into()).collect::<Vec<_>>()),
-            effective_from: chrono::Utc::now().timestamp_nanos_opt().unwrap() as u64,
+            effective_from,
         };
 
         self.send(SourceChange::Delete { metadata }).await
@@ -427,6 +454,16 @@ impl ApplicationSourceHandle {
         start_node_id: impl Into<Arc<str>>,
         end_node_id: impl Into<Arc<str>>,
     ) -> Result<()> {
+        let effective_from =
+            crate::utils::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
+                warn!(
+                    "Failed to get timestamp for relation insert: {}, using fallback",
+                    e
+                );
+                // Use current milliseconds * 1M as fallback
+                (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
+            });
+
         let element = Element::Relation {
             metadata: ElementMetadata {
                 reference: ElementReference {
@@ -434,7 +471,7 @@ impl ApplicationSourceHandle {
                     element_id: element_id.into(),
                 },
                 labels: Arc::from(labels.into_iter().map(|l| l.into()).collect::<Vec<_>>()),
-                effective_from: chrono::Utc::now().timestamp_nanos_opt().unwrap() as u64,
+                effective_from,
             },
             properties,
             in_node: ElementReference {

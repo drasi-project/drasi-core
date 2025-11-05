@@ -335,22 +335,63 @@ impl Source for AdaptiveHttpSource {
         let host_clone = host.clone();
 
         // Start server
+        let (error_tx, error_rx) = tokio::sync::oneshot::channel();
         let server_handle = tokio::spawn(async move {
             let addr = format!("{}:{}", host, port);
-            info!("[{}] Adaptive HTTP source listening on {}", source_id, addr);
+            info!(
+                "[{}] Adaptive HTTP source attempting to bind to {}",
+                source_id, addr
+            );
 
-            let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-            axum::serve(listener, app)
+            // Try to bind with error handling
+            let listener = match tokio::net::TcpListener::bind(&addr).await {
+                Ok(listener) => {
+                    info!(
+                        "[{}] Adaptive HTTP source successfully listening on {}",
+                        source_id, addr
+                    );
+                    listener
+                }
+                Err(e) => {
+                    error!(
+                        "[{}] Failed to bind HTTP server to {}: {}",
+                        source_id, addr, e
+                    );
+                    // Send error back to parent task
+                    let _ = error_tx.send(format!(
+                        "Failed to bind HTTP server to {}: {}. Common causes: port already in use, insufficient permissions",
+                        addr, e
+                    ));
+                    return;
+                }
+            };
+
+            // Run the server with error handling
+            if let Err(e) = axum::serve(listener, app)
                 .with_graceful_shutdown(async move {
                     let _ = shutdown_rx.await;
                 })
                 .await
-                .unwrap();
+            {
+                error!("[{}] HTTP server error: {}", source_id, e);
+            }
         });
 
         *self.base.task_handle.write().await = Some(server_handle);
         *self.base.shutdown_tx.write().await = Some(shutdown_tx);
-        self.base.set_status(ComponentStatus::Running).await;
+
+        // Check for startup errors with a short timeout
+        match timeout(Duration::from_millis(500), error_rx).await {
+            Ok(Ok(error_msg)) => {
+                // Server failed to start
+                self.base.set_status(ComponentStatus::Error).await;
+                return Err(anyhow::anyhow!("{}", error_msg));
+            }
+            _ => {
+                // No error within timeout, assume successful start
+                self.base.set_status(ComponentStatus::Running).await;
+            }
+        }
 
         // Send running event
         self.base
