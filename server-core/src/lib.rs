@@ -32,6 +32,12 @@ pub mod bootstrap;
 #[cfg_attr(not(test), doc(hidden))]
 pub mod channels;
 #[cfg_attr(not(test), doc(hidden))]
+pub mod component_ops;
+#[cfg_attr(not(test), doc(hidden))]
+pub mod inspection;
+#[cfg_attr(not(test), doc(hidden))]
+pub mod lifecycle;
+#[cfg_attr(not(test), doc(hidden))]
 pub mod queries;
 #[cfg_attr(not(test), doc(hidden))]
 pub mod reactions;
@@ -41,6 +47,8 @@ pub mod routers;
 pub mod server_core;
 #[cfg_attr(not(test), doc(hidden))]
 pub mod sources;
+#[cfg_attr(not(test), doc(hidden))]
+pub mod state_guard;
 #[cfg_attr(not(test), doc(hidden))]
 pub mod utils;
 

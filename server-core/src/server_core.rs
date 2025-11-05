@@ -13,19 +13,22 @@
 // limitations under the License.
 
 use anyhow::{anyhow, Result};
-use log::{error, info, warn};
-use std::collections::HashSet;
+use log::{info, warn};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::api::{DrasiError, HandleRegistry};
-use crate::channels::{ComponentStatus, *};
+use crate::channels::*;
+use crate::component_ops::{map_component_error, map_state_error};
 use crate::config::{DrasiServerCoreConfig, RuntimeConfig};
+use crate::inspection::InspectionAPI;
+use crate::lifecycle::{ComponentsRunningState, LifecycleManager};
 use crate::queries::QueryManager;
 use crate::reactions::ApplicationReactionHandle;
 use crate::reactions::ReactionManager;
 use crate::sources::{ApplicationSourceHandle, SourceManager};
+use crate::state_guard::StateGuard;
 
 /// Core Drasi Server for continuous query processing
 ///
@@ -199,14 +202,16 @@ pub struct DrasiServerCore {
     source_manager: Arc<SourceManager>,
     query_manager: Arc<QueryManager>,
     reaction_manager: Arc<ReactionManager>,
-    #[allow(dead_code)]
-    event_receivers: Option<EventReceivers>,
     running: Arc<RwLock<bool>>,
-    initialized: Arc<RwLock<bool>>,
+    state_guard: StateGuard,
     // Track components that were running before server stop
     components_running_before_stop: Arc<RwLock<ComponentsRunningState>>,
     // Handle registry for application sources and reactions
     handle_registry: HandleRegistry,
+    // Inspection API for querying server state
+    inspection: InspectionAPI,
+    // Lifecycle manager for orchestrating component lifecycle
+    lifecycle: Arc<RwLock<LifecycleManager>>,
 }
 
 impl Clone for DrasiServerCore {
@@ -216,20 +221,14 @@ impl Clone for DrasiServerCore {
             source_manager: Arc::clone(&self.source_manager),
             query_manager: Arc::clone(&self.query_manager),
             reaction_manager: Arc::clone(&self.reaction_manager),
-            event_receivers: None, // Don't clone receivers - they're not used after initialization
             running: Arc::clone(&self.running),
-            initialized: Arc::clone(&self.initialized),
+            state_guard: self.state_guard.clone(),
             components_running_before_stop: Arc::clone(&self.components_running_before_stop),
             handle_registry: self.handle_registry.clone(),
+            inspection: self.inspection.clone(),
+            lifecycle: Arc::clone(&self.lifecycle),
         }
     }
-}
-
-#[derive(Default, Clone)]
-struct ComponentsRunningState {
-    sources: HashSet<String>,
-    queries: HashSet<String>,
-    reactions: HashSet<String>,
 }
 
 impl DrasiServerCore {
@@ -247,25 +246,45 @@ impl DrasiServerCore {
 
         let reaction_manager = Arc::new(ReactionManager::new(channels.component_event_tx.clone()));
 
+        let state_guard = StateGuard::new();
+
+        let inspection = InspectionAPI::new(
+            source_manager.clone(),
+            query_manager.clone(),
+            reaction_manager.clone(),
+            state_guard.clone(),
+            config.clone(),
+        );
+
+        let components_running_before_stop = Arc::new(RwLock::new(ComponentsRunningState::default()));
+
+        let lifecycle = Arc::new(RwLock::new(LifecycleManager::new(
+            config.clone(),
+            source_manager.clone(),
+            query_manager.clone(),
+            reaction_manager.clone(),
+            components_running_before_stop.clone(),
+            Some(receivers),
+        )));
+
         Self {
             config,
             source_manager,
             query_manager,
             reaction_manager,
-            event_receivers: Some(receivers),
             running: Arc::new(RwLock::new(false)),
-            initialized: Arc::new(RwLock::new(false)),
-            components_running_before_stop: Arc::new(
-                RwLock::new(ComponentsRunningState::default()),
-            ),
+            state_guard,
+            components_running_before_stop,
             handle_registry: HandleRegistry::new(),
+            inspection,
+            lifecycle,
         }
     }
 
     /// Internal initialization - performs one-time setup
     /// This is called internally by builder and config loaders
     pub(crate) async fn initialize(&mut self) -> Result<()> {
-        let already_initialized = *self.initialized.read().await;
+        let already_initialized = self.state_guard.is_initialized().await;
         if already_initialized {
             info!("Server already initialized, skipping initialization");
             return Ok(());
@@ -274,12 +293,16 @@ impl DrasiServerCore {
         info!("Initializing Drasi Server Core");
 
         // Load configuration
-        self.load_configuration().await?;
+        let lifecycle = self.lifecycle.read().await;
+        lifecycle.load_configuration().await?;
+        drop(lifecycle);
 
         // Start event processors (one-time)
-        self.start_event_processors().await;
+        let mut lifecycle = self.lifecycle.write().await;
+        lifecycle.start_event_processors().await;
+        drop(lifecycle);
 
-        *self.initialized.write().await = true;
+        self.state_guard.mark_initialized().await;
         info!("Drasi Server Core initialized successfully");
         Ok(())
     }
@@ -325,12 +348,15 @@ impl DrasiServerCore {
         info!("Starting Drasi Server Core");
 
         // Ensure initialized
-        if !*self.initialized.read().await {
+        if !self.state_guard.is_initialized().await {
             return Err(anyhow!("Server must be initialized before starting"));
         }
 
         // Start all configured components
-        self.start_components().await?;
+        let lifecycle = self.lifecycle.read().await;
+        lifecycle
+            .start_components(Arc::new(self.clone()))
+            .await?;
 
         *running = true;
         info!("Drasi Server Core started successfully");
@@ -378,10 +404,11 @@ impl DrasiServerCore {
         info!("Stopping Drasi Server Core");
 
         // Save running component state before stopping
-        self.save_running_components_state().await?;
+        let lifecycle = self.lifecycle.read().await;
+        lifecycle.save_running_components_state().await?;
 
         // Stop all components
-        self.stop_all_components().await?;
+        lifecycle.stop_all_components().await?;
 
         *running = false;
         info!("Drasi Server Core stopped successfully");
@@ -582,11 +609,7 @@ impl DrasiServerCore {
         &self,
         source: crate::config::SourceConfig,
     ) -> crate::api::Result<()> {
-        if !*self.initialized.read().await {
-            return Err(DrasiError::invalid_state(
-                "Cannot add source to uninitialized server",
-            ));
-        }
+        self.state_guard.require_initialized().await?;
 
         // Create source with auto-start enabled if requested
         self.create_source_with_options(source, true)
@@ -613,11 +636,7 @@ impl DrasiServerCore {
     /// # }
     /// ```
     pub async fn create_query(&self, query: crate::config::QueryConfig) -> crate::api::Result<()> {
-        if !*self.initialized.read().await {
-            return Err(DrasiError::invalid_state(
-                "Cannot add query to uninitialized server",
-            ));
-        }
+        self.state_guard.require_initialized().await?;
 
         // Create query with auto-start enabled if requested
         self.create_query_with_options(query, true)
@@ -646,11 +665,7 @@ impl DrasiServerCore {
         &self,
         reaction: crate::config::ReactionConfig,
     ) -> crate::api::Result<()> {
-        if !*self.initialized.read().await {
-            return Err(DrasiError::invalid_state(
-                "Cannot add reaction to uninitialized server",
-            ));
-        }
+        self.state_guard.require_initialized().await?;
 
         // Create reaction with auto-start enabled if requested
         self.create_reaction_with_options(reaction, true)
@@ -671,11 +686,7 @@ impl DrasiServerCore {
     /// # }
     /// ```
     pub async fn remove_source(&self, id: &str) -> crate::api::Result<()> {
-        if !*self.initialized.read().await {
-            return Err(DrasiError::invalid_state(
-                "Cannot remove source from uninitialized server",
-            ));
-        }
+        self.state_guard.require_initialized().await?;
 
         // Stop if running
         let status = self
@@ -711,11 +722,7 @@ impl DrasiServerCore {
     /// # }
     /// ```
     pub async fn remove_query(&self, id: &str) -> crate::api::Result<()> {
-        if !*self.initialized.read().await {
-            return Err(DrasiError::invalid_state(
-                "Cannot remove query from uninitialized server",
-            ));
-        }
+        self.state_guard.require_initialized().await?;
 
         // Stop if running
         let status = self
@@ -751,11 +758,7 @@ impl DrasiServerCore {
     /// # }
     /// ```
     pub async fn remove_reaction(&self, id: &str) -> crate::api::Result<()> {
-        if !*self.initialized.read().await {
-            return Err(DrasiError::invalid_state(
-                "Cannot remove reaction from uninitialized server",
-            ));
-        }
+        self.state_guard.require_initialized().await?;
 
         // Stop if running
         let status = self
@@ -797,26 +800,14 @@ impl DrasiServerCore {
     /// # }
     /// ```
     pub async fn start_source(&self, id: &str) -> crate::api::Result<()> {
-        if !*self.initialized.read().await {
-            return Err(DrasiError::invalid_state(
-                "Cannot start source on uninitialized server",
-            ));
-        }
+        self.state_guard.require_initialized().await?;
 
-        self.source_manager
-            .start_source(id.to_string())
-            .await
-            .map_err(|e| {
-                if e.to_string().contains("not found") {
-                    DrasiError::component_not_found("source", id)
-                } else {
-                    DrasiError::component_error(
-                        "source",
-                        id,
-                        format!("Failed to start source: {}", e),
-                    )
-                }
-            })
+        map_component_error(
+            self.source_manager.start_source(id.to_string()).await,
+            "source",
+            id,
+            "start",
+        )
     }
 
     /// Stop a running source
@@ -830,26 +821,14 @@ impl DrasiServerCore {
     /// # }
     /// ```
     pub async fn stop_source(&self, id: &str) -> crate::api::Result<()> {
-        if !*self.initialized.read().await {
-            return Err(DrasiError::invalid_state(
-                "Cannot stop source on uninitialized server",
-            ));
-        }
+        self.state_guard.require_initialized().await?;
 
-        self.source_manager
-            .stop_source(id.to_string())
-            .await
-            .map_err(|e| {
-                if e.to_string().contains("not found") {
-                    DrasiError::component_not_found("source", id)
-                } else {
-                    DrasiError::component_error(
-                        "source",
-                        id,
-                        format!("Failed to stop source: {}", e),
-                    )
-                }
-            })
+        map_component_error(
+            self.source_manager.stop_source(id.to_string()).await,
+            "source",
+            id,
+            "stop",
+        )
     }
 
     /// Start a stopped query
@@ -865,11 +844,7 @@ impl DrasiServerCore {
     /// # }
     /// ```
     pub async fn start_query(&self, id: &str) -> crate::api::Result<()> {
-        if !*self.initialized.read().await {
-            return Err(DrasiError::invalid_state(
-                "Cannot start query on uninitialized server",
-            ));
-        }
+        self.state_guard.require_initialized().await?;
 
         // Get the query config to determine which sources it needs
         // Verify query exists
@@ -880,16 +855,11 @@ impl DrasiServerCore {
             .ok_or_else(|| DrasiError::component_not_found("query", id))?;
 
         // Query will subscribe directly to sources when started
-        self.query_manager
-            .start_query(id.to_string())
-            .await
-            .map_err(|e| {
-                if e.to_string().contains("not found") {
-                    DrasiError::component_not_found("query", id)
-                } else {
-                    DrasiError::invalid_state(e.to_string())
-                }
-            })
+        map_state_error(
+            self.query_manager.start_query(id.to_string()).await,
+            "query",
+            id,
+        )
     }
 
     /// Stop a running query
@@ -903,23 +873,14 @@ impl DrasiServerCore {
     /// # }
     /// ```
     pub async fn stop_query(&self, id: &str) -> crate::api::Result<()> {
-        if !*self.initialized.read().await {
-            return Err(DrasiError::invalid_state(
-                "Cannot stop query on uninitialized server",
-            ));
-        }
+        self.state_guard.require_initialized().await?;
 
         // Stop the query first
-        self.query_manager
-            .stop_query(id.to_string())
-            .await
-            .map_err(|e| {
-                if e.to_string().contains("not found") {
-                    DrasiError::component_not_found("query", id)
-                } else {
-                    DrasiError::invalid_state(e.to_string())
-                }
-            })?;
+        map_state_error(
+            self.query_manager.stop_query(id.to_string()).await,
+            "query",
+            id,
+        )?;
 
         // Query unsubscribes from sources automatically when stopped
 
@@ -939,11 +900,7 @@ impl DrasiServerCore {
     /// # }
     /// ```
     pub async fn start_reaction(&self, id: &str) -> crate::api::Result<()> {
-        if !*self.initialized.read().await {
-            return Err(DrasiError::invalid_state(
-                "Cannot start reaction on uninitialized server",
-            ));
-        }
+        self.state_guard.require_initialized().await?;
 
         // Get the reaction config to determine which queries it subscribes to
         let _config = self
@@ -953,16 +910,13 @@ impl DrasiServerCore {
             .ok_or_else(|| DrasiError::component_not_found("reaction", id))?;
 
         // Start the reaction with server core reference for query subscriptions
-        self.reaction_manager
-            .start_reaction(id.to_string(), Arc::new(self.clone()))
-            .await
-            .map_err(|e| {
-                if e.to_string().contains("not found") {
-                    DrasiError::component_not_found("reaction", id)
-                } else {
-                    DrasiError::invalid_state(e.to_string())
-                }
-            })
+        map_state_error(
+            self.reaction_manager
+                .start_reaction(id.to_string(), Arc::new(self.clone()))
+                .await,
+            "reaction",
+            id,
+        )
     }
 
     /// Stop a running reaction
@@ -976,23 +930,14 @@ impl DrasiServerCore {
     /// # }
     /// ```
     pub async fn stop_reaction(&self, id: &str) -> crate::api::Result<()> {
-        if !*self.initialized.read().await {
-            return Err(DrasiError::invalid_state(
-                "Cannot stop reaction on uninitialized server",
-            ));
-        }
+        self.state_guard.require_initialized().await?;
 
         // Stop the reaction - subscriptions are managed by the reaction itself
-        self.reaction_manager
-            .stop_reaction(id.to_string())
-            .await
-            .map_err(|e| {
-                if e.to_string().contains("not found") {
-                    DrasiError::component_not_found("reaction", id)
-                } else {
-                    DrasiError::invalid_state(e.to_string())
-                }
-            })?;
+        map_state_error(
+            self.reaction_manager.stop_reaction(id.to_string()).await,
+            "reaction",
+            id,
+        )?;
 
         Ok(())
     }
@@ -1013,12 +958,7 @@ impl DrasiServerCore {
     pub async fn list_sources(
         &self,
     ) -> crate::api::Result<Vec<(String, crate::channels::ComponentStatus)>> {
-        if !*self.initialized.read().await {
-            return Err(DrasiError::invalid_state(
-                "Cannot list sources from uninitialized server",
-            ));
-        }
-        Ok(self.source_manager.list_sources().await)
+        self.inspection.list_sources().await
     }
 
     /// Get detailed information about a specific source
@@ -1037,15 +977,7 @@ impl DrasiServerCore {
         &self,
         id: &str,
     ) -> crate::api::Result<crate::config::SourceRuntime> {
-        if !*self.initialized.read().await {
-            return Err(DrasiError::invalid_state(
-                "Cannot get source info from uninitialized server",
-            ));
-        }
-        self.source_manager
-            .get_source(id.to_string())
-            .await
-            .map_err(|_e| DrasiError::component_not_found("source", id))
+        self.inspection.get_source_info(id).await
     }
 
     /// Get the current status of a specific source
@@ -1063,15 +995,7 @@ impl DrasiServerCore {
         &self,
         id: &str,
     ) -> crate::api::Result<crate::channels::ComponentStatus> {
-        if !*self.initialized.read().await {
-            return Err(DrasiError::invalid_state(
-                "Cannot get source status from uninitialized server",
-            ));
-        }
-        self.source_manager
-            .get_source_status(id.to_string())
-            .await
-            .map_err(|_| DrasiError::component_not_found("source", id))
+        self.inspection.get_source_status(id).await
     }
 
     /// Get the full configuration for a specific source
@@ -1092,15 +1016,7 @@ impl DrasiServerCore {
         &self,
         id: &str,
     ) -> crate::api::Result<crate::config::SourceConfig> {
-        if !*self.initialized.read().await {
-            return Err(DrasiError::invalid_state(
-                "Cannot get source config from uninitialized server",
-            ));
-        }
-        self.source_manager
-            .get_source_config(id)
-            .await
-            .ok_or_else(|| DrasiError::component_not_found("source", id))
+        self.inspection.get_source_config(id).await
     }
 
     /// List all queries with their current status
@@ -1119,12 +1035,7 @@ impl DrasiServerCore {
     pub async fn list_queries(
         &self,
     ) -> crate::api::Result<Vec<(String, crate::channels::ComponentStatus)>> {
-        if !*self.initialized.read().await {
-            return Err(DrasiError::invalid_state(
-                "Cannot list queries from uninitialized server",
-            ));
-        }
-        Ok(self.query_manager.list_queries().await)
+        self.inspection.list_queries().await
     }
 
     /// Get detailed information about a specific query
@@ -1144,15 +1055,7 @@ impl DrasiServerCore {
         &self,
         id: &str,
     ) -> crate::api::Result<crate::config::QueryRuntime> {
-        if !*self.initialized.read().await {
-            return Err(DrasiError::invalid_state(
-                "Cannot get query info from uninitialized server",
-            ));
-        }
-        self.query_manager
-            .get_query(id.to_string())
-            .await
-            .map_err(|_e| DrasiError::component_not_found("query", id))
+        self.inspection.get_query_info(id).await
     }
 
     /// Get the current status of a specific query
@@ -1170,15 +1073,7 @@ impl DrasiServerCore {
         &self,
         id: &str,
     ) -> crate::api::Result<crate::channels::ComponentStatus> {
-        if !*self.initialized.read().await {
-            return Err(DrasiError::invalid_state(
-                "Cannot get query status from uninitialized server",
-            ));
-        }
-        self.query_manager
-            .get_query_status(id.to_string())
-            .await
-            .map_err(|_| DrasiError::component_not_found("query", id))
+        self.inspection.get_query_status(id).await
     }
 
     /// Get the current result set for a running query
@@ -1193,20 +1088,7 @@ impl DrasiServerCore {
     /// # }
     /// ```
     pub async fn get_query_results(&self, id: &str) -> crate::api::Result<Vec<serde_json::Value>> {
-        if !*self.initialized.read().await {
-            return Err(DrasiError::invalid_state(
-                "Cannot get query results from uninitialized server",
-            ));
-        }
-        self.query_manager.get_query_results(id).await.map_err(|e| {
-            if e.to_string().contains("not found") {
-                DrasiError::component_not_found("query", id)
-            } else if e.to_string().contains("not running") {
-                DrasiError::invalid_state(format!("Query '{}' is not running", id))
-            } else {
-                DrasiError::initialization(e.to_string())
-            }
-        })
+        self.inspection.get_query_results(id).await
     }
 
     /// Get the full configuration for a specific query
@@ -1227,15 +1109,7 @@ impl DrasiServerCore {
         &self,
         id: &str,
     ) -> crate::api::Result<crate::config::QueryConfig> {
-        if !*self.initialized.read().await {
-            return Err(DrasiError::invalid_state(
-                "Cannot get query config from uninitialized server",
-            ));
-        }
-        self.query_manager
-            .get_query_config(id)
-            .await
-            .ok_or_else(|| DrasiError::component_not_found("query", id))
+        self.inspection.get_query_config(id).await
     }
 
     /// List all reactions with their current status
@@ -1254,12 +1128,7 @@ impl DrasiServerCore {
     pub async fn list_reactions(
         &self,
     ) -> crate::api::Result<Vec<(String, crate::channels::ComponentStatus)>> {
-        if !*self.initialized.read().await {
-            return Err(DrasiError::invalid_state(
-                "Cannot list reactions from uninitialized server",
-            ));
-        }
-        Ok(self.reaction_manager.list_reactions().await)
+        self.inspection.list_reactions().await
     }
 
     /// Get detailed information about a specific reaction
@@ -1279,15 +1148,7 @@ impl DrasiServerCore {
         &self,
         id: &str,
     ) -> crate::api::Result<crate::config::ReactionRuntime> {
-        if !*self.initialized.read().await {
-            return Err(DrasiError::invalid_state(
-                "Cannot get reaction info from uninitialized server",
-            ));
-        }
-        self.reaction_manager
-            .get_reaction(id.to_string())
-            .await
-            .map_err(|_e| DrasiError::component_not_found("reaction", id))
+        self.inspection.get_reaction_info(id).await
     }
 
     /// Get the current status of a specific reaction
@@ -1305,15 +1166,7 @@ impl DrasiServerCore {
         &self,
         id: &str,
     ) -> crate::api::Result<crate::channels::ComponentStatus> {
-        if !*self.initialized.read().await {
-            return Err(DrasiError::invalid_state(
-                "Cannot get reaction status from uninitialized server",
-            ));
-        }
-        self.reaction_manager
-            .get_reaction_status(id.to_string())
-            .await
-            .map_err(|_| DrasiError::component_not_found("reaction", id))
+        self.inspection.get_reaction_status(id).await
     }
 
     /// Get the full configuration for a specific reaction
@@ -1334,15 +1187,7 @@ impl DrasiServerCore {
         &self,
         id: &str,
     ) -> crate::api::Result<crate::config::ReactionConfig> {
-        if !*self.initialized.read().await {
-            return Err(DrasiError::invalid_state(
-                "Cannot get reaction config from uninitialized server",
-            ));
-        }
-        self.reaction_manager
-            .get_reaction_config(id)
-            .await
-            .ok_or_else(|| DrasiError::component_not_found("reaction", id))
+        self.inspection.get_reaction_config(id).await
     }
 
     // ============================================================================
@@ -1365,70 +1210,7 @@ impl DrasiServerCore {
     /// # }
     /// ```
     pub async fn get_current_config(&self) -> crate::api::Result<DrasiServerCoreConfig> {
-        if !*self.initialized.read().await {
-            return Err(DrasiError::invalid_state(
-                "Cannot get config from uninitialized server",
-            ));
-        }
-
-        // Collect all source configs
-        let source_ids: Vec<String> = self
-            .source_manager
-            .list_sources()
-            .await
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-
-        let mut sources = Vec::new();
-        for id in source_ids {
-            if let Some(config) = self.source_manager.get_source_config(&id).await {
-                sources.push(config);
-            }
-        }
-
-        // Collect all query configs
-        let query_ids: Vec<String> = self
-            .query_manager
-            .list_queries()
-            .await
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-
-        let mut queries = Vec::new();
-        for id in query_ids {
-            if let Some(config) = self.query_manager.get_query_config(&id).await {
-                queries.push(config);
-            }
-        }
-
-        // Collect all reaction configs
-        let reaction_ids: Vec<String> = self
-            .reaction_manager
-            .list_reactions()
-            .await
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-
-        let mut reactions = Vec::new();
-        for id in reaction_ids {
-            if let Some(config) = self.reaction_manager.get_reaction_config(&id).await {
-                reactions.push(config);
-            }
-        }
-
-        Ok(DrasiServerCoreConfig {
-            server_core: crate::config::DrasiServerCoreSettings {
-                id: self.config.server_core.id.clone(),
-                priority_queue_capacity: self.config.server_core.priority_queue_capacity,
-                dispatch_buffer_capacity: self.config.server_core.dispatch_buffer_capacity,
-            },
-            sources,
-            queries,
-            reactions,
-        })
+        self.inspection.get_current_config().await
     }
 
     // ============================================================================
@@ -1586,98 +1368,6 @@ impl DrasiServerCore {
     // Note: Direct manager/router access methods were removed as they are not used
     // internally. Managers are accessed directly via self.source_manager, etc.
 
-    async fn load_configuration(&self) -> Result<()> {
-        info!("Loading configuration");
-
-        // Load sources
-        for source_config in &self.config.sources {
-            let config = source_config.clone();
-            self.create_source_with_options(config, false).await?;
-        }
-
-        // Load queries
-        for query_config in &self.config.queries {
-            let config = query_config.clone();
-            self.create_query_with_options(config, false).await?;
-        }
-
-        // Load reactions
-        for reaction_config in &self.config.reactions {
-            let config = reaction_config.clone();
-            self.create_reaction_with_options(config, false).await?;
-        }
-
-        info!("Configuration loaded successfully");
-        Ok(())
-    }
-
-    async fn save_running_components_state(&self) -> Result<()> {
-        let mut state = self.components_running_before_stop.write().await;
-        state.sources.clear();
-        state.queries.clear();
-        state.reactions.clear();
-
-        // Save running sources
-        for (name, _) in self.source_manager.list_sources().await {
-            let status = self.source_manager.get_source_status(name.clone()).await?;
-            if matches!(status, ComponentStatus::Running) {
-                state.sources.insert(name);
-            }
-        }
-
-        // Save running queries
-        for (name, _) in self.query_manager.list_queries().await {
-            let status = self.query_manager.get_query_status(name.clone()).await?;
-            if matches!(status, ComponentStatus::Running) {
-                state.queries.insert(name);
-            }
-        }
-
-        // Save running reactions
-        for (name, _) in self.reaction_manager.list_reactions().await {
-            let status = self
-                .reaction_manager
-                .get_reaction_status(name.clone())
-                .await?;
-            if matches!(status, ComponentStatus::Running) {
-                state.reactions.insert(name);
-            }
-        }
-
-        info!(
-            "Saved running components state: {} sources, {} queries, {} reactions",
-            state.sources.len(),
-            state.queries.len(),
-            state.reactions.len()
-        );
-        Ok(())
-    }
-
-    async fn start_event_processors(&mut self) {
-        if let Some(receivers) = self.event_receivers.take() {
-            // Start component event processor
-            let component_rx = receivers.component_event_rx;
-            tokio::spawn(async move {
-                let mut rx = component_rx;
-                while let Some(event) = rx.recv().await {
-                    info!(
-                        "Component Event - {:?} {}: {:?} - {}",
-                        event.component_type,
-                        event.component_id,
-                        event.status,
-                        event.message.unwrap_or_default()
-                    );
-                }
-            });
-
-            // DataRouter no longer needed - queries subscribe directly to sources
-            // control_signal_rx is no longer used
-            drop(receivers.control_signal_rx);
-
-            // SubscriptionRouter no longer needed - reactions subscribe directly to queries
-        }
-    }
-
     async fn create_source_with_options(
         &self,
         config: crate::config::SourceConfig,
@@ -1733,1320 +1423,5 @@ impl DrasiServerCore {
         }
 
         Ok(())
-    }
-
-    async fn start_components(&self) -> Result<()> {
-        info!("Starting all auto-start components in sequence: Sources → Queries → Reactions");
-
-        let running_before = self.components_running_before_stop.read().await.clone();
-
-        // Start sources first
-        info!("Starting auto-start sources");
-        for source_config in &self.config.sources {
-            let id = &source_config.id;
-            let should_start = source_config.auto_start || running_before.sources.contains(id);
-
-            if should_start {
-                let status = self.source_manager.get_source_status(id.to_string()).await;
-                if matches!(status, Ok(ComponentStatus::Stopped)) {
-                    info!(
-                        "Starting source '{}' (auto_start={}, was_running={})",
-                        id,
-                        source_config.auto_start,
-                        running_before.sources.contains(id)
-                    );
-                    self.source_manager.start_source(id.to_string()).await?;
-                } else {
-                    info!(
-                        "Source '{}' already started or starting, status: {:?}",
-                        id, status
-                    );
-                }
-            } else {
-                let status = self.source_manager.get_source_status(id.to_string()).await;
-                info!(
-                    "Source '{}' will not start (auto_start=false, was not running), status: {:?}",
-                    id, status
-                );
-            }
-        }
-        info!("All required sources started successfully");
-
-        // Start queries after sources
-        info!("Starting auto-start queries");
-        for query_config in &self.config.queries {
-            let id = &query_config.id;
-            let should_start = query_config.auto_start || running_before.queries.contains(id);
-
-            if should_start {
-                let status = self.query_manager.get_query_status(id.to_string()).await;
-                if matches!(status, Ok(ComponentStatus::Stopped)) {
-                    info!(
-                        "Starting query '{}' (auto_start={}, was_running={})",
-                        id,
-                        query_config.auto_start,
-                        running_before.queries.contains(id)
-                    );
-                    // Query will subscribe directly to sources when started
-                    info!("Starting query '{}'", id);
-                    self.query_manager.start_query(id.clone()).await?;
-                    info!("Query '{}' started successfully", id);
-                } else {
-                    info!(
-                        "Query '{}' already started or starting, status: {:?}",
-                        id, status
-                    );
-                }
-            } else {
-                let status = self.query_manager.get_query_status(id.to_string()).await;
-                info!(
-                    "Query '{}' will not start (auto_start=false, was not running), status: {:?}",
-                    id, status
-                );
-            }
-        }
-        info!("All required queries started successfully");
-
-        // Start reactions after queries
-        info!("Starting auto-start reactions");
-        for reaction_config in &self.config.reactions {
-            let id = &reaction_config.id;
-            let should_start = reaction_config.auto_start || running_before.reactions.contains(id);
-
-            if should_start {
-                let status = self
-                    .reaction_manager
-                    .get_reaction_status(id.to_string())
-                    .await;
-                if matches!(status, Ok(ComponentStatus::Stopped)) {
-                    info!(
-                        "Starting reaction '{}' (auto_start={}, was_running={})",
-                        id,
-                        reaction_config.auto_start,
-                        running_before.reactions.contains(id)
-                    );
-                    // Pass server core to reaction for direct query subscriptions
-                    self.reaction_manager
-                        .start_reaction(id.clone(), Arc::new(self.clone()))
-                        .await?;
-                } else {
-                    info!(
-                        "Reaction '{}' already started or starting, status: {:?}",
-                        id, status
-                    );
-                }
-            } else {
-                let status = self
-                    .reaction_manager
-                    .get_reaction_status(id.to_string())
-                    .await;
-                info!("Reaction '{}' will not start (auto_start=false, was not running), status: {:?}", id, status);
-            }
-        }
-        info!("All required reactions started successfully");
-
-        // Clear the saved state after successful start
-        self.components_running_before_stop
-            .write()
-            .await
-            .sources
-            .clear();
-        self.components_running_before_stop
-            .write()
-            .await
-            .queries
-            .clear();
-        self.components_running_before_stop
-            .write()
-            .await
-            .reactions
-            .clear();
-
-        info!("All required components started in sequence: Sources → Queries → Reactions");
-        info!("[STARTUP-COMPLETE] DrasiServerCore.start() is now returning - all components and subscriptions should be active");
-        Ok(())
-    }
-
-    async fn stop_all_components(&self) -> Result<()> {
-        // Stop all reactions first (reverse order)
-        info!("Stopping all reactions");
-        let reaction_ids: Vec<String> = self
-            .reaction_manager
-            .list_reactions()
-            .await
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-
-        for id in reaction_ids {
-            let status = self.reaction_manager.get_reaction_status(id.clone()).await;
-            if matches!(status, Ok(ComponentStatus::Running)) {
-                if let Err(e) = self.reaction_manager.stop_reaction(id.clone()).await {
-                    error!("Error stopping reaction {}: {}", id, e);
-                }
-                // Subscriptions are managed by the reaction itself - no router cleanup needed
-            }
-        }
-
-        // Stop all queries
-        info!("Stopping all queries");
-        let query_ids: Vec<String> = self
-            .query_manager
-            .list_queries()
-            .await
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-
-        for id in query_ids {
-            let status = self.query_manager.get_query_status(id.clone()).await;
-            if matches!(status, Ok(ComponentStatus::Running)) {
-                if let Err(e) = self.query_manager.stop_query(id.clone()).await {
-                    error!("Error stopping query {}: {}", id, e);
-                }
-                // Query unsubscribes from sources automatically when stopped
-            }
-        }
-
-        // Stop all sources
-        info!("Stopping all sources");
-        let source_ids: Vec<String> = self
-            .source_manager
-            .list_sources()
-            .await
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-
-        for id in source_ids {
-            let status = self.source_manager.get_source_status(id.clone()).await;
-            if matches!(status, Ok(ComponentStatus::Running)) {
-                if let Err(e) = self.source_manager.stop_source(id.clone()).await {
-                    error!("Error stopping source {}: {}", id, e);
-                }
-            }
-        }
-
-        info!("All components stopped");
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::api::{Query, Reaction, Source};
-
-    #[tokio::test]
-    async fn test_server_initialization() {
-        let config = Arc::new(RuntimeConfig {
-            server_core: crate::config::DrasiServerCoreSettings {
-                id: "test-server".to_string(),
-                priority_queue_capacity: None,
-                dispatch_buffer_capacity: None,
-            },
-            sources: vec![],
-            queries: vec![],
-            reactions: vec![],
-        });
-
-        let mut core = DrasiServerCore::new(config);
-        let result = core.initialize().await;
-
-        assert!(result.is_ok(), "Server initialization should succeed");
-        assert!(
-            *core.initialized.read().await,
-            "Server should be marked as initialized"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_server_initialization_idempotent() {
-        let config = Arc::new(RuntimeConfig {
-            server_core: crate::config::DrasiServerCoreSettings {
-                id: "test-server".to_string(),
-                priority_queue_capacity: None,
-                dispatch_buffer_capacity: None,
-            },
-            sources: vec![],
-            queries: vec![],
-            reactions: vec![],
-        });
-
-        let mut core = DrasiServerCore::new(config);
-
-        // First initialization
-        let result1 = core.initialize().await;
-        assert!(result1.is_ok(), "First initialization should succeed");
-
-        // Second initialization should also succeed (idempotent)
-        let result2 = core.initialize().await;
-        assert!(
-            result2.is_ok(),
-            "Second initialization should succeed (idempotent)"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_start_without_initialization_fails() {
-        let config = Arc::new(RuntimeConfig {
-            server_core: crate::config::DrasiServerCoreSettings {
-                id: "test-server".to_string(),
-                priority_queue_capacity: None,
-                dispatch_buffer_capacity: None,
-            },
-            sources: vec![],
-            queries: vec![],
-            reactions: vec![],
-        });
-
-        let core = DrasiServerCore::new(config);
-        let result = core.start().await;
-
-        assert!(result.is_err(), "Start should fail without initialization");
-        assert!(result.unwrap_err().to_string().contains("initialized"));
-    }
-
-    #[tokio::test]
-    async fn test_start_already_running_fails() {
-        let config = Arc::new(RuntimeConfig {
-            server_core: crate::config::DrasiServerCoreSettings {
-                id: "test-server".to_string(),
-                priority_queue_capacity: None,
-                dispatch_buffer_capacity: None,
-            },
-            sources: vec![],
-            queries: vec![],
-            reactions: vec![],
-        });
-
-        let mut core = DrasiServerCore::new(config);
-        core.initialize().await.unwrap();
-
-        // First start should succeed
-        core.start().await.unwrap();
-
-        // Second start should fail
-        let result = core.start().await;
-        assert!(result.is_err(), "Start should fail when already running");
-        assert!(result.unwrap_err().to_string().contains("already running"));
-    }
-
-    #[tokio::test]
-    async fn test_stop_not_running_fails() {
-        let config = Arc::new(RuntimeConfig {
-            server_core: crate::config::DrasiServerCoreSettings {
-                id: "test-server".to_string(),
-                priority_queue_capacity: None,
-                dispatch_buffer_capacity: None,
-            },
-            sources: vec![],
-            queries: vec![],
-            reactions: vec![],
-        });
-
-        let mut core = DrasiServerCore::new(config);
-        core.initialize().await.unwrap();
-
-        let result = core.stop().await;
-        assert!(result.is_err(), "Stop should fail when not running");
-        assert!(result.unwrap_err().to_string().contains("already stopped"));
-    }
-
-    #[tokio::test]
-    async fn test_start_and_stop_lifecycle() {
-        let config = Arc::new(RuntimeConfig {
-            server_core: crate::config::DrasiServerCoreSettings {
-                id: "test-server".to_string(),
-                priority_queue_capacity: None,
-                dispatch_buffer_capacity: None,
-            },
-            sources: vec![],
-            queries: vec![],
-            reactions: vec![],
-        });
-
-        let mut core = DrasiServerCore::new(config);
-        core.initialize().await.unwrap();
-
-        assert!(
-            !core.is_running().await,
-            "Server should not be running initially"
-        );
-
-        core.start().await.unwrap();
-        assert!(
-            core.is_running().await,
-            "Server should be running after start"
-        );
-
-        core.stop().await.unwrap();
-        assert!(
-            !core.is_running().await,
-            "Server should not be running after stop"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_builder_creates_initialized_server() {
-        let core = DrasiServerCore::builder()
-            .with_id("builder-test")
-            .build()
-            .await;
-
-        assert!(core.is_ok(), "Builder should create initialized server");
-        let core = core.unwrap();
-        assert!(
-            *core.initialized.read().await,
-            "Server should be initialized"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_from_config_str_creates_server() {
-        let yaml = r#"
-server_core:
-  id: yaml-test
-sources: []
-queries: []
-reactions: []
-"#;
-        let core = DrasiServerCore::from_config_str(yaml).await;
-        assert!(core.is_ok(), "from_config_str should create server");
-        assert!(*core.unwrap().initialized.read().await);
-    }
-
-    #[tokio::test]
-    async fn test_source_handle_for_nonexistent_source() {
-        let core = DrasiServerCore::builder().build().await.unwrap();
-
-        let result = core.source_handle("nonexistent").await;
-        assert!(
-            result.is_err(),
-            "Should return error for nonexistent source"
-        );
-
-        match result {
-            Err(DrasiError::ComponentNotFound { kind, id }) => {
-                assert_eq!(kind, "source");
-                assert_eq!(id, "nonexistent");
-            }
-            _ => panic!("Expected ComponentNotFound error"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_reaction_handle_for_nonexistent_reaction() {
-        let core = DrasiServerCore::builder().build().await.unwrap();
-
-        let result = core.reaction_handle("nonexistent").await;
-        assert!(
-            result.is_err(),
-            "Should return error for nonexistent reaction"
-        );
-
-        match result {
-            Err(DrasiError::ComponentNotFound { kind, id }) => {
-                assert_eq!(kind, "reaction");
-                assert_eq!(id, "nonexistent");
-            }
-            _ => panic!("Expected ComponentNotFound error"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_create_source_without_initialization() {
-        let config = Arc::new(RuntimeConfig {
-            server_core: crate::config::DrasiServerCoreSettings {
-                id: "test-server".to_string(),
-                priority_queue_capacity: None,
-                dispatch_buffer_capacity: None,
-            },
-            sources: vec![],
-            queries: vec![],
-            reactions: vec![],
-        });
-
-        let core = DrasiServerCore::new(config);
-        let source = Source::application("runtime-source").build();
-
-        let result = core.create_source(source).await;
-        assert!(
-            result.is_err(),
-            "create_source should fail without initialization"
-        );
-        assert!(matches!(result.unwrap_err(), DrasiError::InvalidState(_)));
-    }
-
-    #[tokio::test]
-    async fn test_create_query_without_initialization() {
-        let config = Arc::new(RuntimeConfig {
-            server_core: crate::config::DrasiServerCoreSettings {
-                id: "test-server".to_string(),
-                priority_queue_capacity: None,
-                dispatch_buffer_capacity: None,
-            },
-            sources: vec![],
-            queries: vec![],
-            reactions: vec![],
-        });
-
-        let core = DrasiServerCore::new(config);
-        let query = Query::cypher("runtime-query")
-            .query("MATCH (n) RETURN n")
-            .from_source("source1")
-            .build();
-
-        let result = core.create_query(query).await;
-        assert!(
-            result.is_err(),
-            "create_query should fail without initialization"
-        );
-        assert!(matches!(result.unwrap_err(), DrasiError::InvalidState(_)));
-    }
-
-    #[tokio::test]
-    async fn test_create_reaction_without_initialization() {
-        let config = Arc::new(RuntimeConfig {
-            server_core: crate::config::DrasiServerCoreSettings {
-                id: "test-server".to_string(),
-                priority_queue_capacity: None,
-                dispatch_buffer_capacity: None,
-            },
-            sources: vec![],
-            queries: vec![],
-            reactions: vec![],
-        });
-
-        let core = DrasiServerCore::new(config);
-        let reaction = Reaction::log("runtime-reaction")
-            .subscribe_to("query1")
-            .build();
-
-        let result = core.create_reaction(reaction).await;
-        assert!(
-            result.is_err(),
-            "create_reaction should fail without initialization"
-        );
-        assert!(matches!(result.unwrap_err(), DrasiError::InvalidState(_)));
-    }
-
-    #[tokio::test]
-    async fn test_remove_source_without_initialization() {
-        let config = Arc::new(RuntimeConfig {
-            server_core: crate::config::DrasiServerCoreSettings {
-                id: "test-server".to_string(),
-                priority_queue_capacity: None,
-                dispatch_buffer_capacity: None,
-            },
-            sources: vec![],
-            queries: vec![],
-            reactions: vec![],
-        });
-
-        let core = DrasiServerCore::new(config);
-
-        let result = core.remove_source("any-source").await;
-        assert!(
-            result.is_err(),
-            "remove_source should fail without initialization"
-        );
-        assert!(matches!(result.unwrap_err(), DrasiError::InvalidState(_)));
-    }
-
-    #[tokio::test]
-    async fn test_remove_query_without_initialization() {
-        let config = Arc::new(RuntimeConfig {
-            server_core: crate::config::DrasiServerCoreSettings {
-                id: "test-server".to_string(),
-                priority_queue_capacity: None,
-                dispatch_buffer_capacity: None,
-            },
-            sources: vec![],
-            queries: vec![],
-            reactions: vec![],
-        });
-
-        let core = DrasiServerCore::new(config);
-
-        let result = core.remove_query("any-query").await;
-        assert!(
-            result.is_err(),
-            "remove_query should fail without initialization"
-        );
-        assert!(matches!(result.unwrap_err(), DrasiError::InvalidState(_)));
-    }
-
-    #[tokio::test]
-    async fn test_remove_reaction_without_initialization() {
-        let config = Arc::new(RuntimeConfig {
-            server_core: crate::config::DrasiServerCoreSettings {
-                id: "test-server".to_string(),
-                priority_queue_capacity: None,
-                dispatch_buffer_capacity: None,
-            },
-            sources: vec![],
-            queries: vec![],
-            reactions: vec![],
-        });
-
-        let core = DrasiServerCore::new(config);
-
-        let result = core.remove_reaction("any-reaction").await;
-        assert!(
-            result.is_err(),
-            "remove_reaction should fail without initialization"
-        );
-        assert!(matches!(result.unwrap_err(), DrasiError::InvalidState(_)));
-    }
-
-    #[tokio::test]
-    async fn test_remove_nonexistent_source() {
-        let mut core = DrasiServerCore::builder().build().await.unwrap();
-        core.initialize().await.unwrap();
-
-        let result = core.remove_source("nonexistent").await;
-        assert!(result.is_err(), "Should fail to remove nonexistent source");
-        assert!(matches!(
-            result.unwrap_err(),
-            DrasiError::ComponentNotFound { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_remove_nonexistent_query() {
-        let mut core = DrasiServerCore::builder().build().await.unwrap();
-        core.initialize().await.unwrap();
-
-        let result = core.remove_query("nonexistent").await;
-        assert!(result.is_err(), "Should fail to remove nonexistent query");
-        assert!(matches!(
-            result.unwrap_err(),
-            DrasiError::ComponentNotFound { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_remove_nonexistent_reaction() {
-        let mut core = DrasiServerCore::builder().build().await.unwrap();
-        core.initialize().await.unwrap();
-
-        let result = core.remove_reaction("nonexistent").await;
-        assert!(
-            result.is_err(),
-            "Should fail to remove nonexistent reaction"
-        );
-        assert!(matches!(
-            result.unwrap_err(),
-            DrasiError::ComponentNotFound { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_is_running_initial_state() {
-        let config = Arc::new(RuntimeConfig {
-            server_core: crate::config::DrasiServerCoreSettings {
-                id: "test-server".to_string(),
-                priority_queue_capacity: None,
-                dispatch_buffer_capacity: None,
-            },
-            sources: vec![],
-            queries: vec![],
-            reactions: vec![],
-        });
-
-        let core = DrasiServerCore::new(config);
-        assert!(
-            !core.is_running().await,
-            "Server should not be running initially"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_builder_with_components() {
-        let core = DrasiServerCore::builder()
-            .with_id("complex-server")
-            .add_source(Source::application("source1").build())
-            .add_query(
-                Query::cypher("query1")
-                    .query("MATCH (n) RETURN n")
-                    .from_source("source1")
-                    .build(),
-            )
-            .add_reaction(Reaction::log("reaction1").subscribe_to("query1").build())
-            .build()
-            .await;
-
-        assert!(core.is_ok(), "Builder with components should succeed");
-        let core = core.unwrap();
-        assert!(*core.initialized.read().await);
-        assert_eq!(core.config.sources.len(), 1);
-        assert_eq!(core.config.queries.len(), 1);
-        assert_eq!(core.config.reactions.len(), 1);
-    }
-
-    // ========================================================================
-    // Tests for Component Listing and Inspection APIs
-    // ========================================================================
-
-    #[tokio::test]
-    async fn test_list_sources() {
-        let core = DrasiServerCore::builder()
-            .add_source(Source::application("source1").build())
-            .add_source(Source::mock("source2").build())
-            .build()
-            .await
-            .unwrap();
-
-        let sources = core.list_sources().await.unwrap();
-        assert_eq!(sources.len(), 2);
-
-        let source_ids: Vec<String> = sources.iter().map(|(id, _)| id.clone()).collect();
-        assert!(source_ids.contains(&"source1".to_string()));
-        assert!(source_ids.contains(&"source2".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_list_sources_without_initialization() {
-        let config = Arc::new(RuntimeConfig {
-            server_core: crate::config::DrasiServerCoreSettings {
-                id: "test-server".to_string(),
-                priority_queue_capacity: None,
-                dispatch_buffer_capacity: None,
-            },
-            sources: vec![],
-            queries: vec![],
-            reactions: vec![],
-        });
-
-        let core = DrasiServerCore::new(config);
-        let result = core.list_sources().await;
-
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), DrasiError::InvalidState(_)));
-    }
-
-    #[tokio::test]
-    async fn test_get_source_info() {
-        let core = DrasiServerCore::builder()
-            .add_source(Source::application("test-source").build())
-            .build()
-            .await
-            .unwrap();
-
-        let source_info = core.get_source_info("test-source").await.unwrap();
-        assert_eq!(source_info.id, "test-source");
-        assert_eq!(source_info.source_type, "application");
-    }
-
-    #[tokio::test]
-    async fn test_get_source_info_not_found() {
-        let core = DrasiServerCore::builder().build().await.unwrap();
-
-        let result = core.get_source_info("nonexistent").await;
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            DrasiError::ComponentNotFound { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_get_source_status() {
-        let core = DrasiServerCore::builder()
-            .add_source(Source::application("test-source").build())
-            .build()
-            .await
-            .unwrap();
-
-        let status = core.get_source_status("test-source").await.unwrap();
-        assert!(matches!(status, ComponentStatus::Stopped));
-    }
-
-    #[tokio::test]
-    async fn test_list_queries() {
-        let core = DrasiServerCore::builder()
-            .add_source(Source::application("source1").build())
-            .add_query(
-                Query::cypher("query1")
-                    .query("MATCH (n) RETURN n")
-                    .from_source("source1")
-                    .build(),
-            )
-            .add_query(
-                Query::cypher("query2")
-                    .query("MATCH (n) RETURN n.name")
-                    .from_source("source1")
-                    .build(),
-            )
-            .build()
-            .await
-            .unwrap();
-
-        let queries = core.list_queries().await.unwrap();
-        assert_eq!(queries.len(), 2);
-
-        let query_ids: Vec<String> = queries.iter().map(|(id, _)| id.clone()).collect();
-        assert!(query_ids.contains(&"query1".to_string()));
-        assert!(query_ids.contains(&"query2".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_get_query_info() {
-        let core = DrasiServerCore::builder()
-            .add_source(Source::application("source1").build())
-            .add_query(
-                Query::cypher("test-query")
-                    .query("MATCH (n) RETURN n")
-                    .from_source("source1")
-                    .build(),
-            )
-            .build()
-            .await
-            .unwrap();
-
-        let query_info = core.get_query_info("test-query").await.unwrap();
-        assert_eq!(query_info.id, "test-query");
-        assert_eq!(query_info.query, "MATCH (n) RETURN n");
-        assert!(query_info.sources.contains(&"source1".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_get_query_info_not_found() {
-        let core = DrasiServerCore::builder().build().await.unwrap();
-
-        let result = core.get_query_info("nonexistent").await;
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            DrasiError::ComponentNotFound { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_get_query_status() {
-        let core = DrasiServerCore::builder()
-            .add_source(Source::application("source1").build())
-            .add_query(
-                Query::cypher("test-query")
-                    .query("MATCH (n) RETURN n")
-                    .from_source("source1")
-                    .build(),
-            )
-            .build()
-            .await
-            .unwrap();
-
-        let status = core.get_query_status("test-query").await.unwrap();
-        assert!(matches!(status, ComponentStatus::Stopped));
-    }
-
-    #[tokio::test]
-    async fn test_get_query_results_not_running() {
-        let core = DrasiServerCore::builder()
-            .add_source(Source::application("source1").build())
-            .add_query(
-                Query::cypher("test-query")
-                    .query("MATCH (n) RETURN n")
-                    .from_source("source1")
-                    .build(),
-            )
-            .build()
-            .await
-            .unwrap();
-
-        let result = core.get_query_results("test-query").await;
-        assert!(result.is_err());
-        // Query must be running to get results
-        let err = result.unwrap_err();
-        assert!(matches!(err, DrasiError::InvalidState(_)));
-    }
-
-    #[tokio::test]
-    async fn test_list_reactions() {
-        let core = DrasiServerCore::builder()
-            .add_source(Source::application("source1").build())
-            .add_query(
-                Query::cypher("query1")
-                    .query("MATCH (n) RETURN n")
-                    .from_source("source1")
-                    .build(),
-            )
-            .add_reaction(Reaction::log("reaction1").subscribe_to("query1").build())
-            .add_reaction(
-                Reaction::application("reaction2")
-                    .subscribe_to("query1")
-                    .build(),
-            )
-            .build()
-            .await
-            .unwrap();
-
-        let reactions = core.list_reactions().await.unwrap();
-        assert_eq!(reactions.len(), 2);
-
-        let reaction_ids: Vec<String> = reactions.iter().map(|(id, _)| id.clone()).collect();
-        assert!(reaction_ids.contains(&"reaction1".to_string()));
-        assert!(reaction_ids.contains(&"reaction2".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_get_reaction_info() {
-        let core = DrasiServerCore::builder()
-            .add_source(Source::application("source1").build())
-            .add_query(
-                Query::cypher("query1")
-                    .query("MATCH (n) RETURN n")
-                    .from_source("source1")
-                    .build(),
-            )
-            .add_reaction(
-                Reaction::log("test-reaction")
-                    .subscribe_to("query1")
-                    .build(),
-            )
-            .build()
-            .await
-            .unwrap();
-
-        let reaction_info = core.get_reaction_info("test-reaction").await.unwrap();
-        assert_eq!(reaction_info.id, "test-reaction");
-        assert_eq!(reaction_info.reaction_type, "log");
-        assert!(reaction_info.queries.contains(&"query1".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_get_reaction_info_not_found() {
-        let core = DrasiServerCore::builder().build().await.unwrap();
-
-        let result = core.get_reaction_info("nonexistent").await;
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            DrasiError::ComponentNotFound { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_get_reaction_status() {
-        let core = DrasiServerCore::builder()
-            .add_source(Source::application("source1").build())
-            .add_query(
-                Query::cypher("query1")
-                    .query("MATCH (n) RETURN n")
-                    .from_source("source1")
-                    .build(),
-            )
-            .add_reaction(
-                Reaction::log("test-reaction")
-                    .subscribe_to("query1")
-                    .build(),
-            )
-            .build()
-            .await
-            .unwrap();
-
-        let status = core.get_reaction_status("test-reaction").await.unwrap();
-        assert!(matches!(status, ComponentStatus::Stopped));
-    }
-
-    #[tokio::test]
-    async fn test_listing_empty_components() {
-        let core = DrasiServerCore::builder().build().await.unwrap();
-
-        let sources = core.list_sources().await.unwrap();
-        assert_eq!(sources.len(), 0);
-
-        let queries = core.list_queries().await.unwrap();
-        assert_eq!(queries.len(), 0);
-
-        let reactions = core.list_reactions().await.unwrap();
-        assert_eq!(reactions.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_list_components_after_runtime_add() {
-        let mut core = DrasiServerCore::builder().build().await.unwrap();
-        core.initialize().await.unwrap();
-
-        // Initially empty
-        let sources = core.list_sources().await.unwrap();
-        assert_eq!(sources.len(), 0);
-
-        // Add a source at runtime
-        core.create_source(Source::application("runtime-source").build())
-            .await
-            .unwrap();
-
-        // Should now show in list
-        let sources = core.list_sources().await.unwrap();
-        assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0].0, "runtime-source");
-    }
-
-    #[tokio::test]
-    async fn test_list_components_after_removal() {
-        let mut core = DrasiServerCore::builder()
-            .add_source(Source::application("source1").build())
-            .add_source(Source::application("source2").build())
-            .build()
-            .await
-            .unwrap();
-
-        core.initialize().await.unwrap();
-
-        let sources = core.list_sources().await.unwrap();
-        assert_eq!(sources.len(), 2);
-
-        // Remove one source
-        core.remove_source("source1").await.unwrap();
-
-        // Should only show remaining source
-        let sources = core.list_sources().await.unwrap();
-        assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0].0, "source2");
-    }
-
-    // ========================================================================
-    // Tests for Component Start/Stop APIs
-    // ========================================================================
-
-    #[tokio::test]
-    async fn test_start_source() {
-        let core = DrasiServerCore::builder()
-            .add_source(Source::application("test-source").auto_start(false).build())
-            .build()
-            .await
-            .unwrap();
-
-        // Initially stopped
-        let status = core.get_source_status("test-source").await.unwrap();
-        assert!(matches!(status, ComponentStatus::Stopped));
-
-        // Start it
-        core.start_source("test-source").await.unwrap();
-
-        // Should now be starting or running
-        let status = core.get_source_status("test-source").await.unwrap();
-        assert!(matches!(
-            status,
-            ComponentStatus::Starting | ComponentStatus::Running
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_stop_source() {
-        let core = DrasiServerCore::builder()
-            .add_source(Source::application("test-source").auto_start(true).build())
-            .build()
-            .await
-            .unwrap();
-
-        // Start the server to start auto-start components
-        core.start().await.unwrap();
-
-        // Should be running
-        let status = core.get_source_status("test-source").await.unwrap();
-        assert!(matches!(
-            status,
-            ComponentStatus::Running | ComponentStatus::Starting
-        ));
-
-        // Stop it
-        core.stop_source("test-source").await.unwrap();
-
-        // Should now be stopped
-        let status = core.get_source_status("test-source").await.unwrap();
-        assert!(matches!(
-            status,
-            ComponentStatus::Stopped | ComponentStatus::Stopping
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_start_source_not_found() {
-        let core = DrasiServerCore::builder().build().await.unwrap();
-
-        let result = core.start_source("nonexistent").await;
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            DrasiError::ComponentNotFound { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_start_query() {
-        let core = DrasiServerCore::builder()
-            .add_source(Source::application("source1").build())
-            .add_query(
-                Query::cypher("test-query")
-                    .query("MATCH (n) RETURN n")
-                    .from_source("source1")
-                    .auto_start(false)
-                    .build(),
-            )
-            .build()
-            .await
-            .unwrap();
-
-        // Initially stopped
-        let status = core.get_query_status("test-query").await.unwrap();
-        assert!(matches!(status, ComponentStatus::Stopped));
-
-        // Start it
-        core.start_query("test-query").await.unwrap();
-
-        // Should now be starting or running
-        let status = core.get_query_status("test-query").await.unwrap();
-        assert!(matches!(
-            status,
-            ComponentStatus::Starting | ComponentStatus::Running
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_stop_query() {
-        let core = DrasiServerCore::builder()
-            .add_source(Source::application("source1").build())
-            .add_query(
-                Query::cypher("test-query")
-                    .query("MATCH (n) RETURN n")
-                    .from_source("source1")
-                    .auto_start(true)
-                    .build(),
-            )
-            .build()
-            .await
-            .unwrap();
-
-        // Start the server
-        core.start().await.unwrap();
-
-        // Should be running
-        let status = core.get_query_status("test-query").await.unwrap();
-        assert!(matches!(
-            status,
-            ComponentStatus::Running | ComponentStatus::Starting
-        ));
-
-        // Stop it
-        core.stop_query("test-query").await.unwrap();
-
-        // Should now be stopped
-        let status = core.get_query_status("test-query").await.unwrap();
-        assert!(matches!(
-            status,
-            ComponentStatus::Stopped | ComponentStatus::Stopping
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_start_query_not_found() {
-        let core = DrasiServerCore::builder().build().await.unwrap();
-
-        let result = core.start_query("nonexistent").await;
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            DrasiError::ComponentNotFound { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_start_reaction() {
-        let core = DrasiServerCore::builder()
-            .add_source(Source::application("source1").build())
-            .add_query(
-                Query::cypher("query1")
-                    .query("MATCH (n) RETURN n")
-                    .from_source("source1")
-                    .build(),
-            )
-            .add_reaction(
-                Reaction::log("test-reaction")
-                    .subscribe_to("query1")
-                    .auto_start(false)
-                    .build(),
-            )
-            .build()
-            .await
-            .unwrap();
-
-        // Initially stopped
-        let status = core.get_reaction_status("test-reaction").await.unwrap();
-        assert!(matches!(status, ComponentStatus::Stopped));
-
-        // Start it
-        core.start_reaction("test-reaction").await.unwrap();
-
-        // Should now be starting or running
-        let status = core.get_reaction_status("test-reaction").await.unwrap();
-        assert!(matches!(
-            status,
-            ComponentStatus::Starting | ComponentStatus::Running
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_stop_reaction() {
-        let core = DrasiServerCore::builder()
-            .add_source(Source::application("source1").build())
-            .add_query(
-                Query::cypher("query1")
-                    .query("MATCH (n) RETURN n")
-                    .from_source("source1")
-                    .build(),
-            )
-            .add_reaction(
-                Reaction::log("test-reaction")
-                    .subscribe_to("query1")
-                    .auto_start(true)
-                    .build(),
-            )
-            .build()
-            .await
-            .unwrap();
-
-        // Start the server
-        core.start().await.unwrap();
-
-        // Should be running
-        let status = core.get_reaction_status("test-reaction").await.unwrap();
-        assert!(matches!(
-            status,
-            ComponentStatus::Running | ComponentStatus::Starting
-        ));
-
-        // Stop it
-        core.stop_reaction("test-reaction").await.unwrap();
-
-        // Should now be stopped
-        let status = core.get_reaction_status("test-reaction").await.unwrap();
-        assert!(matches!(
-            status,
-            ComponentStatus::Stopped | ComponentStatus::Stopping
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_start_reaction_not_found() {
-        let core = DrasiServerCore::builder().build().await.unwrap();
-
-        let result = core.start_reaction("nonexistent").await;
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            DrasiError::ComponentNotFound { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_start_source_without_initialization() {
-        let config = Arc::new(RuntimeConfig {
-            server_core: crate::config::DrasiServerCoreSettings {
-                id: "test-server".to_string(),
-                priority_queue_capacity: None,
-                dispatch_buffer_capacity: None,
-            },
-            sources: vec![],
-            queries: vec![],
-            reactions: vec![],
-        });
-
-        let core = DrasiServerCore::new(config);
-        let result = core.start_source("any-source").await;
-
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), DrasiError::InvalidState(_)));
-    }
-
-    #[tokio::test]
-    async fn test_lifecycle_start_then_stop() {
-        let core = DrasiServerCore::builder()
-            .add_source(Source::mock("test-source").auto_start(false).build())
-            .build()
-            .await
-            .unwrap();
-
-        // Initially stopped
-        let status = core.get_source_status("test-source").await.unwrap();
-        assert!(matches!(status, ComponentStatus::Stopped));
-
-        // Start
-        core.start_source("test-source").await.unwrap();
-        let status = core.get_source_status("test-source").await.unwrap();
-        assert!(matches!(
-            status,
-            ComponentStatus::Starting | ComponentStatus::Running
-        ));
-
-        // Stop
-        core.stop_source("test-source").await.unwrap();
-        let status = core.get_source_status("test-source").await.unwrap();
-        assert!(matches!(
-            status,
-            ComponentStatus::Stopped | ComponentStatus::Stopping
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_start_stop_all_component_types() {
-        let core = DrasiServerCore::builder()
-            .add_source(Source::mock("source1").auto_start(false).build())
-            .add_query(
-                Query::cypher("query1")
-                    .query("MATCH (n) RETURN n")
-                    .from_source("source1")
-                    .auto_start(false)
-                    .build(),
-            )
-            .add_reaction(
-                Reaction::log("reaction1")
-                    .subscribe_to("query1")
-                    .auto_start(false)
-                    .build(),
-            )
-            .build()
-            .await
-            .unwrap();
-
-        // All should be stopped initially
-        assert!(matches!(
-            core.get_source_status("source1").await.unwrap(),
-            ComponentStatus::Stopped
-        ));
-        assert!(matches!(
-            core.get_query_status("query1").await.unwrap(),
-            ComponentStatus::Stopped
-        ));
-        assert!(matches!(
-            core.get_reaction_status("reaction1").await.unwrap(),
-            ComponentStatus::Stopped
-        ));
-
-        // Start all
-        core.start_source("source1").await.unwrap();
-        core.start_query("query1").await.unwrap();
-        core.start_reaction("reaction1").await.unwrap();
-
-        // All should be starting or running
-        let source_status = core.get_source_status("source1").await.unwrap();
-        assert!(matches!(
-            source_status,
-            ComponentStatus::Starting | ComponentStatus::Running
-        ));
-
-        let query_status = core.get_query_status("query1").await.unwrap();
-        assert!(matches!(
-            query_status,
-            ComponentStatus::Starting | ComponentStatus::Running
-        ));
-
-        let reaction_status = core.get_reaction_status("reaction1").await.unwrap();
-        assert!(matches!(
-            reaction_status,
-            ComponentStatus::Starting | ComponentStatus::Running
-        ));
     }
 }
