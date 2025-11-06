@@ -799,19 +799,9 @@ impl Query for DrasiQuery {
     async fn stop(&self) -> Result<()> {
         log_component_stop("Query", &self.base.config.id);
 
-        *self.base.status.write().await = ComponentStatus::Stopping;
-
-        let event = ComponentEvent {
-            component_id: self.base.config.id.clone(),
-            component_type: ComponentType::Query,
-            status: ComponentStatus::Stopping,
-            timestamp: chrono::Utc::now(),
-            message: Some("Stopping query".to_string()),
-        };
-
-        if let Err(e) = self.base.event_tx.send(event).await {
-            error!("Failed to send component event: {}", e);
-        }
+        self.base
+            .emit_status_event(ComponentStatus::Stopping, Some("Stopping query"))
+            .await;
 
         // Drain and abort source subscription forwarders so they don't leak across restarts
         let subscription_handles: Vec<_> = {
@@ -827,17 +817,9 @@ impl Query for DrasiQuery {
         // Use QueryBase common stop behavior to finish shutting down the processor task
         self.base.stop_common().await?;
 
-        let event = ComponentEvent {
-            component_id: self.base.config.id.clone(),
-            component_type: ComponentType::Query,
-            status: ComponentStatus::Stopped,
-            timestamp: chrono::Utc::now(),
-            message: Some("Query stopped successfully".to_string()),
-        };
-
-        if let Err(e) = self.base.event_tx.send(event).await {
-            error!("Failed to send component event: {}", e);
-        }
+        self.base
+            .emit_status_event(ComponentStatus::Stopped, Some("Query stopped successfully"))
+            .await;
 
         Ok(())
     }

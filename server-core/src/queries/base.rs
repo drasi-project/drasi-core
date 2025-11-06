@@ -51,10 +51,12 @@ use tokio::sync::RwLock;
 
 use crate::channels::{
     BroadcastChangeDispatcher, ChangeDispatcher, ChangeReceiver, ChannelChangeDispatcher,
-    ComponentEventSender, ComponentStatus, DispatchMode, QueryResult, QuerySubscriptionResponse,
+    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, DispatchMode, QueryResult,
+    QuerySubscriptionResponse,
 };
 use crate::config::QueryConfig;
 // Profiling will be used when implementing performance tracking
+use chrono::Utc;
 
 /// Base implementation for common query functionality
 pub struct QueryBase {
@@ -175,6 +177,27 @@ impl QueryBase {
             self.dispatch_query_result(result).await?;
         }
         Ok(())
+    }
+
+    /// Update status and emit a lifecycle event
+    pub async fn emit_status_event(
+        &self,
+        status: ComponentStatus,
+        message: Option<&str>,
+    ) {
+        *self.status.write().await = status.clone();
+
+        let event = ComponentEvent {
+            component_id: self.config.id.clone(),
+            component_type: ComponentType::Query,
+            status,
+            timestamp: Utc::now(),
+            message: message.map(|m| m.to_string()),
+        };
+
+        if let Err(e) = self.event_tx.send(event).await {
+            error!("Failed to send component event: {}", e);
+        }
     }
 
     /// Handle common stop functionality
