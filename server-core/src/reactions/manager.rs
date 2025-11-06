@@ -439,6 +439,7 @@ impl ReactionManager {
 
             // Now remove the reaction
             self.reactions.write().await.remove(&id);
+            self.application_handles.write().await.remove(&id);
             info!("Deleted reaction: {}", id);
 
             Ok(())

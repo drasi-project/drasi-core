@@ -716,6 +716,8 @@ impl DrasiServerCore {
             .await
             .map_err(|e| DrasiError::provisioning(format!("Failed to delete source: {}", e)))?;
 
+        self.handle_registry.remove_source_handle(id).await;
+
         Ok(())
     }
 
@@ -789,6 +791,8 @@ impl DrasiServerCore {
             .delete_reaction(id.to_string())
             .await
             .map_err(|e| DrasiError::provisioning(format!("Failed to delete reaction: {}", e)))?;
+
+        self.handle_registry.remove_reaction_handle(id).await;
 
         Ok(())
     }

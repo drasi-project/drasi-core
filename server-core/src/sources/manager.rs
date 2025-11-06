@@ -372,6 +372,7 @@ impl SourceManager {
 
             // Now remove the source
             self.sources.write().await.remove(&id);
+            self.application_handles.write().await.remove(&id);
             info!("Deleted source: {}", id);
 
             Ok(())

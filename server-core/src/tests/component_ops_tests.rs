@@ -248,6 +248,25 @@ async fn test_list_components_after_removal() {
     assert_eq!(sources[0].0, "source2");
 }
 
+#[tokio::test]
+async fn test_remove_source_clears_cached_handle() {
+    let mut core = DrasiServerCore::builder()
+        .add_source(Source::application("app-source").build())
+        .build()
+        .await
+        .unwrap();
+
+    core.initialize().await.unwrap();
+
+    // Cache the handle in the registry
+    let _handle = core.source_handle("app-source").await.unwrap();
+
+    core.remove_source("app-source").await.unwrap();
+
+    let result = core.source_handle("app-source").await;
+    assert!(matches!(result, Err(DrasiError::ComponentNotFound { .. })));
+}
+
 // ========================================================================
 // Tests for Component Start/Stop APIs
 // ========================================================================
@@ -427,6 +446,36 @@ async fn test_start_reaction() {
         status,
         ComponentStatus::Starting | ComponentStatus::Running
     ));
+}
+
+#[tokio::test]
+async fn test_remove_reaction_clears_cached_handle() {
+    let mut core = DrasiServerCore::builder()
+        .add_source(Source::application("source1").build())
+        .add_query(
+            Query::cypher("query1")
+                .query("RETURN 1")
+                .from_source("source1")
+                .build(),
+        )
+        .add_reaction(
+            Reaction::application("app-reaction")
+                .subscribe_to("query1")
+                .build(),
+        )
+        .build()
+        .await
+        .unwrap();
+
+    core.initialize().await.unwrap();
+
+    // Cache the handle in the registry
+    let _handle = core.reaction_handle("app-reaction").await.unwrap();
+
+    core.remove_reaction("app-reaction").await.unwrap();
+
+    let result = core.reaction_handle("app-reaction").await;
+    assert!(matches!(result, Err(DrasiError::ComponentNotFound { .. })));
 }
 
 #[tokio::test]
