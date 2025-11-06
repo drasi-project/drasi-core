@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::events::Timestamped;
-use log::{debug, warn};
+use log::{debug, trace};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::fmt::Debug;
@@ -151,13 +151,23 @@ where
 
         // Check capacity
         if heap.len() >= self.max_capacity {
-            warn!(
-                "Priority queue at capacity ({}), dropping event: {:?}",
-                self.max_capacity, event
-            );
-            self.metrics
+            let previous = self
+                .metrics
                 .drops_due_to_capacity
                 .fetch_add(1, AtomicOrdering::Relaxed);
+            let total_drops = previous + 1;
+
+            if total_drops == 1 || total_drops % 100 == 0 {
+                debug!(
+                    "Priority queue at capacity ({}); {} events dropped so far",
+                    self.max_capacity, total_drops
+                );
+            } else {
+                trace!(
+                    "Priority queue drop (capacity {}): {:?}",
+                    self.max_capacity, event
+                );
+            }
             drop(heap);
             return false;
         }
