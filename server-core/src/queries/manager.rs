@@ -738,10 +738,6 @@ impl Query for DrasiQuery {
                                         ),
                                     );
                                     meta.insert(
-                                        "query".to_string(),
-                                        serde_json::Value::String(query_str.clone()),
-                                    );
-                                    meta.insert(
                                         "processed_by".to_string(),
                                         serde_json::Value::String("drasi-core".to_string()),
                                     );
