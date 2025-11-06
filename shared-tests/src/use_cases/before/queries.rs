@@ -12,11 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod common;
-pub mod decoder;
-pub mod jq;
-pub mod map;
-pub mod parse_json;
-pub mod promote;
-pub mod relabel;
-pub mod unwind;
+pub fn increasing_value_query() -> &'static str {
+    "
+MATCH 
+  (i:Invoice)
+WHERE i.amount > drasi.previousValue(i.amount)
+RETURN
+  i.id AS id,
+  i.amount AS amount
+  "
+}
+
+pub fn increasing_sum_query() -> &'static str {
+    "
+MATCH 
+  (i:Invoice)-[:HAS]->(l:LineItem)
+WITH
+  i,
+  sum(l.amount) AS total
+WHERE total > drasi.previousValue(total, 0)
+RETURN
+  i.id AS id
+  "
+}

@@ -434,7 +434,11 @@ impl ContinuousQuery {
 
         variables.insert("".into(), element_variable);
 
-        let eval_context = ExpressionEvaluationContext::new(&variables, context.clock.clone());
+        let eval_context = ExpressionEvaluationContext::from_slot(
+            &variables,
+            context.clock.clone(),
+            &metadata.reference,
+        );
 
         for predicate in &element_spec.predicates {
             let result = self

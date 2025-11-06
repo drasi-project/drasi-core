@@ -486,11 +486,11 @@ impl ExpressionEvaluator {
         let result = match expression {
             ast::BinaryExpression::And(c1, c2) => VariableValue::Bool(
                 self.evaluate_predicate(context, c1).await?
-                    && self.evaluate_predicate(context, c2).await?,
+                    & self.evaluate_predicate(context, c2).await?,
             ),
             ast::BinaryExpression::Or(c1, c2) => VariableValue::Bool(
                 self.evaluate_predicate(context, c1).await?
-                    || self.evaluate_predicate(context, c2).await?,
+                    | self.evaluate_predicate(context, c2).await?,
             ),
             ast::BinaryExpression::Eq(e1, e2) => match (
                 self.evaluate_expression(context, e1).await?,
@@ -1900,6 +1900,27 @@ impl ExpressionEvaluator {
                 expected: "List".to_string(),
             }),
         }
+    }
+
+    /// Resolves the context result key for the given expression evaluation context.
+    /// The result key is either the set of grouping keys or the input grouping hash.
+    pub async fn resolve_context_result_key(
+        &self,
+        context: &ExpressionEvaluationContext<'_>,
+    ) -> Result<ResultKey, EvaluationError> {
+        let result_key = match context.get_output_grouping_key() {
+            Some(group_expressions) => {
+                let mut grouping_vals = Vec::new();
+                let mut context = context.clone();
+                context.set_side_effects(SideEffects::Snapshot);
+                for group_expression in group_expressions {
+                    grouping_vals.push(self.evaluate_expression(&context, group_expression).await?);
+                }
+                ResultKey::GroupBy(Arc::new(grouping_vals))
+            }
+            None => ResultKey::InputHash(context.get_input_grouping_hash()),
+        };
+        Ok(result_key)
     }
 }
 

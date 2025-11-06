@@ -251,3 +251,37 @@ mod index {
         shared_tests::index::future_queue::push_overwrite(&fqi).await;
     }
 }
+
+mod before {
+    use super::RocksDbQueryConfig;
+    use shared_tests::use_cases::*;
+
+    #[tokio::test]
+    async fn before_value() {
+        let test_config = RocksDbQueryConfig::new();
+        before::before_value(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn before_sum() {
+        let test_config = RocksDbQueryConfig::new();
+        before::before_sum(&test_config).await;
+    }
+}
+
+mod prev_unique {
+    use super::RocksDbQueryConfig;
+    use shared_tests::use_cases::*;
+
+    #[tokio::test]
+    async fn prev_unique() {
+        let test_config = RocksDbQueryConfig::new();
+        prev_distinct::prev_unique(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn prev_unique_with_match() {
+        let test_config = RocksDbQueryConfig::new();
+        prev_distinct::prev_unique_with_match(&test_config).await;
+    }
+}

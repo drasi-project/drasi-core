@@ -12,11 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod common;
-pub mod decoder;
-pub mod jq;
-pub mod map;
-pub mod parse_json;
-pub mod promote;
-pub mod relabel;
-pub mod unwind;
+pub fn prev_distinct_query() -> &'static str {
+    "
+MATCH 
+  (c:Contract)
+WHERE c.status = 'active'
+AND drasi.previousDistinctValue(c.status) = 'pending'
+RETURN
+  c.id AS id,
+  c.status AS status,
+  c.tags AS tags
+  "
+}
+
+pub fn prev_distinct_match_query() -> &'static str {
+    "
+MATCH 
+  (c:Contract WHERE c.status = 'active' AND drasi.previousDistinctValue(c.status) = 'pending')
+RETURN
+  c.id AS id,
+  c.status AS status,
+  c.tags AS tags
+  "
+}

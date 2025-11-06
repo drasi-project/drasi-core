@@ -83,6 +83,27 @@ impl TryInto<ElementValue> for &VariableValue {
     }
 }
 
+impl TryInto<ElementValue> for VariableValue {
+    type Error = ConversionError;
+
+    fn try_into(self) -> Result<ElementValue, ConversionError> {
+        match self {
+            VariableValue::Null => Ok(ElementValue::Null),
+            VariableValue::Bool(b) => Ok(ElementValue::Bool(b)),
+            VariableValue::Float(f) => Ok(ElementValue::Float(OrderedFloat(
+                f.as_f64().unwrap_or_default(),
+            ))),
+            VariableValue::Integer(i) => Ok(ElementValue::Integer(i.as_i64().unwrap_or_default())),
+            VariableValue::String(s) => Ok(ElementValue::String(Arc::from(s.as_str()))),
+            VariableValue::List(l) => Ok(ElementValue::List(
+                l.iter().map(|x| x.try_into().unwrap_or_default()).collect(),
+            )),
+            VariableValue::Object(o) => Ok(ElementValue::Object(o.into())),
+            _ => Err(ConversionError {}),
+        }
+    }
+}
+
 impl From<&ElementValue> for serde_json::Value {
     fn from(val: &ElementValue) -> Self {
         match val {
@@ -209,6 +230,26 @@ impl From<&BTreeMap<String, VariableValue>> for ElementPropertyMap {
     }
 }
 
+impl From<BTreeMap<String, VariableValue>> for ElementPropertyMap {
+    fn from(map: BTreeMap<String, VariableValue>) -> Self {
+        let mut values = BTreeMap::new();
+        for (key, value) in map {
+            values.insert(Arc::from(key.as_str()), value.try_into().unwrap());
+        }
+        ElementPropertyMap { values }
+    }
+}
+
+impl From<BTreeMap<String, ElementValue>> for ElementPropertyMap {
+    fn from(map: BTreeMap<String, ElementValue>) -> Self {
+        let mut values = BTreeMap::new();
+        for (key, value) in map {
+            values.insert(Arc::from(key.as_str()), value);
+        }
+        ElementPropertyMap { values }
+    }
+}
+
 impl From<&ElementPropertyMap> for serde_json::Map<String, serde_json::Value> {
     fn from(val: &ElementPropertyMap) -> Self {
         val.values
@@ -232,6 +273,15 @@ impl From<serde_json::Value> for ElementPropertyMap {
     fn from(value: serde_json::Value) -> Self {
         match value {
             serde_json::Value::Object(o) => (&o).into(),
+            _ => ElementPropertyMap::new(),
+        }
+    }
+}
+
+impl From<&serde_json::Value> for ElementPropertyMap {
+    fn from(value: &serde_json::Value) -> Self {
+        match value {
+            serde_json::Value::Object(o) => o.into(),
             _ => ElementPropertyMap::new(),
         }
     }
