@@ -163,6 +163,14 @@ impl DrasiQuery {
     }
 }
 
+#[cfg(test)]
+impl DrasiQuery {
+    /// Count active subscription forwarder tasks (testing helper)
+    pub async fn subscription_task_count(&self) -> usize {
+        self.subscription_tasks.read().await.len()
+    }
+}
+
 #[async_trait]
 impl Query for DrasiQuery {
     async fn start(&self) -> Result<()> {
@@ -805,14 +813,19 @@ impl Query for DrasiQuery {
             error!("Failed to send component event: {}", e);
         }
 
-        // Abort the processing task if it exists
-        if let Some(handle) = self.base.task_handle.write().await.take() {
+        // Drain and abort source subscription forwarders so they don't leak across restarts
+        let subscription_handles: Vec<_> = {
+            let mut tasks = self.subscription_tasks.write().await;
+            tasks.drain(..).collect()
+        };
+
+        for handle in subscription_handles {
             handle.abort();
-            // Wait for the task to finish (it will be cancelled)
             let _ = handle.await;
         }
 
-        *self.base.status.write().await = ComponentStatus::Stopped;
+        // Use QueryBase common stop behavior to finish shutting down the processor task
+        self.base.stop_common().await?;
 
         let event = ComponentEvent {
             component_id: self.base.config.id.clone(),

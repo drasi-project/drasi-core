@@ -147,6 +147,43 @@ mod manager_tests {
     }
 
     #[tokio::test]
+    async fn test_stop_query_cancels_subscription_tasks() {
+        let (manager, _event_rx, source_manager) = create_test_manager().await;
+
+        // Add a source so subscriptions succeed
+        let source_config = create_test_source_config("source1", "mock");
+        source_manager.add_source(source_config).await.unwrap();
+
+        // Add the query and start it
+        let config = create_test_query_config("test-query", vec!["source1".to_string()]);
+        manager.add_query(config).await.unwrap();
+        manager.start_query("test-query".to_string()).await.unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Inspect concrete query to verify subscription tasks are present
+        let query = manager
+            .get_query_instance("test-query")
+            .await
+            .unwrap();
+        let concrete = query.as_any().downcast_ref::<DrasiQuery>().unwrap();
+
+        assert!(
+            concrete.subscription_task_count().await > 0,
+            "Expected active subscription task"
+        );
+
+        manager.stop_query("test-query".to_string()).await.unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        assert!(
+            concrete.subscription_task_count().await == 0,
+            "Subscription tasks should be cleared on stop"
+        );
+    }
+
+    #[tokio::test]
     async fn test_add_gql_query() {
         let (manager, _event_rx, _source_manager) = create_test_manager().await;
 
