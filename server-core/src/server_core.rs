@@ -622,7 +622,7 @@ impl DrasiServerCore {
         // Create source with auto-start enabled if requested
         self.create_source_with_options(source, true)
             .await
-            .map_err(|e| DrasiError::initialization(format!("Failed to add source: {}", e)))?;
+            .map_err(|e| DrasiError::provisioning(format!("Failed to add source: {}", e)))?;
 
         Ok(())
     }
@@ -649,7 +649,7 @@ impl DrasiServerCore {
         // Create query with auto-start enabled if requested
         self.create_query_with_options(query, true)
             .await
-            .map_err(|e| DrasiError::initialization(format!("Failed to add query: {}", e)))?;
+            .map_err(|e| DrasiError::provisioning(format!("Failed to add query: {}", e)))?;
 
         Ok(())
     }
@@ -678,7 +678,7 @@ impl DrasiServerCore {
         // Create reaction with auto-start enabled if requested
         self.create_reaction_with_options(reaction, true)
             .await
-            .map_err(|e| DrasiError::initialization(format!("Failed to add reaction: {}", e)))?;
+            .map_err(|e| DrasiError::provisioning(format!("Failed to add reaction: {}", e)))?;
 
         Ok(())
     }
@@ -707,14 +707,14 @@ impl DrasiServerCore {
             self.source_manager
                 .stop_source(id.to_string())
                 .await
-                .map_err(|e| DrasiError::initialization(format!("Failed to stop source: {}", e)))?;
+                .map_err(|e| DrasiError::provisioning(format!("Failed to stop source: {}", e)))?;
         }
 
         // Delete the source
         self.source_manager
             .delete_source(id.to_string())
             .await
-            .map_err(|e| DrasiError::initialization(format!("Failed to delete source: {}", e)))?;
+            .map_err(|e| DrasiError::provisioning(format!("Failed to delete source: {}", e)))?;
 
         Ok(())
     }
@@ -743,14 +743,14 @@ impl DrasiServerCore {
             self.query_manager
                 .stop_query(id.to_string())
                 .await
-                .map_err(|e| DrasiError::initialization(format!("Failed to stop query: {}", e)))?;
+                .map_err(|e| DrasiError::provisioning(format!("Failed to stop query: {}", e)))?;
         }
 
         // Delete the query
         self.query_manager
             .delete_query(id.to_string())
             .await
-            .map_err(|e| DrasiError::initialization(format!("Failed to delete query: {}", e)))?;
+            .map_err(|e| DrasiError::provisioning(format!("Failed to delete query: {}", e)))?;
 
         Ok(())
     }
@@ -780,7 +780,7 @@ impl DrasiServerCore {
                 .stop_reaction(id.to_string())
                 .await
                 .map_err(|e| {
-                    DrasiError::initialization(format!("Failed to stop reaction: {}", e))
+                    DrasiError::provisioning(format!("Failed to stop reaction: {}", e))
                 })?;
         }
 
@@ -788,7 +788,7 @@ impl DrasiServerCore {
         self.reaction_manager
             .delete_reaction(id.to_string())
             .await
-            .map_err(|e| DrasiError::initialization(format!("Failed to delete reaction: {}", e)))?;
+            .map_err(|e| DrasiError::provisioning(format!("Failed to delete reaction: {}", e)))?;
 
         Ok(())
     }
@@ -1266,7 +1266,9 @@ impl DrasiServerCore {
     /// ```
     pub async fn from_config_file(path: impl AsRef<Path>) -> crate::api::Result<Self> {
         let config = DrasiServerCoreConfig::load_from_file(path)?;
-        config.validate()?;
+        config
+            .validate()
+            .map_err(|e| DrasiError::startup_validation(e.to_string()))?;
 
         let runtime_config = Arc::new(RuntimeConfig::from(config));
         let mut core = Self::new(runtime_config);
@@ -1295,7 +1297,9 @@ impl DrasiServerCore {
     /// ```
     pub async fn from_config_str(yaml: &str) -> crate::api::Result<Self> {
         let config: DrasiServerCoreConfig = serde_yaml::from_str(yaml)?;
-        config.validate()?;
+        config
+            .validate()
+            .map_err(|e| DrasiError::startup_validation(e.to_string()))?;
 
         let runtime_config = Arc::new(RuntimeConfig::from(config));
         let mut core = Self::new(runtime_config);

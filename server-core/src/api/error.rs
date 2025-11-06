@@ -103,6 +103,14 @@ pub enum DrasiError {
     #[error("Initialization error: {0}")]
     Initialization(String),
 
+    /// Startup validation error - configuration failed validation during startup
+    #[error("Startup validation error: {0}")]
+    StartupValidation(String),
+
+    /// Provisioning error - runtime add/remove/start operations failed
+    #[error("Provisioning error: {0}")]
+    Provisioning(String),
+
     /// Component not found - requested source, query, or reaction doesn't exist
     #[error("Component not found: {kind} '{id}'")]
     ComponentNotFound { kind: String, id: String },
@@ -204,6 +212,16 @@ impl DrasiError {
     /// Create an initialization error
     pub fn initialization(msg: impl Into<String>) -> Self {
         Self::Initialization(msg.into())
+    }
+
+    /// Create a startup validation error
+    pub fn startup_validation(msg: impl Into<String>) -> Self {
+        Self::StartupValidation(msg.into())
+    }
+
+    /// Create a provisioning error
+    pub fn provisioning(msg: impl Into<String>) -> Self {
+        Self::Provisioning(msg.into())
     }
 
     /// Create a component not found error

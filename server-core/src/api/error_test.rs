@@ -37,6 +37,26 @@ mod tests {
     }
 
     #[test]
+    fn test_error_startup_validation() {
+        let err = DrasiError::startup_validation("Missing server id");
+        assert!(matches!(err, DrasiError::StartupValidation(_)));
+        assert_eq!(
+            err.to_string(),
+            "Startup validation error: Missing server id"
+        );
+    }
+
+    #[test]
+    fn test_error_provisioning() {
+        let err = DrasiError::provisioning("Failed to create source");
+        assert!(matches!(err, DrasiError::Provisioning(_)));
+        assert_eq!(
+            err.to_string(),
+            "Provisioning error: Failed to create source"
+        );
+    }
+
+    #[test]
     fn test_error_component_not_found() {
         let err = DrasiError::component_not_found("source", "test-source");
         assert!(matches!(err, DrasiError::ComponentNotFound { .. }));

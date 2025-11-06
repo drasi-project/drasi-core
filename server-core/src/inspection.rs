@@ -234,7 +234,7 @@ impl InspectionAPI {
             } else if e.to_string().contains("not running") {
                 DrasiError::invalid_state(format!("Query '{}' is not running", id))
             } else {
-                DrasiError::initialization(e.to_string())
+                DrasiError::provisioning(e.to_string())
             }
         })
     }

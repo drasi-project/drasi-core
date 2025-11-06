@@ -14,7 +14,7 @@
 
 //! Builder for DrasiServerCore
 
-use crate::api::Result;
+use crate::api::{DrasiError, Result};
 use crate::config::{
     DrasiServerCoreConfig, DrasiServerCoreSettings, QueryConfig, ReactionConfig, RuntimeConfig,
     SourceConfig,
@@ -488,6 +488,10 @@ impl DrasiServerCoreBuilder {
             queries: self.queries,
             reactions: self.reactions,
         };
+
+        core_config
+            .validate()
+            .map_err(|e| DrasiError::startup_validation(e.to_string()))?;
 
         let config = Arc::new(RuntimeConfig::from(core_config));
 
