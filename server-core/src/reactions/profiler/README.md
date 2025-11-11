@@ -64,7 +64,7 @@ Percentiles are computed from a sliding window of recent samples:
   - Medium (1000-5000): Balanced stability (recommended)
   - Large (5000-10000): Very stable statistics, higher memory
 
-- **report_interval_secs** (default: 10): How often to log statistical reports
+- **report_interval_secs** (default: 60): How often to log statistical reports
   - Short (5-15s): Active debugging and development
   - Medium (30-60s): Production monitoring
   - Long (120-300s): Low-overhead monitoring
@@ -86,19 +86,18 @@ reactions:
 
 **Rust**:
 ```rust
-use drasi_server_core::config::ReactionConfig;
+use drasi_server_core::config::{ReactionConfig, ReactionSpecificConfig};
+use drasi_server_core::config::typed::ProfilerReactionConfig;
 
 let config = ReactionConfig {
     id: "profiler".to_string(),
-    reaction_type: "profiler".to_string(),
     queries: vec!["my-query".to_string()],
     auto_start: true,
-    properties: {
-        let mut props = HashMap::new();
-        props.insert("window_size".to_string(), serde_json::json!(1000));
-        props.insert("report_interval_secs".to_string(), serde_json::json!(30));
-        props
-    },
+    config: ReactionSpecificConfig::Profiler(ProfilerReactionConfig {
+        window_size: 1000,
+        report_interval_secs: 30,
+    }),
+    priority_queue_capacity: None,
 };
 ```
 

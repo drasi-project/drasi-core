@@ -44,12 +44,12 @@ Inherits all standard gRPC properties (see [standard gRPC docs](../grpc/README.m
 
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
-| `adaptive_max_batch_size` | number | 1000 | Maximum batch size (burst traffic) |
-| `adaptive_min_batch_size` | number | 10 | Minimum batch size (idle/low traffic) |
-| `adaptive_max_wait_ms` | number | 100 | Maximum wait time before flush |
-| `adaptive_min_wait_ms` | number | 1 | Minimum wait time for coalescing |
-| `adaptive_window_secs` | number | 5 | Throughput calculation window |
-| `adaptive_enabled` | boolean | true | Enable adaptive batching |
+| `adaptive_max_batch_size` | number | 100 | Maximum batch size (burst traffic) |
+| `adaptive_min_batch_size` | number | 1 | Minimum batch size (idle/low traffic) |
+| `adaptive_window_size` | number | 10 | Window size in 100ms units (1-255) |
+| `adaptive_batch_timeout_ms` | number | 1000 | Maximum wait time before flush |
+
+**Note**: The `adaptive_window_size` is measured in 100ms units. For example, a value of 10 equals 1 second, 50 equals 5 seconds, etc.
 
 ## Configuration Examples
 
@@ -77,9 +77,8 @@ reactions:
       endpoint: "grpc://event-processor:9090"
       adaptive_max_batch_size: 2000
       adaptive_min_batch_size: 50
-      adaptive_max_wait_ms: 500
-      adaptive_min_wait_ms: 5
-      adaptive_window_secs: 10
+      adaptive_window_size: 100  # 10 seconds
+      adaptive_batch_timeout_ms: 500
       timeout_ms: 15000
       max_retries: 5
 ```
@@ -96,9 +95,8 @@ reactions:
       endpoint: "grpc://alert-service:50052"
       adaptive_max_batch_size: 100
       adaptive_min_batch_size: 5
-      adaptive_max_wait_ms: 50
-      adaptive_min_wait_ms: 1
-      adaptive_window_secs: 3
+      adaptive_window_size: 30  # 3 seconds
+      adaptive_batch_timeout_ms: 50
       timeout_ms: 3000
 ```
 
@@ -115,9 +113,8 @@ reactions:
       "endpoint": "grpc://localhost:50052",
       "adaptive_max_batch_size": 2000,
       "adaptive_min_batch_size": 50,
-      "adaptive_max_wait_ms": 500,
-      "adaptive_min_wait_ms": 5,
-      "adaptive_window_secs": 10
+      "adaptive_window_size": 100,
+      "adaptive_batch_timeout_ms": 500
     }
   }]
 }
@@ -126,34 +123,56 @@ reactions:
 ### Rust API
 
 ```rust
-use drasi_server_core::api::{Reaction, Properties};
-use serde_json::json;
+use drasi_server_core::config::{ReactionConfig, ReactionSpecificConfig};
+use drasi_server_core::config::typed::{GrpcAdaptiveReactionConfig, AdaptiveBatchConfig};
+use std::collections::HashMap;
 
 // Basic usage with defaults
-let reaction = Reaction::grpc_adaptive("my-reaction")
-    .subscribe_to("temperature-query")
-    .with_properties(
-        Properties::new()
-            .with_string("endpoint", "grpc://localhost:50052")
-    )
-    .build();
+let config = ReactionConfig {
+    id: "my-reaction".to_string(),
+    queries: vec!["temperature-query".to_string()],
+    auto_start: true,
+    config: ReactionSpecificConfig::GrpcAdaptive(GrpcAdaptiveReactionConfig {
+        endpoint: "grpc://localhost:50052".to_string(),
+        timeout_ms: 5000,
+        max_retries: 3,
+        connection_retry_attempts: 5,
+        initial_connection_timeout_ms: 10000,
+        metadata: HashMap::new(),
+        adaptive: AdaptiveBatchConfig {
+            adaptive_min_batch_size: 1,
+            adaptive_max_batch_size: 100,
+            adaptive_window_size: 10,
+            adaptive_batch_timeout_ms: 1000,
+        },
+    }),
+    priority_queue_capacity: None,
+};
 
 // High-throughput configuration
-let reaction = Reaction::grpc_adaptive("high-throughput")
-    .subscribe_to("event-stream")
-    .with_properties(
-        Properties::new()
-            .with_string("endpoint", "grpc://event-processor:9090")
-            .with_number("adaptive_max_batch_size", 2000)
-            .with_number("adaptive_min_batch_size", 50)
-            .with_number("adaptive_max_wait_ms", 500)
-            .with_number("adaptive_min_wait_ms", 5)
-            .with_number("adaptive_window_secs", 10)
-            .with("metadata", json!({
-                "authorization": "Bearer token123"
-            }))
-    )
-    .build();
+let mut metadata = HashMap::new();
+metadata.insert("authorization".to_string(), "Bearer token123".to_string());
+
+let config = ReactionConfig {
+    id: "high-throughput".to_string(),
+    queries: vec!["event-stream".to_string()],
+    auto_start: true,
+    config: ReactionSpecificConfig::GrpcAdaptive(GrpcAdaptiveReactionConfig {
+        endpoint: "grpc://event-processor:9090".to_string(),
+        timeout_ms: 15000,
+        max_retries: 5,
+        connection_retry_attempts: 5,
+        initial_connection_timeout_ms: 10000,
+        metadata,
+        adaptive: AdaptiveBatchConfig {
+            adaptive_min_batch_size: 50,
+            adaptive_max_batch_size: 2000,
+            adaptive_window_size: 100,  // 10 seconds
+            adaptive_batch_timeout_ms: 500,
+        },
+    }),
+    priority_queue_capacity: None,
+};
 ```
 
 ## Adaptive Batching Algorithm
@@ -183,11 +202,11 @@ Messages per second determine the traffic level and batching behavior:
 
 ### Throughput Window
 
-The sliding window acts as a smoothing buffer:
+The sliding window acts as a smoothing buffer (measured in 100ms units):
 
-- **Short (1-3s)**: Fast response, may oscillate
-- **Medium (5-10s)**: Stable, tolerates spikes (default)
-- **Long (15-30s)**: Very smooth, slow to detect changes
+- **Short (10-30 units / 1-3s)**: Fast response, may oscillate
+- **Medium (50-100 units / 5-10s)**: Stable, tolerates spikes (default)
+- **Long (150-255 units / 15-25.5s)**: Very smooth, slow to detect changes
 
 ## Proto Schema
 
@@ -225,9 +244,8 @@ Logged periodically (every 100 successful sends):
 ```yaml
 adaptive_max_batch_size: 2000
 adaptive_min_batch_size: 100
-adaptive_max_wait_ms: 1000
-adaptive_min_wait_ms: 10
-adaptive_window_secs: 10
+adaptive_window_size: 100  # 10 seconds
+adaptive_batch_timeout_ms: 1000
 ```
 
 **Effect**: Large batches during bursts, maintains efficiency during lulls
@@ -237,9 +255,8 @@ adaptive_window_secs: 10
 ```yaml
 adaptive_max_batch_size: 50
 adaptive_min_batch_size: 1
-adaptive_max_wait_ms: 20
-adaptive_min_wait_ms: 1
-adaptive_window_secs: 3
+adaptive_window_size: 30  # 3 seconds
+adaptive_batch_timeout_ms: 20
 ```
 
 **Effect**: Small batches, minimal wait times, fast adaptation
@@ -247,11 +264,10 @@ adaptive_window_secs: 3
 ### Balanced Settings (Default)
 
 ```yaml
-adaptive_max_batch_size: 1000
-adaptive_min_batch_size: 10
-adaptive_max_wait_ms: 100
-adaptive_min_wait_ms: 1
-adaptive_window_secs: 5
+adaptive_max_batch_size: 100
+adaptive_min_batch_size: 1
+adaptive_window_size: 10  # 1 second
+adaptive_batch_timeout_ms: 1000
 ```
 
 **Effect**: Good balance for variable workloads
@@ -263,8 +279,7 @@ adaptive_window_secs: 5
 **Symptom**: Batch size never changes
 
 **Causes:**
-- `adaptive_enabled: false` - Check configuration
-- Window too large - Reduce `adaptive_window_secs`
+- Window too large - Reduce `adaptive_window_size`
 - Min/max too close - Increase range
 - Traffic is consistently at one extreme (expected behavior)
 
@@ -274,7 +289,7 @@ adaptive_window_secs: 5
 
 **Causes:**
 - Insufficient traffic (expected for low traffic)
-- Wait time too short - Increase `adaptive_max_wait_ms`
+- Wait time too short - Increase `adaptive_batch_timeout_ms`
 - Multiple queries (each batched separately)
 
 ### High Memory Usage
@@ -282,7 +297,7 @@ adaptive_window_secs: 5
 **Causes:**
 - Very large `adaptive_max_batch_size` - Reduce to 500-2000
 - Channel buffer full (batcher slow) - Check network/server
-- Large throughput window - Reduce `adaptive_window_secs`
+- Large throughput window - Reduce `adaptive_window_size`
 
 ### Enable Debug Logging
 
@@ -313,9 +328,10 @@ INFO: Adaptive metrics - Successful: 500, Failed: 3
 - Negligible for most workloads
 
 **Tuning Complexity**:
-- 6 parameters vs 2 for standard gRPC
+- 4 adaptive parameters vs 2 for standard gRPC
 - Understanding parameter interactions
 - Use defaults for most scenarios
+- `min_wait_time` is hardcoded to 100ms (not configurable) to avoid excessive gRPC calls
 
 **Workload Sensitivity**:
 - Works best: Gradual changes, sustained levels
@@ -323,13 +339,12 @@ INFO: Adaptive metrics - Successful: 500, Failed: 3
 
 **Adaptation Lag**:
 - ~½ window duration delay to adapt
-- 5-10s transition time for default settings
+- 0.5-1s transition time for default settings (window_size=10)
 - Trade-off for stability
 
 **Non-Deterministic**:
 - Batch sizes vary based on timing
 - Different runs produce different sequences
-- Disable adaptive for reproducible testing
 
 ## Architecture
 

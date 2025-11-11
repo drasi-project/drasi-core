@@ -15,7 +15,9 @@
 #[cfg(test)]
 mod tests {
     use crate::channels::ComponentStatus;
-    use crate::config::typed::HttpReactionConfig;
+    use crate::config::typed::{
+        AdaptiveBatchConfig as ConfigAdaptiveBatchConfig, HttpAdaptiveReactionConfig,
+    };
     use crate::config::{ReactionConfig, ReactionSpecificConfig};
     use crate::reactions::http_adaptive::{AdaptiveHttpReaction, BatchResult};
     use crate::reactions::Reaction;
@@ -27,18 +29,24 @@ mod tests {
     fn create_test_config(base_url: String) -> ReactionConfig {
         let routes = HashMap::new();
 
-        let http_config = HttpReactionConfig {
+        let http_config = HttpAdaptiveReactionConfig {
             base_url,
             token: None,
             timeout_ms: 5000,
             routes,
+            adaptive: ConfigAdaptiveBatchConfig {
+                adaptive_min_batch_size: 1,
+                adaptive_max_batch_size: 100,
+                adaptive_window_size: 10,
+                adaptive_batch_timeout_ms: 1000,
+            },
         };
 
         ReactionConfig {
             id: "test-adaptive-http".to_string(),
             queries: vec!["test-query".to_string()],
             auto_start: true,
-            config: ReactionSpecificConfig::Http(http_config),
+            config: ReactionSpecificConfig::HttpAdaptive(http_config),
             priority_queue_capacity: None,
         }
     }
@@ -80,20 +88,22 @@ mod tests {
         // Test that custom adaptive parameters can be set
         let (event_tx, _event_rx) = mpsc::channel(100);
 
-        let mut custom = HashMap::new();
-        custom.insert("base_url".to_string(), json!("http://localhost:8080"));
-        custom.insert("adaptive_max_batch_size".to_string(), json!(500));
-        custom.insert("adaptive_min_batch_size".to_string(), json!(20));
-        custom.insert("adaptive_max_wait_ms".to_string(), json!(50));
-        custom.insert("adaptive_min_wait_ms".to_string(), json!(2));
-        custom.insert("adaptive_window_secs".to_string(), json!(10));
-        custom.insert("adaptive_enabled".to_string(), json!(false));
-
         let config = ReactionConfig {
             id: "test-custom-adaptive".to_string(),
             queries: vec!["test-query".to_string()],
             auto_start: true,
-            config: ReactionSpecificConfig::Custom { properties: custom },
+            config: ReactionSpecificConfig::HttpAdaptive(HttpAdaptiveReactionConfig {
+                base_url: "http://localhost:8080".to_string(),
+                token: None,
+                timeout_ms: 5000,
+                routes: HashMap::new(),
+                adaptive: ConfigAdaptiveBatchConfig {
+                    adaptive_min_batch_size: 20,
+                    adaptive_max_batch_size: 500,
+                    adaptive_window_size: 100, // 10 * 100ms = 10 seconds
+                    adaptive_batch_timeout_ms: 50,
+                },
+            }),
             priority_queue_capacity: None,
         };
 
@@ -240,7 +250,7 @@ mod tests {
 
         // Verify reaction type through config
         let config = reaction.get_config();
-        assert_eq!(config.reaction_type(), "http");
+        assert_eq!(config.reaction_type(), "http_adaptive");
     }
 
     #[test]
@@ -286,11 +296,17 @@ mod tests {
             id: "test-multi-query".to_string(),
             queries: vec!["query1".to_string(), "query2".to_string(), "query3".to_string()],
             auto_start: true,
-            config: ReactionSpecificConfig::Http(HttpReactionConfig {
+            config: ReactionSpecificConfig::HttpAdaptive(HttpAdaptiveReactionConfig {
                 base_url: "http://localhost:8080".to_string(),
                 token: None,
                 timeout_ms: 5000,
                 routes: HashMap::new(),
+                adaptive: ConfigAdaptiveBatchConfig {
+                    adaptive_min_batch_size: 1,
+                    adaptive_max_batch_size: 100,
+                    adaptive_window_size: 10,
+                    adaptive_batch_timeout_ms: 1000,
+                },
             }),
             priority_queue_capacity: None,
         };
@@ -327,11 +343,17 @@ mod tests {
             id: "test-with-token".to_string(),
             queries: vec!["test-query".to_string()],
             auto_start: true,
-            config: ReactionSpecificConfig::Http(HttpReactionConfig {
+            config: ReactionSpecificConfig::HttpAdaptive(HttpAdaptiveReactionConfig {
                 base_url: "http://localhost:8080".to_string(),
                 token: Some("test-token".to_string()),
                 timeout_ms: 5000,
                 routes: HashMap::new(),
+                adaptive: ConfigAdaptiveBatchConfig {
+                    adaptive_min_batch_size: 1,
+                    adaptive_max_batch_size: 100,
+                    adaptive_window_size: 10,
+                    adaptive_batch_timeout_ms: 1000,
+                },
             }),
             priority_queue_capacity: None,
         };

@@ -15,7 +15,7 @@ Enables real-time integration with external systems by pushing Drasi query resul
 | `base_url` | string | `"http://localhost"` | Base URL for HTTP requests. Call URLs are appended unless absolute |
 | `token` | string | - | Bearer token for authentication (adds `Authorization: Bearer <token>` header) |
 | `timeout_ms` | number | `10000` | Request timeout in milliseconds |
-| `queries` | object | `{}` | Query-specific CallSpec configurations (see below) |
+| `routes` | object | `{}` | Query-specific CallSpec configurations (see below) |
 
 ### CallSpec Structure
 
@@ -56,7 +56,7 @@ reactions:
     properties:
       base_url: "https://api.example.com"
       token: "your-api-token"
-      queries:
+      routes:
         users-query:
           added:
             url: "/users"
@@ -76,38 +76,46 @@ reactions:
 ## Programmatic API (Rust)
 
 ```rust
-use drasi_server_core::{DrasiServerCore, Reaction, Properties};
-use serde_json::json;
+use drasi_server_core::config::{ReactionConfig, ReactionSpecificConfig};
+use drasi_server_core::config::typed::HttpReactionConfig;
+use drasi_server_core::reactions::http::{CallSpec, QueryConfig};
+use std::collections::HashMap;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let queries_config = json!({
-        "users-query": {
-            "added": {
-                "url": "/users",
-                "method": "POST",
-                "body": "{\"id\": \"{{after.id}}\", \"name\": \"{{after.name}}\"}",
-                "headers": {"X-Source": "drasi"}
-            }
-        }
-    });
+    let mut routes = HashMap::new();
+    routes.insert(
+        "users-query".to_string(),
+        QueryConfig {
+            added: Some(CallSpec {
+                url: "/users".to_string(),
+                method: "POST".to_string(),
+                body: r#"{"id": "{{after.id}}", "name": "{{after.name}}"}"#.to_string(),
+                headers: {
+                    let mut h = HashMap::new();
+                    h.insert("X-Source".to_string(), "drasi".to_string());
+                    h
+                },
+            }),
+            updated: None,
+            deleted: None,
+        },
+    );
 
-    let core = DrasiServerCore::builder()
-        .add_reaction(
-            Reaction::http("my-http-reaction")
-                .subscribe_to("my-query")
-                .with_properties(
-                    Properties::new()
-                        .with_string("base_url", "https://api.example.com")
-                        .with_string("token", "your-api-token")
-                        .with_value("queries", queries_config)
-                )
-                .build()
-        )
-        .build()
-        .await?;
+    let config = ReactionConfig {
+        id: "my-http-reaction".to_string(),
+        queries: vec!["users-query".to_string()],
+        auto_start: true,
+        config: ReactionSpecificConfig::Http(HttpReactionConfig {
+            base_url: "https://api.example.com".to_string(),
+            token: Some("your-api-token".to_string()),
+            timeout_ms: 10000,
+            routes,
+        }),
+        priority_queue_capacity: None,
+    };
 
-    core.start().await?;
+    // Use config to create and add reaction to DrasiServerCore
     Ok(())
 }
 ```
@@ -146,7 +154,7 @@ Available in Handlebars templates for all operations:
 
 **ADD**: `{{after}}` - New row data, `{{after.fieldName}}` - Access specific fields
 
-**UPDATE**: `{{before}}` / `{{after}}` - Previous/new values, `{{before.fieldName}}` / `{{after.fieldName}}` - Access fields
+**UPDATE**: `{{before}}` / `{{after}}` / `{{data}}` - Previous/new/current values. Note: `{{data}}` is equivalent to `{{after}}` for UPDATE operations. Use `{{before.fieldName}}` / `{{after.fieldName}}` to access specific fields
 
 **DELETE**: `{{before}}` - Deleted row data, `{{before.fieldName}}` - Access fields
 

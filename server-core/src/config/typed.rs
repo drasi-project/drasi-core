@@ -299,7 +299,7 @@ fn default_consumer_group() -> String {
 }
 
 fn default_batch_size() -> usize {
-    10
+    100
 }
 
 fn default_block_ms() -> u64 {
@@ -353,27 +353,11 @@ impl Default for LogReactionConfig {
     }
 }
 
-/// HTTP call specification for HTTP reaction
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CallSpec {
-    pub url: String,
-    pub method: String,
-    #[serde(default)]
-    pub body: String,
-    #[serde(default)]
-    pub headers: HashMap<String, String>,
-}
-
-/// Query-specific HTTP call configuration
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct QueryCallConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub added: Option<CallSpec>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub updated: Option<CallSpec>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deleted: Option<CallSpec>,
-}
+// Re-export CallSpec from the http reaction module
+// Note: We don't re-export QueryConfig to avoid ambiguity with schema::QueryConfig
+pub use crate::reactions::http::CallSpec;
+// Import QueryConfig for use in reaction configs
+use crate::reactions::http::QueryConfig as HttpQueryConfig;
 
 /// HTTP reaction configuration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -392,12 +376,261 @@ pub struct HttpReactionConfig {
 
     /// Query-specific call configurations
     #[serde(default)]
-    pub routes: HashMap<String, QueryCallConfig>,
+    pub routes: HashMap<String, HttpQueryConfig>,
 }
 
 fn default_base_url() -> String {
     "http://localhost".to_string()
 }
+
+// =============================================================================
+// Adaptive Reaction Configuration Types
+// =============================================================================
+
+/// Adaptive batching configuration shared by adaptive reactions
+///
+/// This configuration is used by both HTTP Adaptive and gRPC Adaptive reactions to
+/// dynamically adjust batch size and timing based on throughput patterns.
+///
+/// # Adaptive Algorithm
+///
+/// The adaptive batcher monitors throughput over a configurable window and adjusts
+/// batch size and wait time based on traffic level:
+///
+/// | Throughput Level | Messages/Sec | Batch Size | Wait Time |
+/// |-----------------|--------------|------------|-----------|
+/// | Idle           | < 1          | min_batch_size | 1ms |
+/// | Low            | 1-100        | 2 × min | 1ms |
+/// | Medium         | 100-1K       | 25% of max | 10ms |
+/// | High           | 1K-10K       | 50% of max | 25ms |
+/// | Burst          | > 10K        | max_batch_size | 50ms |
+///
+/// # Example
+///
+/// ```rust
+/// use drasi_server_core::config::typed::AdaptiveBatchConfig;
+///
+/// // High-throughput configuration
+/// let config = AdaptiveBatchConfig {
+///     adaptive_min_batch_size: 50,
+///     adaptive_max_batch_size: 2000,
+///     adaptive_window_size: 100,  // 10 seconds
+///     adaptive_batch_timeout_ms: 500,
+/// };
+///
+/// // Low-latency configuration
+/// let config = AdaptiveBatchConfig {
+///     adaptive_min_batch_size: 1,
+///     adaptive_max_batch_size: 50,
+///     adaptive_window_size: 30,  // 3 seconds
+///     adaptive_batch_timeout_ms: 10,
+/// };
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AdaptiveBatchConfig {
+    /// Minimum batch size (events per batch) used during idle/low traffic
+    #[serde(default = "default_adaptive_min_batch_size")]
+    pub adaptive_min_batch_size: usize,
+
+    /// Maximum batch size (events per batch) used during burst traffic
+    #[serde(default = "default_adaptive_max_batch_size")]
+    pub adaptive_max_batch_size: usize,
+
+    /// Window size for throughput monitoring in 100ms units (range: 1-255)
+    ///
+    /// For example:
+    /// - 10 = 1 second
+    /// - 50 = 5 seconds
+    /// - 100 = 10 seconds
+    ///
+    /// Larger windows provide more stable adaptation but respond slower to traffic changes.
+    #[serde(default = "default_adaptive_window_size")]
+    pub adaptive_window_size: usize,
+
+    /// Maximum time to wait before flushing a partial batch (milliseconds)
+    ///
+    /// This timeout ensures results are delivered even when batch size is not reached.
+    #[serde(default = "default_adaptive_batch_timeout_ms")]
+    pub adaptive_batch_timeout_ms: u64,
+}
+
+impl Default for AdaptiveBatchConfig {
+    fn default() -> Self {
+        Self {
+            adaptive_min_batch_size: default_adaptive_min_batch_size(),
+            adaptive_max_batch_size: default_adaptive_max_batch_size(),
+            adaptive_window_size: default_adaptive_window_size(),
+            adaptive_batch_timeout_ms: default_adaptive_batch_timeout_ms(),
+        }
+    }
+}
+
+fn default_adaptive_min_batch_size() -> usize {
+    1
+}
+
+fn default_adaptive_max_batch_size() -> usize {
+    100
+}
+
+fn default_adaptive_window_size() -> usize {
+    10
+}
+
+fn default_adaptive_batch_timeout_ms() -> u64 {
+    1000
+}
+
+/// gRPC Adaptive reaction configuration with adaptive batching
+///
+/// This reaction extends the standard gRPC reaction with intelligent, throughput-based
+/// batching that automatically adjusts batch sizes and wait times based on real-time
+/// traffic patterns.
+///
+/// # Key Features
+///
+/// - **Dynamic Batching**: Adjusts batch size (min to max) based on throughput
+/// - **Lazy Connection**: Connects only when first batch is ready
+/// - **Automatic Retry**: Exponential backoff with configurable retries
+/// - **Traffic Classification**: Five levels (Idle/Low/Medium/High/Burst)
+///
+/// # Example
+///
+/// ```rust
+/// use drasi_server_core::config::{ReactionConfig, ReactionSpecificConfig};
+/// use drasi_server_core::config::typed::{GrpcAdaptiveReactionConfig, AdaptiveBatchConfig};
+/// use std::collections::HashMap;
+///
+/// let config = ReactionConfig {
+///     id: "high-throughput".to_string(),
+///     queries: vec!["event-stream".to_string()],
+///     auto_start: true,
+///     config: ReactionSpecificConfig::GrpcAdaptive(GrpcAdaptiveReactionConfig {
+///         endpoint: "grpc://event-processor:9090".to_string(),
+///         timeout_ms: 15000,
+///         max_retries: 5,
+///         connection_retry_attempts: 5,
+///         initial_connection_timeout_ms: 10000,
+///         metadata: HashMap::new(),
+///         adaptive: AdaptiveBatchConfig {
+///             adaptive_min_batch_size: 50,
+///             adaptive_max_batch_size: 2000,
+///             adaptive_window_size: 100,  // 10 seconds
+///             adaptive_batch_timeout_ms: 500,
+///         },
+///     }),
+///     priority_queue_capacity: None,
+/// };
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GrpcAdaptiveReactionConfig {
+    /// gRPC server endpoint URL (e.g., "grpc://localhost:50052")
+    #[serde(default = "default_grpc_endpoint")]
+    pub endpoint: String,
+
+    /// Request timeout in milliseconds
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
+
+    /// Maximum retries for failed batch requests
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+
+    /// Number of connection retry attempts before giving up
+    #[serde(default = "default_connection_retry_attempts")]
+    pub connection_retry_attempts: u32,
+
+    /// Initial connection timeout in milliseconds (used for lazy connection)
+    #[serde(default = "default_initial_connection_timeout_ms")]
+    pub initial_connection_timeout_ms: u64,
+
+    /// gRPC metadata headers to include in all requests
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+
+    /// Adaptive batching configuration (flattened into parent config)
+    #[serde(flatten)]
+    pub adaptive: AdaptiveBatchConfig,
+}
+
+/// HTTP Adaptive reaction configuration with adaptive batching
+///
+/// This reaction extends the standard HTTP reaction with intelligent batching and
+/// HTTP/2 connection pooling, automatically adjusting batch size and timing based
+/// on throughput patterns.
+///
+/// # Key Features
+///
+/// - **Intelligent Batching**: Groups multiple results based on traffic patterns
+/// - **Batch Endpoint**: Sends batches to `{base_url}/batch` endpoint
+/// - **Adaptive Algorithm**: Dynamically adjusts batch size and wait time
+/// - **HTTP/2 Pooling**: Maintains persistent connections for better performance
+/// - **Individual Fallback**: Uses query-specific routes for single results
+///
+/// # Batch Endpoint Format
+///
+/// Batches are sent as POST requests to `{base_url}/batch` with an array of
+/// `BatchResult` objects containing query_id, results array, timestamp, and count.
+///
+/// # Example
+///
+/// ```rust
+/// use drasi_server_core::config::{ReactionConfig, ReactionSpecificConfig};
+/// use drasi_server_core::config::typed::{HttpAdaptiveReactionConfig, AdaptiveBatchConfig};
+/// use std::collections::HashMap;
+///
+/// let config = ReactionConfig {
+///     id: "adaptive-webhook".to_string(),
+///     queries: vec!["user-changes".to_string()],
+///     auto_start: true,
+///     config: ReactionSpecificConfig::HttpAdaptive(HttpAdaptiveReactionConfig {
+///         base_url: "https://api.example.com".to_string(),
+///         token: Some("your-api-token".to_string()),
+///         timeout_ms: 10000,
+///         routes: HashMap::new(),
+///         adaptive: AdaptiveBatchConfig {
+///             adaptive_min_batch_size: 20,
+///             adaptive_max_batch_size: 500,
+///             adaptive_window_size: 10,  // 1 second
+///             adaptive_batch_timeout_ms: 1000,
+///         },
+///     }),
+///     priority_queue_capacity: None,
+/// };
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HttpAdaptiveReactionConfig {
+    /// Base URL for HTTP requests (e.g., "https://api.example.com")
+    ///
+    /// Batch requests are sent to `{base_url}/batch`
+    #[serde(default = "default_base_url")]
+    pub base_url: String,
+
+    /// Optional bearer token for authentication
+    ///
+    /// If provided, adds `Authorization: Bearer {token}` header to all requests
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+
+    /// Request timeout in milliseconds
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
+
+    /// Query-specific route configurations for individual requests
+    ///
+    /// Used when only single results are available (fallback from batch endpoint).
+    /// Maps query IDs to operation-specific call specifications.
+    #[serde(default)]
+    pub routes: HashMap<String, HttpQueryConfig>,
+
+    /// Adaptive batching configuration (flattened into parent config)
+    #[serde(flatten)]
+    pub adaptive: AdaptiveBatchConfig,
+}
+
+// =============================================================================
+// Standard Reaction Configuration Types
+// =============================================================================
 
 /// gRPC reaction configuration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -405,10 +638,6 @@ pub struct GrpcReactionConfig {
     /// gRPC server URL
     #[serde(default = "default_grpc_endpoint")]
     pub endpoint: String,
-
-    /// Optional authentication token
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub token: Option<String>,
 
     /// Request timeout in milliseconds
     #[serde(default = "default_timeout_ms")]
@@ -537,14 +766,6 @@ fn default_batch_wait_ms() -> u64 {
 /// Profiler reaction configuration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProfilerReactionConfig {
-    /// Output file path for profiling data
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub output_file: Option<String>,
-
-    /// Whether to include detailed timing breakdowns
-    #[serde(default = "default_detailed")]
-    pub detailed: bool,
-
     /// Window size for profiling statistics
     #[serde(default = "default_profiler_window_size")]
     pub window_size: usize,
@@ -560,10 +781,6 @@ fn default_profiler_window_size() -> usize {
 
 fn default_report_interval_secs() -> u64 {
     60
-}
-
-fn default_detailed() -> bool {
-    true
 }
 
 /// Application reaction configuration
@@ -585,6 +802,14 @@ pub enum ReactionSpecificConfig {
     Platform(PlatformReactionConfig),
     Profiler(ProfilerReactionConfig),
     Application(ApplicationReactionConfig),
+
+    /// gRPC Adaptive reaction with adaptive batching
+    #[serde(rename = "grpc_adaptive")]
+    GrpcAdaptive(GrpcAdaptiveReactionConfig),
+
+    /// HTTP Adaptive reaction with adaptive batching
+    #[serde(rename = "http_adaptive")]
+    HttpAdaptive(HttpAdaptiveReactionConfig),
 
     /// Custom reaction type with properties map (for extensibility)
     #[serde(rename = "custom")]

@@ -45,7 +45,7 @@ pub struct HttpReaction {
 impl HttpReaction {
     pub fn new(config: ReactionConfig, event_tx: ComponentEventSender) -> Self {
         // Extract HTTP-specific configuration
-        let (base_url, token, timeout_ms, typed_query_configs) = match &config.config {
+        let (base_url, token, timeout_ms, query_configs) = match &config.config {
             crate::config::ReactionSpecificConfig::Http(http_config) => (
                 http_config.base_url.clone(),
                 http_config.token.clone(),
@@ -54,36 +54,6 @@ impl HttpReaction {
             ),
             _ => ("http://localhost".to_string(), None, 10000, HashMap::new()),
         };
-
-        // Convert typed QueryCallConfig to local QueryConfig
-        let query_configs: HashMap<String, QueryConfig> = typed_query_configs
-            .into_iter()
-            .map(|(key, call_config)| {
-                (
-                    key,
-                    QueryConfig {
-                        added: call_config.added.map(|spec| CallSpec {
-                            url: spec.url,
-                            method: spec.method,
-                            body: spec.body,
-                            headers: spec.headers,
-                        }),
-                        updated: call_config.updated.map(|spec| CallSpec {
-                            url: spec.url,
-                            method: spec.method,
-                            body: spec.body,
-                            headers: spec.headers,
-                        }),
-                        deleted: call_config.deleted.map(|spec| CallSpec {
-                            url: spec.url,
-                            method: spec.method,
-                            body: spec.body,
-                            headers: spec.headers,
-                        }),
-                    },
-                )
-            })
-            .collect();
 
         Self {
             base: ReactionBase::new(config, event_tx),

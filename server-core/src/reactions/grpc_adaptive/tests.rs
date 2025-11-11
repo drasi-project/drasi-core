@@ -14,7 +14,7 @@
 
 use super::AdaptiveGrpcReaction;
 use crate::channels::*;
-use crate::config::typed::GrpcReactionConfig;
+use crate::config::typed::{AdaptiveBatchConfig as ConfigAdaptiveBatchConfig, GrpcAdaptiveReactionConfig};
 use crate::config::{QueryConfig, ReactionConfig, ReactionSpecificConfig};
 use crate::queries::Query;
 use crate::reactions::Reaction;
@@ -111,16 +111,19 @@ fn create_adaptive_grpc_reaction_config(reaction_id: &str, endpoint: &str) -> Re
         id: reaction_id.to_string(),
         queries: vec!["query1".to_string()],
         auto_start: false,
-        config: ReactionSpecificConfig::Grpc(GrpcReactionConfig {
+        config: ReactionSpecificConfig::GrpcAdaptive(GrpcAdaptiveReactionConfig {
             endpoint: endpoint.to_string(),
-            batch_size: 100,
-            batch_flush_timeout_ms: 1000,
             timeout_ms: 5000,
             max_retries: 3,
             connection_retry_attempts: 5,
             initial_connection_timeout_ms: 10000,
             metadata: HashMap::new(),
-            token: None,
+            adaptive: ConfigAdaptiveBatchConfig {
+                adaptive_min_batch_size: 1,
+                adaptive_max_batch_size: 100,
+                adaptive_window_size: 10,
+                adaptive_batch_timeout_ms: 1000,
+            },
         }),
         priority_queue_capacity: None,
     }
@@ -129,42 +132,29 @@ fn create_adaptive_grpc_reaction_config(reaction_id: &str, endpoint: &str) -> Re
 fn create_adaptive_grpc_reaction_with_custom_config(
     reaction_id: &str,
     endpoint: &str,
-    adaptive_max_batch_size: u64,
-    adaptive_min_batch_size: u64,
-    adaptive_max_wait_ms: u64,
-    adaptive_min_wait_ms: u64,
-    adaptive_window_secs: u64,
-    adaptive_enabled: bool,
+    adaptive_max_batch_size: usize,
+    adaptive_min_batch_size: usize,
+    adaptive_window_size: usize,
+    adaptive_batch_timeout_ms: u64,
 ) -> ReactionConfig {
-    let mut properties = HashMap::new();
-    properties.insert("endpoint".to_string(), json!(endpoint));
-    properties.insert(
-        "adaptive_max_batch_size".to_string(),
-        json!(adaptive_max_batch_size),
-    );
-    properties.insert(
-        "adaptive_min_batch_size".to_string(),
-        json!(adaptive_min_batch_size),
-    );
-    properties.insert(
-        "adaptive_max_wait_ms".to_string(),
-        json!(adaptive_max_wait_ms),
-    );
-    properties.insert(
-        "adaptive_min_wait_ms".to_string(),
-        json!(adaptive_min_wait_ms),
-    );
-    properties.insert(
-        "adaptive_window_secs".to_string(),
-        json!(adaptive_window_secs),
-    );
-    properties.insert("adaptive_enabled".to_string(), json!(adaptive_enabled));
-
     ReactionConfig {
         id: reaction_id.to_string(),
         queries: vec!["query1".to_string()],
         auto_start: false,
-        config: ReactionSpecificConfig::Custom { properties },
+        config: ReactionSpecificConfig::GrpcAdaptive(GrpcAdaptiveReactionConfig {
+            endpoint: endpoint.to_string(),
+            timeout_ms: 5000,
+            max_retries: 3,
+            connection_retry_attempts: 5,
+            initial_connection_timeout_ms: 10000,
+            metadata: HashMap::new(),
+            adaptive: ConfigAdaptiveBatchConfig {
+                adaptive_min_batch_size,
+                adaptive_max_batch_size,
+                adaptive_window_size,
+                adaptive_batch_timeout_ms,
+            },
+        }),
         priority_queue_capacity: None,
     }
 }
@@ -225,10 +215,8 @@ async fn test_adaptive_grpc_reaction_custom_config() {
         "grpc://localhost:50052",
         2000, // max_batch_size
         50,   // min_batch_size
-        500,  // max_wait_ms
-        5,    // min_wait_ms
-        10,   // window_secs
-        true, // adaptive_enabled
+        10,   // window_size
+        500,  // batch_timeout_ms
     );
     let reaction = AdaptiveGrpcReaction::new(config, event_tx);
 
@@ -241,12 +229,10 @@ async fn test_adaptive_grpc_reaction_high_throughput_config() {
     let config = create_adaptive_grpc_reaction_with_custom_config(
         "test-adaptive-high-throughput",
         "grpc://localhost:50052",
-        2000, // Large max for throughput
-        100,  // Higher min for efficiency
-        1000, // Longer wait for batching
-        10,   // Allow coalescing
-        10,   // Longer window for stability
-        true,
+        2000, // max_batch_size
+        100,  // min_batch_size
+        10,   // window_size
+        1000, // batch_timeout_ms
     );
     let reaction = AdaptiveGrpcReaction::new(config, event_tx);
 
@@ -267,12 +253,10 @@ async fn test_adaptive_grpc_reaction_low_latency_config() {
     let config = create_adaptive_grpc_reaction_with_custom_config(
         "test-adaptive-low-latency",
         "grpc://localhost:50052",
-        100, // Small max to limit wait time
-        5,   // Very small for immediate sends
-        50,  // Quick flush for low latency
-        1,   // Minimal wait
-        3,   // Fast adaptation
-        true,
+        100, // max_batch_size
+        5,   // min_batch_size
+        3,   // window_size
+        50,  // batch_timeout_ms
     );
     let reaction = AdaptiveGrpcReaction::new(config, event_tx);
 
@@ -293,12 +277,10 @@ async fn test_adaptive_grpc_reaction_disabled_adaptation() {
     let config = create_adaptive_grpc_reaction_with_custom_config(
         "test-adaptive-disabled",
         "grpc://localhost:50052",
-        1000,
-        100,
-        1000,
-        1,
-        5,
-        false, // Disable adaptive behavior
+        1000, // max_batch_size
+        100,  // min_batch_size
+        5,    // window_size
+        1000, // batch_timeout_ms
     );
     let reaction = AdaptiveGrpcReaction::new(config, event_tx);
 
@@ -354,16 +336,19 @@ async fn test_adaptive_grpc_reaction_with_metadata() {
         id: "test-adaptive-metadata".to_string(),
         queries: vec!["query1".to_string()],
         auto_start: false,
-        config: ReactionSpecificConfig::Grpc(GrpcReactionConfig {
+        config: ReactionSpecificConfig::GrpcAdaptive(GrpcAdaptiveReactionConfig {
             endpoint: "grpc://localhost:50052".to_string(),
-            batch_size: 100,
-            batch_flush_timeout_ms: 1000,
             timeout_ms: 5000,
             max_retries: 3,
             connection_retry_attempts: 5,
             initial_connection_timeout_ms: 10000,
             metadata,
-            token: None,
+            adaptive: ConfigAdaptiveBatchConfig {
+                adaptive_min_batch_size: 1,
+                adaptive_max_batch_size: 100,
+                adaptive_window_size: 10,
+                adaptive_batch_timeout_ms: 1000,
+            },
         }),
         priority_queue_capacity: None,
     };
@@ -382,10 +367,8 @@ async fn test_adaptive_grpc_reaction_batch_size_constraints() {
         "grpc://localhost:50052",
         100, // max
         90,  // min - very narrow range
-        100,
-        1,
-        5,
-        true,
+        5,   // window_size
+        100, // batch_timeout_ms
     );
     let reaction = AdaptiveGrpcReaction::new(config, event_tx.clone());
     assert_eq!(reaction.status().await, ComponentStatus::Stopped);
@@ -396,10 +379,8 @@ async fn test_adaptive_grpc_reaction_batch_size_constraints() {
         "grpc://localhost:50052",
         5000, // max
         1,    // min - very wide range
-        100,
-        1,
-        5,
-        true,
+        5,   // window_size
+        100, // batch_timeout_ms
     );
     let reaction = AdaptiveGrpcReaction::new(config, event_tx);
     assert_eq!(reaction.status().await, ComponentStatus::Stopped);
@@ -413,12 +394,10 @@ async fn test_adaptive_grpc_reaction_window_size_variations() {
     let config = create_adaptive_grpc_reaction_with_custom_config(
         "test-adaptive-short-window",
         "grpc://localhost:50052",
-        1000,
-        10,
-        100,
-        1,
-        1, // Very short window
-        true,
+        1000, // max_batch_size
+        10,   // min_batch_size
+        1,    // window_size - very short
+        100,  // batch_timeout_ms
     );
     let reaction = AdaptiveGrpcReaction::new(config, event_tx.clone());
     assert_eq!(reaction.status().await, ComponentStatus::Stopped);
@@ -427,12 +406,10 @@ async fn test_adaptive_grpc_reaction_window_size_variations() {
     let config = create_adaptive_grpc_reaction_with_custom_config(
         "test-adaptive-long-window",
         "grpc://localhost:50052",
-        1000,
-        10,
-        100,
-        1,
-        30, // Long window
-        true,
+        1000, // max_batch_size
+        10,   // min_batch_size
+        30,   // window_size - long window
+        100,  // batch_timeout_ms
     );
     let reaction = AdaptiveGrpcReaction::new(config, event_tx);
     assert_eq!(reaction.status().await, ComponentStatus::Stopped);
@@ -447,7 +424,7 @@ async fn test_adaptive_grpc_reaction_timeout_configurations() {
         "test-adaptive-short-timeout",
         "grpc://localhost:50052",
     );
-    if let ReactionSpecificConfig::Grpc(ref mut grpc_config) = config.config {
+    if let ReactionSpecificConfig::GrpcAdaptive(ref mut grpc_config) = config.config {
         grpc_config.timeout_ms = 1000; // Short timeout
         grpc_config.max_retries = 2; // Fewer retries
     }
@@ -459,7 +436,7 @@ async fn test_adaptive_grpc_reaction_timeout_configurations() {
         "test-adaptive-long-timeout",
         "grpc://localhost:50052",
     );
-    if let ReactionSpecificConfig::Grpc(ref mut grpc_config) = config.config {
+    if let ReactionSpecificConfig::GrpcAdaptive(ref mut grpc_config) = config.config {
         grpc_config.timeout_ms = 30000; // Long timeout
         grpc_config.max_retries = 10; // More retries
     }
@@ -476,7 +453,7 @@ async fn test_adaptive_grpc_reaction_connection_retry_configurations() {
         "test-adaptive-aggressive-retry",
         "grpc://localhost:50052",
     );
-    if let ReactionSpecificConfig::Grpc(ref mut grpc_config) = config.config {
+    if let ReactionSpecificConfig::GrpcAdaptive(ref mut grpc_config) = config.config {
         grpc_config.connection_retry_attempts = 10;
         grpc_config.initial_connection_timeout_ms = 5000;
     }
@@ -488,7 +465,7 @@ async fn test_adaptive_grpc_reaction_connection_retry_configurations() {
         "test-adaptive-minimal-retry",
         "grpc://localhost:50052",
     );
-    if let ReactionSpecificConfig::Grpc(ref mut grpc_config) = config.config {
+    if let ReactionSpecificConfig::GrpcAdaptive(ref mut grpc_config) = config.config {
         grpc_config.connection_retry_attempts = 1;
         grpc_config.initial_connection_timeout_ms = 2000;
     }

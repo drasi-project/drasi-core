@@ -46,8 +46,6 @@ async fn main() {
         queries: vec!["example_query".to_string()],
         auto_start: true,
         config: ReactionSpecificConfig::Profiler(ProfilerReactionConfig {
-            output_file: None,
-            detailed: true,
             window_size: 100,
             report_interval_secs: 10,
         }),

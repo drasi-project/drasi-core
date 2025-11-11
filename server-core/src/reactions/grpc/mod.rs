@@ -79,7 +79,7 @@ impl GrpcReaction {
                 "grpc://localhost:50052".to_string(),
                 100,
                 1000,
-                5000,
+                10000,
                 3,
                 5,
                 10000,

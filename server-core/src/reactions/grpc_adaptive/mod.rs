@@ -38,7 +38,7 @@ pub struct AdaptiveGrpcReaction {
 
 impl AdaptiveGrpcReaction {
     pub fn new(config: ReactionConfig, event_tx: ComponentEventSender) -> Self {
-        // Extract gRPC-specific configuration from typed config
+        // Extract gRPC Adaptive configuration from typed config
         let (
             endpoint,
             timeout_ms,
@@ -46,66 +46,50 @@ impl AdaptiveGrpcReaction {
             connection_retry_attempts,
             initial_connection_timeout_ms,
             metadata,
+            adaptive_config,
         ) = match &config.config {
-            crate::config::ReactionSpecificConfig::Grpc(grpc_config) => (
-                grpc_config.endpoint.clone(),
-                grpc_config.timeout_ms,
-                grpc_config.max_retries,
-                grpc_config.connection_retry_attempts,
-                grpc_config.initial_connection_timeout_ms,
-                grpc_config.metadata.clone(),
-            ),
-            _ => (
-                "grpc://localhost:50052".to_string(),
-                5000u64,
-                5u32,
-                5u32,
-                10000u64,
-                HashMap::new(),
-            ),
+            crate::config::ReactionSpecificConfig::GrpcAdaptive(grpc_adaptive_config) => {
+                // Convert from config adaptive fields to utils::AdaptiveBatchConfig
+                let utils_adaptive_config = AdaptiveBatchConfig {
+                    min_batch_size: grpc_adaptive_config.adaptive.adaptive_min_batch_size,
+                    max_batch_size: grpc_adaptive_config.adaptive.adaptive_max_batch_size,
+                    throughput_window: Duration::from_millis(
+                        grpc_adaptive_config.adaptive.adaptive_window_size as u64 * 100,
+                    ),
+                    max_wait_time: Duration::from_millis(
+                        grpc_adaptive_config.adaptive.adaptive_batch_timeout_ms,
+                    ),
+                    min_wait_time: Duration::from_millis(100),
+                    adaptive_enabled: true,
+                };
+
+                (
+                    grpc_adaptive_config.endpoint.clone(),
+                    grpc_adaptive_config.timeout_ms,
+                    grpc_adaptive_config.max_retries,
+                    grpc_adaptive_config.connection_retry_attempts,
+                    grpc_adaptive_config.initial_connection_timeout_ms,
+                    grpc_adaptive_config.metadata.clone(),
+                    utils_adaptive_config,
+                )
+            }
+            _ => {
+                // Provide defaults if wrong config type
+                warn!(
+                    "Expected GrpcAdaptive config, got different type. Using defaults for reaction: {}",
+                    config.id
+                );
+                (
+                    "grpc://localhost:50052".to_string(),
+                    5000u64,
+                    5u32,
+                    5u32,
+                    10000u64,
+                    HashMap::new(),
+                    AdaptiveBatchConfig::default(),
+                )
+            }
         };
-
-        // Configure adaptive batching
-        let mut adaptive_config = AdaptiveBatchConfig::default();
-
-        // Allow overriding adaptive parameters from config if using custom variant
-        if let crate::config::ReactionSpecificConfig::Custom { properties } = &config.config {
-            if let Some(max_batch) = properties
-                .get("adaptive_max_batch_size")
-                .and_then(|v| v.as_u64())
-            {
-                adaptive_config.max_batch_size = max_batch as usize;
-            }
-            if let Some(min_batch) = properties
-                .get("adaptive_min_batch_size")
-                .and_then(|v| v.as_u64())
-            {
-                adaptive_config.min_batch_size = min_batch as usize;
-            }
-            if let Some(max_wait_ms) = properties
-                .get("adaptive_max_wait_ms")
-                .and_then(|v| v.as_u64())
-            {
-                adaptive_config.max_wait_time = Duration::from_millis(max_wait_ms);
-            }
-            if let Some(min_wait_ms) = properties
-                .get("adaptive_min_wait_ms")
-                .and_then(|v| v.as_u64())
-            {
-                adaptive_config.min_wait_time = Duration::from_millis(min_wait_ms);
-            }
-            if let Some(window_secs) = properties
-                .get("adaptive_window_secs")
-                .and_then(|v| v.as_u64())
-            {
-                adaptive_config.throughput_window = Duration::from_secs(window_secs);
-            }
-
-            // Check if adaptive mode is explicitly disabled
-            if let Some(enabled) = properties.get("adaptive_enabled").and_then(|v| v.as_bool()) {
-                adaptive_config.adaptive_enabled = enabled;
-            }
-        }
 
         Self {
             base: ReactionBase::new(config, event_tx),

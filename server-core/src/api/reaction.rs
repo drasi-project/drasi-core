@@ -527,11 +527,7 @@ impl ReactionBuilder {
                     .and_then(|v| v.as_str())
                     .unwrap_or("grpc://localhost:50052")
                     .to_string();
-                let token = self
-                    .properties
-                    .get("token")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
+                // Token field removed from GrpcReactionConfig
                 let timeout_ms = self
                     .properties
                     .get("timeout_ms")
@@ -563,7 +559,6 @@ impl ReactionBuilder {
 
                 ReactionSpecificConfig::Grpc(GrpcReactionConfig {
                     endpoint,
-                    token,
                     timeout_ms,
                     batch_size: batch_size.unwrap_or(10),
                     batch_flush_timeout_ms: batch_flush_timeout_ms.unwrap_or(1000),
@@ -660,16 +655,7 @@ impl ReactionBuilder {
                 })
             }
             "profiler" => {
-                let output_file = self
-                    .properties
-                    .get("output_file")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                let detailed = self
-                    .properties
-                    .get("detailed")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
+                // output_file and detailed fields removed from ProfilerReactionConfig
                 let window_size = self
                     .properties
                     .get("window_size")
@@ -682,8 +668,6 @@ impl ReactionBuilder {
                     .unwrap_or(60);
 
                 ReactionSpecificConfig::Profiler(ProfilerReactionConfig {
-                    output_file,
-                    detailed,
                     window_size,
                     report_interval_secs,
                 })

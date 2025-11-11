@@ -38,7 +38,7 @@ core.start().await?;
 | `endpoint` | string | `grpc://localhost:50052` | gRPC server endpoint |
 | `batch_size` | number | `100` | Max items per batch |
 | `batch_flush_timeout_ms` | number | `1000` | Max wait before flushing batch |
-| `timeout_ms` | number | `5000` | Request timeout |
+| `timeout_ms` | number | `10000` | Request timeout |
 | `max_retries` | number | `3` | Max retry attempts |
 | `connection_retry_attempts` | number | `5` | Initial connection retries |
 | `initial_connection_timeout_ms` | number | `10000` | Initial connection timeout |
@@ -182,6 +182,7 @@ The gRPC reaction is organized into focused modules:
 - **No connection pooling**: One connection per reaction instance
 - **No persistence**: Failed batches during shutdown may be lost
 - **No built-in metrics**: Extensive logging but no Prometheus/OpenTelemetry
+- **Batch flushing**: Batches are flushed when query_id changes or batch size is reached. The `batch_flush_timeout_ms` parameter is currently not enforced (batches are not flushed based on time alone)
 
 ## Performance Considerations
 

@@ -40,15 +40,30 @@ The standard HTTP reaction sends one HTTP request per query result. The Adaptive
 
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
-| `batch_endpoints_enabled` | boolean | `true` | Enable batch endpoint (`POST /batch`) |
-| `adaptive_max_batch_size` | number | `1000` | Maximum number of results in a batch |
-| `adaptive_min_batch_size` | number | `10` | Minimum batch size for efficient batching |
-| `adaptive_max_wait_ms` | number | `100` | Maximum time to wait for batch to fill (ms) |
-| `adaptive_min_wait_ms` | number | `1` | Minimum wait time to allow coalescing (ms) |
-| `adaptive_window_secs` | number | `5` | Window size for throughput calculation (seconds) |
-| `adaptive_enabled` | boolean | `true` | Enable adaptive parameter adjustment |
+| `adaptive_max_batch_size` | number | `100` | Maximum number of results in a batch |
+| `adaptive_min_batch_size` | number | `1` | Minimum batch size for efficient batching |
+| `adaptive_window_size` | number | `10` | Window size in 100ms units (1-255) |
+| `adaptive_batch_timeout_ms` | number | `1000` | Maximum wait time before flush (ms) |
 
-**Note**: Connection pool settings (`pool_idle_timeout: 90s`, `pool_max_idle_per_host: 10`) are hard-coded and not configurable.
+**Note**:
+- The `adaptive_window_size` is measured in 100ms units. For example, a value of 10 equals 1 second, 50 equals 5 seconds, etc.
+- Batch endpoints (`POST /batch`) are always enabled in Adaptive HTTP reactions.
+- Connection pool settings (`pool_idle_timeout: 90s`, `pool_max_idle_per_host: 10`) are hard-coded and not configurable.
+
+## Route Configuration and Templates
+
+The Adaptive HTTP reaction supports the same route configuration and Handlebars templating as the [standard HTTP reaction](../http/README.md#configuration-properties). You can configure per-query routes with custom URLs, methods, bodies, and headers using Handlebars templates.
+
+**Key template variables available**:
+- `{{query_id}}` - Query identifier
+- `{{operation}}` - Operation type (`"added"`, `"updated"`, `"deleted"`)
+- `{{data}}` - Result data
+- `{{after}}` - New values (for ADD and UPDATE)
+- `{{before}}` - Previous values (for UPDATE and DELETE)
+
+For detailed route configuration and templating examples, see the [HTTP Reaction Routes documentation](../http/README.md#configuration-examples).
+
+**Note**: When using individual routes (not batch endpoints), the adaptive batching still applies - results are batched by the batcher, but each result in the batch is sent as a separate HTTP request according to its route configuration.
 
 ## Configuration Examples
 
@@ -65,9 +80,10 @@ reactions:
       base_url: "https://api.example.com"
       token: "your-api-token"
       timeout_ms: 10000
-      batch_endpoints_enabled: true
       adaptive_max_batch_size: 500
       adaptive_min_batch_size: 20
+      adaptive_window_size: 10  # 1 second
+      adaptive_batch_timeout_ms: 1000
 ```
 
 ### High-Throughput Configuration
@@ -80,25 +96,23 @@ reactions:
       - "inventory-updates"
     properties:
       base_url: "https://data-ingestion.example.com"
-      batch_endpoints_enabled: true
       adaptive_max_batch_size: 1000
       adaptive_min_batch_size: 50
-      adaptive_max_wait_ms: 100
-      adaptive_window_secs: 10
+      adaptive_window_size: 100  # 10 seconds
+      adaptive_batch_timeout_ms: 100
 ```
 
-### Disable Batching (Individual Requests)
+### Query-Specific Routes
 
 ```yaml
 reactions:
-  - id: "fixed-batch-webhook"
+  - id: "routed-webhook"
     reaction_type: "http_adaptive"
     queries:
       - "sensor-data"
     properties:
       base_url: "https://api.example.com"
-      batch_endpoints_enabled: false  # Use individual requests only
-      queries:
+      routes:
         sensor-data:
           added:
             url: "/sensors/data"
@@ -108,7 +122,7 @@ reactions:
 
 ## Batch Endpoint Format
 
-When `batch_endpoints_enabled` is `true` and multiple results are available, the reaction sends a POST request to `{base_url}/batch` with the following format:
+When multiple results are available, the reaction sends a POST request to `{base_url}/batch` with the following format:
 
 ### Request Format
 
@@ -156,36 +170,36 @@ See [batch-format.tsp](batch-format.tsp) for the complete TypeSpec definition.
 
 ### Individual Request Format
 
-When `batch_endpoints_enabled` is `false` or only single results are available, the reaction uses individual HTTP requests with the same format as the standard HTTP reaction. See the [HTTP Reaction README](../http/README.md#output-data-format) for details on CallSpec configuration and templating.
+When only single results are available, the reaction uses individual HTTP requests with query-specific routes. See the [HTTP Reaction README](../http/README.md#output-data-format) for details on CallSpec configuration and templating with the `routes` property.
 
 ## Adaptive Batching Algorithm
 
-The adaptive batcher monitors throughput over a configurable window (default: 5 seconds) and adjusts parameters based on traffic level:
+The adaptive batcher monitors throughput over a configurable window (default: 1 second / window_size=10) and adjusts parameters based on traffic level:
 
 | Throughput Level | Messages/Second | Batch Size | Wait Time |
 |-----------------|-----------------|------------|-----------|
-| **Idle** | < 1 | min_batch_size (10) | 1ms |
-| **Low** | 1-100 | 2 × min_batch_size (20) | 1ms |
-| **Medium** | 100-1,000 | 25% of max (250) | 10ms |
-| **High** | 1,000-10,000 | 50% of max (500) | 25ms |
-| **Burst** | > 10,000 | max_batch_size (1000) | 50ms |
+| **Idle** | < 1 | min_batch_size (1) | 1ms |
+| **Low** | 1-100 | 2 × min_batch_size (2) | 1ms |
+| **Medium** | 100-1,000 | 25% of max (25) | 10ms |
+| **High** | 1,000-10,000 | 50% of max (50) | 25ms |
+| **Burst** | > 10,000 | max_batch_size (100) | 50ms |
 
 ### Adaptive Behavior
 
-1. **Throughput Monitoring**: Tracks messages per second in a rolling window
+1. **Throughput Monitoring**: Tracks messages per second in a rolling window (measured in 100ms units)
 2. **Parameter Adjustment**: Adjusts batch size and wait time based on current throughput
 3. **Burst Detection**: Detects pending messages and fills batches completely
 4. **Latency Optimization**: Uses small batches during idle/low traffic
 5. **Throughput Optimization**: Uses large batches during burst traffic
 
-### Batch Endpoint Decision
+### Batch Endpoint Behavior
 
-**When `batch_endpoints_enabled` is `true` (default)**:
-- Multiple results → `POST /batch` (batch format)
-- Single result → Individual request (CallSpec format)
+**Multiple results available**:
+- Sends to `POST /batch` endpoint with batch format
 
-**When `batch_endpoints_enabled` is `false`**:
-- All results → Individual requests (CallSpec format)
+**Single result available**:
+- Sends individual request using query-specific routes (if configured)
+- If no route configured for operation, result is skipped
 
 ## Performance Tuning
 
@@ -195,11 +209,10 @@ Optimize for minimal latency:
 
 ```yaml
 properties:
-  adaptive_enabled: true
-  adaptive_min_batch_size: 1     # Send immediately
-  adaptive_max_batch_size: 50    # Keep batches small
-  adaptive_min_wait_ms: 1        # Minimal delay
-  adaptive_max_wait_ms: 10       # Short wait time
+  adaptive_min_batch_size: 1           # Send immediately
+  adaptive_max_batch_size: 50          # Keep batches small
+  adaptive_window_size: 30             # 3 seconds - fast adaptation
+  adaptive_batch_timeout_ms: 10        # Short wait time
 ```
 
 **Use cases**: Real-time notifications, interactive applications, low-volume updates
@@ -210,10 +223,10 @@ Optimize for maximum throughput:
 
 ```yaml
 properties:
-  adaptive_enabled: true
-  adaptive_min_batch_size: 100   # Larger minimum batch
-  adaptive_max_batch_size: 2000  # Very large batches
-  adaptive_max_wait_ms: 200      # Longer wait for more results
+  adaptive_min_batch_size: 100         # Larger minimum batch
+  adaptive_max_batch_size: 2000        # Very large batches
+  adaptive_window_size: 100            # 10 seconds - stable adaptation
+  adaptive_batch_timeout_ms: 200       # Longer wait for more results
 ```
 
 **Use cases**: Bulk data synchronization, analytics pipelines, high-volume event streams
@@ -221,12 +234,10 @@ properties:
 ### Tuning Parameters
 
 **Key parameters and their effects**:
-- Larger `max_batch_size`: Allows more results per batch during burst traffic
-- Larger `min_batch_size`: Ensures minimum efficiency threshold
-- Longer `max_wait_ms`: Allows more time to collect results
-- Shorter `min_wait_ms`: Reduces latency during low traffic
-- Longer `window_secs`: Smoother adaptation to traffic changes
-- `adaptive_enabled = false`: Uses fixed `min_batch_size` and `min_wait_time` values
+- Larger `adaptive_max_batch_size`: Allows more results per batch during burst traffic
+- Larger `adaptive_min_batch_size`: Ensures minimum efficiency threshold
+- Longer `adaptive_batch_timeout_ms`: Allows more time to collect results
+- Longer `adaptive_window_size`: Smoother adaptation to traffic changes (measured in 100ms units)
 
 ## HTTP/2 Connection Pooling
 
@@ -269,18 +280,17 @@ Connections are automatically reused when:
 
 **Solutions**:
 1. Verify batch endpoint exists: `curl -X POST https://api.example.com/batch`
-2. Disable batch endpoints if not supported: `batch_endpoints_enabled: false`
-3. Implement batch endpoint on target service (see [batch-format.tsp](batch-format.tsp))
+2. Implement batch endpoint on target service (see [batch-format.tsp](batch-format.tsp))
+3. Use standard HTTP reaction if batch endpoint cannot be implemented
 
 ### Batching Latency Too High
 
-**Symptoms**: Results delayed by 50-100ms, poor responsiveness
+**Symptoms**: Results delayed by 50-1000ms, poor responsiveness
 
 **Solutions**:
-1. Reduce wait times: `adaptive_max_wait_ms: 10`
-2. Disable adaptive mode: `adaptive_enabled: false` with `adaptive_min_wait_ms: 1`
-3. Disable batching entirely: `batch_endpoints_enabled: false`
-4. Use standard HTTP reaction for zero batching delay
+1. Reduce wait times: `adaptive_batch_timeout_ms: 10`
+2. Reduce window size for faster adaptation: `adaptive_window_size: 30` (3 seconds)
+3. Use standard HTTP reaction for zero batching delay
 
 ### Batches Too Small or Too Large
 
@@ -292,10 +302,9 @@ Connections are automatically reused when:
    adaptive_min_batch_size: 50   # Raise minimum
    adaptive_max_batch_size: 500  # Lower maximum
    ```
-2. Disable adaptive mode for fixed batch size:
+2. Adjust window size to change adaptation speed:
    ```yaml
-   adaptive_enabled: false
-   adaptive_min_batch_size: 100  # Fixed size
+   adaptive_window_size: 50      # 5 seconds for more stable batching
    ```
 
 ### Connection Pool Exhaustion
@@ -314,23 +323,20 @@ Connections are automatically reused when:
 Enable debug logging to diagnose issues:
 
 ```bash
+# Enable all debug logs
 RUST_LOG=debug cargo run
-```
 
-Or in configuration:
-
-```yaml
-server:
-  log_level: "debug"
+# Or enable only HTTP Adaptive reaction logs
+RUST_LOG=drasi_server_core::reactions::http_adaptive=debug cargo run
 ```
 
 **Example debug output**:
 ```
 [adaptive-webhook] Adaptive HTTP batcher started
-[adaptive-webhook] Adapted batching parameters - Level: High, Rate: 2543.1 msgs/sec, Batch: 500, Wait: 25ms
 [adaptive-webhook] Processing adaptive batch of 487 results
 [adaptive-webhook] Sending batch of 487 results to https://api.example.com/batch
 [adaptive-webhook] Batch sent successfully
+[adaptive-webhook] Adaptive HTTP metrics - Batches: 100, Results: 48700, Avg batch size: 487.0
 ```
 
 ## Limitations
@@ -349,7 +355,7 @@ The Adaptive HTTP reaction inherits all limitations from the standard HTTP react
 **Requires Batch Endpoint Support**:
 - Target service must implement `POST /batch` endpoint to benefit from batching
 - Batch endpoint must accept array of `BatchResult` objects (see [batch-format.tsp](batch-format.tsp))
-- **Workaround**: Set `batch_endpoints_enabled: false` to use individual requests
+- **Workaround**: Use standard HTTP reaction for individual requests only
 
 **HTTP/2 Requirements**:
 - HTTP/2 prior knowledge is always enabled (cannot be disabled)

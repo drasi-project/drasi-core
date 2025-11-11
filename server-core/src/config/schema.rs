@@ -797,6 +797,8 @@ impl ReactionConfig {
             ReactionSpecificConfig::Platform(_) => "platform",
             ReactionSpecificConfig::Profiler(_) => "profiler",
             ReactionSpecificConfig::Application(_) => "application",
+            ReactionSpecificConfig::GrpcAdaptive(_) => "grpc_adaptive",
+            ReactionSpecificConfig::HttpAdaptive(_) => "http_adaptive",
             ReactionSpecificConfig::Custom { .. } => "custom",
         }
     }

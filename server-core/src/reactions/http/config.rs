@@ -24,7 +24,7 @@ use std::collections::HashMap;
 ///
 /// This type is used to configure HTTP requests for different operation types (added, updated, deleted).
 /// All fields support Handlebars template syntax for dynamic content generation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CallSpec {
     /// URL path (appended to base_url) or absolute URL.
     /// Supports Handlebars templates for dynamic URLs.
@@ -48,7 +48,7 @@ pub struct CallSpec {
 ///
 /// Defines different HTTP call specifications for each operation type (added, updated, deleted).
 /// Each operation type can have its own URL, method, body template, and headers.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QueryConfig {
     /// HTTP call specification for ADD operations (new rows in query results).
     #[serde(skip_serializing_if = "Option::is_none")]
