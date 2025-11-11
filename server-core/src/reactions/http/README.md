@@ -8,7 +8,16 @@ Enables real-time integration with external systems by pushing Drasi query resul
 
 ## Configuration Properties
 
-### Top-Level Properties
+### Standard Reaction Properties
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `id` | string | Yes | Unique identifier for the reaction |
+| `reaction_type` | string | Yes | Must be `"http"` |
+| `queries` | array | Yes | List of query IDs to subscribe to |
+| `auto_start` | boolean | No | Whether to start automatically (default: `false`) |
+
+### HTTP-Specific Properties
 
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
