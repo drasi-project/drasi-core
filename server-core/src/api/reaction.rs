@@ -506,11 +506,18 @@ impl ReactionBuilder {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(10000);
 
+                // Parse routes from properties
+                let routes = self
+                    .properties
+                    .get("routes")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_else(HashMap::new);
+
                 ReactionSpecificConfig::Http(HttpReactionConfig {
                     base_url,
                     token,
                     timeout_ms,
-                    routes: HashMap::new(),
+                    routes,
                 })
             }
             "grpc" => {
