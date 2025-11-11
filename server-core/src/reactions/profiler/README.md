@@ -79,9 +79,8 @@ reactions:
     queries:
       - my-query
     auto_start: true
-    properties:
-      window_size: 1000
-      report_interval_secs: 30
+    window_size: 1000
+    report_interval_secs: 30
 ```
 
 **Rust**:
@@ -190,9 +189,8 @@ Enable profiling in your source configuration:
 sources:
   - id: my-source
     source_type: postgres
-    properties:
-      enable_profiling: true
-      # ... other source properties
+    enable_profiling: true
+    # ... other source properties
 ```
 
 ### Profiling Data Flow

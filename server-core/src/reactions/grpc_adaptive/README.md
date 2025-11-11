@@ -61,8 +61,7 @@ reactions:
     reaction_type: "grpc_adaptive"
     queries: ["sensor-alerts"]
     auto_start: true
-    properties:
-      endpoint: "grpc://localhost:50052"
+    endpoint: "grpc://localhost:50052"
 ```
 
 ### High-Throughput (Optimize for Throughput)
@@ -73,14 +72,13 @@ reactions:
     reaction_type: "grpc_adaptive"
     queries: ["high-volume-events"]
     auto_start: true
-    properties:
-      endpoint: "grpc://event-processor:9090"
-      adaptive_max_batch_size: 2000
-      adaptive_min_batch_size: 50
-      adaptive_window_size: 100  # 10 seconds
-      adaptive_batch_timeout_ms: 500
-      timeout_ms: 15000
-      max_retries: 5
+    endpoint: "grpc://event-processor:9090"
+    adaptive_max_batch_size: 2000
+    adaptive_min_batch_size: 50
+    adaptive_window_size: 100  # 10 seconds
+    adaptive_batch_timeout_ms: 500
+    timeout_ms: 15000
+    max_retries: 5
 ```
 
 ### Low-Latency (Optimize for Speed)
@@ -91,13 +89,12 @@ reactions:
     reaction_type: "grpc_adaptive"
     queries: ["critical-alerts"]
     auto_start: true
-    properties:
-      endpoint: "grpc://alert-service:50052"
-      adaptive_max_batch_size: 100
-      adaptive_min_batch_size: 5
-      adaptive_window_size: 30  # 3 seconds
-      adaptive_batch_timeout_ms: 50
-      timeout_ms: 3000
+    endpoint: "grpc://alert-service:50052"
+    adaptive_max_batch_size: 100
+    adaptive_min_batch_size: 5
+    adaptive_window_size: 30  # 3 seconds
+    adaptive_batch_timeout_ms: 50
+    timeout_ms: 3000
 ```
 
 ### JSON Configuration
@@ -109,13 +106,11 @@ reactions:
     "reaction_type": "grpc_adaptive",
     "queries": ["sensor-alerts"],
     "auto_start": true,
-    "properties": {
-      "endpoint": "grpc://localhost:50052",
-      "adaptive_max_batch_size": 2000,
-      "adaptive_min_batch_size": 50,
-      "adaptive_window_size": 100,
-      "adaptive_batch_timeout_ms": 500
-    }
+    "endpoint": "grpc://localhost:50052",
+    "adaptive_max_batch_size": 2000,
+    "adaptive_min_batch_size": 50,
+    "adaptive_window_size": 100,
+    "adaptive_batch_timeout_ms": 500
   }]
 }
 ```

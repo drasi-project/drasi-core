@@ -40,11 +40,10 @@ reactions:
     queries:
       - "temperature-alerts"
     auto_start: true
-    properties:
-      host: "0.0.0.0"              # Network interface (default: "0.0.0.0")
-      port: 8080                    # HTTP port (default: 50051)
-      sse_path: "/events"           # SSE endpoint path (default: "/events")
-      heartbeat_interval_ms: 15000  # Heartbeat interval (default: 15000)
+    host: "0.0.0.0"              # Network interface (default: "0.0.0.0")
+    port: 8080                    # HTTP port (default: 50051)
+    sse_path: "/events"           # SSE endpoint path (default: "/events")
+    heartbeat_interval_ms: 15000  # Heartbeat interval (default: 15000)
 ```
 
 ### Configuration Properties
@@ -334,8 +333,10 @@ curl -v http://localhost:8080/events
 
 **Solutions**:
 ```yaml
-properties:
-  heartbeat_interval_ms: 5000  # Reduce from 15s to 5s
+reactions:
+  - id: "web-dashboard"
+    reaction_type: "sse"
+    heartbeat_interval_ms: 5000  # Reduce from 15s to 5s
 ```
 
 ```javascript
@@ -366,9 +367,11 @@ setInterval(() => {
 # Find process using port
 lsof -i :8080
 
-# Kill process or use different port
-properties:
-  port: 8081
+# Kill process or use different port in config
+reactions:
+  - id: "web-dashboard"
+    reaction_type: "sse"
+    port: 8081
 ```
 
 ## Limitations

@@ -72,8 +72,7 @@ reactions:
     reaction_type: platform
     queries: ["my-query"]
     auto_start: true
-    properties:
-      redis_url: "redis://localhost:6379"
+    redis_url: "redis://localhost:6379"
 ```
 
 #### With Stream Management
@@ -82,9 +81,8 @@ reactions:
   - id: platform-output
     reaction_type: platform
     queries: ["my-query", "another-query"]
-    properties:
-      redis_url: "redis://localhost:6379"
-      max_stream_length: 10000  # Keep last 10k results per stream
+    redis_url: "redis://localhost:6379"
+    max_stream_length: 10000  # Keep last 10k results per stream
 ```
 
 #### With Batching (High Throughput)
@@ -93,12 +91,11 @@ reactions:
   - id: platform-output
     reaction_type: platform
     queries: ["high-volume-query"]
-    properties:
-      redis_url: "redis://localhost:6379"
-      batch_enabled: true
-      batch_max_size: 500        # Batch up to 500 events
-      batch_max_wait_ms: 50      # Flush every 50ms
-      max_stream_length: 50000
+    redis_url: "redis://localhost:6379"
+    batch_enabled: true
+    batch_max_size: 500        # Batch up to 500 events
+    batch_max_wait_ms: 50      # Flush every 50ms
+    max_stream_length: 50000
 ```
 
 #### With Custom Names
@@ -107,11 +104,10 @@ reactions:
   - id: platform-output
     reaction_type: platform
     queries: ["my-query"]
-    properties:
-      redis_url: "redis://localhost:6379"
-      pubsub_name: "custom-pubsub"
-      source_name: "my-application"
-      emit_control_events: false
+    redis_url: "redis://localhost:6379"
+    pubsub_name: "custom-pubsub"
+    source_name: "my-application"
+    emit_control_events: false
 ```
 
 ## CloudEvent Format

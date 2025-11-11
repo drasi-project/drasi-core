@@ -76,14 +76,13 @@ reactions:
     queries:
       - "user-changes"
     auto_start: true
-    properties:
-      base_url: "https://api.example.com"
-      token: "your-api-token"
-      timeout_ms: 10000
-      adaptive_max_batch_size: 500
-      adaptive_min_batch_size: 20
-      adaptive_window_size: 10  # 1 second
-      adaptive_batch_timeout_ms: 1000
+    base_url: "https://api.example.com"
+    token: "your-api-token"
+    timeout_ms: 10000
+    adaptive_max_batch_size: 500
+    adaptive_min_batch_size: 20
+    adaptive_window_size: 10  # 1 second
+    adaptive_batch_timeout_ms: 1000
 ```
 
 ### High-Throughput Configuration
@@ -94,12 +93,11 @@ reactions:
     reaction_type: "http_adaptive"
     queries:
       - "inventory-updates"
-    properties:
-      base_url: "https://data-ingestion.example.com"
-      adaptive_max_batch_size: 1000
-      adaptive_min_batch_size: 50
-      adaptive_window_size: 100  # 10 seconds
-      adaptive_batch_timeout_ms: 100
+    base_url: "https://data-ingestion.example.com"
+    adaptive_max_batch_size: 1000
+    adaptive_min_batch_size: 50
+    adaptive_window_size: 100  # 10 seconds
+    adaptive_batch_timeout_ms: 100
 ```
 
 ### Query-Specific Routes
@@ -110,14 +108,13 @@ reactions:
     reaction_type: "http_adaptive"
     queries:
       - "sensor-data"
-    properties:
-      base_url: "https://api.example.com"
-      routes:
-        sensor-data:
-          added:
-            url: "/sensors/data"
-            method: "POST"
-            body: '{{json after}}'
+    base_url: "https://api.example.com"
+    routes:
+      sensor-data:
+        added:
+          url: "/sensors/data"
+          method: "POST"
+          body: '{{json after}}'
 ```
 
 ## Batch Endpoint Format
@@ -208,11 +205,13 @@ The adaptive batcher monitors throughput over a configurable window (default: 1 
 Optimize for minimal latency:
 
 ```yaml
-properties:
-  adaptive_min_batch_size: 1           # Send immediately
-  adaptive_max_batch_size: 50          # Keep batches small
-  adaptive_window_size: 30             # 3 seconds - fast adaptation
-  adaptive_batch_timeout_ms: 10        # Short wait time
+reactions:
+  - id: "low-latency-adaptive"
+    reaction_type: "http_adaptive"
+    adaptive_min_batch_size: 1           # Send immediately
+    adaptive_max_batch_size: 50          # Keep batches small
+    adaptive_window_size: 30             # 3 seconds - fast adaptation
+    adaptive_batch_timeout_ms: 10        # Short wait time
 ```
 
 **Use cases**: Real-time notifications, interactive applications, low-volume updates
@@ -222,11 +221,13 @@ properties:
 Optimize for maximum throughput:
 
 ```yaml
-properties:
-  adaptive_min_batch_size: 100         # Larger minimum batch
-  adaptive_max_batch_size: 2000        # Very large batches
-  adaptive_window_size: 100            # 10 seconds - stable adaptation
-  adaptive_batch_timeout_ms: 200       # Longer wait for more results
+reactions:
+  - id: "high-throughput-adaptive"
+    reaction_type: "http_adaptive"
+    adaptive_min_batch_size: 100         # Larger minimum batch
+    adaptive_max_batch_size: 2000        # Very large batches
+    adaptive_window_size: 100            # 10 seconds - stable adaptation
+    adaptive_batch_timeout_ms: 200       # Longer wait for more results
 ```
 
 **Use cases**: Bulk data synchronization, analytics pipelines, high-volume event streams

@@ -22,8 +22,7 @@ reactions:
     reaction_type: "log"
     queries: ["sensor-monitor"]
     auto_start: true
-    properties:
-      log_level: "info"
+    log_level: "info"
 ```
 
 ### Properties

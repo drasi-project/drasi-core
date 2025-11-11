@@ -40,10 +40,9 @@ reactions:
     reaction_type: "http"
     queries: ["my-query"]
     auto_start: true
-    properties:
-      base_url: "https://api.example.com"
-      token: "your-api-token"
-      timeout_ms: 10000
+    base_url: "https://api.example.com"
+    token: "your-api-token"
+    timeout_ms: 10000
 ```
 
 ### Per-Query Configuration with Templates
@@ -53,24 +52,23 @@ reactions:
   - id: "entity-sync"
     reaction_type: "http"
     queries: ["users-query"]
-    properties:
-      base_url: "https://api.example.com"
-      token: "your-api-token"
-      routes:
-        users-query:
-          added:
-            url: "/users"
-            method: "POST"
-            body: '{"id": "{{after.id}}", "name": "{{after.name}}"}'
-            headers:
-              X-Source: "drasi"
-          updated:
-            url: "/users/{{after.id}}"
-            method: "PUT"
-            body: '{"name": "{{after.name}}", "previousName": "{{before.name}}"}'
-          deleted:
-            url: "/users/{{before.id}}"
-            method: "DELETE"
+    base_url: "https://api.example.com"
+    token: "your-api-token"
+    routes:
+      users-query:
+        added:
+          url: "/users"
+          method: "POST"
+          body: '{"id": "{{after.id}}", "name": "{{after.name}}"}'
+          headers:
+            X-Source: "drasi"
+        updated:
+          url: "/users/{{after.id}}"
+          method: "PUT"
+          body: '{"name": "{{after.name}}", "previousName": "{{before.name}}"}'
+        deleted:
+          url: "/users/{{before.id}}"
+          method: "DELETE"
 ```
 
 ## Programmatic API (Rust)
@@ -219,8 +217,10 @@ body: |
 
 **Bearer Token** (automatic):
 ```yaml
-properties:
-  token: "your-secret-token"  # Adds: Authorization: Bearer your-secret-token
+reactions:
+  - id: "my-http-reaction"
+    reaction_type: "http"
+    token: "your-secret-token"  # Adds: Authorization: Bearer your-secret-token
 ```
 
 **Custom Authentication** (via headers):

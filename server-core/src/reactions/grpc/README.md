@@ -11,14 +11,13 @@ reactions:
     reaction_type: "grpc"
     queries: ["my-query"]
     auto_start: true
-    properties:
-      endpoint: "grpc://localhost:50052"
-      batch_size: 100
-      batch_flush_timeout_ms: 1000
-      timeout_ms: 5000
-      max_retries: 3
-      metadata:
-        authorization: "Bearer ${TOKEN}"
+    endpoint: "grpc://localhost:50052"
+    batch_size: 100
+    batch_flush_timeout_ms: 1000
+    timeout_ms: 5000
+    max_retries: 3
+    metadata:
+      authorization: "Bearer ${TOKEN}"
 ```
 
 ### Rust API
@@ -111,31 +110,37 @@ Automatically handles:
 
 ### High-Throughput
 ```yaml
-properties:
-  batch_size: 500
-  batch_flush_timeout_ms: 2000
-  timeout_ms: 10000
-  max_retries: 5
+reactions:
+  - id: "high-throughput-grpc"
+    reaction_type: "grpc"
+    batch_size: 500
+    batch_flush_timeout_ms: 2000
+    timeout_ms: 10000
+    max_retries: 5
 ```
 
 ### Low-Latency
 ```yaml
-properties:
-  batch_size: 10
-  batch_flush_timeout_ms: 100
-  timeout_ms: 2000
-  max_retries: 2
+reactions:
+  - id: "low-latency-grpc"
+    reaction_type: "grpc"
+    batch_size: 10
+    batch_flush_timeout_ms: 100
+    timeout_ms: 2000
+    max_retries: 2
 ```
 
 ### Production with Auth
 ```yaml
-properties:
-  endpoint: "grpc://api.example.com:443"
-  connection_retry_attempts: 10
-  initial_connection_timeout_ms: 30000
-  metadata:
-    authorization: "Bearer ${API_TOKEN}"
-    x-tenant-id: "prod-123"
+reactions:
+  - id: "production-grpc"
+    reaction_type: "grpc"
+    endpoint: "grpc://api.example.com:443"
+    connection_retry_attempts: 10
+    initial_connection_timeout_ms: 30000
+    metadata:
+      authorization: "Bearer ${API_TOKEN}"
+      x-tenant-id: "prod-123"
 ```
 
 ## Troubleshooting
@@ -146,25 +151,31 @@ properties:
 ### Unavailable Service
 ```yaml
 # Increase retries and timeout
-properties:
-  connection_retry_attempts: 10
-  initial_connection_timeout_ms: 30000
+reactions:
+  - id: "my-grpc-reaction"
+    reaction_type: "grpc"
+    connection_retry_attempts: 10
+    initial_connection_timeout_ms: 30000
 ```
 
 ### DeadlineExceeded
 ```yaml
 # Increase timeout and reduce batch size
-properties:
-  timeout_ms: 15000
-  batch_size: 50
+reactions:
+  - id: "my-grpc-reaction"
+    reaction_type: "grpc"
+    timeout_ms: 15000
+    batch_size: 50
 ```
 
 ### Authentication Failures
 Verify metadata configuration:
 ```yaml
-properties:
-  metadata:
-    authorization: "Bearer valid-token"  # Must be string
+reactions:
+  - id: "my-grpc-reaction"
+    reaction_type: "grpc"
+    metadata:
+      authorization: "Bearer valid-token"  # Must be string
 ```
 
 ## Module Structure
