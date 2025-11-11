@@ -54,7 +54,7 @@ impl AdaptiveHttpReaction {
                 http_config.base_url.clone(),
                 http_config.token.clone(),
                 http_config.timeout_ms,
-                http_config.queries.clone(),
+                http_config.routes.clone(),
             ),
             _ => ("http://localhost".to_string(), None, 10000, HashMap::new()),
         };

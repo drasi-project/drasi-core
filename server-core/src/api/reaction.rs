@@ -510,7 +510,7 @@ impl ReactionBuilder {
                     base_url,
                     token,
                     timeout_ms,
-                    queries: HashMap::new(),
+                    routes: HashMap::new(),
                 })
             }
             "grpc" => {

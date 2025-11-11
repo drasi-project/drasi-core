@@ -392,7 +392,7 @@ pub struct HttpReactionConfig {
 
     /// Query-specific call configurations
     #[serde(default)]
-    pub queries: HashMap<String, QueryCallConfig>,
+    pub routes: HashMap<String, QueryCallConfig>,
 }
 
 fn default_base_url() -> String {
