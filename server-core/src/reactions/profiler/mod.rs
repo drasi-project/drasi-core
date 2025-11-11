@@ -22,7 +22,7 @@ use tokio::sync::RwLock;
 use crate::channels::{ComponentEventSender, ComponentStatus};
 use crate::config::ReactionConfig;
 use crate::profiling::ProfilingMetadata;
-use crate::reactions::base::ReactionBase;
+use crate::reactions::common::base::ReactionBase;
 use crate::reactions::Reaction;
 use crate::utils::log_component_start;
 
@@ -401,7 +401,7 @@ impl ProfilerReaction {
 impl Reaction for ProfilerReaction {
     async fn start(
         &self,
-        query_subscriber: Arc<dyn crate::reactions::base::QuerySubscriber>,
+        query_subscriber: Arc<dyn crate::reactions::common::base::QuerySubscriber>,
     ) -> Result<()> {
         log_component_start("Reaction", &self.base.config.id);
 
@@ -511,3 +511,6 @@ impl Reaction for ProfilerReaction {
         &self.base.config
     }
 }
+
+#[cfg(test)]
+mod tests;

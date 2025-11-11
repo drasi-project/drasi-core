@@ -51,8 +51,8 @@ use tokio::sync::RwLock;
 
 use crate::channels::{
     BroadcastChangeDispatcher, ChangeDispatcher, ChangeReceiver, ChannelChangeDispatcher,
-    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, DispatchMode, QueryResult,
-    QuerySubscriptionResponse,
+    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, DispatchMode,
+    QueryResult, QuerySubscriptionResponse,
 };
 use crate::config::QueryConfig;
 // Profiling will be used when implementing performance tracking
@@ -180,11 +180,7 @@ impl QueryBase {
     }
 
     /// Update status and emit a lifecycle event
-    pub async fn emit_status_event(
-        &self,
-        status: ComponentStatus,
-        message: Option<&str>,
-    ) {
+    pub async fn emit_status_event(&self, status: ComponentStatus, message: Option<&str>) {
         *self.status.write().await = status.clone();
 
         let event = ComponentEvent {

@@ -165,7 +165,8 @@ where
             } else {
                 trace!(
                     "Priority queue drop (capacity {}): {:?}",
-                    self.max_capacity, event
+                    self.max_capacity,
+                    event
                 );
             }
             drop(heap);

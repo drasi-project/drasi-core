@@ -162,10 +162,7 @@ mod manager_tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // Inspect concrete query to verify subscription tasks are present
-        let query = manager
-            .get_query_instance("test-query")
-            .await
-            .unwrap();
+        let query = manager.get_query_instance("test-query").await.unwrap();
         let concrete = query.as_any().downcast_ref::<DrasiQuery>().unwrap();
 
         assert!(

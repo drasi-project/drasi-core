@@ -31,7 +31,13 @@ impl MockWebhookState {
         }
     }
 
-    fn add_event(&self, method: String, path: String, headers: Vec<(String, String)>, body: Option<Value>) {
+    fn add_event(
+        &self,
+        method: String,
+        path: String,
+        headers: Vec<(String, String)>,
+        body: Option<Value>,
+    ) {
         self.events.lock().unwrap().push(ReceivedWebhook {
             method,
             path,
@@ -132,7 +138,11 @@ async fn start_mock_webhook_server(state: MockWebhookState, port: u16) -> Result
 }
 
 /// Helper function to create a DrasiServerCore instance for testing
-async fn create_test_server_core(source_port: u16, webhook_port: u16, test_id: &str) -> Result<DrasiServerCore> {
+async fn create_test_server_core(
+    source_port: u16,
+    webhook_port: u16,
+    test_id: &str,
+) -> Result<DrasiServerCore> {
     let source_id = format!("http-source-{}", test_id);
     let query_id = format!("user-query-{}", test_id);
     let reaction_id = format!("http-reaction-{}", test_id);
@@ -225,7 +235,9 @@ async fn test_http_source_single_insert() -> Result<()> {
     // Check component status
     let source_status = core.get_source_status("http-source-single-insert").await?;
     let query_status = core.get_query_status("user-query-single-insert").await?;
-    let reaction_status = core.get_reaction_status("http-reaction-single-insert").await?;
+    let reaction_status = core
+        .get_reaction_status("http-reaction-single-insert")
+        .await?;
 
     println!("Source status: {:?}", source_status);
     println!("Query status: {:?}", query_status);
@@ -233,7 +245,10 @@ async fn test_http_source_single_insert() -> Result<()> {
 
     // Send a single insert event to HTTP source
     let client = Client::new();
-    let source_url = format!("http://127.0.0.1:{}/sources/http-source-single-insert/events", SOURCE_PORT);
+    let source_url = format!(
+        "http://127.0.0.1:{}/sources/http-source-single-insert/events",
+        SOURCE_PORT
+    );
     let response = client
         .post(&source_url)
         .json(&json!({
@@ -287,11 +302,17 @@ async fn test_http_source_single_insert() -> Result<()> {
 
     // Verify headers
     assert!(
-        webhook.headers.iter().any(|(k, v)| k == "x-source" && v == "drasi"),
+        webhook
+            .headers
+            .iter()
+            .any(|(k, v)| k == "x-source" && v == "drasi"),
         "Should include X-Source header"
     );
     assert!(
-        webhook.headers.iter().any(|(k, v)| k == "x-operation" && v == "add"),
+        webhook
+            .headers
+            .iter()
+            .any(|(k, v)| k == "x-operation" && v == "add"),
         "Should include X-Operation header"
     );
 
@@ -327,7 +348,10 @@ async fn test_http_source_update_operation() -> Result<()> {
     sleep(Duration::from_millis(500)).await;
 
     let client = Client::new();
-    let source_url = format!("http://127.0.0.1:{}/sources/http-source-update/events", SOURCE_PORT);
+    let source_url = format!(
+        "http://127.0.0.1:{}/sources/http-source-update/events",
+        SOURCE_PORT
+    );
 
     // Insert initial user
     client
@@ -412,7 +436,10 @@ async fn test_http_source_delete_operation() -> Result<()> {
     sleep(Duration::from_millis(500)).await;
 
     let client = Client::new();
-    let source_url = format!("http://127.0.0.1:{}/sources/http-source-delete/events", SOURCE_PORT);
+    let source_url = format!(
+        "http://127.0.0.1:{}/sources/http-source-delete/events",
+        SOURCE_PORT
+    );
 
     // Insert a user first
     client
@@ -483,7 +510,10 @@ async fn test_http_source_batch_operations() -> Result<()> {
 
     // Send batch of events
     let client = Client::new();
-    let source_url = format!("http://127.0.0.1:{}/sources/http-source-batch/events/batch", SOURCE_PORT);
+    let source_url = format!(
+        "http://127.0.0.1:{}/sources/http-source-batch/events/batch",
+        SOURCE_PORT
+    );
     let response = client
         .post(&source_url)
         .json(&json!({
@@ -619,7 +649,10 @@ async fn test_http_source_query_filter() -> Result<()> {
     sleep(Duration::from_millis(500)).await;
 
     let client = Client::new();
-    let source_url = format!("http://127.0.0.1:{}/sources/http-source-filter/events", SOURCE_PORT);
+    let source_url = format!(
+        "http://127.0.0.1:{}/sources/http-source-filter/events",
+        SOURCE_PORT
+    );
 
     // Insert non-premium user (should NOT trigger webhook)
     client

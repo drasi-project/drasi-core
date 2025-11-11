@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use axum::{extract::State, routing::post, Json, Router};
-use drasi_server_core::{DrasiServerCore, PropertyMapBuilder, Query, Reaction, Source, Properties};
+use drasi_server_core::{DrasiServerCore, Properties, PropertyMapBuilder, Query, Reaction, Source};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tokio::time::{sleep, Duration};
@@ -28,10 +28,7 @@ impl WebhookState {
     }
 }
 
-async fn handle_webhook(
-    State(state): State<WebhookState>,
-    Json(body): Json<Value>,
-) -> Json<Value> {
+async fn handle_webhook(State(state): State<WebhookState>, Json(body): Json<Value>) -> Json<Value> {
     println!("Webhook received: {:?}", body);
     state.events.lock().unwrap().push(body);
     Json(json!({"success": true}))

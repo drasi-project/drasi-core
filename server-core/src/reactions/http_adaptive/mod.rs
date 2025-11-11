@@ -16,12 +16,14 @@ use tokio::sync::mpsc;
 
 use crate::channels::{ComponentEventSender, ComponentStatus};
 use crate::config::ReactionConfig;
-use crate::reactions::base::ReactionBase;
+use crate::reactions::common::base::ReactionBase;
 use crate::reactions::Reaction;
-use crate::server_core::DrasiServerCore;
 use crate::utils::{AdaptiveBatchConfig, AdaptiveBatcher};
 
 use super::http::{CallSpec, QueryConfig};
+
+#[cfg(test)]
+mod tests;
 
 /// Batch result for sending multiple results in one HTTP call
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,7 +57,7 @@ impl AdaptiveHttpReaction {
                 http_config.base_url.clone(),
                 http_config.token.clone(),
                 http_config.timeout_ms,
-                http_config.queries.clone(),
+                http_config.routes.clone(),
             ),
             _ => ("http://localhost".to_string(), None, 10000, HashMap::new()),
         };
@@ -449,7 +451,10 @@ impl AdaptiveHttpReaction {
 
 #[async_trait]
 impl Reaction for AdaptiveHttpReaction {
-    async fn start(&self, query_subscriber: Arc<dyn crate::reactions::base::QuerySubscriber>) -> Result<()> {
+    async fn start(
+        &self,
+        query_subscriber: Arc<dyn crate::reactions::common::base::QuerySubscriber>,
+    ) -> Result<()> {
         info!("[{}] Starting adaptive HTTP reaction", self.base.config.id);
 
         // Set status to Starting
@@ -461,7 +466,7 @@ impl Reaction for AdaptiveHttpReaction {
             .await?;
 
         // Subscribe to queries
-        self.base.subscribe_to_queries(server_core).await?;
+        self.base.subscribe_to_queries(query_subscriber).await?;
 
         // Set status to Running
         self.base

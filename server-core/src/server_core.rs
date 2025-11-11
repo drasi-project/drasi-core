@@ -781,9 +781,7 @@ impl DrasiServerCore {
             self.reaction_manager
                 .stop_reaction(id.to_string())
                 .await
-                .map_err(|e| {
-                    DrasiError::provisioning(format!("Failed to stop reaction: {}", e))
-                })?;
+                .map_err(|e| DrasiError::provisioning(format!("Failed to stop reaction: {}", e)))?;
         }
 
         // Delete the reaction
@@ -922,7 +920,7 @@ impl DrasiServerCore {
             .ok_or_else(|| DrasiError::component_not_found("reaction", id))?;
 
         // Start the reaction with QuerySubscriber for query subscriptions
-        let subscriber: Arc<dyn crate::reactions::base::QuerySubscriber> = self.as_arc();
+        let subscriber: Arc<dyn crate::reactions::common::base::QuerySubscriber> = self.as_arc();
         map_state_error(
             self.reaction_manager
                 .start_reaction(id.to_string(), subscriber)
@@ -1434,7 +1432,8 @@ impl DrasiServerCore {
         // Start if auto-start is enabled and allowed
         if should_auto_start && allow_auto_start {
             // Pass QuerySubscriber to reaction for query subscriptions
-            let subscriber: Arc<dyn crate::reactions::base::QuerySubscriber> = self.as_arc();
+            let subscriber: Arc<dyn crate::reactions::common::base::QuerySubscriber> =
+                self.as_arc();
             self.reaction_manager
                 .start_reaction(reaction_id.clone(), subscriber)
                 .await?;
@@ -1447,7 +1446,7 @@ impl DrasiServerCore {
 // Implement QuerySubscriber trait for DrasiServerCore
 // This breaks the circular dependency by providing a minimal interface for reactions
 #[async_trait::async_trait]
-impl crate::reactions::base::QuerySubscriber for DrasiServerCore {
+impl crate::reactions::common::base::QuerySubscriber for DrasiServerCore {
     async fn get_query_instance(&self, id: &str) -> Result<Arc<dyn crate::queries::Query>> {
         self.query_manager
             .get_query_instance(id)

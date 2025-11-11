@@ -12,28 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod application;
-pub mod common;
-pub mod grpc;
-pub mod grpc_adaptive;
-pub mod http;
-pub mod http_adaptive;
-pub mod log;
-pub mod manager;
-pub mod platform;
-pub mod profiler;
-pub mod sse;
+//! Protocol buffer definitions for gRPC reactions.
+//!
+//! This module includes the generated protobuf code from the drasi.v1 package.
 
-#[cfg(test)]
-mod tests;
+/// Generated protobuf code for drasi.v1
+pub mod drasi_v1 {
+    tonic::include_proto!("drasi.v1");
+}
 
-pub use application::{ApplicationReaction, ApplicationReactionHandle};
-pub use grpc::GrpcReaction;
-pub use grpc_adaptive::AdaptiveGrpcReaction;
-pub use http::HttpReaction;
-pub use http_adaptive::AdaptiveHttpReaction;
-pub use log::LogReaction;
-pub use manager::*;
-pub use platform::PlatformReaction;
-pub use profiler::ProfilerReaction;
-pub use sse::SseReaction;
+// Re-export commonly used types for convenience
+pub use drasi_v1::{
+    reaction_service_client::ReactionServiceClient, ProcessResultsRequest, ProcessResultsResponse,
+    QueryResult as ProtoQueryResult, QueryResultItem as ProtoQueryResultItem,
+};

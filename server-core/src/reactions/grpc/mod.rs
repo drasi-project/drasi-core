@@ -16,48 +16,28 @@ use anyhow::Result;
 use async_trait::async_trait;
 use log::{debug, error, info, trace, warn};
 use rand::Rng;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tonic::transport::Channel;
 
 use crate::channels::{ComponentEventSender, ComponentStatus};
 use crate::config::ReactionConfig;
-use crate::reactions::base::ReactionBase;
+use crate::reactions::common::base::ReactionBase;
 use crate::reactions::Reaction;
 use crate::utils::log_component_start;
 
-// Include generated protobuf code
-pub mod proto {
-    tonic::include_proto!("drasi.v1");
-}
+// Submodules
+pub mod connection;
+pub mod helpers;
+pub mod proto;
 
-use proto::{
-    reaction_service_client::ReactionServiceClient, ProcessResultsRequest,
-    QueryResult as ProtoQueryResult, QueryResultItem as ProtoQueryResultItem,
+// Re-export commonly used types and functions
+pub use connection::{create_client, create_client_with_retry, ConnectionState};
+pub use helpers::{convert_json_to_proto_struct, convert_json_to_proto_value};
+pub use proto::{
+    ProcessResultsRequest, ProtoQueryResult, ProtoQueryResultItem, ReactionServiceClient,
 };
-
-/// Connection state for the gRPC client
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ConnectionState {
-    Disconnected,
-    Connecting,
-    Connected,
-    Failed,
-    Reconnecting,
-}
-
-impl std::fmt::Display for ConnectionState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ConnectionState::Disconnected => write!(f, "Disconnected"),
-            ConnectionState::Connecting => write!(f, "Connecting"),
-            ConnectionState::Connected => write!(f, "Connected"),
-            ConnectionState::Failed => write!(f, "Failed"),
-            ConnectionState::Reconnecting => write!(f, "Reconnecting"),
-        }
-    }
-}
 
 /// gRPC reaction that sends query results to an external gRPC service
 pub struct GrpcReaction {
@@ -306,7 +286,7 @@ impl GrpcReaction {
 
                                 info!("Creating fresh connection after GoAway...");
                                 // Always try to create a new client for GoAway - don't reuse existing
-                                match Self::create_client_static(endpoint, timeout_ms).await {
+                                match create_client(endpoint, timeout_ms).await {
                                     Ok(new_client) => {
                                         info!("✓ Successfully created new client after GoAway - will retry request");
                                         return Ok((true, Some(new_client)));
@@ -339,7 +319,7 @@ impl GrpcReaction {
                         if retries == 0 {
                             // First attempt failed due to connection - try to create new client immediately
                             debug!("Connection error on first attempt for endpoint {}, signaling for new client", endpoint);
-                            match Self::create_client_static(endpoint, timeout_ms).await {
+                            match create_client(endpoint, timeout_ms).await {
                                 Ok(new_client) => {
                                     info!("Successfully created new client for retry");
                                     return Ok((true, Some(new_client)));
@@ -356,7 +336,7 @@ impl GrpcReaction {
                                 "Connection error on retry {}/{}, attempting new client",
                                 retries, max_retries
                             );
-                            match Self::create_client_static(endpoint, timeout_ms).await {
+                            match create_client(endpoint, timeout_ms).await {
                                 Ok(new_client) => {
                                     debug!("Successfully created new client for retry");
                                     return Ok((true, Some(new_client)));
@@ -409,7 +389,7 @@ impl GrpcReaction {
 impl Reaction for GrpcReaction {
     async fn start(
         &self,
-        query_subscriber: Arc<dyn crate::reactions::base::QuerySubscriber>,
+        query_subscriber: Arc<dyn crate::reactions::common::base::QuerySubscriber>,
     ) -> Result<()> {
         log_component_start("gRPC Reaction", &self.base.config.id);
 
@@ -542,7 +522,7 @@ impl Reaction for GrpcReaction {
                         );
                         last_connection_attempt = std::time::Instant::now();
 
-                        match GrpcReaction::create_client_with_retry(
+                        match create_client_with_retry(
                             &endpoint,
                             initial_connection_timeout_ms,
                             connection_retry_attempts,
@@ -703,7 +683,7 @@ impl Reaction for GrpcReaction {
                                   endpoint, consecutive_failures, total_connection_attempts);
                             last_connection_attempt = std::time::Instant::now();
 
-                            match GrpcReaction::create_client_with_retry(
+                            match create_client_with_retry(
                                 &endpoint,
                                 initial_connection_timeout_ms,
                                 connection_retry_attempts,
@@ -829,7 +809,7 @@ impl Reaction for GrpcReaction {
                     // Ensure we have a client
                     if client.is_none() {
                         info!("[{}] Creating gRPC client for final batch", reaction_name);
-                        match GrpcReaction::create_client_with_retry(
+                        match create_client_with_retry(
                             &endpoint,
                             initial_connection_timeout_ms,
                             connection_retry_attempts,
@@ -953,106 +933,4 @@ impl Reaction for GrpcReaction {
     fn get_config(&self) -> &ReactionConfig {
         &self.base.config
     }
-}
-
-impl GrpcReaction {
-    async fn create_client_static(
-        endpoint: &str,
-        timeout_ms: u64,
-    ) -> Result<ReactionServiceClient<Channel>> {
-        let endpoint = endpoint.replace("grpc://", "http://");
-        info!(
-            "Creating lazy gRPC channel to {} with timeout: {}ms",
-            endpoint, timeout_ms
-        );
-        let channel = Channel::from_shared(endpoint.clone())?
-            .timeout(Duration::from_millis(timeout_ms))
-            .connect_lazy();
-        info!("Lazy channel created; actual socket connect will occur on first RPC");
-        let client = ReactionServiceClient::new(channel);
-        info!("ReactionServiceClient created - connection will establish on first RPC call");
-        Ok(client)
-    }
-
-    async fn create_client_with_retry(
-        endpoint: &str,
-        timeout_ms: u64,
-        max_retries: u32,
-    ) -> Result<ReactionServiceClient<Channel>> {
-        let mut retries = 0;
-        let mut backoff = Duration::from_millis(500);
-
-        loop {
-            match Self::create_client_static(endpoint, timeout_ms).await {
-                Ok(client) => {
-                    info!("Successfully created client for endpoint: {}", endpoint);
-                    return Ok(client);
-                }
-                Err(e) => {
-                    if retries >= max_retries {
-                        error!(
-                            "Failed to create client after {} retries: {}",
-                            max_retries, e
-                        );
-                        return Err(e);
-                    }
-                    warn!(
-                        "Failed to create client (attempt {}/{}): {}",
-                        retries + 1,
-                        max_retries,
-                        e
-                    );
-                    retries += 1;
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(5));
-                }
-            }
-        }
-    }
-}
-
-/// Convert JSON value to protobuf Struct
-pub fn convert_json_to_proto_struct(value: &serde_json::Value) -> prost_types::Struct {
-    use prost_types::Struct;
-
-    match value {
-        serde_json::Value::Object(map) => {
-            let mut fields = BTreeMap::new();
-            for (key, val) in map {
-                fields.insert(key.clone(), convert_json_to_proto_value(val));
-            }
-            Struct { fields }
-        }
-        _ => {
-            // If it's not an object, wrap it in an object with a "value" key
-            let mut fields = BTreeMap::new();
-            fields.insert("value".to_string(), convert_json_to_proto_value(value));
-            Struct { fields }
-        }
-    }
-}
-
-/// Convert JSON value to protobuf Value
-fn convert_json_to_proto_value(value: &serde_json::Value) -> prost_types::Value {
-    use prost_types::{value::Kind, ListValue, Value};
-
-    let kind = match value {
-        serde_json::Value::Null => Kind::NullValue(0),
-        serde_json::Value::Bool(b) => Kind::BoolValue(*b),
-        serde_json::Value::Number(n) => {
-            if let Some(f) = n.as_f64() {
-                Kind::NumberValue(f)
-            } else {
-                Kind::StringValue(n.to_string())
-            }
-        }
-        serde_json::Value::String(s) => Kind::StringValue(s.clone()),
-        serde_json::Value::Array(arr) => {
-            let values: Vec<Value> = arr.iter().map(convert_json_to_proto_value).collect();
-            Kind::ListValue(ListValue { values })
-        }
-        serde_json::Value::Object(_) => Kind::StructValue(convert_json_to_proto_struct(value)),
-    };
-
-    Value { kind: Some(kind) }
 }

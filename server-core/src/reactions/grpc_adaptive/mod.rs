@@ -10,18 +10,18 @@ use tonic::transport::Channel;
 
 use crate::channels::{ComponentEventSender, ComponentStatus};
 use crate::config::ReactionConfig;
-use crate::reactions::base::ReactionBase;
+use crate::reactions::common::base::ReactionBase;
 use crate::reactions::Reaction;
-use crate::server_core::DrasiServerCore;
 use crate::utils::{AdaptiveBatchConfig, AdaptiveBatcher};
 
-// Use the same proto module from the original grpc module
-use super::grpc::proto::{
-    reaction_service_client::ReactionServiceClient, ProcessResultsRequest,
-    QueryResult as ProtoQueryResult, QueryResultItem as ProtoQueryResultItem,
+// Use the same proto module and helpers from the original grpc module
+use super::grpc::{
+    convert_json_to_proto_struct, ProcessResultsRequest, ProtoQueryResult, ProtoQueryResultItem,
+    ReactionServiceClient,
 };
 
-use super::grpc::convert_json_to_proto_struct;
+#[cfg(test)]
+mod tests;
 
 /// Adaptive gRPC reaction that dynamically adjusts batching based on throughput
 pub struct AdaptiveGrpcReaction {
@@ -247,7 +247,7 @@ impl AdaptiveGrpcReaction {
                         let mut needs_clear = false;
 
                         // Send each query's batch
-                        for (query_id, items) in batches_by_query {
+                        for (query_id, items) in batches_by_query.into_iter() {
                             let mut retries = 0;
                             let mut sent = false;
 
@@ -404,7 +404,10 @@ impl AdaptiveGrpcReaction {
 
 #[async_trait]
 impl Reaction for AdaptiveGrpcReaction {
-    async fn start(&self, query_subscriber: Arc<dyn crate::reactions::base::QuerySubscriber>) -> Result<()> {
+    async fn start(
+        &self,
+        query_subscriber: Arc<dyn crate::reactions::common::base::QuerySubscriber>,
+    ) -> Result<()> {
         info!("Starting adaptive gRPC reaction: {}", self.base.config.id);
 
         // Set status to Starting
@@ -416,7 +419,7 @@ impl Reaction for AdaptiveGrpcReaction {
             .await?;
 
         // Subscribe to queries
-        self.base.subscribe_to_queries(server_core).await?;
+        self.base.subscribe_to_queries(query_subscriber).await?;
 
         // Set status to Running
         self.base

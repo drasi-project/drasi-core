@@ -20,7 +20,7 @@ use std::sync::Arc;
 use crate::channels::{ComponentEventSender, ComponentStatus};
 use crate::config::typed::LogLevel;
 use crate::config::ReactionConfig;
-use crate::reactions::base::ReactionBase;
+use crate::reactions::common::base::ReactionBase;
 use crate::reactions::Reaction;
 use crate::utils::log_component_start;
 
@@ -79,7 +79,7 @@ impl LogReaction {
 impl Reaction for LogReaction {
     async fn start(
         &self,
-        query_subscriber: Arc<dyn crate::reactions::base::QuerySubscriber>,
+        query_subscriber: Arc<dyn crate::reactions::common::base::QuerySubscriber>,
     ) -> Result<()> {
         log_component_start("Reaction", &self.base.config.id);
 
@@ -225,3 +225,6 @@ impl Reaction for LogReaction {
         &self.base.config
     }
 }
+
+#[cfg(test)]
+mod tests;

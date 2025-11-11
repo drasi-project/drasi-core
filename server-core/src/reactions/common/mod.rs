@@ -12,28 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod application;
-pub mod common;
-pub mod grpc;
-pub mod grpc_adaptive;
-pub mod http;
-pub mod http_adaptive;
-pub mod log;
-pub mod manager;
-pub mod platform;
-pub mod profiler;
-pub mod sse;
+//! Common functionality shared across reaction implementations.
 
-#[cfg(test)]
-mod tests;
+pub mod base;
 
-pub use application::{ApplicationReaction, ApplicationReactionHandle};
-pub use grpc::GrpcReaction;
-pub use grpc_adaptive::AdaptiveGrpcReaction;
-pub use http::HttpReaction;
-pub use http_adaptive::AdaptiveHttpReaction;
-pub use log::LogReaction;
-pub use manager::*;
-pub use platform::PlatformReaction;
-pub use profiler::ProfilerReaction;
-pub use sse::SseReaction;
+pub use base::ReactionBase;

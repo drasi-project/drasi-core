@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod config;
+
+pub use config::{CallSpec, QueryConfig};
+
 use anyhow::Result;
 use async_trait::async_trait;
 use handlebars::Handlebars;
@@ -20,36 +24,15 @@ use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue},
     Client, Method,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::channels::{ComponentEventSender, ComponentStatus};
 use crate::config::ReactionConfig;
-use crate::reactions::base::ReactionBase;
+use crate::reactions::common::base::ReactionBase;
 use crate::reactions::Reaction;
 use crate::utils::log_component_start;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CallSpec {
-    pub url: String,
-    pub method: String,
-    #[serde(default)]
-    pub body: String,
-    #[serde(default)]
-    pub headers: HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QueryConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub added: Option<CallSpec>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub updated: Option<CallSpec>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deleted: Option<CallSpec>,
-}
 
 pub struct HttpReaction {
     base: ReactionBase,
@@ -256,7 +239,7 @@ impl HttpReaction {
 impl Reaction for HttpReaction {
     async fn start(
         &self,
-        query_subscriber: Arc<dyn crate::reactions::base::QuerySubscriber>,
+        query_subscriber: Arc<dyn crate::reactions::common::base::QuerySubscriber>,
     ) -> Result<()> {
         log_component_start("HTTP Reaction", &self.base.config.id);
 
