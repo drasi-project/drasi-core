@@ -62,6 +62,7 @@ async fn test_application_source_to_http_reaction() -> Result<()> {
         .add_reaction(
             Reaction::http("http-reaction")
                 .subscribe_to("test-query")
+                .auto_start(true)
                 .with_properties(
                     Properties::new()
                         .with_string("base_url", "http://127.0.0.1:9100")
