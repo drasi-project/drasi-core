@@ -21,7 +21,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use log::{debug, error, info};
+use log::{debug, error, info, trace};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -97,6 +97,7 @@ impl AdaptiveHttpSource {
         State(state): State<AdaptiveAppState>,
         Json(event): Json<DirectSourceChange>,
     ) -> Result<impl IntoResponse, (StatusCode, Json<EventResponse>)> {
+        debug!("[{}] HTTP endpoint received single event: {:?}", source_id, event);
         Self::process_events(&source_id, &state, vec![event]).await
     }
 
@@ -105,6 +106,7 @@ impl AdaptiveHttpSource {
         State(state): State<AdaptiveAppState>,
         Json(batch): Json<BatchEventRequest>,
     ) -> Result<impl IntoResponse, (StatusCode, Json<EventResponse>)> {
+        debug!("[{}] HTTP endpoint received batch of {} events", source_id, batch.events.len());
         Self::process_events(&source_id, &state, batch.events).await
     }
 
@@ -113,6 +115,8 @@ impl AdaptiveHttpSource {
         state: &AdaptiveAppState,
         events: Vec<DirectSourceChange>,
     ) -> Result<impl IntoResponse, (StatusCode, Json<EventResponse>)> {
+        trace!("[{}] Processing {} events", source_id, events.len());
+
         // Validate source name matches
         if source_id != state.source_id {
             error!(
@@ -137,7 +141,7 @@ impl AdaptiveHttpSource {
         let mut last_error = None;
 
         // Process each event
-        for event in events {
+        for (idx, event) in events.iter().enumerate() {
             match convert_direct_to_source_change(&event, source_id) {
                 Ok(source_change) => {
                     let change_event = SourceChangeEvent {
@@ -149,8 +153,8 @@ impl AdaptiveHttpSource {
                     // Send to batch channel
                     if let Err(e) = state.batch_tx.send(change_event).await {
                         error!(
-                            "[{}] Failed to send to batch channel: {}",
-                            state.source_id, e
+                            "[{}] Failed to send event {} to batch channel: {}",
+                            state.source_id, idx + 1, e
                         );
                         error_count += 1;
                         last_error = Some("Internal channel error".to_string());
@@ -159,12 +163,14 @@ impl AdaptiveHttpSource {
                     }
                 }
                 Err(e) => {
-                    error!("[{}] Invalid event data: {}", state.source_id, e);
+                    error!("[{}] Failed to convert event {}: {}", state.source_id, idx + 1, e);
                     error_count += 1;
                     last_error = Some(e.to_string());
                 }
             }
         }
+
+        debug!("[{}] Event processing complete: {} succeeded, {} failed", source_id, success_count, error_count);
 
         if error_count > 0 && success_count == 0 {
             // All events failed
@@ -214,14 +220,15 @@ impl AdaptiveHttpSource {
         adaptive_config: AdaptiveBatchConfig,
         source_id: String,
     ) {
-        let mut batcher = AdaptiveBatcher::new(batch_rx, adaptive_config);
+        let mut batcher = AdaptiveBatcher::new(batch_rx, adaptive_config.clone());
         let mut total_events = 0u64;
         let mut total_batches = 0u64;
 
-        info!("[{}] Adaptive HTTP batcher started", source_id);
+        info!("[{}] Adaptive HTTP batcher started with config: {:?}", source_id, adaptive_config);
 
         while let Some(batch) = batcher.next_batch().await {
             if batch.is_empty() {
+                debug!("[{}] Batcher received empty batch, skipping", source_id);
                 continue;
             }
 
@@ -230,12 +237,15 @@ impl AdaptiveHttpSource {
             total_batches += 1;
 
             debug!(
-                "[{}] Processing adaptive batch of {} events",
-                source_id, batch_size
+                "[{}] Batcher forwarding batch #{} with {} events to dispatchers",
+                source_id, total_batches, batch_size
             );
 
             // Send all events in the batch
-            for event in batch {
+            let mut sent_count = 0;
+            let mut failed_count = 0;
+            for (idx, event) in batch.into_iter().enumerate() {
+                debug!("[{}] Batch #{}, dispatching event {}/{}", source_id, total_batches, idx + 1, batch_size);
                 // Create profiling metadata with timestamps
                 let mut profiling = crate::profiling::ProfilingMetadata::new();
                 profiling.source_send_ns = Some(crate::profiling::timestamp_ns());
@@ -252,9 +262,15 @@ impl AdaptiveHttpSource {
                     SourceBase::dispatch_from_task(dispatchers.clone(), wrapper.clone(), &source_id)
                         .await
                 {
-                    debug!("[{}] Failed to dispatch (no subscribers): {}", source_id, e);
+                    error!("[{}] Batch #{}, failed to dispatch event {}/{} (no subscribers): {}", source_id, total_batches, idx + 1, batch_size, e);
+                    failed_count += 1;
+                } else {
+                    debug!("[{}] Batch #{}, successfully dispatched event {}/{}", source_id, total_batches, idx + 1, batch_size);
+                    sent_count += 1;
                 }
             }
+
+            debug!("[{}] Batch #{} complete: {} dispatched, {} failed", source_id, total_batches, sent_count, failed_count);
 
             if total_batches % 100 == 0 {
                 info!(
@@ -296,12 +312,15 @@ impl Source for AdaptiveHttpSource {
         };
 
         // Create batch channel
-        let (batch_tx, batch_rx) = mpsc::channel(1000);
+        let batch_channel_capacity = 1000;
+        let (batch_tx, batch_rx) = mpsc::channel(batch_channel_capacity);
+        info!("[{}] Created batch channel with capacity {}", self.base.config.id, batch_channel_capacity);
 
         // Start adaptive batcher task
         let adaptive_config = self.adaptive_config.clone();
         let source_id = self.base.config.id.clone();
 
+        info!("[{}] Starting adaptive batcher task", source_id);
         tokio::spawn(Self::run_adaptive_batcher(
             batch_rx,
             self.base.dispatchers.clone(),
