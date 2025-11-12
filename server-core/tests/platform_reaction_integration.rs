@@ -26,7 +26,9 @@ use async_trait::async_trait;
 use drasi_server_core::channels::{
     ChangeDispatcher, ComponentEvent, ComponentStatus, QueryResult, QuerySubscriptionResponse,
 };
-use drasi_server_core::config::{PlatformReactionConfig, QueryConfig, ReactionConfig, ReactionSpecificConfig};
+use drasi_server_core::config::{
+    PlatformReactionConfig, QueryConfig, ReactionConfig, ReactionSpecificConfig,
+};
 use drasi_server_core::queries::Query;
 use drasi_server_core::reactions::platform::{
     CloudEvent, ControlSignal, PlatformReaction, ResultEvent,
@@ -707,7 +709,8 @@ async fn test_running_control_event() -> Result<()> {
     let (server_core, _mock_query) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
-    let (reaction, _event_rx) = create_test_reaction(redis.url().to_string(), query_id, true, None, None);
+    let (reaction, _event_rx) =
+        create_test_reaction(redis.url().to_string(), query_id, true, None, None);
 
     reaction.start(server_core.clone()).await?;
 

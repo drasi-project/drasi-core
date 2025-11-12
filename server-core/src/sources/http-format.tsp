@@ -13,13 +13,13 @@
 // limitations under the License.
 
 /**
- * HTTP Direct Format Specification
+ * HTTP Source Format Specification
  *
  * This format is used by the HTTP source for directly ingesting graph changes
  * via HTTP POST requests. It provides a simple, JSON-based format for sending
  * node and relation changes to Drasi.
  *
- * Source: server-core/src/sources/http/direct_format.rs
+ * Source: server-core/src/sources/http/models.rs
  */
 
 import "@typespec/json-schema";
@@ -30,63 +30,63 @@ using TypeSpec.JsonSchema;
 namespace Drasi.Sources.Http;
 
 /**
- * A source change event in the direct HTTP format.
+ * A source change event in the HTTP source format.
  *
  * This is a tagged union discriminated by the "operation" field.
  * Each operation type has different required fields.
  *
- * Based on: server-core/src/sources/http/direct_format.rs (lines 22-46)
+ * Based on: server-core/src/sources/http/models.rs (HttpSourceChange)
  */
 @jsonSchema
 @discriminator("operation")
-union DirectSourceChange {
+union HttpSourceChange {
   /** Insert a new element */
-  insert: DirectInsert,
+  insert: HttpInsert,
 
   /** Update an existing element */
-  update: DirectUpdate,
+  update: HttpUpdate,
 
   /** Delete an element */
-  delete: DirectDelete
+  delete: HttpDelete
 }
 
 /**
- * Insert operation in direct format.
+ * Insert operation in HTTP source format.
  */
 @jsonSchema
-model DirectInsert {
+model HttpInsert {
   /** Operation type discriminator */
   operation: "insert";
 
   /** The element to insert (node or relation) */
-  element: DirectElement;
+  element: HttpElement;
 
   /** Optional timestamp in nanoseconds (defaults to current time if not provided) */
   timestamp?: uint64;
 }
 
 /**
- * Update operation in direct format.
+ * Update operation in HTTP source format.
  */
 @jsonSchema
-model DirectUpdate {
+model HttpUpdate {
   /** Operation type discriminator */
   operation: "update";
 
   /** The updated element (full state after update) */
-  element: DirectElement;
+  element: HttpElement;
 
   /** Optional timestamp in nanoseconds (defaults to current time if not provided) */
   timestamp?: uint64;
 }
 
 /**
- * Delete operation in direct format.
+ * Delete operation in HTTP source format.
  *
  * For deletes, only the ID is required. Labels are optional.
  */
 @jsonSchema
-model DirectDelete {
+model HttpDelete {
   /** Operation type discriminator */
   operation: "delete";
 
@@ -101,29 +101,29 @@ model DirectDelete {
 }
 
 /**
- * A graph element in the direct format - either a Node or Relation.
+ * A graph element in the HTTP source format - either a Node or Relation.
  *
  * This is discriminated by the "type" field.
  *
- * Based on: server-core/src/sources/http/direct_format.rs (lines 48-68)
+ * Based on: server-core/src/sources/http/models.rs (HttpElement)
  */
 @jsonSchema
 @discriminator("type")
-union DirectElement {
+union HttpElement {
   /** A node in the graph */
-  node: DirectNode,
+  node: HttpNode,
 
   /** A relation (edge) in the graph */
-  relation: DirectRelation
+  relation: HttpRelation
 }
 
 /**
- * A node in the direct format.
+ * A node in the HTTP source format.
  *
  * Represents an entity with an ID, labels, and properties.
  */
 @jsonSchema
-model DirectNode {
+model HttpNode {
   /** Type discriminator */
   type: "node";
 
@@ -139,12 +139,12 @@ model DirectNode {
 }
 
 /**
- * A relation in the direct format.
+ * A relation in the HTTP source format.
  *
  * Represents a directed edge connecting two nodes.
  */
 @jsonSchema
-model DirectRelation {
+model HttpRelation {
   /** Type discriminator */
   type: "relation";
 
@@ -171,7 +171,7 @@ model DirectRelation {
  * The HTTP source can accept arrays of changes in a single request.
  */
 @jsonSchema
-model DirectSourceChangeBatch is DirectSourceChange[];
+model HttpSourceChangeBatch is HttpSourceChange[];
 
 /**
  * Example usage:

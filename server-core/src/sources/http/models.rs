@@ -16,21 +16,23 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// Direct format that closely mirrors drasi_core::models::SourceChange
+/// Data schema for HTTP source events
+///
+/// This schema closely mirrors drasi_core::models::SourceChange for efficient conversion
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "lowercase")]
-pub enum DirectSourceChange {
+pub enum HttpSourceChange {
     /// Insert a new element
     #[serde(rename = "insert")]
     Insert {
-        element: DirectElement,
+        element: HttpElement,
         #[serde(skip_serializing_if = "Option::is_none")]
         timestamp: Option<u64>,
     },
     /// Update an existing element
     #[serde(rename = "update")]
     Update {
-        element: DirectElement,
+        element: HttpElement,
         #[serde(skip_serializing_if = "Option::is_none")]
         timestamp: Option<u64>,
     },
@@ -48,7 +50,7 @@ pub enum DirectSourceChange {
 /// Element that can be either a Node or Relation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
-pub enum DirectElement {
+pub enum HttpElement {
     #[serde(rename = "node")]
     Node {
         id: String,
@@ -67,9 +69,9 @@ pub enum DirectElement {
     },
 }
 
-/// Convert DirectSourceChange to drasi_core::models::SourceChange
-pub fn convert_direct_to_source_change(
-    direct: &DirectSourceChange,
+/// Convert HttpSourceChange to drasi_core::models::SourceChange
+pub fn convert_http_to_source_change(
+    http_change: &HttpSourceChange,
     source_id: &str,
 ) -> Result<drasi_core::models::SourceChange> {
     use drasi_core::models::{ElementMetadata, ElementReference, SourceChange};
@@ -88,18 +90,18 @@ pub fn convert_direct_to_source_change(
         })
     };
 
-    match direct {
-        DirectSourceChange::Insert { element, timestamp } => {
+    match http_change {
+        HttpSourceChange::Insert { element, timestamp } => {
             let element =
-                create_element_from_direct(element, source_id, get_timestamp(*timestamp))?;
+                create_element_from_http(element, source_id, get_timestamp(*timestamp))?;
             Ok(SourceChange::Insert { element })
         }
-        DirectSourceChange::Update { element, timestamp } => {
+        HttpSourceChange::Update { element, timestamp } => {
             let element =
-                create_element_from_direct(element, source_id, get_timestamp(*timestamp))?;
+                create_element_from_http(element, source_id, get_timestamp(*timestamp))?;
             Ok(SourceChange::Update { element })
         }
-        DirectSourceChange::Delete {
+        HttpSourceChange::Delete {
             id,
             labels,
             timestamp,
@@ -122,16 +124,16 @@ pub fn convert_direct_to_source_change(
     }
 }
 
-/// Create Element from DirectElement
-fn create_element_from_direct(
-    direct: &DirectElement,
+/// Create Element from HttpElement
+fn create_element_from_http(
+    http_element: &HttpElement,
     source_id: &str,
     timestamp: u64,
 ) -> Result<drasi_core::models::Element> {
     use drasi_core::models::{Element, ElementMetadata, ElementPropertyMap, ElementReference};
 
-    match direct {
-        DirectElement::Node {
+    match http_element {
+        HttpElement::Node {
             id,
             labels,
             properties,
@@ -160,7 +162,7 @@ fn create_element_from_direct(
                 properties: prop_map,
             })
         }
-        DirectElement::Relation {
+        HttpElement::Relation {
             id,
             labels,
             from,
@@ -257,11 +259,11 @@ mod tests {
             "timestamp": 1234567890000
         }"#;
 
-        let result: DirectSourceChange = serde_json::from_str(json).unwrap();
+        let result: HttpSourceChange = serde_json::from_str(json).unwrap();
         match result {
-            DirectSourceChange::Insert { element, timestamp } => {
+            HttpSourceChange::Insert { element, timestamp } => {
                 match element {
-                    DirectElement::Node {
+                    HttpElement::Node {
                         id,
                         labels,
                         properties,
@@ -296,11 +298,11 @@ mod tests {
             }
         }"#;
 
-        let result: DirectSourceChange = serde_json::from_str(json).unwrap();
+        let result: HttpSourceChange = serde_json::from_str(json).unwrap();
         match result {
-            DirectSourceChange::Insert { element, timestamp } => {
+            HttpSourceChange::Insert { element, timestamp } => {
                 match element {
-                    DirectElement::Relation {
+                    HttpElement::Relation {
                         id,
                         labels,
                         from,
@@ -330,9 +332,9 @@ mod tests {
             "timestamp": 1234567890000
         }"#;
 
-        let result: DirectSourceChange = serde_json::from_str(json).unwrap();
+        let result: HttpSourceChange = serde_json::from_str(json).unwrap();
         match result {
-            DirectSourceChange::Delete {
+            HttpSourceChange::Delete {
                 id,
                 labels,
                 timestamp,
@@ -352,9 +354,9 @@ mod tests {
             "id": "user_123"
         }"#;
 
-        let result: DirectSourceChange = serde_json::from_str(json).unwrap();
+        let result: HttpSourceChange = serde_json::from_str(json).unwrap();
         match result {
-            DirectSourceChange::Delete {
+            HttpSourceChange::Delete {
                 id,
                 labels,
                 timestamp,

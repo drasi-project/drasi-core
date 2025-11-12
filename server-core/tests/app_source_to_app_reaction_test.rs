@@ -48,13 +48,17 @@ async fn test_application_source_to_application_reaction() -> Result<()> {
 
     let core = DrasiServerCore::builder()
         .with_id("test-app-to-app")
-        .add_source(Source::application("person-source").auto_start(true).build())
+        .add_source(
+            Source::application("person-source")
+                .auto_start(true)
+                .build(),
+        )
         .add_query(
             Query::cypher("person-query")
                 .query("MATCH (n:Person) RETURN n.id as id, n.name as name")
                 .from_source("person-source")
                 .auto_start(true)
-                .build()
+                .build(),
         )
         .add_reaction(
             Reaction::application("person-reaction")
@@ -125,7 +129,11 @@ async fn test_application_source_to_application_reaction() -> Result<()> {
     let source_handle = core.source_handle("person-source").await?;
 
     source_handle
-        .send_node_insert("person-1", vec!["Person"], create_person_props("p1", "Alice"))
+        .send_node_insert(
+            "person-1",
+            vec!["Person"],
+            create_person_props("p1", "Alice"),
+        )
         .await?;
 
     source_handle
@@ -133,7 +141,11 @@ async fn test_application_source_to_application_reaction() -> Result<()> {
         .await?;
 
     source_handle
-        .send_node_insert("person-3", vec!["Person"], create_person_props("p3", "Charlie"))
+        .send_node_insert(
+            "person-3",
+            vec!["Person"],
+            create_person_props("p3", "Charlie"),
+        )
         .await?;
 
     // ============================================================================
@@ -143,7 +155,11 @@ async fn test_application_source_to_application_reaction() -> Result<()> {
     collection_task.await?;
     let results = results_buffer.lock().await;
 
-    assert_eq!(results.len(), EXPECTED_RESULTS, "Should receive exactly 3 results");
+    assert_eq!(
+        results.len(),
+        EXPECTED_RESULTS,
+        "Should receive exactly 3 results"
+    );
 
     // Validate each result has correct structure and type
     let mut found_ids = std::collections::HashSet::new();
@@ -155,8 +171,14 @@ async fn test_application_source_to_application_reaction() -> Result<()> {
         );
 
         let data = result.get("data").expect("Result should have data field");
-        let id = data.get("id").and_then(|v| v.as_str()).expect("Data should have id field");
-        let name = data.get("name").and_then(|v| v.as_str()).expect("Data should have name field");
+        let id = data
+            .get("id")
+            .and_then(|v| v.as_str())
+            .expect("Data should have id field");
+        let name = data
+            .get("name")
+            .and_then(|v| v.as_str())
+            .expect("Data should have name field");
 
         found_ids.insert(id.to_string());
 

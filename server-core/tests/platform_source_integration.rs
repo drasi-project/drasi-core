@@ -777,7 +777,8 @@ async fn test_source_start_and_stop() -> Result<()> {
     let redis = setup_redis().await;
     let stream_key = "test-lifecycle";
 
-    let (source, _source_change_rx, _event_rx) = create_test_source(redis.url().to_string(), stream_key).await;
+    let (source, _source_change_rx, _event_rx) =
+        create_test_source(redis.url().to_string(), stream_key).await;
 
     // Start source
     source.start().await?;
@@ -846,7 +847,8 @@ async fn test_restart_and_resume() -> Result<()> {
     let stream_key = "test-restart";
 
     // First run
-    let (source1, mut rx1, _event_rx1) = create_test_source(redis.url().to_string(), stream_key).await;
+    let (source1, mut rx1, _event_rx1) =
+        create_test_source(redis.url().to_string(), stream_key).await;
     source1.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -871,7 +873,8 @@ async fn test_restart_and_resume() -> Result<()> {
     publish_platform_event(redis.url(), stream_key, event2).await?;
 
     // Restart with same group
-    let (source2, mut rx2, _event_rx2) = create_test_source(redis.url().to_string(), stream_key).await;
+    let (source2, mut rx2, _event_rx2) =
+        create_test_source(redis.url().to_string(), stream_key).await;
     source2.start().await?;
 
     // Should resume and get second event

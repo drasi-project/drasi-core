@@ -25,11 +25,7 @@
 //! 5. Validate webhook payloads contain correct data
 
 use anyhow::Result;
-use axum::{
-    extract::State,
-    routing::post,
-    Json, Router,
-};
+use axum::{extract::State, routing::post, Json, Router};
 use drasi_core::models::ElementPropertyMap;
 use drasi_server_core::{DrasiServerCore, Properties, PropertyMapBuilder, Query, Reaction, Source};
 use serde_json::{json, Value};
@@ -156,15 +152,27 @@ async fn test_application_source_to_http_reaction() -> Result<()> {
     let source_handle = core.source_handle("product-source").await?;
 
     source_handle
-        .send_node_insert("product-1", vec!["Product"], create_product_props("p1", 100))
+        .send_node_insert(
+            "product-1",
+            vec!["Product"],
+            create_product_props("p1", 100),
+        )
         .await?;
 
     source_handle
-        .send_node_insert("product-2", vec!["Product"], create_product_props("p2", 200))
+        .send_node_insert(
+            "product-2",
+            vec!["Product"],
+            create_product_props("p2", 200),
+        )
         .await?;
 
     source_handle
-        .send_node_insert("product-3", vec!["Product"], create_product_props("p3", 300))
+        .send_node_insert(
+            "product-3",
+            vec!["Product"],
+            create_product_props("p3", 300),
+        )
         .await?;
 
     // ============================================================================
@@ -180,8 +188,14 @@ async fn test_application_source_to_http_reaction() -> Result<()> {
     // Validate webhook payloads
     let mut found_ids = std::collections::HashSet::new();
     for event in events.iter() {
-        let id = event.get("id").and_then(|v| v.as_str()).expect("Event should have id field");
-        let price = event.get("price").and_then(|v| v.as_i64()).expect("Event should have price field");
+        let id = event
+            .get("id")
+            .and_then(|v| v.as_str())
+            .expect("Event should have id field");
+        let price = event
+            .get("price")
+            .and_then(|v| v.as_i64())
+            .expect("Event should have price field");
 
         found_ids.insert(id.to_string());
 

@@ -25,11 +25,7 @@
 //! 5. Validate webhook payloads contain correct data
 
 use anyhow::Result;
-use axum::{
-    extract::State,
-    routing::post,
-    Json, Router,
-};
+use axum::{extract::State, routing::post, Json, Router};
 use drasi_server_core::{DrasiServerCore, Properties, Query, Reaction, Source};
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -157,7 +153,10 @@ async fn test_http_source_to_http_reaction() -> Result<()> {
     // ============================================================================
 
     let client = Client::new();
-    let source_url = format!("http://127.0.0.1:{}/sources/http-source/events", SOURCE_PORT);
+    let source_url = format!(
+        "http://127.0.0.1:{}/sources/http-source/events",
+        SOURCE_PORT
+    );
 
     // Send event 1
     client
@@ -229,8 +228,14 @@ async fn test_http_source_to_http_reaction() -> Result<()> {
     // Validate webhook payloads
     let mut found_ids = std::collections::HashSet::new();
     for event in events.iter() {
-        let id = event.get("id").and_then(|v| v.as_str()).expect("Event should have id field");
-        let event_type = event.get("type").and_then(|v| v.as_str()).expect("Event should have type field");
+        let id = event
+            .get("id")
+            .and_then(|v| v.as_str())
+            .expect("Event should have id field");
+        let event_type = event
+            .get("type")
+            .and_then(|v| v.as_str())
+            .expect("Event should have type field");
 
         found_ids.insert(id.to_string());
 

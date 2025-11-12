@@ -14,10 +14,10 @@
 
 use super::AdaptiveGrpcReaction;
 use crate::channels::*;
-use crate::reactions::common::AdaptiveBatchConfig as ConfigAdaptiveBatchConfig;
-use crate::reactions::grpc_adaptive::GrpcAdaptiveReactionConfig;
 use crate::config::{QueryConfig, ReactionConfig, ReactionSpecificConfig};
 use crate::queries::Query;
+use crate::reactions::common::AdaptiveBatchConfig as ConfigAdaptiveBatchConfig;
+use crate::reactions::grpc_adaptive::GrpcAdaptiveReactionConfig;
 use crate::reactions::Reaction;
 use crate::server_core::DrasiServerCore;
 use crate::utils::AdaptiveBatchConfig;
@@ -379,8 +379,8 @@ async fn test_adaptive_grpc_reaction_batch_size_constraints() {
         "grpc://localhost:50052",
         5000, // max
         1,    // min - very wide range
-        5,   // window_size
-        100, // batch_timeout_ms
+        5,    // window_size
+        100,  // batch_timeout_ms
     );
     let reaction = AdaptiveGrpcReaction::new(config, event_tx);
     assert_eq!(reaction.status().await, ComponentStatus::Stopped);

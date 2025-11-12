@@ -1,18 +1,10 @@
 # HTTP Source
 
-The HTTP source provides a REST API endpoint for submitting data changes to Drasi. It supports both single event and batch submissions with adaptive batching for optimal throughput.
+The HTTP source provides a REST API endpoint for receiving graph data changes via HTTP requests. It supports both single events and batch submissions with optional adaptive batching for optimal throughput.
 
-## Features
+## Configuration Schema
 
-- **Single Event Submission**: Submit individual events via REST API
-- **Batch Submission**: Submit multiple events in a single request
-- **Adaptive Batching**: Automatically adjusts batch size and timing based on throughput
-- **Direct Format**: Uses a clean JSON format that closely mirrors internal structures
-- **OpenAPI Documentation**: Interactive API documentation available at `/docs`
-
-## Configuration
-
-The HTTP source is configured in your Drasi server YAML configuration file:
+### Basic Configuration
 
 ```yaml
 sources:
@@ -20,149 +12,139 @@ sources:
     source_type: "http"
     auto_start: true
     properties:
-      port: 8080         # Port to listen on (default: 8080)
-      host: "0.0.0.0"    # Host to bind to (default: 0.0.0.0)
-      
-      # Adaptive batching configuration (all optional)
+      host: "0.0.0.0"        # HTTP server host (default: localhost)
+      port: 8080             # HTTP server port (default: 8080)
+      endpoint: "/events"    # Optional custom endpoint path
+      timeout_ms: 30000      # Request timeout in milliseconds (default: 10000)
+```
+
+### With Adaptive Batching
+
+Adaptive batching automatically adjusts batch size and timing based on throughput for optimal performance:
+
+```yaml
+sources:
+  - id: "high-throughput-source"
+    source_type: "http"
+    properties:
+      host: "0.0.0.0"
+      port: 9000
+
+      # Adaptive batching configuration
       adaptive_enabled: true              # Enable adaptive batching (default: true)
       adaptive_max_batch_size: 1000       # Maximum batch size (default: 1000)
       adaptive_min_batch_size: 10         # Minimum batch size (default: 10)
-      adaptive_max_wait_ms: 100           # Maximum wait time in ms (default: 100)
-      adaptive_min_wait_ms: 1             # Minimum wait time in ms (default: 1)
-      adaptive_window_secs: 5             # Throughput window in seconds (default: 5)
+      adaptive_max_wait_ms: 100           # Maximum wait time ms (default: 100)
+      adaptive_min_wait_ms: 1             # Minimum wait time ms (default: 1)
+      adaptive_window_secs: 5             # Throughput measurement window (default: 5)
 ```
 
-### Batching Configuration
+### With Bootstrap Provider
 
-The adaptive batching feature automatically optimizes for different traffic patterns:
+HTTP source supports **any** bootstrap provider through the universal SourceBase pattern. This enables powerful use cases like "bootstrap from database, stream changes via HTTP".
 
-- **Idle** (< 1 msg/sec): Minimal batching for low latency
-- **Low** (1-100 msgs/sec): Small batches with minimal wait
-- **Medium** (100-1,000 msgs/sec): Moderate batching
-- **High** (1,000-10,000 msgs/sec): Larger batches for efficiency
-- **Burst** (> 10,000 msgs/sec): Maximum throughput mode
+#### PostgreSQL Bootstrap Example
 
-To disable adaptive batching for low-latency requirements:
+Initial data load from PostgreSQL, then receive updates via HTTP:
+
 ```yaml
-properties:
-  adaptive_enabled: false  # Events are processed immediately without batching
+sources:
+  - id: "http-with-postgres-bootstrap"
+    source_type: "http"
+    bootstrap_provider:
+      type: postgres
+    properties:
+      # HTTP source configuration
+      host: "localhost"
+      port: 9000
+
+      # PostgreSQL bootstrap provider configuration
+      # These properties are used by the bootstrap provider, not the HTTP source
+      database: "mydb"
+      user: "dbuser"
+      password: "dbpass"
+      tables: ["inventory", "orders"]
+      table_keys:
+        - table: inventory
+          key_columns: ["id"]
+        - table: orders
+          key_columns: ["order_id"]
 ```
 
-## API Endpoints
+#### ScriptFile Bootstrap Example
 
-When an HTTP source is running, it exposes the following endpoints on the configured port:
+Initial data load from JSONL files, then receive updates via HTTP:
 
-- **POST** `/sources/{source_name}/events` - Submit a single data change event
-- **POST** `/sources/{source_name}/events/batch` - Submit multiple events (batch)
-- **GET** `/health` - Health check endpoint (returns JSON with service status and features)
-
-### Health Check Response
-
-```json
-{
-  "status": "healthy",
-  "service": "adaptive-http-source",
-  "features": ["adaptive-batching", "batch-endpoint"]
-}
+```yaml
+sources:
+  - id: "http-with-file-bootstrap"
+    source_type: "http"
+    bootstrap_provider:
+      type: scriptfile
+      file_paths:
+        - "/data/initial_nodes.jsonl"
+        - "/data/initial_relations.jsonl"
+    properties:
+      host: "localhost"
+      port: 9000
 ```
 
-## Event Format (Direct Format)
+#### Other Bootstrap Providers
 
-The HTTP source uses a Direct Format that closely mirrors the internal Drasi Core structure:
+- **Platform**: Bootstrap from remote Drasi Query API via HTTP
+- **Application**: Replay previously stored insert events
+- **Noop**: No bootstrap, streaming only
 
-### Single Event Structure
+### Configuration Reference
 
-#### Node Insert/Update
-```json
-{
-  "operation": "insert",  // or "update"
-  "element": {
-    "type": "node",
-    "id": "unique_id",
-    "labels": ["Label1", "Label2"],
-    "properties": {
-      "key": "value",
-      "nested": {
-        "data": "supported"
-      }
-    }
-  },
-  "timestamp": 1234567890000  // Optional, nanoseconds since Unix epoch
-}
-```
+#### HTTP Source Configuration
 
-#### Relation Insert/Update
-```json
-{
-  "operation": "insert",  // or "update"
-  "element": {
-    "type": "relation",
-    "id": "relation_id",
-    "labels": ["RELATIONSHIP_TYPE"],
-    "from": "source_node_id",
-    "to": "target_node_id",
-    "properties": {
-      "key": "value"
-    }
-  }
-}
-```
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `host` | string | Yes | - | HTTP server host address |
+| `port` | u16 | Yes | - | HTTP server port |
+| `endpoint` | string | No | None | Custom endpoint path |
+| `timeout_ms` | u64 | No | 10000 | Request timeout in milliseconds |
+| `adaptive_enabled` | bool | No | None | Enable adaptive batching |
+| `adaptive_max_batch_size` | usize | No | None | Maximum batch size |
+| `adaptive_min_batch_size` | usize | No | None | Minimum batch size |
+| `adaptive_max_wait_ms` | u64 | No | None | Maximum wait time in ms |
+| `adaptive_min_wait_ms` | u64 | No | None | Minimum wait time in ms |
+| `adaptive_window_secs` | u64 | No | None | Throughput measurement window in seconds |
 
-#### Delete Operation
-```json
-{
-  "operation": "delete",
-  "id": "element_id",
-  "labels": ["Label1"],  // Optional
-  "timestamp": 1234567890000  // Optional
-}
-```
+#### Bootstrap Provider Configuration
 
-### Batch Event Structure
+These properties are used by bootstrap providers when configured. They remain in the generic properties map for bootstrap providers to access via `BootstrapContext`.
 
-```json
-{
-  "events": [
-    {
-      "operation": "insert",
-      "element": {
-        "type": "node",
-        "id": "node_1",
-        "labels": ["User"],
-        "properties": {"name": "Alice"}
-      }
-    },
-    {
-      "operation": "insert",
-      "element": {
-        "type": "relation",
-        "id": "rel_1",
-        "labels": ["FOLLOWS"],
-        "from": "node_1",
-        "to": "node_2",
-        "properties": {}
-      }
-    }
-  ]
-}
-```
+**PostgreSQL Bootstrap Provider**:
+- `database` (string): PostgreSQL database name
+- `user` (string): PostgreSQL user
+- `password` (string): PostgreSQL password
+- `tables` (array): Tables to bootstrap
+- `table_keys` (array): Primary key configuration per table
 
-### Field Descriptions
+**ScriptFile Bootstrap Provider**:
+- `file_paths` (array): Paths to JSONL files for bootstrap
 
-- **operation**: The operation type (`insert`, `update`, or `delete`)
-- **element**: The element data (for insert/update operations)
-  - **type**: Element type (`node` or `relation`)
-  - **id**: Unique identifier for the element
-  - **labels**: Array of labels/types for the element
-  - **properties**: Key-value pairs of element properties (any JSON values)
-  - **from**: Source node ID (relations only)
-  - **to**: Target node ID (relations only)
-- **id**: Element ID to delete (for delete operations)
-- **timestamp**: Optional timestamp in nanoseconds since Unix epoch
+**Platform Bootstrap Provider**:
+- `query_api_url` (string): Remote Drasi Query API URL
 
-## Examples
+## Pushing Data to HTTP Source
 
-### Insert a User Node
+### API Endpoints
+
+When an HTTP source is running, it exposes the following endpoints:
+
+- `POST /sources/{source_id}/events` - Submit a single event
+- `POST /sources/{source_id}/events/batch` - Submit multiple events
+- `GET /health` - Health check
+
+### Event Format
+
+The HTTP source uses an event format that directly maps to internal Drasi Core structures for efficient conversion.
+
+#### Insert Node
+
 ```bash
 curl -X POST http://localhost:8080/sources/my-http-source/events \
   -H "Content-Type: application/json" \
@@ -175,14 +157,37 @@ curl -X POST http://localhost:8080/sources/my-http-source/events \
       "properties": {
         "name": "John Doe",
         "email": "john@example.com",
-        "active": true,
         "age": 30
+      }
+    },
+    "timestamp": 1234567890000
+  }'
+```
+
+#### Insert Relation
+
+```bash
+curl -X POST http://localhost:8080/sources/my-http-source/events \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operation": "insert",
+    "element": {
+      "type": "relation",
+      "id": "rel_123",
+      "labels": ["PURCHASED"],
+      "from": "user_123",
+      "to": "product_456",
+      "properties": {
+        "quantity": 2,
+        "price": 29.99,
+        "date": "2025-01-15"
       }
     }
   }'
 ```
 
-### Update a User Node
+#### Update Operations
+
 ```bash
 curl -X POST http://localhost:8080/sources/my-http-source/events \
   -H "Content-Type: application/json" \
@@ -191,50 +196,34 @@ curl -X POST http://localhost:8080/sources/my-http-source/events \
     "element": {
       "type": "node",
       "id": "user_123",
-      "labels": ["User", "Customer", "Premium"],
+      "labels": ["User", "Premium"],
       "properties": {
         "name": "John Doe",
-        "email": "john.doe@example.com",
-        "active": true,
+        "email": "john@example.com",
         "age": 31,
-        "subscription": "premium"
+        "membership": "premium"
       }
     }
   }'
 ```
 
-### Create a Relationship
-```bash
-curl -X POST http://localhost:8080/sources/my-http-source/events \
-  -H "Content-Type: application/json" \
-  -d '{
-    "operation": "insert",
-    "element": {
-      "type": "relation",
-      "id": "follows_456",
-      "labels": ["FOLLOWS"],
-      "from": "user_123",
-      "to": "user_789",
-      "properties": {
-        "since": "2024-01-01",
-        "strength": 0.8
-      }
-    }
-  }'
-```
+#### Delete Operations
 
-### Delete an Element
 ```bash
 curl -X POST http://localhost:8080/sources/my-http-source/events \
   -H "Content-Type: application/json" \
   -d '{
     "operation": "delete",
     "id": "user_123",
-    "labels": ["User", "Customer"]
+    "labels": ["User"],
+    "timestamp": 1234567890000
   }'
 ```
 
-### Batch Submission
+#### Batch Operations
+
+Submit multiple events in a single request:
+
 ```bash
 curl -X POST http://localhost:8080/sources/my-http-source/events/batch \
   -H "Content-Type: application/json" \
@@ -244,211 +233,190 @@ curl -X POST http://localhost:8080/sources/my-http-source/events/batch \
         "operation": "insert",
         "element": {
           "type": "node",
-          "id": "product_1",
-          "labels": ["Product"],
-          "properties": {"name": "Laptop", "price": 999.99}
+          "id": "user_1",
+          "labels": ["User"],
+          "properties": {"name": "Alice"}
         }
       },
       {
         "operation": "insert",
         "element": {
           "type": "node",
-          "id": "product_2",
-          "labels": ["Product"],
-          "properties": {"name": "Mouse", "price": 29.99}
-        }
-      },
-      {
-        "operation": "insert",
-        "element": {
-          "type": "relation",
-          "id": "related_1",
-          "labels": ["RELATED_TO"],
-          "from": "product_1",
-          "to": "product_2",
-          "properties": {"type": "accessory"}
+          "id": "user_2",
+          "labels": ["User"],
+          "properties": {"name": "Bob"}
         }
       }
     ]
   }'
 ```
 
-## Response Format
+### Response Format
 
-### Success Response
+**Success Response:**
 ```json
 {
   "success": true,
-  "message": "Event processed successfully",
+  "message": "All 2 events processed successfully",
   "error": null
 }
 ```
 
-### Error Response
+**Error Response:**
 ```json
 {
   "success": false,
-  "message": "Invalid event data",
-  "error": "Missing required field: operation"
+  "message": "All 1 events failed",
+  "error": "Invalid element type"
 }
 ```
 
-### Batch Response (Partial Success)
+**Health Check Response:**
 ```json
 {
-  "success": true,
-  "message": "Processed 8 events successfully, 2 failed",
-  "error": "Last error: Invalid element type"
+  "status": "healthy",
+  "service": "http-source",
+  "features": ["adaptive-batching", "batch-endpoint"]
 }
 ```
 
-## Integration with Drasi Queries
+## Integration with Continuous Queries
 
-When you submit events through the HTTP source, they are processed by Drasi's continuous query engine. The element structure maps to Cypher query patterns:
+Events submitted to the HTTP source are processed by continuous queries. The event format maps to Cypher graph elements:
 
-- **Element ID**: Used as the unique identifier for nodes/relations
-- **Labels**: Match against Cypher patterns (e.g., `MATCH (n:User)`)
-- **Properties**: Accessible in queries (e.g., `WHERE n.active = true`)
+- **Nodes**: Match Cypher `(label {properties})` patterns
+- **Relations**: Match Cypher `-[label {properties}]->` patterns
+- **Labels**: Used for query filtering and pattern matching
+- **Properties**: Accessible in Cypher queries via dot notation
 
-Example Cypher query that would process the above events:
+Example query consuming HTTP source events:
 
 ```cypher
 MATCH (u:User)
-WHERE u.active = true
-RETURN u.name, u.email, u.subscription
-
-MATCH (u1:User)-[f:FOLLOWS]->(u2:User)
-RETURN u1.name, u2.name, f.since
+WHERE u.age > 25
+RETURN u.name, u.email
 ```
 
-## Performance Profiling
+## Bootstrap Providers
 
-The HTTP source automatically includes profiling metadata with each event when profiling is enabled in the DrasiServerCore configuration. This enables end-to-end performance tracking from source ingestion through query processing to reaction delivery.
+### Overview
 
-### Profiling Timestamps
+HTTP source uses the **universal bootstrap architecture** - any bootstrap provider can be used with any source. Bootstrap runs asynchronously while streaming continues.
 
-The HTTP source automatically captures the following timestamps:
-- **source_send_ns**: Timestamp when the source sends the event to the processing pipeline
+### PostgreSQL Bootstrap
 
-These timestamps are combined with timestamps from other components to provide a complete performance picture:
-- **query_receive_ns**: When the query receives the event
-- **query_core_call_ns**: When drasi-core processing begins
-- **query_core_return_ns**: When drasi-core processing completes
-- **reaction_receive_ns**: When the reaction receives the result
-- **reaction_complete_ns**: When the reaction finishes processing
+**Use case**: Load 1M records from existing database, then receive incremental updates via HTTP.
 
-### Using Profiling Data
+**Configuration**: See "With Bootstrap Provider" section above.
 
-Profiling metadata flows through the entire pipeline and can be:
-1. Analyzed for bottleneck identification
-2. Used to measure end-to-end latency
-3. Exported via profiler reactions for monitoring
-4. Aggregated to understand system performance under load
+**How it works**: PostgreSQL bootstrap provider extracts database connection details from the source properties map, performs a snapshot read of configured tables, and sends initial data through the bootstrap channel.
 
-For more information on configuring profiling, see the DrasiServerCore documentation.
+### ScriptFile Bootstrap
+
+**Use case**: Load test data from JSONL files for development/testing, then receive updates via HTTP.
+
+**Configuration**: See "With Bootstrap Provider" section above.
+
+**How it works**: Reads JSONL files containing nodes and relations, sends them through the bootstrap channel before streaming begins.
+
+### Platform Bootstrap
+
+**Use case**: Bootstrap from a remote Drasi Query API, then receive updates via HTTP.
+
+### Application Bootstrap
+
+**Use case**: Replay previously stored insert events, then receive new updates via HTTP.
 
 ## Performance Considerations
 
-### When to Use Single Events
-- Low-volume scenarios (< 100 events/sec)
-- When individual event latency is critical
-- Real-time user interactions
-- Debugging and testing
+### Adaptive Batching
 
-### When to Use Batch Submission
-- High-volume data ingestion
-- Bulk data imports
-- When throughput is more important than individual latency
-- Processing data from batch systems
+**When to use**:
+- High throughput scenarios (>100 msgs/sec)
+- Variable traffic patterns
+- Need to balance latency and throughput
 
-### Adaptive Batching Behavior
-When adaptive batching is enabled (default), the system automatically:
-- Batches events during high load for better throughput
-- Processes events immediately during low load for better latency
-- Adjusts batch size based on incoming traffic patterns
-- Monitors throughput and adapts parameters accordingly
+**How to tune**:
+- `adaptive_max_batch_size`: Increase for higher throughput scenarios
+- `adaptive_max_wait_ms`: Decrease for lower latency requirements
+- `adaptive_window_secs`: Adjust based on how quickly traffic patterns change
+
+**Disable for**:
+- Real-time applications requiring minimal latency
+- Low traffic scenarios (<10 msgs/sec)
+
+### Single Event vs Batch Endpoint
+
+**Use `/events` (single) when**:
+- Sending individual updates as they occur
+- Simplicity is preferred
+- Traffic is sporadic
+
+**Use `/events/batch` when**:
+- You have multiple events to send at once
+- Reduce HTTP request overhead
+- Maximize throughput
+
+### Bootstrap Performance
+
+Bootstrap runs asynchronously in a separate task, allowing queries to start processing streaming events immediately while bootstrap data loads in the background.
+
+## Error Handling
+
+### Common Errors
+
+**Port Already in Use**:
+```
+Failed to bind HTTP server to 0.0.0.0:8080: Address already in use
+```
+**Solution**: Change the port in configuration or stop the conflicting service.
+
+**Invalid JSON**:
+```json
+{
+  "success": false,
+  "message": "Failed to parse JSON",
+  "error": "..."
+}
+```
+**Solution**: Validate JSON structure matches the event format.
+
+**Source Name Mismatch**:
+```json
+{
+  "success": false,
+  "message": "Source name mismatch",
+  "error": "Expected 'my-source', got 'wrong-source'"
+}
+```
+**Solution**: Ensure URL path matches the source ID in configuration.
 
 ## Testing
 
-You can test the HTTP source using the provided example files:
+### Running Tests
 
 ```bash
-# Start the server with HTTP source configuration
-cargo run -- --config examples/configs/http_source_example.yaml
+# Run all HTTP source tests
+cargo test -p drasi-server-core sources::http
 
-# In another terminal, submit test events
-./examples/test_direct_format.sh
-
-# Or use the provided HTTP files with VS Code REST Client
-# Open examples/http_source_direct_format.http in VS Code
+# Run specific test
+cargo test -p drasi-server-core test_http_source_start_stop
 ```
 
-## Important Notes
+### Testing with curl
 
-1. **Timestamps**: All timestamps are Unix epoch in nanoseconds (not milliseconds)
-2. **Element IDs**: Must be unique within the source
-3. **Labels**: Are case-sensitive and used for query matching
-4. **Properties**: Can contain any valid JSON values (including nested objects and arrays)
-5. **Operation Order**: Events are processed in the order received (per batch)
-6. **Batch Size**: The batch endpoint accepts up to 10,000 events per request
-7. **Error Handling**: Invalid events in a batch don't stop processing of valid events
+Start a test HTTP source and submit events:
 
-## Migration from Old Format
+```bash
+# Health check
+curl http://localhost:8080/health
 
-If you were using the old "op/payload" format, migrate to the Direct Format:
-
-**Old Format (Deprecated):**
-```json
-{
-  "op": "i",
-  "payload": {
-    "source": {"db": "...", "table": "...", "ts_ns": 123, "lsn": 1},
-    "after": {"id": "123", "labels": ["User"], "properties": {...}}
-  }
-}
+# Submit test event
+curl -X POST http://localhost:8080/sources/test-source/events \
+  -H "Content-Type: application/json" \
+  -d '{"operation":"insert","element":{"type":"node","id":"1","labels":["Test"],"properties":{}}}'
 ```
 
-**New Direct Format:**
-```json
-{
-  "operation": "insert",
-  "element": {
-    "type": "node",
-    "id": "123",
-    "labels": ["User"],
-    "properties": {...}
-  }
-}
-```
+## Migration from Previous Versions
 
-## TypeScript Types
-
-```typescript
-// Direct Format Types
-interface DirectSourceChange {
-  operation: "insert" | "update" | "delete";
-  element?: DirectElement;  // For insert/update
-  id?: string;              // For delete
-  labels?: string[];        // For delete (optional)
-  timestamp?: number;       // Optional, nanoseconds
-}
-
-interface DirectElement {
-  type: "node" | "relation";
-  id: string;
-  labels: string[];
-  properties: Record<string, any>;
-  from?: string;  // For relations only
-  to?: string;    // For relations only
-}
-
-interface BatchEventRequest {
-  events: DirectSourceChange[];
-}
-
-interface EventResponse {
-  success: boolean;
-  message: string;
-  error?: string;
-}
-```
+See [MIGRATION.md](MIGRATION.md) for detailed migration instructions when upgrading from versions with different configuration schemas.

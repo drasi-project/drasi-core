@@ -18,9 +18,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::common::TableKeyConfig;
-
 /// HTTP source configuration
+///
+/// This config only contains HTTP-specific settings.
+/// Bootstrap provider configuration (database, user, password, tables, etc.)
+/// should be provided via the source's generic properties map.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HttpSourceConfig {
     /// HTTP host
@@ -36,26 +38,6 @@ pub struct HttpSourceConfig {
     /// Request timeout in milliseconds
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
-
-    /// Tables to monitor (for adaptive HTTP)
-    #[serde(default)]
-    pub tables: Vec<String>,
-
-    /// Table key configurations (for adaptive HTTP)
-    #[serde(default)]
-    pub table_keys: Vec<TableKeyConfig>,
-
-    /// PostgreSQL database (for adaptive HTTP bootstrap)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub database: Option<String>,
-
-    /// PostgreSQL user (for adaptive HTTP bootstrap)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub user: Option<String>,
-
-    /// PostgreSQL password (for adaptive HTTP bootstrap)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub password: Option<String>,
 
     /// Adaptive batching: maximum batch size
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -84,4 +66,118 @@ pub struct HttpSourceConfig {
 
 fn default_timeout_ms() -> u64 {
     10000
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_deserialization_minimal() {
+        let yaml = r#"
+host: "localhost"
+port: 8080
+"#;
+        let config: HttpSourceConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.host, "localhost");
+        assert_eq!(config.port, 8080);
+        assert_eq!(config.endpoint, None);
+        assert_eq!(config.timeout_ms, 10000); // default
+        assert_eq!(config.adaptive_enabled, None);
+    }
+
+    #[test]
+    fn test_config_deserialization_full() {
+        let yaml = r#"
+host: "0.0.0.0"
+port: 9000
+endpoint: "/events"
+timeout_ms: 5000
+adaptive_max_batch_size: 1000
+adaptive_min_batch_size: 10
+adaptive_max_wait_ms: 500
+adaptive_min_wait_ms: 10
+adaptive_window_secs: 60
+adaptive_enabled: true
+"#;
+        let config: HttpSourceConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.host, "0.0.0.0");
+        assert_eq!(config.port, 9000);
+        assert_eq!(config.endpoint, Some("/events".to_string()));
+        assert_eq!(config.timeout_ms, 5000);
+        assert_eq!(config.adaptive_max_batch_size, Some(1000));
+        assert_eq!(config.adaptive_min_batch_size, Some(10));
+        assert_eq!(config.adaptive_max_wait_ms, Some(500));
+        assert_eq!(config.adaptive_min_wait_ms, Some(10));
+        assert_eq!(config.adaptive_window_secs, Some(60));
+        assert_eq!(config.adaptive_enabled, Some(true));
+    }
+
+    #[test]
+    fn test_config_serialization() {
+        let config = HttpSourceConfig {
+            host: "localhost".to_string(),
+            port: 8080,
+            endpoint: Some("/data".to_string()),
+            timeout_ms: 15000,
+            adaptive_max_batch_size: Some(500),
+            adaptive_min_batch_size: Some(5),
+            adaptive_max_wait_ms: Some(1000),
+            adaptive_min_wait_ms: Some(50),
+            adaptive_window_secs: Some(30),
+            adaptive_enabled: Some(false),
+        };
+
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let deserialized: HttpSourceConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(config, deserialized);
+    }
+
+    #[test]
+    fn test_config_adaptive_batching_disabled() {
+        let yaml = r#"
+host: "localhost"
+port: 8080
+adaptive_enabled: false
+"#;
+        let config: HttpSourceConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.adaptive_enabled, Some(false));
+    }
+
+    #[test]
+    fn test_config_default_values() {
+        let config = HttpSourceConfig {
+            host: "localhost".to_string(),
+            port: 8080,
+            endpoint: None,
+            timeout_ms: default_timeout_ms(),
+            adaptive_max_batch_size: None,
+            adaptive_min_batch_size: None,
+            adaptive_max_wait_ms: None,
+            adaptive_min_wait_ms: None,
+            adaptive_window_secs: None,
+            adaptive_enabled: None,
+        };
+
+        assert_eq!(config.timeout_ms, 10000);
+    }
+
+    #[test]
+    fn test_config_port_range() {
+        // Test valid port
+        let yaml = r#"
+host: "localhost"
+port: 65535
+"#;
+        let config: HttpSourceConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.port, 65535);
+
+        // Test minimum port
+        let yaml = r#"
+host: "localhost"
+port: 1
+"#;
+        let config: HttpSourceConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.port, 1);
+    }
 }

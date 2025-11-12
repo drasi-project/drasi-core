@@ -15,9 +15,9 @@
 #[cfg(test)]
 mod tests {
     use crate::channels::ComponentStatus;
+    use crate::config::{ReactionConfig, ReactionSpecificConfig};
     use crate::reactions::common::AdaptiveBatchConfig as ConfigAdaptiveBatchConfig;
     use crate::reactions::http_adaptive::HttpAdaptiveReactionConfig;
-    use crate::config::{ReactionConfig, ReactionSpecificConfig};
     use crate::reactions::http_adaptive::{AdaptiveHttpReaction, BatchResult};
     use crate::reactions::Reaction;
     use serde_json::json;

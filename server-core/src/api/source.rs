@@ -895,21 +895,8 @@ impl SourceBuilder {
                     .get("timeout_ms")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(30000);
-                let database = self
-                    .properties
-                    .get("database")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                let user = self
-                    .properties
-                    .get("user")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                let password = self
-                    .properties
-                    .get("password")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
+                // Note: database, user, password, tables, table_keys remain in properties map
+                // for bootstrap providers to access via BootstrapContext
                 let adaptive_enabled = self
                     .properties
                     .get("adaptive_enabled")
@@ -942,11 +929,6 @@ impl SourceBuilder {
                     port,
                     endpoint,
                     timeout_ms,
-                    tables: Vec::new(),
-                    table_keys: Vec::new(),
-                    database,
-                    user,
-                    password,
                     adaptive_enabled,
                     adaptive_max_batch_size,
                     adaptive_min_batch_size,

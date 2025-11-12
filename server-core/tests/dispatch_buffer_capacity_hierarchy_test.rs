@@ -17,12 +17,12 @@
 //! 2. Server global setting
 //! 3. Hardcoded default (1000)
 
+use drasi_server_core::config::SourceSpecificConfig;
 use drasi_server_core::sources::grpc::GrpcSourceConfig;
 use drasi_server_core::sources::http::HttpSourceConfig;
 use drasi_server_core::sources::mock::MockSourceConfig;
 use drasi_server_core::sources::platform::PlatformSourceConfig;
 use drasi_server_core::sources::postgres::PostgresSourceConfig;
-use drasi_server_core::config::SourceSpecificConfig;
 use drasi_server_core::{
     DrasiServerCoreConfig, DrasiServerCoreSettings, QueryConfig, QueryLanguage, RuntimeConfig,
     SourceConfig,
@@ -227,11 +227,6 @@ async fn test_dispatch_buffer_capacity_hierarchy_component_override() {
                     port: 8080,
                     endpoint: None,
                     timeout_ms: 30000,
-                    tables: vec![],
-                    table_keys: vec![],
-                    database: None,
-                    user: None,
-                    password: None,
                     adaptive_enabled: None,
                     adaptive_max_batch_size: None,
                     adaptive_min_batch_size: None,

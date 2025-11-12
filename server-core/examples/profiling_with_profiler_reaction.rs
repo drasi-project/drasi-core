@@ -26,8 +26,8 @@
 //! Run with: cargo run --example profiling_with_profiler_reaction
 
 use drasi_server_core::{
-    reactions::profiler::ProfilerReactionConfig,
     config::{ReactionConfig, ReactionSpecificConfig},
+    reactions::profiler::ProfilerReactionConfig,
     reactions::{ProfilerReaction, Reaction},
     server_core::DrasiServerCore,
 };

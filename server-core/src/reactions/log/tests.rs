@@ -15,9 +15,9 @@
 use super::LogReaction;
 use crate::channels::*;
 use crate::config::common::LogLevel;
-use crate::reactions::log::LogReactionConfig;
 use crate::config::{QueryConfig, ReactionConfig, ReactionSpecificConfig};
 use crate::queries::Query;
+use crate::reactions::log::LogReactionConfig;
 use crate::reactions::Reaction;
 use crate::server_core::DrasiServerCore;
 use anyhow::Result;
