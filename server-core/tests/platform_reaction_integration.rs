@@ -26,8 +26,7 @@ use async_trait::async_trait;
 use drasi_server_core::channels::{
     ChangeDispatcher, ComponentEvent, ComponentStatus, QueryResult, QuerySubscriptionResponse,
 };
-use drasi_server_core::config::typed::PlatformReactionConfig;
-use drasi_server_core::config::{QueryConfig, ReactionConfig, ReactionSpecificConfig};
+use drasi_server_core::config::{PlatformReactionConfig, QueryConfig, ReactionConfig, ReactionSpecificConfig};
 use drasi_server_core::queries::Query;
 use drasi_server_core::reactions::platform::{
     CloudEvent, ControlSignal, PlatformReaction, ResultEvent,
@@ -245,7 +244,7 @@ async fn read_cloudevent_from_stream(
 
 #[tokio::test]
 async fn test_publish_add_results() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let query_id = "test-query-add";
 
     // Create test server with mock query
@@ -253,7 +252,7 @@ async fn test_publish_add_results() -> Result<()> {
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, mut event_rx) =
-        create_test_reaction(redis_url.clone(), query_id, false, None, None);
+        create_test_reaction(redis.url().to_string(), query_id, false, None, None);
 
     // Start reaction with server core (it will subscribe to the mock query)
     reaction.start(server_core).await?;
@@ -284,7 +283,7 @@ async fn test_publish_add_results() -> Result<()> {
     sleep(Duration::from_millis(300)).await;
 
     // Read from Redis stream
-    let cloud_event = read_cloudevent_from_stream(&redis_url, &stream_key).await?;
+    let cloud_event = read_cloudevent_from_stream(redis.url(), &stream_key).await?;
 
     // Verify
     assert_eq!(cloud_event.topic, stream_key);
@@ -305,7 +304,7 @@ async fn test_publish_add_results() -> Result<()> {
 
 #[tokio::test]
 async fn test_publish_update_results() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let query_id = "test-query-update";
 
     // Create test server with mock query
@@ -313,7 +312,7 @@ async fn test_publish_update_results() -> Result<()> {
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
-        create_test_reaction(redis_url.clone(), query_id, false, None, None);
+        create_test_reaction(redis.url().to_string(), query_id, false, None, None);
 
     reaction.start(server_core.clone()).await?;
 
@@ -333,7 +332,7 @@ async fn test_publish_update_results() -> Result<()> {
     sleep(Duration::from_millis(300)).await;
 
     // Read and verify
-    let cloud_event = read_cloudevent_from_stream(&redis_url, &stream_key).await?;
+    let cloud_event = read_cloudevent_from_stream(redis.url(), &stream_key).await?;
 
     if let ResultEvent::Change(change_event) = cloud_event.data {
         assert_eq!(change_event.updated_results.len(), 1);
@@ -354,7 +353,7 @@ async fn test_publish_update_results() -> Result<()> {
 
 #[tokio::test]
 async fn test_publish_delete_results() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let query_id = "test-query-delete";
 
     // Create test server with mock query
@@ -362,7 +361,7 @@ async fn test_publish_delete_results() -> Result<()> {
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
-        create_test_reaction(redis_url.clone(), query_id, false, None, None);
+        create_test_reaction(redis.url().to_string(), query_id, false, None, None);
 
     reaction.start(server_core.clone()).await?;
 
@@ -375,7 +374,7 @@ async fn test_publish_delete_results() -> Result<()> {
     sleep(Duration::from_millis(300)).await;
 
     // Read and verify
-    let cloud_event = read_cloudevent_from_stream(&redis_url, &stream_key).await?;
+    let cloud_event = read_cloudevent_from_stream(redis.url(), &stream_key).await?;
 
     if let ResultEvent::Change(change_event) = cloud_event.data {
         assert_eq!(change_event.deleted_results.len(), 1);
@@ -389,7 +388,7 @@ async fn test_publish_delete_results() -> Result<()> {
 
 #[tokio::test]
 async fn test_mixed_result_types() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let query_id = "test-query-mixed";
 
     // Create test server with mock query
@@ -397,7 +396,7 @@ async fn test_mixed_result_types() -> Result<()> {
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
-        create_test_reaction(redis_url.clone(), query_id, false, None, None);
+        create_test_reaction(redis.url().to_string(), query_id, false, None, None);
 
     reaction.start(server_core.clone()).await?;
 
@@ -420,7 +419,7 @@ async fn test_mixed_result_types() -> Result<()> {
     sleep(Duration::from_millis(300)).await;
 
     // Read and verify
-    let cloud_event = read_cloudevent_from_stream(&redis_url, &stream_key).await?;
+    let cloud_event = read_cloudevent_from_stream(redis.url(), &stream_key).await?;
 
     if let ResultEvent::Change(change_event) = cloud_event.data {
         assert_eq!(change_event.added_results.len(), 1);
@@ -435,7 +434,7 @@ async fn test_mixed_result_types() -> Result<()> {
 
 #[tokio::test]
 async fn test_stream_naming_convention() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let query_id = "my-custom-query";
 
     // Create test server with mock query
@@ -443,7 +442,7 @@ async fn test_stream_naming_convention() -> Result<()> {
     let expected_stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
-        create_test_reaction(redis_url.clone(), query_id, false, None, None);
+        create_test_reaction(redis.url().to_string(), query_id, false, None, None);
 
     reaction.start(server_core.clone()).await?;
 
@@ -456,7 +455,7 @@ async fn test_stream_naming_convention() -> Result<()> {
     sleep(Duration::from_millis(300)).await;
 
     // Verify stream exists with correct name
-    let events = read_from_stream(&redis_url, &expected_stream_key, "0", 1).await?;
+    let events = read_from_stream(redis.url(), &expected_stream_key, "0", 1).await?;
     assert!(
         !events.is_empty(),
         "Stream should exist with name {}",
@@ -468,7 +467,7 @@ async fn test_stream_naming_convention() -> Result<()> {
 
 #[tokio::test]
 async fn test_metadata_preservation() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let query_id = "test-query-metadata";
 
     // Create test server with mock query
@@ -476,7 +475,7 @@ async fn test_metadata_preservation() -> Result<()> {
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
-        create_test_reaction(redis_url.clone(), query_id, false, None, None);
+        create_test_reaction(redis.url().to_string(), query_id, false, None, None);
 
     reaction.start(server_core.clone()).await?;
 
@@ -499,7 +498,7 @@ async fn test_metadata_preservation() -> Result<()> {
     sleep(Duration::from_millis(300)).await;
 
     // Read and verify metadata
-    let cloud_event = read_cloudevent_from_stream(&redis_url, &stream_key).await?;
+    let cloud_event = read_cloudevent_from_stream(redis.url(), &stream_key).await?;
 
     if let ResultEvent::Change(change_event) = cloud_event.data {
         let metadata = change_event.metadata.expect("Metadata should be present");
@@ -516,7 +515,7 @@ async fn test_metadata_preservation() -> Result<()> {
 
 #[tokio::test]
 async fn test_cloudevent_required_fields() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let query_id = "test-cloudevent-fields";
 
     // Create test server with mock query
@@ -524,7 +523,7 @@ async fn test_cloudevent_required_fields() -> Result<()> {
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
-        create_test_reaction(redis_url.clone(), query_id, false, None, None);
+        create_test_reaction(redis.url().to_string(), query_id, false, None, None);
 
     reaction.start(server_core.clone()).await?;
 
@@ -536,7 +535,7 @@ async fn test_cloudevent_required_fields() -> Result<()> {
     sleep(Duration::from_millis(300)).await;
 
     // Read raw event
-    let events = read_from_stream(&redis_url, &stream_key, "0", 1).await?;
+    let events = read_from_stream(redis.url(), &stream_key, "0", 1).await?;
     let (_id, data_map) = &events[0];
     let event_json = data_map.get("data").unwrap();
     let cloud_event_value: serde_json::Value = serde_json::from_str(event_json)?;
@@ -549,7 +548,7 @@ async fn test_cloudevent_required_fields() -> Result<()> {
 
 #[tokio::test]
 async fn test_cloudevent_topic_format() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let query_id = "test-topic-format";
 
     // Create test server with mock query
@@ -557,7 +556,7 @@ async fn test_cloudevent_topic_format() -> Result<()> {
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
-        create_test_reaction(redis_url.clone(), query_id, false, None, None);
+        create_test_reaction(redis.url().to_string(), query_id, false, None, None);
 
     reaction.start(server_core.clone()).await?;
 
@@ -568,7 +567,7 @@ async fn test_cloudevent_topic_format() -> Result<()> {
 
     sleep(Duration::from_millis(300)).await;
 
-    let cloud_event = read_cloudevent_from_stream(&redis_url, &stream_key).await?;
+    let cloud_event = read_cloudevent_from_stream(redis.url(), &stream_key).await?;
 
     // Verify topic format
     assert_eq!(cloud_event.topic, format!("{}-results", query_id));
@@ -578,7 +577,7 @@ async fn test_cloudevent_topic_format() -> Result<()> {
 
 #[tokio::test]
 async fn test_cloudevent_timestamp_format() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let query_id = "test-timestamp";
 
     // Create test server with mock query
@@ -586,7 +585,7 @@ async fn test_cloudevent_timestamp_format() -> Result<()> {
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
-        create_test_reaction(redis_url.clone(), query_id, false, None, None);
+        create_test_reaction(redis.url().to_string(), query_id, false, None, None);
 
     reaction.start(server_core.clone()).await?;
 
@@ -597,7 +596,7 @@ async fn test_cloudevent_timestamp_format() -> Result<()> {
 
     sleep(Duration::from_millis(300)).await;
 
-    let cloud_event = read_cloudevent_from_stream(&redis_url, &stream_key).await?;
+    let cloud_event = read_cloudevent_from_stream(redis.url(), &stream_key).await?;
 
     // Verify timestamp is valid ISO 8601
     chrono::DateTime::parse_from_rfc3339(&cloud_event.time)?;
@@ -607,7 +606,7 @@ async fn test_cloudevent_timestamp_format() -> Result<()> {
 
 #[tokio::test]
 async fn test_cloudevent_data_content_type() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let query_id = "test-content-type";
 
     // Create test server with mock query
@@ -615,7 +614,7 @@ async fn test_cloudevent_data_content_type() -> Result<()> {
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
-        create_test_reaction(redis_url.clone(), query_id, false, None, None);
+        create_test_reaction(redis.url().to_string(), query_id, false, None, None);
 
     reaction.start(server_core.clone()).await?;
 
@@ -626,7 +625,7 @@ async fn test_cloudevent_data_content_type() -> Result<()> {
 
     sleep(Duration::from_millis(300)).await;
 
-    let cloud_event = read_cloudevent_from_stream(&redis_url, &stream_key).await?;
+    let cloud_event = read_cloudevent_from_stream(redis.url(), &stream_key).await?;
 
     assert_eq!(cloud_event.datacontenttype, "application/json");
 
@@ -635,7 +634,7 @@ async fn test_cloudevent_data_content_type() -> Result<()> {
 
 #[tokio::test]
 async fn test_dapr_metadata_fields() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let query_id = "test-dapr-metadata";
 
     // Create test server with mock query
@@ -643,7 +642,7 @@ async fn test_dapr_metadata_fields() -> Result<()> {
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
-        create_test_reaction(redis_url.clone(), query_id, false, None, None);
+        create_test_reaction(redis.url().to_string(), query_id, false, None, None);
 
     reaction.start(server_core.clone()).await?;
 
@@ -654,7 +653,7 @@ async fn test_dapr_metadata_fields() -> Result<()> {
 
     sleep(Duration::from_millis(300)).await;
 
-    let cloud_event = read_cloudevent_from_stream(&redis_url, &stream_key).await?;
+    let cloud_event = read_cloudevent_from_stream(redis.url(), &stream_key).await?;
 
     // Verify Dapr fields exist
     assert_eq!(cloud_event.pubsubname, "drasi-pubsub"); // Default value
@@ -666,7 +665,7 @@ async fn test_dapr_metadata_fields() -> Result<()> {
 
 #[tokio::test]
 async fn test_custom_pubsub_name() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let query_id = "test-custom-pubsub";
 
     // Create test server with mock query
@@ -674,7 +673,7 @@ async fn test_custom_pubsub_name() -> Result<()> {
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) = create_test_reaction(
-        redis_url.clone(),
+        redis.url().to_string(),
         query_id,
         false,
         None,
@@ -690,7 +689,7 @@ async fn test_custom_pubsub_name() -> Result<()> {
 
     sleep(Duration::from_millis(300)).await;
 
-    let cloud_event = read_cloudevent_from_stream(&redis_url, &stream_key).await?;
+    let cloud_event = read_cloudevent_from_stream(redis.url(), &stream_key).await?;
 
     assert_eq!(cloud_event.pubsubname, "custom-pubsub");
 
@@ -701,21 +700,21 @@ async fn test_custom_pubsub_name() -> Result<()> {
 
 #[tokio::test]
 async fn test_running_control_event() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let query_id = "test-control-running";
 
     // Create test server with mock query
     let (server_core, _mock_query) = create_test_server_with_query(query_id).await;
     let stream_key = format!("{}-results", query_id);
 
-    let (reaction, _event_rx) = create_test_reaction(redis_url.clone(), query_id, true, None, None);
+    let (reaction, _event_rx) = create_test_reaction(redis.url().to_string(), query_id, true, None, None);
 
     reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(300)).await;
 
     // Read control event
-    let cloud_event = read_cloudevent_from_stream(&redis_url, &stream_key).await?;
+    let cloud_event = read_cloudevent_from_stream(redis.url(), &stream_key).await?;
 
     if let ResultEvent::Control(control_event) = cloud_event.data {
         assert_eq!(control_event.control_signal, ControlSignal::Running);
@@ -728,7 +727,7 @@ async fn test_running_control_event() -> Result<()> {
 
 #[tokio::test]
 async fn test_control_events_disabled() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let query_id = "test-control-disabled";
 
     // Create test server with mock query
@@ -736,14 +735,14 @@ async fn test_control_events_disabled() -> Result<()> {
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
-        create_test_reaction(redis_url.clone(), query_id, false, None, None);
+        create_test_reaction(redis.url().to_string(), query_id, false, None, None);
 
     reaction.start(server_core.clone()).await?;
 
     sleep(Duration::from_millis(300)).await;
 
     // Try to read - should have no events since control events are disabled
-    let events = read_from_stream(&redis_url, &stream_key, "0", 10).await?;
+    let events = read_from_stream(redis.url(), &stream_key, "0", 10).await?;
     assert!(
         events.is_empty(),
         "No control events should be published when disabled"
@@ -756,7 +755,7 @@ async fn test_control_events_disabled() -> Result<()> {
 
 #[tokio::test]
 async fn test_sequence_numbering() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let query_id = "test-sequence";
 
     // Create test server with mock query
@@ -764,7 +763,7 @@ async fn test_sequence_numbering() -> Result<()> {
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
-        create_test_reaction(redis_url.clone(), query_id, false, None, None);
+        create_test_reaction(redis.url().to_string(), query_id, false, None, None);
 
     reaction.start(server_core.clone()).await?;
 
@@ -780,7 +779,7 @@ async fn test_sequence_numbering() -> Result<()> {
     sleep(Duration::from_millis(300)).await;
 
     // Read all events and verify sequence
-    let events = read_from_stream(&redis_url, &stream_key, "0", 10).await?;
+    let events = read_from_stream(redis.url(), &stream_key, "0", 10).await?;
     assert!(events.len() >= 5, "Should have at least 5 events");
 
     // Check sequences increment
@@ -798,7 +797,7 @@ async fn test_sequence_numbering() -> Result<()> {
 
 #[tokio::test]
 async fn test_maxlen_stream_trimming() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let query_id = "test-maxlen";
 
     // Create test server with mock query
@@ -806,7 +805,7 @@ async fn test_maxlen_stream_trimming() -> Result<()> {
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) = create_test_reaction(
-        redis_url.clone(),
+        redis.url().to_string(),
         query_id,
         false,
         Some(5), // Max length of 5
@@ -827,7 +826,7 @@ async fn test_maxlen_stream_trimming() -> Result<()> {
     sleep(Duration::from_millis(300)).await;
 
     // Check stream length
-    let length = get_stream_length(&redis_url, &stream_key).await?;
+    let length = get_stream_length(redis.url(), &stream_key).await?;
 
     // Redis MAXLEN with ~ (approximate) is efficient but may not trim immediately
     // It typically keeps the stream between max_len and 2*max_len depending on internal factors
@@ -847,7 +846,7 @@ async fn test_maxlen_stream_trimming() -> Result<()> {
 
 #[tokio::test]
 async fn test_update_with_grouping_keys() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let query_id = "test-grouping-keys";
 
     // Create test server with mock query
@@ -855,7 +854,7 @@ async fn test_update_with_grouping_keys() -> Result<()> {
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
-        create_test_reaction(redis_url.clone(), query_id, false, None, None);
+        create_test_reaction(redis.url().to_string(), query_id, false, None, None);
 
     reaction.start(server_core.clone()).await?;
 
@@ -874,7 +873,7 @@ async fn test_update_with_grouping_keys() -> Result<()> {
 
     sleep(Duration::from_millis(300)).await;
 
-    let cloud_event = read_cloudevent_from_stream(&redis_url, &stream_key).await?;
+    let cloud_event = read_cloudevent_from_stream(redis.url(), &stream_key).await?;
 
     if let ResultEvent::Change(change_event) = cloud_event.data {
         let update = &change_event.updated_results[0];
@@ -894,7 +893,7 @@ async fn test_update_with_grouping_keys() -> Result<()> {
 
 #[tokio::test]
 async fn test_empty_metadata_filtered() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let query_id = "test-empty-metadata";
 
     // Create test server with mock query
@@ -902,7 +901,7 @@ async fn test_empty_metadata_filtered() -> Result<()> {
     let stream_key = format!("{}-results", query_id);
 
     let (reaction, _event_rx) =
-        create_test_reaction(redis_url.clone(), query_id, false, None, None);
+        create_test_reaction(redis.url().to_string(), query_id, false, None, None);
 
     reaction.start(server_core.clone()).await?;
 
@@ -920,7 +919,7 @@ async fn test_empty_metadata_filtered() -> Result<()> {
 
     sleep(Duration::from_millis(300)).await;
 
-    let cloud_event = read_cloudevent_from_stream(&redis_url, &stream_key).await?;
+    let cloud_event = read_cloudevent_from_stream(redis.url(), &stream_key).await?;
 
     if let ResultEvent::Change(change_event) = cloud_event.data {
         assert!(

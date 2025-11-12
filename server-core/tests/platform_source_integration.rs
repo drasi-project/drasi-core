@@ -24,8 +24,7 @@ mod test_support;
 use anyhow::Result;
 use drasi_core::models::SourceChange;
 use drasi_server_core::channels::SourceEvent;
-use drasi_server_core::config::typed::PlatformSourceConfig;
-use drasi_server_core::config::{SourceConfig, SourceSpecificConfig};
+use drasi_server_core::config::{PlatformSourceConfig, SourceConfig, SourceSpecificConfig};
 use drasi_server_core::sources::platform::PlatformSource;
 use drasi_server_core::sources::Source;
 use serde_json::json;
@@ -76,12 +75,12 @@ async fn create_test_source(
 
 #[tokio::test]
 async fn test_basic_insert_event_consumption() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let stream_key = "test-insert-stream";
 
     // Create and start source
     let (source, mut source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key).await;
+        create_test_source(redis.url().to_string(), stream_key).await;
     source.start().await?;
 
     // Give source time to set up consumer group
@@ -93,7 +92,7 @@ async fn test_basic_insert_event_consumption() -> Result<()> {
     props.insert("age".to_string(), json!(30));
 
     let event = build_platform_insert_event("1", vec!["Person"], props, "node", None, None);
-    publish_platform_event(&redis_url, stream_key, event).await?;
+    publish_platform_event(redis.url(), stream_key, event).await?;
 
     // Wait for source change
     let wrapper = timeout(Duration::from_secs(5), source_change_rx.recv())
@@ -114,16 +113,18 @@ async fn test_basic_insert_event_consumption() -> Result<()> {
     }
 
     source.stop().await?;
+    // Cleanup Redis container
+    redis.cleanup().await;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_basic_update_event_consumption() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let stream_key = "test-update-stream";
 
     let (source, mut source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key).await;
+        create_test_source(redis.url().to_string(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -143,7 +144,7 @@ async fn test_basic_update_event_consumption() -> Result<()> {
         None,
         None,
     );
-    publish_platform_event(&redis_url, stream_key, event).await?;
+    publish_platform_event(redis.url(), stream_key, event).await?;
 
     // Wait for source change
     let wrapper = timeout(Duration::from_secs(5), source_change_rx.recv())
@@ -161,16 +162,18 @@ async fn test_basic_update_event_consumption() -> Result<()> {
     }
 
     source.stop().await?;
+    // Cleanup Redis container
+    redis.cleanup().await;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_basic_delete_event_consumption() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let stream_key = "test-delete-stream";
 
     let (source, mut source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key).await;
+        create_test_source(redis.url().to_string(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -179,7 +182,7 @@ async fn test_basic_delete_event_consumption() -> Result<()> {
     props.insert("name".to_string(), json!("Bob"));
 
     let event = build_platform_delete_event("2", vec!["Person"], props, "node", None, None);
-    publish_platform_event(&redis_url, stream_key, event).await?;
+    publish_platform_event(redis.url(), stream_key, event).await?;
 
     // Wait for source change
     let wrapper = timeout(Duration::from_secs(5), source_change_rx.recv())
@@ -196,16 +199,18 @@ async fn test_basic_delete_event_consumption() -> Result<()> {
     }
 
     source.stop().await?;
+    // Cleanup Redis container
+    redis.cleanup().await;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_node_element_transformation() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let stream_key = "test-node-transform";
 
     let (source, mut source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key).await;
+        create_test_source(redis.url().to_string(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -223,7 +228,7 @@ async fn test_node_element_transformation() -> Result<()> {
         None,
         None,
     );
-    publish_platform_event(&redis_url, stream_key, event).await?;
+    publish_platform_event(redis.url(), stream_key, event).await?;
 
     // Wait for source change
     let wrapper = timeout(Duration::from_secs(5), source_change_rx.recv())
@@ -261,16 +266,18 @@ async fn test_node_element_transformation() -> Result<()> {
     }
 
     source.stop().await?;
+    // Cleanup Redis container
+    redis.cleanup().await;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_relation_element_transformation() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let stream_key = "test-relation-transform";
 
     let (source, mut source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key).await;
+        create_test_source(redis.url().to_string(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -281,7 +288,7 @@ async fn test_relation_element_transformation() -> Result<()> {
 
     let event =
         build_platform_insert_event("r1", vec!["KNOWS"], props, "rel", Some("1"), Some("2"));
-    publish_platform_event(&redis_url, stream_key, event).await?;
+    publish_platform_event(redis.url(), stream_key, event).await?;
 
     // Wait for source change
     let wrapper = timeout(Duration::from_secs(5), source_change_rx.recv())
@@ -316,16 +323,18 @@ async fn test_relation_element_transformation() -> Result<()> {
     }
 
     source.stop().await?;
+    // Cleanup Redis container
+    redis.cleanup().await;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_multiple_events_in_batch() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let stream_key = "test-batch-stream";
 
     let (source, mut source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key).await;
+        create_test_source(redis.url().to_string(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -342,7 +351,7 @@ async fn test_multiple_events_in_batch() -> Result<()> {
             None,
             None,
         );
-        publish_platform_event(&redis_url, stream_key, event).await?;
+        publish_platform_event(redis.url(), stream_key, event).await?;
     }
 
     // Collect all 5 events
@@ -364,6 +373,8 @@ async fn test_multiple_events_in_batch() -> Result<()> {
     }
 
     source.stop().await?;
+    // Cleanup Redis container
+    redis.cleanup().await;
     Ok(())
 }
 
@@ -371,18 +382,18 @@ async fn test_multiple_events_in_batch() -> Result<()> {
 
 #[tokio::test]
 async fn test_consumer_group_creation() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let stream_key = "test-group-creation";
 
     let (source, _source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key).await;
+        create_test_source(redis.url().to_string(), stream_key).await;
     source.start().await?;
 
     // Give source time to create consumer group
     sleep(Duration::from_millis(200)).await;
 
     // Verify consumer group exists by trying to read from it
-    let client = redis::Client::open(redis_url.as_str())?;
+    let client = redis::Client::open(redis.url())?;
     let mut conn = client.get_multiplexed_async_connection().await?;
 
     let groups: redis::Value = redis::cmd("XINFO")
@@ -399,16 +410,18 @@ async fn test_consumer_group_creation() -> Result<()> {
     }
 
     source.stop().await?;
+    // Cleanup Redis container
+    redis.cleanup().await;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_event_acknowledgment() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let stream_key = "test-ack-stream";
 
     let (source, mut source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key).await;
+        create_test_source(redis.url().to_string(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -416,7 +429,7 @@ async fn test_event_acknowledgment() -> Result<()> {
     let mut props = HashMap::new();
     props.insert("test".to_string(), json!("ack"));
     let event = build_platform_insert_event("ack-1", vec!["Test"], props, "node", None, None);
-    publish_platform_event(&redis_url, stream_key, event).await?;
+    publish_platform_event(redis.url(), stream_key, event).await?;
 
     // Wait for processing
     timeout(Duration::from_secs(5), source_change_rx.recv())
@@ -427,21 +440,23 @@ async fn test_event_acknowledgment() -> Result<()> {
     sleep(Duration::from_millis(200)).await;
 
     // Check pending count - should be 0 after acknowledgment
-    let pending = get_pending_count(&redis_url, stream_key, "test-group").await?;
+    let pending = get_pending_count(redis.url(), stream_key, "test-group").await?;
     assert_eq!(pending, 0, "All events should be acknowledged");
 
     source.stop().await?;
+    // Cleanup Redis container
+    redis.cleanup().await;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_resume_from_position() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let stream_key = "test-resume-stream";
 
     // Start source and process one event
     let (source, mut source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key).await;
+        create_test_source(redis.url().to_string(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -449,7 +464,7 @@ async fn test_resume_from_position() -> Result<()> {
     let mut props1 = HashMap::new();
     props1.insert("seq".to_string(), json!(1));
     let event1 = build_platform_insert_event("first", vec!["Test"], props1, "node", None, None);
-    publish_platform_event(&redis_url, stream_key, event1).await?;
+    publish_platform_event(redis.url(), stream_key, event1).await?;
 
     // Wait for it to be processed
     timeout(Duration::from_secs(5), source_change_rx.recv())
@@ -464,11 +479,11 @@ async fn test_resume_from_position() -> Result<()> {
     let mut props2 = HashMap::new();
     props2.insert("seq".to_string(), json!(2));
     let event2 = build_platform_insert_event("second", vec!["Test"], props2, "node", None, None);
-    publish_platform_event(&redis_url, stream_key, event2).await?;
+    publish_platform_event(redis.url(), stream_key, event2).await?;
 
     // Restart source with same consumer group
     let (source2, mut source_change_rx2, _event_rx2) =
-        create_test_source(redis_url.clone(), stream_key).await;
+        create_test_source(redis.url().to_string(), stream_key).await;
     source2.start().await?;
 
     // Should receive only the second event (resume from position)
@@ -484,6 +499,8 @@ async fn test_resume_from_position() -> Result<()> {
     }
 
     source2.stop().await?;
+    // Cleanup Redis container
+    redis.cleanup().await;
     Ok(())
 }
 
@@ -491,16 +508,16 @@ async fn test_resume_from_position() -> Result<()> {
 
 #[tokio::test]
 async fn test_malformed_json_event() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let stream_key = "test-malformed-stream";
 
     let (source, mut source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key).await;
+        create_test_source(redis.url().to_string(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
     // Publish malformed JSON directly to Redis
-    let client = redis::Client::open(redis_url.as_str())?;
+    let client = redis::Client::open(redis.url())?;
     let mut conn = client.get_multiplexed_async_connection().await?;
     let _: String = redis::cmd("XADD")
         .arg(stream_key)
@@ -514,7 +531,7 @@ async fn test_malformed_json_event() -> Result<()> {
     let mut props = HashMap::new();
     props.insert("test".to_string(), json!("valid"));
     let event = build_platform_insert_event("valid-1", vec!["Test"], props, "node", None, None);
-    publish_platform_event(&redis_url, stream_key, event).await?;
+    publish_platform_event(redis.url(), stream_key, event).await?;
 
     // Should still receive the valid event
     let wrapper = timeout(Duration::from_secs(5), source_change_rx.recv())
@@ -529,16 +546,18 @@ async fn test_malformed_json_event() -> Result<()> {
     }
 
     source.stop().await?;
+    // Cleanup Redis container
+    redis.cleanup().await;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_missing_required_fields() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let stream_key = "test-missing-fields";
 
     let (source, mut source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key).await;
+        create_test_source(redis.url().to_string(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -559,13 +578,13 @@ async fn test_missing_required_fields() -> Result<()> {
             }
         }]
     });
-    publish_platform_event(&redis_url, stream_key, bad_event).await?;
+    publish_platform_event(redis.url(), stream_key, bad_event).await?;
 
     // Publish valid event
     let mut props = HashMap::new();
     props.insert("test".to_string(), json!("valid"));
     let event = build_platform_insert_event("valid-2", vec!["Test"], props, "node", None, None);
-    publish_platform_event(&redis_url, stream_key, event).await?;
+    publish_platform_event(redis.url(), stream_key, event).await?;
 
     // Should receive valid event
     let wrapper = timeout(Duration::from_secs(5), source_change_rx.recv())
@@ -580,16 +599,18 @@ async fn test_missing_required_fields() -> Result<()> {
     }
 
     source.stop().await?;
+    // Cleanup Redis container
+    redis.cleanup().await;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_invalid_operation_type() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let stream_key = "test-invalid-op";
 
     let (source, mut source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key).await;
+        create_test_source(redis.url().to_string(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -610,13 +631,13 @@ async fn test_invalid_operation_type() -> Result<()> {
             }
         }]
     });
-    publish_platform_event(&redis_url, stream_key, bad_event).await?;
+    publish_platform_event(redis.url(), stream_key, bad_event).await?;
 
     // Publish valid event
     let mut props = HashMap::new();
     props.insert("test".to_string(), json!("valid"));
     let event = build_platform_insert_event("valid-3", vec!["Test"], props, "node", None, None);
-    publish_platform_event(&redis_url, stream_key, event).await?;
+    publish_platform_event(redis.url(), stream_key, event).await?;
 
     // Should receive valid event
     let wrapper = timeout(Duration::from_secs(5), source_change_rx.recv())
@@ -631,22 +652,24 @@ async fn test_invalid_operation_type() -> Result<()> {
     }
 
     source.stop().await?;
+    // Cleanup Redis container
+    redis.cleanup().await;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_stream_creation_if_not_exists() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let stream_key = "non-existent-stream";
 
     // Start source on non-existent stream
     let (source, _source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key).await;
+        create_test_source(redis.url().to_string(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(200)).await;
 
     // Verify stream was created
-    let client = redis::Client::open(redis_url.as_str())?;
+    let client = redis::Client::open(redis.url())?;
     let mut conn = client.get_multiplexed_async_connection().await?;
 
     let stream_type: String = redis::cmd("TYPE")
@@ -657,16 +680,18 @@ async fn test_stream_creation_if_not_exists() -> Result<()> {
     assert_eq!(stream_type, "stream", "Stream should be auto-created");
 
     source.stop().await?;
+    // Cleanup Redis container
+    redis.cleanup().await;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_multiple_events_in_cloudevent_data_array() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let stream_key = "test-multi-event-array";
 
     let (source, mut source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key).await;
+        create_test_source(redis.url().to_string(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -718,7 +743,7 @@ async fn test_multiple_events_in_cloudevent_data_array() -> Result<()> {
         ]
     });
 
-    publish_platform_event(&redis_url, stream_key, multi_event).await?;
+    publish_platform_event(redis.url(), stream_key, multi_event).await?;
 
     // Should receive all 3 events
     let mut received_ids = Vec::new();
@@ -738,6 +763,8 @@ async fn test_multiple_events_in_cloudevent_data_array() -> Result<()> {
     assert!(received_ids.contains(&"multi-3".to_string()));
 
     source.stop().await?;
+    // Cleanup Redis container
+    redis.cleanup().await;
     Ok(())
 }
 
@@ -747,10 +774,10 @@ async fn test_multiple_events_in_cloudevent_data_array() -> Result<()> {
 async fn test_source_start_and_stop() -> Result<()> {
     use drasi_server_core::channels::ComponentStatus;
 
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let stream_key = "test-lifecycle";
 
-    let (source, _source_change_rx, _event_rx) = create_test_source(redis_url, stream_key).await;
+    let (source, _source_change_rx, _event_rx) = create_test_source(redis.url().to_string(), stream_key).await;
 
     // Start source
     source.start().await?;
@@ -770,11 +797,11 @@ async fn test_source_start_and_stop() -> Result<()> {
 
 #[tokio::test]
 async fn test_graceful_shutdown() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let stream_key = "test-shutdown";
 
     let (source, mut source_change_rx, _event_rx) =
-        create_test_source(redis_url.clone(), stream_key).await;
+        create_test_source(redis.url().to_string(), stream_key).await;
     source.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -790,7 +817,7 @@ async fn test_graceful_shutdown() -> Result<()> {
             None,
             None,
         );
-        publish_platform_event(&redis_url, stream_key, event).await?;
+        publish_platform_event(redis.url(), stream_key, event).await?;
     }
 
     // Start receiving
@@ -802,7 +829,7 @@ async fn test_graceful_shutdown() -> Result<()> {
 
     // Check that pending entries are acknowledged (allow more time for acknowledgments)
     sleep(Duration::from_millis(500)).await;
-    let pending = get_pending_count(&redis_url, stream_key, "test-group").await?;
+    let pending = get_pending_count(redis.url(), stream_key, "test-group").await?;
     // Note: Due to async timing, some events may still be pending
     assert!(
         pending <= 2,
@@ -815,11 +842,11 @@ async fn test_graceful_shutdown() -> Result<()> {
 
 #[tokio::test]
 async fn test_restart_and_resume() -> Result<()> {
-    let redis_url = setup_redis().await;
+    let redis = setup_redis().await;
     let stream_key = "test-restart";
 
     // First run
-    let (source1, mut rx1, _event_rx1) = create_test_source(redis_url.clone(), stream_key).await;
+    let (source1, mut rx1, _event_rx1) = create_test_source(redis.url().to_string(), stream_key).await;
     source1.start().await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -827,7 +854,7 @@ async fn test_restart_and_resume() -> Result<()> {
     let mut props1 = HashMap::new();
     props1.insert("seq".to_string(), json!(1));
     let event1 = build_platform_insert_event("restart-1", vec!["Test"], props1, "node", None, None);
-    publish_platform_event(&redis_url, stream_key, event1).await?;
+    publish_platform_event(redis.url(), stream_key, event1).await?;
 
     timeout(Duration::from_secs(5), rx1.recv())
         .await?
@@ -841,10 +868,10 @@ async fn test_restart_and_resume() -> Result<()> {
     let mut props2 = HashMap::new();
     props2.insert("seq".to_string(), json!(2));
     let event2 = build_platform_insert_event("restart-2", vec!["Test"], props2, "node", None, None);
-    publish_platform_event(&redis_url, stream_key, event2).await?;
+    publish_platform_event(redis.url(), stream_key, event2).await?;
 
     // Restart with same group
-    let (source2, mut rx2, _event_rx2) = create_test_source(redis_url.clone(), stream_key).await;
+    let (source2, mut rx2, _event_rx2) = create_test_source(redis.url().to_string(), stream_key).await;
     source2.start().await?;
 
     // Should resume and get second event
@@ -860,5 +887,7 @@ async fn test_restart_and_resume() -> Result<()> {
     }
 
     source2.stop().await?;
+    // Cleanup Redis container
+    redis.cleanup().await;
     Ok(())
 }
