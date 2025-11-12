@@ -31,6 +31,7 @@ mod true_for;
 mod true_later;
 mod true_now_or_later;
 mod true_until;
+mod sliding_window;
 
 #[cfg(test)]
 mod tests;
@@ -99,6 +100,17 @@ impl RegisterFutureFunctions for FunctionRegistry {
             "drasi.previousDistinctValue",
             Function::Scalar(Arc::new(
                 previous_distinct_value::PreviousDistinctValue::new(
+                    result_index.clone(),
+                    expression_evaluator.clone(),
+                ),
+            )),
+        );
+
+        self.register_function(
+            "drasi.slidingWindow",
+            Function::LazyScalar(Arc::new(
+                sliding_window::SlidingWindow::new(
+                    future_queue.clone(),
                     result_index.clone(),
                     expression_evaluator.clone(),
                 ),
