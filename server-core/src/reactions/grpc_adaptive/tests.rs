@@ -22,7 +22,6 @@ use crate::server_core::DrasiServerCore;
 use crate::utils::AdaptiveBatchConfig;
 use anyhow::Result;
 use async_trait::async_trait;
-use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
