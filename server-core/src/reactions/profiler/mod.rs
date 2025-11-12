@@ -26,6 +26,9 @@ use crate::reactions::common::base::ReactionBase;
 use crate::reactions::Reaction;
 use crate::utils::log_component_start;
 
+pub mod config;
+pub use config::ProfilerReactionConfig;
+
 /// Statistics for a specific metric
 #[derive(Debug, Clone)]
 pub struct MetricStats {

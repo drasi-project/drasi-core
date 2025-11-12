@@ -236,7 +236,7 @@ mod tests {
     #[tokio::test]
     async fn test_reaction_base_creation() {
         let (event_tx, _event_rx) = mpsc::channel(100);
-        use crate::config::typed::ApplicationReactionConfig;
+        use crate::reactions::application::ApplicationReactionConfig;
 
         let config = ReactionConfig {
             id: "test-reaction".to_string(),
@@ -255,7 +255,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_status_transitions() {
-        use crate::config::typed::ApplicationReactionConfig;
+        use crate::reactions::application::ApplicationReactionConfig;
 
         let (event_tx, mut event_rx) = mpsc::channel(100);
         let config = ReactionConfig {
@@ -285,7 +285,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_priority_queue_operations() {
-        use crate::config::typed::ApplicationReactionConfig;
+        use crate::reactions::application::ApplicationReactionConfig;
 
         let (event_tx, _event_rx) = mpsc::channel(100);
         let config = ReactionConfig {

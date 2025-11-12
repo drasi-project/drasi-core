@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod config;
+pub mod config;
 
-pub use config::{CallSpec, QueryConfig};
+pub use config::{CallSpec, HttpReactionConfig, QueryConfig};
 
 use anyhow::Result;
 use async_trait::async_trait;

@@ -12,10 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Common functionality shared across reaction implementations.
+//! Configuration types for Profiler reactions.
 
-pub mod base;
-pub mod config;
+use serde::{Deserialize, Serialize};
 
-pub use base::ReactionBase;
-pub use config::AdaptiveBatchConfig;
+fn default_profiler_window_size() -> usize {
+    1000
+}
+
+fn default_report_interval_secs() -> u64 {
+    60
+}
+
+/// Profiler reaction configuration
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProfilerReactionConfig {
+    /// Window size for profiling statistics
+    #[serde(default = "default_profiler_window_size")]
+    pub window_size: usize,
+
+    /// Report interval in seconds
+    #[serde(default = "default_report_interval_secs")]
+    pub report_interval_secs: u64,
+}

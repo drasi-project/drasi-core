@@ -51,10 +51,12 @@
 //! - `topic`: "{query-id}-results"
 //! - `type`: "com.dapr.event.sent"
 
+pub mod config;
 mod publisher;
 mod transformer;
 mod types;
 
+pub use config::PlatformReactionConfig;
 pub use types::{
     CloudEvent, CloudEventConfig, ControlSignal, ResultChangeEvent, ResultControlEvent,
     ResultEvent, UpdatePayload,

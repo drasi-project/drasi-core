@@ -14,7 +14,8 @@
 
 use super::AdaptiveGrpcReaction;
 use crate::channels::*;
-use crate::config::typed::{AdaptiveBatchConfig as ConfigAdaptiveBatchConfig, GrpcAdaptiveReactionConfig};
+use crate::reactions::common::AdaptiveBatchConfig as ConfigAdaptiveBatchConfig;
+use crate::reactions::grpc_adaptive::GrpcAdaptiveReactionConfig;
 use crate::config::{QueryConfig, ReactionConfig, ReactionSpecificConfig};
 use crate::queries::Query;
 use crate::reactions::Reaction;

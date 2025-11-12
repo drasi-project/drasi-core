@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod config;
+pub use config::GrpcSourceConfig;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use log::{debug, error, info};

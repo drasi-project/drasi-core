@@ -22,6 +22,9 @@ use crate::utils::{AdaptiveBatchConfig, AdaptiveBatcher};
 
 use super::http::QueryConfig;
 
+pub mod config;
+pub use config::HttpAdaptiveReactionConfig;
+
 #[cfg(test)]
 mod tests;
 

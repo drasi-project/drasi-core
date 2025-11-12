@@ -17,10 +17,11 @@
 //! 2. Server global setting
 //! 3. Hardcoded default (1000)
 
-use drasi_server_core::config::typed::{
-    GrpcSourceConfig, HttpSourceConfig, MockSourceConfig, PlatformSourceConfig,
-    PostgresSourceConfig,
-};
+use drasi_server_core::sources::grpc::GrpcSourceConfig;
+use drasi_server_core::sources::http::HttpSourceConfig;
+use drasi_server_core::sources::mock::MockSourceConfig;
+use drasi_server_core::sources::platform::PlatformSourceConfig;
+use drasi_server_core::sources::postgres::PostgresSourceConfig;
 use drasi_server_core::config::SourceSpecificConfig;
 use drasi_server_core::{
     DrasiServerCoreConfig, DrasiServerCoreSettings, QueryConfig, QueryLanguage, RuntimeConfig,
@@ -151,7 +152,7 @@ async fn test_dispatch_buffer_capacity_hierarchy_global_override() {
                     tables: vec![],
                     slot_name: "drasi_slot".to_string(),
                     publication_name: "drasi_publication".to_string(),
-                    ssl_mode: drasi_server_core::config::typed::SslMode::Prefer,
+                    ssl_mode: drasi_server_core::config::SslMode::Prefer,
                     table_keys: vec![],
                 }),
                 bootstrap_provider: None,
@@ -327,7 +328,7 @@ async fn test_dispatch_buffer_capacity_hierarchy_mixed() {
                     tables: vec![],
                     slot_name: "drasi_slot".to_string(),
                     publication_name: "drasi_publication".to_string(),
-                    ssl_mode: drasi_server_core::config::typed::SslMode::Prefer,
+                    ssl_mode: drasi_server_core::config::SslMode::Prefer,
                     table_keys: vec![],
                 }),
                 bootstrap_provider: None,

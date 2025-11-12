@@ -17,8 +17,13 @@
 use crate::api::Properties;
 use crate::bootstrap::{self, BootstrapProviderConfig};
 use crate::channels::DispatchMode;
-use crate::config::typed::*;
 use crate::config::{SourceConfig, SourceSpecificConfig};
+use crate::sources::application::ApplicationSourceConfig;
+use crate::sources::grpc::GrpcSourceConfig;
+use crate::sources::http::HttpSourceConfig;
+use crate::sources::mock::MockSourceConfig;
+use crate::sources::platform::PlatformSourceConfig;
+use crate::sources::postgres::PostgresSourceConfig;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -848,12 +853,12 @@ impl SourceBuilder {
                     .get("ssl_mode")
                     .and_then(|v| v.as_str())
                     .and_then(|s| match s {
-                        "disable" => Some(crate::config::typed::SslMode::Disable),
-                        "prefer" => Some(crate::config::typed::SslMode::Prefer),
-                        "require" => Some(crate::config::typed::SslMode::Require),
+                        "disable" => Some(crate::config::SslMode::Disable),
+                        "prefer" => Some(crate::config::SslMode::Prefer),
+                        "require" => Some(crate::config::SslMode::Require),
                         _ => None,
                     })
-                    .unwrap_or(crate::config::typed::SslMode::Prefer);
+                    .unwrap_or(crate::config::SslMode::Prefer);
 
                 SourceSpecificConfig::Postgres(PostgresSourceConfig {
                     host,

@@ -29,7 +29,7 @@ use std::collections::HashMap;
 /// Helper function to create a basic test configuration
 #[cfg(test)]
 fn create_test_config() -> ReactionConfig {
-    use crate::config::typed::PlatformReactionConfig;
+    use crate::reactions::platform::PlatformReactionConfig;
 
     ReactionConfig {
         id: "test-reaction".to_string(),
@@ -275,7 +275,7 @@ mod batch_processing_tests {
 
     #[test]
     fn test_batch_configuration_validation() {
-        use crate::config::typed::PlatformReactionConfig;
+        use crate::reactions::platform::PlatformReactionConfig;
 
         // Valid batch configuration
         let valid_config = ReactionConfig {
@@ -302,7 +302,7 @@ mod batch_processing_tests {
 
     #[test]
     fn test_batch_size_zero_rejected() {
-        use crate::config::typed::PlatformReactionConfig;
+        use crate::reactions::platform::PlatformReactionConfig;
 
         let invalid_config = ReactionConfig {
             id: "invalid-batch".to_string(),
@@ -336,7 +336,7 @@ mod config_validation_tests {
 
     #[test]
     fn test_redis_url_required() {
-        use crate::config::typed::PlatformReactionConfig;
+        use crate::reactions::platform::PlatformReactionConfig;
 
         let config_with_empty_url = ReactionConfig {
             id: "test".to_string(),
@@ -362,7 +362,7 @@ mod config_validation_tests {
 
     #[test]
     fn test_default_config_values() {
-        use crate::config::typed::PlatformReactionConfig;
+        use crate::reactions::platform::PlatformReactionConfig;
 
         let config = ReactionConfig {
             id: "defaults-test".to_string(),
@@ -392,7 +392,7 @@ mod config_validation_tests {
 
     #[test]
     fn test_custom_config_values() {
-        use crate::config::typed::PlatformReactionConfig;
+        use crate::reactions::platform::PlatformReactionConfig;
 
         let config = ReactionConfig {
             id: "custom-test".to_string(),

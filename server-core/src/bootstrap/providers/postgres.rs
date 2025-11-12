@@ -20,13 +20,13 @@ use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
 use log::{debug, error, info, warn};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_postgres::{Client, NoTls, Row, Transaction};
 
 use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 use crate::channels::SourceChangeEvent;
+use crate::config::common::{SslMode, TableKeyConfig};
 
 /// Bootstrap provider for PostgreSQL sources
 pub struct PostgresBootstrapProvider;
@@ -88,14 +88,8 @@ struct PostgresConfig {
     #[allow(dead_code)]
     pub publication_name: String,
     #[allow(dead_code)]
-    pub ssl_mode: crate::config::typed::SslMode,
+    pub ssl_mode: SslMode,
     pub table_keys: Vec<TableKeyConfig>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TableKeyConfig {
-    pub table: String,
-    pub key_columns: Vec<String>,
 }
 
 impl PostgresConfig {
@@ -111,14 +105,7 @@ impl PostgresConfig {
                 slot_name: postgres_config.slot_name.clone(),
                 publication_name: postgres_config.publication_name.clone(),
                 ssl_mode: postgres_config.ssl_mode,
-                table_keys: postgres_config
-                    .table_keys
-                    .iter()
-                    .map(|tk| TableKeyConfig {
-                        table: tk.table.clone(),
-                        key_columns: tk.key_columns.clone(),
-                    })
-                    .collect(),
+                table_keys: postgres_config.table_keys.clone(),
             }),
             _ => Err(anyhow!(
                 "PostgreSQL bootstrap provider requires PostgreSQL source configuration. \

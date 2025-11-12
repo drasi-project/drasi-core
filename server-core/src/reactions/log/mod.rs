@@ -12,13 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod config;
+pub use config::LogReactionConfig;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use log::{debug, error, info, trace, warn};
 use std::sync::Arc;
 
 use crate::channels::{ComponentEventSender, ComponentStatus};
-use crate::config::typed::LogLevel;
+use crate::config::common::LogLevel;
 use crate::config::ReactionConfig;
 use crate::reactions::common::base::ReactionBase;
 use crate::reactions::Reaction;

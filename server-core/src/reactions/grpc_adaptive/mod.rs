@@ -1,3 +1,6 @@
+pub mod config;
+pub use config::GrpcAdaptiveReactionConfig;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use log::{debug, error, info, warn};

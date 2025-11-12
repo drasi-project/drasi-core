@@ -204,10 +204,31 @@ Internal components use application handles for direct integration:
 - Use `SubscriptionOptions` for query subscriptions
 
 ### Configuration Management
-- YAML-based configuration in `config/` module
+
+DrasiServerCore uses a **decentralized configuration architecture** where config types live alongside their implementation modules.
+
+#### Configuration Architecture
+
+**Decentralized Organization**:
+- Each source has its config in `sources/{module}/config.rs` (e.g., `PostgresSourceConfig` in `sources/postgres/config.rs`)
+- Each reaction has its config in `reactions/{module}/config.rs` (e.g., `HttpReactionConfig` in `reactions/http/config.rs`)
+- Common config types (LogLevel, SslMode, TableKeyConfig) in `config/common.rs`
+- Discriminated union enums (SourceSpecificConfig, ReactionSpecificConfig) in `config/enums.rs`
+
+**Convenience Re-exports**:
+- All config types are re-exported from `config/mod.rs` for easy access
+- Use `use crate::config::PostgresSourceConfig;` instead of `use crate::sources::postgres::PostgresSourceConfig;`
+- Enums are the source of truth: `config::enums::{SourceSpecificConfig, ReactionSpecificConfig}`
+
+**Configuration Files**:
+- YAML-based configuration supported via `config/schema.rs`
 - Runtime configuration persisted optionally
-- Config schema defined with serde structs
 - Main config type is `DrasiServerCoreConfig`
+
+**Best Practices**:
+- Config structs live in the same module as their implementation
+- Use convenience re-exports from `config/mod.rs` for cleaner imports
+- Common types (like LogLevel, SslMode) are centralized in `config/common.rs`
 
 ### Error Handling
 - Use `anyhow::Result` for fallible operations

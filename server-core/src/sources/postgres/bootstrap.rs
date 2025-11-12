@@ -25,11 +25,11 @@ use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
 
-use super::PostgresReplicationConfig;
+use super::PostgresSourceConfig;
 
 /// Handles bootstrap operations for PostgreSQL source
 pub struct BootstrapHandler {
-    config: PostgresReplicationConfig,
+    config: PostgresSourceConfig,
     source_id: String,
     /// Stores the LSN at bootstrap time for replication coordination
     pub snapshot_lsn: Arc<RwLock<Option<String>>>,
@@ -41,7 +41,7 @@ pub struct BootstrapHandler {
 
 impl BootstrapHandler {
     pub fn new(
-        config: PostgresReplicationConfig,
+        config: PostgresSourceConfig,
         source_id: String,
         event_tx: crate::channels::BootstrapEventSender,
     ) -> Self {

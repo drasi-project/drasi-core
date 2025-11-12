@@ -12,10 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Common functionality shared across reaction implementations.
+//! Configuration types for Application reactions.
 
-pub mod base;
-pub mod config;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-pub use base::ReactionBase;
-pub use config::AdaptiveBatchConfig;
+/// Application reaction configuration
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ApplicationReactionConfig {
+    /// Application-specific properties (for now, keep flexible)
+    #[serde(flatten)]
+    pub properties: HashMap<String, serde_json::Value>,
+}

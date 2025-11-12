@@ -25,13 +25,13 @@ use super::connection::ReplicationConnection;
 use super::decoder::PgOutputDecoder;
 use super::protocol::BackendMessage;
 use super::types::{StandbyStatusUpdate, WalMessage};
-use super::PostgresReplicationConfig;
+use super::PostgresSourceConfig;
 use crate::channels::{ComponentEventSender, ComponentStatus, SourceEvent, SourceEventWrapper};
 use crate::sources::base::SourceBase;
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 
 pub struct ReplicationStream {
-    config: PostgresReplicationConfig,
+    config: PostgresSourceConfig,
     source_id: String,
     connection: Option<ReplicationConnection>,
     decoder: PgOutputDecoder,
@@ -58,7 +58,7 @@ struct RelationMapping {
 
 impl ReplicationStream {
     pub fn new(
-        config: PostgresReplicationConfig,
+        config: PostgresSourceConfig,
         source_id: String,
         dispatchers: Arc<
             RwLock<

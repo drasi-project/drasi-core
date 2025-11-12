@@ -229,7 +229,7 @@ mod internal_source_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_mock_source_counter() {
-        use crate::config::typed::MockSourceConfig;
+        use crate::sources::mock::MockSourceConfig;
 
         let (event_tx, _event_rx) = mpsc::channel(100);
 
@@ -274,7 +274,7 @@ mod internal_source_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_mock_source_sensor() {
-        use crate::config::typed::MockSourceConfig;
+        use crate::sources::mock::MockSourceConfig;
 
         let (event_tx, _event_rx) = mpsc::channel(100);
 
@@ -317,7 +317,7 @@ mod internal_source_tests {
 
     #[tokio::test]
     async fn test_mock_source_status() {
-        use crate::config::typed::MockSourceConfig;
+        use crate::sources::mock::MockSourceConfig;
 
         let (event_tx, _event_rx) = mpsc::channel(100);
 

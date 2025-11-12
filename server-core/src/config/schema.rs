@@ -20,7 +20,7 @@ use std::path::Path;
 
 use crate::bootstrap::BootstrapProviderConfig;
 use crate::channels::DispatchMode;
-use crate::config::typed::{ReactionSpecificConfig, SourceSpecificConfig};
+use crate::config::enums::{ReactionSpecificConfig, SourceSpecificConfig};
 
 /// Query language for continuous queries
 ///

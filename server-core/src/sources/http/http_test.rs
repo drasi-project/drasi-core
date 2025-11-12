@@ -147,7 +147,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_http_source_start_stop() {
-        use crate::config::typed::{HttpSourceConfig, SourceSpecificConfig};
+        use crate::config::SourceSpecificConfig;
+        use crate::sources::http::HttpSourceConfig;
 
         let config = SourceConfig {
             id: "test-http-source".to_string(),

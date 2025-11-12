@@ -5,7 +5,7 @@ mod tests {
 
     #[test]
     fn test_source_config_with_dispatch_mode() {
-        use crate::config::typed::MockSourceConfig;
+        use crate::sources::mock::MockSourceConfig;
 
         let config = SourceConfig {
             id: "test_source".to_string(),
@@ -25,7 +25,7 @@ mod tests {
 
     #[test]
     fn test_source_config_without_dispatch_mode() {
-        use crate::config::typed::MockSourceConfig;
+        use crate::sources::mock::MockSourceConfig;
 
         let config = SourceConfig {
             id: "test_source".to_string(),
@@ -72,7 +72,9 @@ mod tests {
 
     #[test]
     fn test_full_config_with_mixed_dispatch_modes() {
-        use crate::config::typed::{LogReactionConfig, MockSourceConfig};
+        use crate::config::common::LogLevel;
+        use crate::reactions::log::LogReactionConfig;
+        use crate::sources::mock::MockSourceConfig;
 
         let mut config = DrasiServerCoreConfig::default();
 
@@ -148,7 +150,7 @@ mod tests {
             queries: vec!["query1".to_string()],
             auto_start: true,
             config: crate::config::ReactionSpecificConfig::Log(LogReactionConfig {
-                log_level: crate::config::typed::LogLevel::Info,
+                log_level: LogLevel::Info,
             }),
             priority_queue_capacity: None,
         });

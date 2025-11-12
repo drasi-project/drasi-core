@@ -15,8 +15,14 @@
 //! Reaction configuration builders
 
 use crate::api::Properties;
-use crate::config::typed::*;
 use crate::config::{ReactionConfig, ReactionSpecificConfig};
+use crate::reactions::application::ApplicationReactionConfig;
+use crate::reactions::grpc::GrpcReactionConfig;
+use crate::reactions::http::HttpReactionConfig;
+use crate::reactions::log::LogReactionConfig;
+use crate::reactions::platform::PlatformReactionConfig;
+use crate::reactions::profiler::ProfilerReactionConfig;
+use crate::reactions::sse::SseReactionConfig;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -478,14 +484,14 @@ impl ReactionBuilder {
                     .get("log_level")
                     .and_then(|v| v.as_str())
                     .and_then(|s| match s {
-                        "trace" => Some(crate::config::typed::LogLevel::Trace),
-                        "debug" => Some(crate::config::typed::LogLevel::Debug),
-                        "info" => Some(crate::config::typed::LogLevel::Info),
-                        "warn" => Some(crate::config::typed::LogLevel::Warn),
-                        "error" => Some(crate::config::typed::LogLevel::Error),
+                        "trace" => Some(crate::config::LogLevel::Trace),
+                        "debug" => Some(crate::config::LogLevel::Debug),
+                        "info" => Some(crate::config::LogLevel::Info),
+                        "warn" => Some(crate::config::LogLevel::Warn),
+                        "error" => Some(crate::config::LogLevel::Error),
                         _ => None,
                     })
-                    .unwrap_or(crate::config::typed::LogLevel::Info);
+                    .unwrap_or(crate::config::LogLevel::Info);
                 ReactionSpecificConfig::Log(LogReactionConfig { log_level })
             }
             "http" => {

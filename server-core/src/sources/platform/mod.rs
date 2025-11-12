@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod config;
+pub use config::PlatformSourceConfig;
+
 use anyhow::Result;
 use log::{debug, error, info, warn};
 use redis::streams::StreamReadReply;

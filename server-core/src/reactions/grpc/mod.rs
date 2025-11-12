@@ -28,9 +28,12 @@ use crate::reactions::Reaction;
 use crate::utils::log_component_start;
 
 // Submodules
+pub mod config;
 pub mod connection;
 pub mod helpers;
 pub mod proto;
+
+pub use config::GrpcReactionConfig;
 
 // Re-export commonly used types and functions
 pub use connection::{create_client, create_client_with_retry, ConnectionState};

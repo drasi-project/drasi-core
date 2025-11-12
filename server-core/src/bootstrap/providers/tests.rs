@@ -32,7 +32,7 @@ mod tests {
     ) {
         let (tx, rx) = mpsc::channel(100);
 
-        use crate::config::typed::ApplicationSourceConfig;
+        use crate::sources::application::ApplicationSourceConfig;
 
         let source_config = Arc::new(SourceConfig {
             id: "test_source".to_string(),

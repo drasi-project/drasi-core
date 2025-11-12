@@ -43,4 +43,4 @@ pub use http::HttpSource;
 pub use manager::*;
 pub use mock::MockSource;
 pub use platform::PlatformSource;
-pub use postgres::{PostgresReplicationConfig, PostgresReplicationSource};
+pub use postgres::{PostgresReplicationSource, PostgresSourceConfig};

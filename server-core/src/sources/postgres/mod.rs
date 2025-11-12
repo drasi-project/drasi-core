@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod bootstrap;
+pub mod config;
 pub mod connection;
 pub mod decoder;
 pub mod protocol;
@@ -20,43 +21,17 @@ pub mod scram;
 pub mod stream;
 pub mod types;
 
+pub use config::PostgresSourceConfig;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use log::{error, info};
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::channels::*;
 use crate::config::SourceConfig;
 use crate::sources::{base::SourceBase, Source};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TableKeyConfig {
-    pub table: String,
-    pub key_columns: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PostgresReplicationConfig {
-    pub host: String,
-    pub port: u16,
-    pub database: String,
-    pub user: String,
-    pub password: String,
-    pub tables: Vec<String>,
-    pub slot_name: String,
-    #[serde(default = "default_publication_name")]
-    pub publication_name: String,
-    #[serde(default)]
-    pub ssl_mode: crate::config::typed::SslMode,
-    #[serde(default)]
-    pub table_keys: Vec<TableKeyConfig>,
-}
-
-fn default_publication_name() -> String {
-    "drasi_publication".to_string()
-}
 
 pub struct PostgresReplicationSource {
     base: SourceBase,
@@ -69,28 +44,10 @@ impl PostgresReplicationSource {
         })
     }
 
-    fn parse_config(&self) -> Result<PostgresReplicationConfig> {
+    fn parse_config(&self) -> Result<PostgresSourceConfig> {
         match &self.base.config.config {
             crate::config::SourceSpecificConfig::Postgres(postgres_config) => {
-                Ok(PostgresReplicationConfig {
-                    host: postgres_config.host.clone(),
-                    port: postgres_config.port,
-                    database: postgres_config.database.clone(),
-                    user: postgres_config.user.clone(),
-                    password: postgres_config.password.clone(),
-                    tables: postgres_config.tables.clone(),
-                    slot_name: postgres_config.slot_name.clone(),
-                    publication_name: postgres_config.publication_name.clone(),
-                    ssl_mode: postgres_config.ssl_mode,
-                    table_keys: postgres_config
-                        .table_keys
-                        .iter()
-                        .map(|tk| TableKeyConfig {
-                            table: tk.table.clone(),
-                            key_columns: tk.key_columns.clone(),
-                        })
-                        .collect(),
-                })
+                Ok(postgres_config.clone())
             }
             _ => Err(anyhow::anyhow!("Invalid config type for PostgreSQL source")),
         }
@@ -214,7 +171,7 @@ impl Source for PostgresReplicationSource {
 
 async fn run_replication(
     source_id: String,
-    config: PostgresReplicationConfig,
+    config: PostgresSourceConfig,
     dispatchers: Arc<
         RwLock<Vec<Box<dyn crate::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>,
     >,

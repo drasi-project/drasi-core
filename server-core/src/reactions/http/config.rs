@@ -12,13 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Shared configuration types for HTTP reactions.
+//! Configuration types for HTTP reactions.
 //!
-//! This module contains configuration types that are shared between the HTTP reaction
-//! and HTTP Adaptive reaction implementations.
+//! This module contains configuration types for HTTP reaction and shared types
+//! used by HTTP Adaptive reaction implementations.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+fn default_base_url() -> String {
+    "http://localhost".to_string()
+}
+
+fn default_timeout_ms() -> u64 {
+    5000
+}
 
 /// Specification for an HTTP call, including URL, method, headers, and body template.
 ///
@@ -61,4 +69,24 @@ pub struct QueryConfig {
     /// HTTP call specification for DELETE operations (removed rows from query results).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deleted: Option<CallSpec>,
+}
+
+/// HTTP reaction configuration
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HttpReactionConfig {
+    /// Base URL for HTTP requests
+    #[serde(default = "default_base_url")]
+    pub base_url: String,
+
+    /// Optional authentication token
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+
+    /// Request timeout in milliseconds
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
+
+    /// Query-specific call configurations
+    #[serde(default)]
+    pub routes: HashMap<String, QueryConfig>,
 }

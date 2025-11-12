@@ -16,7 +16,7 @@
 
 use drasi_server_core::bootstrap::providers::PlatformBootstrapProvider;
 use drasi_server_core::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
-use drasi_server_core::config::typed::PlatformSourceConfig;
+use drasi_server_core::sources::platform::PlatformSourceConfig;
 use drasi_server_core::config::{SourceConfig, SourceSpecificConfig};
 use std::sync::Arc;
 use tokio::sync::mpsc;

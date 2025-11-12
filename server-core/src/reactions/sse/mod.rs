@@ -30,6 +30,9 @@ use crate::reactions::common::base::ReactionBase;
 use crate::reactions::Reaction;
 use crate::utils::log_component_start;
 
+pub mod config;
+pub use config::SseReactionConfig;
+
 // SSE tests currently have compilation errors - needs to be fixed separately
 // #[cfg(test)]
 // mod tests;

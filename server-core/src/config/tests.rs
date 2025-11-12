@@ -104,14 +104,15 @@ mod schema_tests {
     #[test]
     fn test_reaction_config_defaults() {
         // Test programmatically instead of deserializing to avoid tag conflicts
-        use crate::config::typed::LogReactionConfig;
+        use crate::config::common::LogLevel;
+        use crate::reactions::log::LogReactionConfig;
 
         let config = ReactionConfig {
             id: "test-reaction".to_string(),
             queries: vec!["query1".to_string()],
             auto_start: true,
             config: crate::config::ReactionSpecificConfig::Log(LogReactionConfig {
-                log_level: crate::config::typed::LogLevel::Info,
+                log_level: LogLevel::Info,
             }),
             priority_queue_capacity: None,
         };
@@ -123,7 +124,9 @@ mod schema_tests {
 
     #[test]
     fn test_server_config_complete() {
-        use crate::config::typed::{LogReactionConfig, MockSourceConfig};
+        use crate::config::common::LogLevel;
+        use crate::reactions::log::LogReactionConfig;
+        use crate::sources::mock::MockSourceConfig;
 
         let mut config = DrasiServerCoreConfig::default();
 
@@ -161,7 +164,7 @@ mod schema_tests {
             queries: vec!["query1".to_string()],
             auto_start: true,
             config: crate::config::ReactionSpecificConfig::Log(LogReactionConfig {
-                log_level: crate::config::typed::LogLevel::Info,
+                log_level: LogLevel::Info,
             }),
             priority_queue_capacity: None,
         });
@@ -181,7 +184,7 @@ mod persistence_tests {
 
     #[test]
     fn test_load_config_from_file() {
-        use crate::config::typed::MockSourceConfig;
+        use crate::sources::mock::MockSourceConfig;
 
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().join("test_config.yaml");
@@ -255,7 +258,7 @@ mod persistence_tests {
 
     #[test]
     fn test_config_roundtrip() {
-        use crate::config::typed::MockSourceConfig;
+        use crate::sources::mock::MockSourceConfig;
 
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().join("config.yaml");
@@ -298,7 +301,7 @@ mod runtime_tests {
 
     #[test]
     fn test_source_runtime_conversion() {
-        use crate::config::typed::MockSourceConfig;
+        use crate::sources::mock::MockSourceConfig;
 
         let config = SourceConfig {
             id: "test-source".to_string(),
@@ -344,14 +347,15 @@ mod runtime_tests {
 
     #[test]
     fn test_reaction_runtime_conversion() {
-        use crate::config::typed::LogReactionConfig;
+        use crate::config::common::LogLevel;
+        use crate::reactions::log::LogReactionConfig;
 
         let config = ReactionConfig {
             id: "test-reaction".to_string(),
             queries: vec!["query1".to_string()],
             auto_start: true,
             config: crate::config::ReactionSpecificConfig::Log(LogReactionConfig {
-                log_level: crate::config::typed::LogLevel::Info,
+                log_level: LogLevel::Info,
             }),
             priority_queue_capacity: None,
         };

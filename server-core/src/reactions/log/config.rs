@@ -12,10 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Common functionality shared across reaction implementations.
+//! Configuration types for log reaction.
 
-pub mod base;
-pub mod config;
+use crate::config::common::LogLevel;
+use serde::{Deserialize, Serialize};
 
-pub use base::ReactionBase;
-pub use config::AdaptiveBatchConfig;
+/// Log reaction configuration
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LogReactionConfig {
+    /// Log level
+    #[serde(default)]
+    pub log_level: LogLevel,
+}
+
+impl Default for LogReactionConfig {
+    fn default() -> Self {
+        Self {
+            log_level: LogLevel::default(),
+        }
+    }
+}

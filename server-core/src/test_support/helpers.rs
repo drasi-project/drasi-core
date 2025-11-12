@@ -35,7 +35,12 @@ pub mod test_fixtures {
 
     /// Creates a test source configuration
     pub fn create_test_source_config(id: &str, source_type: &str) -> SourceConfig {
-        use crate::config::typed::*;
+        use crate::sources::application::ApplicationSourceConfig;
+        use crate::sources::grpc::GrpcSourceConfig;
+        use crate::sources::http::HttpSourceConfig;
+        use crate::sources::mock::MockSourceConfig;
+        use crate::sources::platform::PlatformSourceConfig;
+        use crate::sources::postgres::PostgresSourceConfig;
 
         let config = match source_type {
             "mock" => crate::config::SourceSpecificConfig::Mock(MockSourceConfig {
@@ -51,7 +56,7 @@ pub mod test_fixtures {
                 tables: vec![],
                 slot_name: "drasi_slot".to_string(),
                 publication_name: "drasi_publication".to_string(),
-                ssl_mode: crate::config::typed::SslMode::Prefer,
+                ssl_mode: crate::config::SslMode::Prefer,
                 table_keys: vec![],
             }),
             "http" => crate::config::SourceSpecificConfig::Http(HttpSourceConfig {
@@ -143,14 +148,15 @@ pub mod test_fixtures {
 
     /// Creates a test reaction configuration
     pub fn create_test_reaction_config(id: &str, queries: Vec<String>) -> ReactionConfig {
-        use crate::config::typed::LogReactionConfig;
+        use crate::config::common::LogLevel;
+        use crate::reactions::log::LogReactionConfig;
 
         ReactionConfig {
             id: id.to_string(),
             queries,
             auto_start: true,
             config: crate::config::ReactionSpecificConfig::Log(LogReactionConfig {
-                log_level: crate::config::typed::LogLevel::Info,
+                log_level: LogLevel::Info,
             }),
             priority_queue_capacity: None,
         }

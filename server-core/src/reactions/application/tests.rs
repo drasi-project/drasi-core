@@ -16,7 +16,7 @@ use super::*;
 use std::collections::HashMap;
 
 fn create_test_reaction_config(id: &str, queries: Vec<String>) -> ReactionConfig {
-    use crate::config::typed::ApplicationReactionConfig;
+    use crate::reactions::application::ApplicationReactionConfig;
 
     ReactionConfig {
         id: id.to_string(),
