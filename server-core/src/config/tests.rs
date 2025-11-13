@@ -156,6 +156,7 @@ mod schema_tests {
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
+            storage_backend: None,
         });
 
         // Add a reaction
@@ -336,6 +337,7 @@ mod runtime_tests {
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
+            storage_backend: None,
         };
 
         let runtime = QueryRuntime::from(config.clone());

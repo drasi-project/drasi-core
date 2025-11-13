@@ -55,6 +55,9 @@ pub mod utils;
 // Config module needs to be public for config file loading
 pub mod config;
 
+// Indexes module for storage backend configuration
+pub mod indexes;
+
 // Profiling module for performance monitoring
 #[cfg_attr(not(test), doc(hidden))]
 pub mod profiling;
@@ -116,3 +119,6 @@ pub use config::{
     DrasiServerCoreConfig, DrasiServerCoreSettings, QueryConfig, QueryLanguage, QueryRuntime,
     ReactionConfig, ReactionRuntime, RuntimeConfig, SourceConfig, SourceRuntime,
 };
+
+/// Storage backend configuration types
+pub use indexes::{StorageBackendConfig, StorageBackendRef, StorageBackendSpec};

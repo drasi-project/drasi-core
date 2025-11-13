@@ -435,6 +435,7 @@ impl InspectionAPI {
                 priority_queue_capacity: self.config.server_core.priority_queue_capacity,
                 dispatch_buffer_capacity: self.config.server_core.dispatch_buffer_capacity,
             },
+            storage_backends: vec![],
             sources,
             queries,
             reactions,

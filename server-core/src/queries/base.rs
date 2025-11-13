@@ -264,6 +264,7 @@ mod tests {
             priority_queue_capacity: None,
             dispatch_buffer_capacity: Some(100),
             dispatch_mode: Some(DispatchMode::Broadcast),
+            storage_backend: None,
         };
 
         let (event_tx, _) = tokio::sync::mpsc::channel(100);
@@ -309,6 +310,7 @@ mod tests {
             priority_queue_capacity: None,
             dispatch_buffer_capacity: Some(100),
             dispatch_mode: Some(DispatchMode::Channel),
+            storage_backend: None,
         };
 
         let (event_tx, _) = tokio::sync::mpsc::channel(100);

@@ -21,6 +21,7 @@ use std::path::Path;
 use crate::bootstrap::BootstrapProviderConfig;
 use crate::channels::DispatchMode;
 use crate::config::enums::{ReactionSpecificConfig, SourceSpecificConfig};
+use crate::indexes::{StorageBackendConfig, StorageBackendRef};
 
 /// Query language for continuous queries
 ///
@@ -179,6 +180,9 @@ impl Default for QueryLanguage {
 pub struct DrasiServerCoreConfig {
     #[serde(default)]
     pub server_core: DrasiServerCoreSettings,
+    /// Global storage backend definitions that can be referenced by queries
+    #[serde(default)]
+    pub storage_backends: Vec<StorageBackendConfig>,
     pub sources: Vec<SourceConfig>,
     pub queries: Vec<QueryConfig>,
     pub reactions: Vec<ReactionConfig>,
@@ -570,6 +574,10 @@ pub struct QueryConfig {
     /// Dispatch mode for this query (default: Channel)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_mode: Option<DispatchMode>,
+    /// Storage backend for this query (default: in-memory)
+    /// Can reference a named backend or provide inline configuration
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_backend: Option<StorageBackendRef>,
 }
 
 /// Synthetic join configuration for queries
@@ -1000,6 +1008,21 @@ impl DrasiServerCoreConfig {
             }
         }
 
+        // Validate unique storage backend ids
+        let mut storage_backend_ids = std::collections::HashSet::new();
+        for backend in &self.storage_backends {
+            if !storage_backend_ids.insert(&backend.id) {
+                return Err(anyhow::anyhow!(
+                    "Duplicate storage backend id: '{}'",
+                    backend.id
+                ));
+            }
+            // Validate backend configuration
+            backend.spec.validate().map_err(|e| {
+                anyhow::anyhow!("Storage backend '{}' has invalid configuration: {}", backend.id, e)
+            })?;
+        }
+
         // Validate source references in queries
         for query in &self.queries {
             for source_id in &query.sources {
@@ -1022,6 +1045,33 @@ impl DrasiServerCoreConfig {
                         reaction.id,
                         query_id
                     ));
+                }
+            }
+        }
+
+        // Validate storage backend references in queries
+        for query in &self.queries {
+            if let Some(backend_ref) = &query.storage_backend {
+                match backend_ref {
+                    StorageBackendRef::Named(backend_id) => {
+                        if !storage_backend_ids.contains(backend_id) {
+                            return Err(anyhow::anyhow!(
+                                "Query '{}' references unknown storage backend: '{}'",
+                                query.id,
+                                backend_id
+                            ));
+                        }
+                    }
+                    StorageBackendRef::Inline(spec) => {
+                        // Validate inline backend configuration
+                        spec.validate().map_err(|e| {
+                            anyhow::anyhow!(
+                                "Query '{}' has invalid inline storage backend configuration: {}",
+                                query.id,
+                                e
+                            )
+                        })?;
+                    }
                 }
             }
         }

@@ -161,6 +161,7 @@ pub struct QueryBuilder {
     priority_queue_capacity: Option<usize>,
     dispatch_buffer_capacity: Option<usize>,
     dispatch_mode: Option<DispatchMode>,
+    storage_backend: Option<crate::indexes::StorageBackendRef>,
 }
 
 impl QueryBuilder {
@@ -176,6 +177,7 @@ impl QueryBuilder {
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
+            storage_backend: None,
         }
     }
 
@@ -544,6 +546,78 @@ impl QueryBuilder {
         self
     }
 
+    /// Configure a storage backend for this query by referencing a named backend
+    ///
+    /// Storage backends define where and how query indexes are persisted:
+    ///
+    /// - **Memory**: Volatile in-memory storage (default if not configured)
+    /// - **RocksDB**: Persistent local storage for single-node deployments
+    /// - **Redis/Garnet**: Distributed storage for multi-node deployments
+    ///
+    /// Named backends must be defined in the server configuration's `storage_backends` list.
+    ///
+    /// # Arguments
+    ///
+    /// * `backend_id` - ID of a storage backend defined in server configuration
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::Query;
+    /// let query = Query::cypher("my_query")
+    ///     .query("MATCH (n) RETURN n")
+    ///     .from_source("events")
+    ///     .with_storage_backend("rocks_persistent")  // Reference named backend
+    ///     .build();
+    /// ```
+    pub fn with_storage_backend(mut self, backend_id: impl Into<String>) -> Self {
+        self.storage_backend = Some(crate::indexes::StorageBackendRef::Named(backend_id.into()));
+        self
+    }
+
+    /// Configure an inline storage backend for this query
+    ///
+    /// Use this to configure storage directly on the query without defining it in
+    /// server configuration. Useful for testing or simple deployments.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - Storage backend specification
+    ///
+    /// # Examples
+    ///
+    /// ## Inline Memory Backend
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{Query, StorageBackendSpec};
+    /// let query = Query::cypher("my_query")
+    ///     .query("MATCH (n) RETURN n")
+    ///     .from_source("events")
+    ///     .with_inline_storage(StorageBackendSpec::Memory {
+    ///         enable_archive: true
+    ///     })
+    ///     .build();
+    /// ```
+    ///
+    /// ## Inline RocksDB Backend
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{Query, StorageBackendSpec};
+    /// let query = Query::cypher("my_query")
+    ///     .query("MATCH (n) RETURN n")
+    ///     .from_source("events")
+    ///     .with_inline_storage(StorageBackendSpec::RocksDb {
+    ///         path: "/data/query-indexes".to_string(),
+    ///         enable_archive: true,
+    ///         direct_io: false,
+    ///     })
+    ///     .build();
+    /// ```
+    pub fn with_inline_storage(mut self, spec: crate::indexes::StorageBackendSpec) -> Self {
+        self.storage_backend = Some(crate::indexes::StorageBackendRef::Inline(spec));
+        self
+    }
+
     /// Build the query configuration
     ///
     /// Consumes the builder and creates the final [`QueryConfig`] that can be passed to
@@ -584,6 +658,7 @@ impl QueryBuilder {
             priority_queue_capacity: self.priority_queue_capacity,
             dispatch_buffer_capacity: self.dispatch_buffer_capacity,
             dispatch_mode: self.dispatch_mode,
+            storage_backend: self.storage_backend,
         }
     }
 }

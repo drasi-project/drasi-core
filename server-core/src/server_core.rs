@@ -251,6 +251,7 @@ impl DrasiServerCore {
         let query_manager = Arc::new(QueryManager::new(
             channels.component_event_tx.clone(),
             source_manager.clone(),
+            config.index_factory.clone(),
         ));
 
         let reaction_manager = Arc::new(ReactionManager::new(channels.component_event_tx.clone()));

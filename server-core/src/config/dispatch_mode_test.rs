@@ -128,6 +128,7 @@ mod tests {
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: Some(DispatchMode::Channel),
+            storage_backend: None,
         });
 
         config.queries.push(QueryConfig {
@@ -142,6 +143,7 @@ mod tests {
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
+            storage_backend: None,
         });
 
         // Add reaction

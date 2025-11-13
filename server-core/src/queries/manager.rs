@@ -132,6 +132,8 @@ pub struct DrasiQuery {
     subscription_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
     // Track bootstrap state per source
     bootstrap_state: Arc<RwLock<HashMap<String, BootstrapPhase>>>,
+    // IndexFactory for creating storage backend indexes
+    index_factory: Arc<crate::indexes::IndexFactory>,
 }
 
 impl DrasiQuery {
@@ -139,6 +141,7 @@ impl DrasiQuery {
         config: QueryConfig,
         event_tx: ComponentEventSender,
         source_manager: Arc<SourceManager>,
+        index_factory: Arc<crate::indexes::IndexFactory>,
     ) -> Result<Self> {
         // Create priority queue with configured capacity (fallback to 10000 if not set)
         let priority_capacity = config.priority_queue_capacity.unwrap_or(10000);
@@ -155,6 +158,7 @@ impl DrasiQuery {
             source_manager,
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
             bootstrap_state: Arc::new(RwLock::new(HashMap::new())),
+            index_factory,
         })
     }
 
@@ -232,6 +236,31 @@ impl Query for DrasiQuery {
             let drasi_joins: Vec<drasi_core::models::QueryJoin> =
                 joins.iter().cloned().map(|j| j.into()).collect();
             builder = builder.with_joins(drasi_joins);
+        }
+
+        // Build indexes if storage backend configured
+        if let Some(backend_ref) = &self.base.config.storage_backend {
+            debug!(
+                "Query '{}' using storage backend: {:?}",
+                self.base.config.id, backend_ref
+            );
+            let index_factory = self.index_factory.clone();
+
+            let index_set = index_factory
+                .build(backend_ref, &self.base.config.id)
+                .await
+                .context("Failed to build index set")?;
+
+            builder = builder
+                .with_element_index(index_set.element_index)
+                .with_archive_index(index_set.archive_index)
+                .with_result_index(index_set.result_index)
+                .with_future_queue(index_set.future_queue);
+        } else {
+            debug!(
+                "Query '{}' using default in-memory indexes",
+                self.base.config.id
+            );
         }
 
         let continuous_query = match builder.try_build().await {
@@ -854,14 +883,20 @@ pub struct QueryManager {
     queries: Arc<RwLock<HashMap<String, Arc<dyn Query>>>>,
     event_tx: ComponentEventSender,
     source_manager: Arc<SourceManager>,
+    index_factory: Arc<crate::indexes::IndexFactory>,
 }
 
 impl QueryManager {
-    pub fn new(event_tx: ComponentEventSender, source_manager: Arc<SourceManager>) -> Self {
+    pub fn new(
+        event_tx: ComponentEventSender,
+        source_manager: Arc<SourceManager>,
+        index_factory: Arc<crate::indexes::IndexFactory>,
+    ) -> Self {
         Self {
             queries: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
             source_manager,
+            index_factory,
         }
     }
 
@@ -901,6 +936,7 @@ impl QueryManager {
             config.clone(),
             self.event_tx.clone(),
             self.source_manager.clone(),
+            self.index_factory.clone(),
         )?;
 
         let query: Arc<dyn Query> = Arc::new(query);

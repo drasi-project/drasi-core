@@ -14,9 +14,11 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::schema::{QueryConfig, ReactionConfig, SourceConfig};
 use crate::channels::ComponentStatus;
+use crate::indexes::IndexFactory;
 
 /// Helper function to convert typed config to properties HashMap
 fn serialize_to_properties<T: serde::Serialize>(config: &T) -> HashMap<String, serde_json::Value> {
@@ -302,6 +304,8 @@ impl From<ReactionConfig> for ReactionRuntime {
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     pub server_core: super::schema::DrasiServerCoreSettings,
+    /// Index factory for creating storage backend indexes for queries
+    pub index_factory: Arc<IndexFactory>,
     pub sources: Vec<SourceConfig>,
     pub queries: Vec<QueryConfig>,
     pub reactions: Vec<ReactionConfig>,
@@ -312,6 +316,9 @@ impl From<super::schema::DrasiServerCoreConfig> for RuntimeConfig {
         // Get the global defaults (or hardcoded fallbacks)
         let global_priority_queue = config.server_core.priority_queue_capacity.unwrap_or(10000);
         let global_dispatch_capacity = config.server_core.dispatch_buffer_capacity.unwrap_or(1000);
+
+        // Create IndexFactory from storage backend configurations
+        let index_factory = Arc::new(IndexFactory::new(config.storage_backends));
 
         // Apply global defaults to sources that don't specify their own dispatch capacity
         let sources = config
@@ -354,6 +361,7 @@ impl From<super::schema::DrasiServerCoreConfig> for RuntimeConfig {
 
         Self {
             server_core: config.server_core,
+            index_factory,
             sources,
             queries,
             reactions,

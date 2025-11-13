@@ -35,6 +35,8 @@ drasi-functions-gql = { path = "../functions-gql" }
 drasi-query-ast = { path = "../query-ast" }
 drasi-query-cypher = { path = "../query-cypher" }
 drasi-query-gql = { path = "../query-gql" }
+drasi-index-rocksdb = { path = "../index-rocksdb" }
+drasi-index-garnet = { path = "../index-garnet" }
 
 tokio = { version = "1.0", features = ["full"] }
 axum = "0.7"

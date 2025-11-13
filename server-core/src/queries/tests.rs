@@ -29,7 +29,15 @@ mod manager_tests {
         let (event_tx, event_rx) = mpsc::channel(100);
 
         let source_manager = Arc::new(SourceManager::new(event_tx.clone()));
-        let query_manager = Arc::new(QueryManager::new(event_tx.clone(), source_manager.clone()));
+
+        // Create a test IndexFactory with empty backends
+        let index_factory = Arc::new(crate::indexes::IndexFactory::new(vec![]));
+
+        let query_manager = Arc::new(QueryManager::new(
+            event_tx.clone(),
+            source_manager.clone(),
+            index_factory,
+        ));
 
         (query_manager, event_rx, source_manager)
     }
@@ -350,6 +358,7 @@ mod query_core_tests {
                 priority_queue_capacity: None,
                 dispatch_buffer_capacity: None,
                 dispatch_mode: None,
+                storage_backend: None,
             };
 
             // Just verify the config can be created
@@ -371,6 +380,7 @@ mod query_core_tests {
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
+            storage_backend: None,
         };
 
         // Empty queries should be caught during validation

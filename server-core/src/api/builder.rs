@@ -126,6 +126,7 @@ pub struct DrasiServerCoreBuilder {
     server_id: Option<String>,
     priority_queue_capacity: Option<usize>,
     dispatch_buffer_capacity: Option<usize>,
+    storage_backends: Vec<crate::indexes::StorageBackendConfig>,
     sources: Vec<SourceConfig>,
     queries: Vec<QueryConfig>,
     reactions: Vec<ReactionConfig>,
@@ -145,6 +146,7 @@ impl DrasiServerCoreBuilder {
             server_id: None,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
+            storage_backends: Vec::new(),
             sources: Vec::new(),
             queries: Vec::new(),
             reactions: Vec::new(),
@@ -242,6 +244,126 @@ impl DrasiServerCoreBuilder {
     /// ```
     pub fn with_dispatch_buffer_capacity(mut self, capacity: usize) -> Self {
         self.dispatch_buffer_capacity = Some(capacity);
+        self
+    }
+
+    /// Add a storage backend to the server configuration
+    ///
+    /// Storage backends define where and how query indexes are persisted. Queries can
+    /// reference these backends by ID using `.with_storage_backend()`.
+    ///
+    /// # Storage Backend Types
+    ///
+    /// - **Memory**: Volatile in-memory storage (fast, no persistence)
+    /// - **RocksDB**: Persistent local storage for single-node deployments
+    /// - **Redis/Garnet**: Distributed storage for multi-node deployments
+    ///
+    /// # Arguments
+    ///
+    /// * `backend` - Storage backend configuration with ID and specification
+    ///
+    /// # Examples
+    ///
+    /// ## RocksDB Backend
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Query, StorageBackendConfig, StorageBackendSpec};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let core = DrasiServerCore::builder()
+    ///     .add_storage_backend(StorageBackendConfig {
+    ///         id: "rocks_persistent".to_string(),
+    ///         spec: StorageBackendSpec::RocksDb {
+    ///             path: "/data/drasi/indexes".to_string(),
+    ///             enable_archive: true,
+    ///             direct_io: false,
+    ///         },
+    ///     })
+    ///     .add_query(
+    ///         Query::cypher("my_query")
+    ///             .query("MATCH (n) RETURN n")
+    ///             .from_source("events")
+    ///             .with_storage_backend("rocks_persistent")  // Reference the backend
+    ///             .build()
+    ///     )
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// ## Redis/Garnet Backend
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, Query, StorageBackendConfig, StorageBackendSpec};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let core = DrasiServerCore::builder()
+    ///     .add_storage_backend(StorageBackendConfig {
+    ///         id: "redis_distributed".to_string(),
+    ///         spec: StorageBackendSpec::Redis {
+    ///             connection_string: "redis://localhost:6379".to_string(),
+    ///             cache_size: 10000,
+    ///         },
+    ///     })
+    ///     .add_query(
+    ///         Query::cypher("my_query")
+    ///             .query("MATCH (n) RETURN n")
+    ///             .from_source("events")
+    ///             .with_storage_backend("redis_distributed")
+    ///             .build()
+    ///     )
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_storage_backend(mut self, backend: crate::indexes::StorageBackendConfig) -> Self {
+        self.storage_backends.push(backend);
+        self
+    }
+
+    /// Add multiple storage backends at once
+    ///
+    /// Convenient method for adding multiple storage backend configurations in one call.
+    ///
+    /// # Arguments
+    ///
+    /// * `backends` - Vector of storage backend configurations
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::{DrasiServerCore, StorageBackendConfig, StorageBackendSpec};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let backends = vec![
+    ///     StorageBackendConfig {
+    ///         id: "rocks_primary".to_string(),
+    ///         spec: StorageBackendSpec::RocksDb {
+    ///             path: "/data/primary".to_string(),
+    ///             enable_archive: true,
+    ///             direct_io: false,
+    ///         },
+    ///     },
+    ///     StorageBackendConfig {
+    ///         id: "redis_cache".to_string(),
+    ///         spec: StorageBackendSpec::Redis {
+    ///             connection_string: "redis://cache:6379".to_string(),
+    ///             cache_size: 5000,
+    ///         },
+    ///     },
+    /// ];
+    ///
+    /// let core = DrasiServerCore::builder()
+    ///     .add_storage_backends(backends)
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_storage_backends(
+        mut self,
+        backends: Vec<crate::indexes::StorageBackendConfig>,
+    ) -> Self {
+        self.storage_backends.extend(backends);
         self
     }
 
@@ -484,6 +606,7 @@ impl DrasiServerCoreBuilder {
         // This ensures the From implementation applies the priority queue hierarchy
         let core_config = DrasiServerCoreConfig {
             server_core: server_settings,
+            storage_backends: self.storage_backends,
             sources: self.sources,
             queries: self.queries,
             reactions: self.reactions,

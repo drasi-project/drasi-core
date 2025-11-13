@@ -27,6 +27,7 @@ pub mod test_fixtures {
                 priority_queue_capacity: None,
                 dispatch_buffer_capacity: None,
             },
+            storage_backends: vec![],
             sources: vec![],
             queries: vec![],
             reactions: vec![],
@@ -120,6 +121,7 @@ pub mod test_fixtures {
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
+            storage_backend: None,
         }
     }
 
@@ -138,6 +140,7 @@ pub mod test_fixtures {
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
+            storage_backend: None,
         }
     }
 

@@ -49,6 +49,7 @@ impl MockQuery {
                 priority_queue_capacity: None,
                 dispatch_buffer_capacity: None,
                 dispatch_mode: None,
+            storage_backend: None,
             },
             status: Arc::new(RwLock::new(ComponentStatus::Running)),
             dispatcher,
