@@ -17,9 +17,10 @@ DrasiServerCore is a Rust library for building change-driven solutions that dete
 8. [Queries - Change Detection](#queries---change-detection)
 9. [Reactions - Response Actions](#reactions---response-actions)
 10. [Bootstrap System](#bootstrap-system)
-11. [Data Flow and Transformations](#data-flow-and-transformations)
-12. [Advanced Topics](#advanced-topics)
-13. [API Reference](#api-reference)
+11. [Middleware Configuration](#middleware-configuration)
+12. [Data Flow and Transformations](#data-flow-and-transformations)
+13. [Advanced Topics](#advanced-topics)
+14. [API Reference](#api-reference)
 15. [Best Practices](#best-practices)
 16. [Troubleshooting](#troubleshooting)
 17. [Contributing](#contributing)
@@ -986,6 +987,201 @@ match status {
     _ => {}
 }
 ```
+
+## Middleware Configuration
+
+Middleware provides powerful data transformation capabilities as data flows from sources to queries. Transform, filter, and enrich data before it reaches your continuous queries.
+
+### Overview
+
+Middleware components can be chained in pipelines, with each source having its own independent pipeline configuration. This enables:
+- Data transformation and enrichment
+- Filtering and validation
+- Format normalization
+- Complex business logic processing
+
+### Available Middleware Types
+
+| Middleware | Purpose | Example Use Case |
+|------------|---------|------------------|
+| **JQ** | Transform with JQ expressions | Convert units, filter data, reshape objects |
+| **Map** | Simple field mapping | Rename fields, select specific fields |
+| **Unwind** | Flatten arrays | Process array elements individually |
+| **Relabel** | Change labels | Normalize labels across sources |
+| **Decoder** | Decode values | Base64, URL, hex decoding |
+| **ParseJson** | Parse JSON strings | Extract structured data from JSON fields |
+| **Promote** | Promote nested fields | Flatten nested objects |
+
+### Quick Example: Temperature Conversion
+
+**YAML Configuration:**
+
+```yaml
+queries:
+  - id: temperature-monitor
+    query: "MATCH (n:Sensor) WHERE n.temp_f > 80 RETURN n"
+
+    # Define middleware
+    middleware:
+      - kind: jq
+        name: celsius_to_fahrenheit
+        config:
+          Sensor:
+            insert:
+              - op: Insert
+                label: "\"Sensor\""
+                id: .id
+                query: "{ id: .id, temp_f: (.temp_c * 9/5 + 32) }"
+
+    # Associate with source via pipeline
+    source_subscriptions:
+      - source_id: sensor_data
+        pipeline: [celsius_to_fahrenheit]
+```
+
+**Rust Builder API:**
+
+```rust
+use drasi_core::models::SourceMiddlewareConfig;
+use serde_json::json;
+
+let query = Query::cypher("temperature-monitor")
+    .query("MATCH (n:Sensor) WHERE n.temp_f > 80 RETURN n")
+    .with_middleware(SourceMiddlewareConfig::new(
+        "jq",
+        "celsius_to_fahrenheit",
+        json!({
+            "Sensor": {
+                "insert": [{
+                    "op": "Insert",
+                    "label": "\"Sensor\"",
+                    "id": ".id",
+                    "query": "{ id: .id, temp_f: (.temp_c * 9/5 + 32) }"
+                }]
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    ))
+    .from_source("sensor_data")
+    .with_source_pipeline("sensor_data", vec!["celsius_to_fahrenheit".to_string()])
+    .build();
+```
+
+### Multi-Step Pipeline Example
+
+Chain multiple middleware for complex transformations:
+
+```yaml
+queries:
+  - id: event-processor
+    query: "MATCH (n:Event) WHERE n.priority = 'high' RETURN n"
+
+    middleware:
+      # Step 1: Parse JSON
+      - kind: parse_json
+        name: json_parser
+        config:
+          field: payload
+
+      # Step 2: Promote fields
+      - kind: promote
+        name: field_promoter
+        config:
+          fields: [event_type, priority, user_id]
+
+      # Step 3: Filter and enrich
+      - kind: jq
+        name: enrich_event
+        config:
+          Event:
+            insert:
+              - op: Insert
+                label: "\"Event\""
+                id: .id
+                query: |
+                  {
+                    id: .id,
+                    event_type: .event_type,
+                    priority: .priority,
+                    user_id: .user_id,
+                    processed_at: now | todate
+                  }
+
+    source_subscriptions:
+      - source_id: raw_events
+        pipeline: [json_parser, field_promoter, enrich_event]
+```
+
+### Multiple Sources with Different Pipelines
+
+Different sources can have different transformation pipelines:
+
+```yaml
+queries:
+  - id: unified-data
+    query: "MATCH (n:Data) RETURN n"
+
+    middleware:
+      - kind: jq
+        name: validator
+        config:
+          Data:
+            insert:
+              - op: Insert
+                label: "\"Data\""
+                id: .id
+                query: "select(.value > 0 and .value < 1000)"
+
+      - kind: jq
+        name: normalizer
+        config:
+          Data:
+            insert:
+              - op: Insert
+                label: "\"Data\""
+                id: .id
+                query: "{ id: .id, value: .value, timestamp: now }"
+
+    source_subscriptions:
+      # Raw source: needs validation and normalization
+      - source_id: raw_feed
+        pipeline: [validator, normalizer]
+
+      # Trusted source: only normalization
+      - source_id: trusted_feed
+        pipeline: [normalizer]
+
+      # Pre-processed source: no middleware
+      - source_id: clean_feed
+        pipeline: []
+```
+
+### Backward Compatibility
+
+Sources without middleware work as before with empty pipelines:
+
+```yaml
+source_subscriptions:
+  - source_id: my_source
+    pipeline: []  # No transformation
+```
+
+### Detailed Documentation
+
+For comprehensive middleware documentation including:
+- All middleware types with detailed examples
+- JQ expression reference
+- Pipeline design patterns
+- Performance best practices
+- Troubleshooting guide
+
+See: [docs/MIDDLEWARE.md](docs/MIDDLEWARE.md)
+
+### Migration from Old Format
+
+If you're using the deprecated `sources: [...]` field, see [MIGRATION.md](MIGRATION.md) for the migration guide to `source_subscriptions`.
 
 ## Data Flow and Transformations
 

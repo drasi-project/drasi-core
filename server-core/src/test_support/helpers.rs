@@ -108,12 +108,19 @@ pub mod test_fixtures {
 
     /// Creates a test query configuration
     pub fn create_test_query_config(id: &str, sources: Vec<String>) -> QueryConfig {
-        use crate::config::QueryLanguage;
+        use crate::config::{QueryLanguage, SourceSubscriptionConfig};
         QueryConfig {
             id: id.to_string(),
             query: "MATCH (n) RETURN n".to_string(),
             query_language: QueryLanguage::Cypher,
-            sources,
+            middleware: vec![],
+            source_subscriptions: sources
+                .into_iter()
+                .map(|source_id| SourceSubscriptionConfig {
+                    source_id,
+                    pipeline: vec![],
+                })
+                .collect(),
             auto_start: true,
             joins: None,
             enable_bootstrap: true,
@@ -127,12 +134,19 @@ pub mod test_fixtures {
 
     /// Creates a test GQL query configuration
     pub fn create_test_gql_query_config(id: &str, sources: Vec<String>) -> QueryConfig {
-        use crate::config::QueryLanguage;
+        use crate::config::{QueryLanguage, SourceSubscriptionConfig};
         QueryConfig {
             id: id.to_string(),
             query: "MATCH (n:Person) RETURN n.name".to_string(),
             query_language: QueryLanguage::GQL,
-            sources,
+            middleware: vec![],
+            source_subscriptions: sources
+                .into_iter()
+                .map(|source_id| SourceSubscriptionConfig {
+                    source_id,
+                    pipeline: vec![],
+                })
+                .collect(),
             auto_start: true,
             joins: None,
             enable_bootstrap: true,

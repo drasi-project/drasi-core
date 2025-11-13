@@ -33,7 +33,10 @@ mod schema_tests {
         let valid_json = json!({
             "id": "test-query",
             "query": "MATCH (n) RETURN n",
-            "sources": ["source1", "source2"],
+            "source_subscriptions": [
+                {"source_id": "source1", "pipeline": []},
+                {"source_id": "source2", "pipeline": []}
+            ],
             "auto_start": false,
             "properties": {}
         });
@@ -43,7 +46,7 @@ mod schema_tests {
 
         let config = config.unwrap();
         assert_eq!(config.id, "test-query");
-        assert_eq!(config.sources.len(), 2);
+        assert_eq!(config.source_subscriptions.len(), 2);
         assert!(!config.auto_start);
         assert_eq!(config.query_language, QueryLanguage::Cypher); // default
     }
@@ -54,7 +57,9 @@ mod schema_tests {
         let json = json!({
             "id": "test-query",
             "query": "MATCH (n) RETURN n",
-            "sources": ["source1"]
+            "source_subscriptions": [
+                {"source_id": "source1", "pipeline": []}
+            ]
         });
 
         let config: QueryConfig = serde_json::from_value(json).unwrap();
@@ -68,7 +73,9 @@ mod schema_tests {
             "id": "test-query",
             "query": "MATCH (n) RETURN n",
             "queryLanguage": "Cypher",
-            "sources": ["source1"]
+            "source_subscriptions": [
+                {"source_id": "source1", "pipeline": []}
+            ]
         });
 
         let config: QueryConfig = serde_json::from_value(json).unwrap();
@@ -82,7 +89,9 @@ mod schema_tests {
             "id": "test-query",
             "query": "MATCH (n:Person) RETURN n.name",
             "queryLanguage": "GQL",
-            "sources": ["source1"]
+            "source_subscriptions": [
+                {"source_id": "source1", "pipeline": []}
+            ]
         });
 
         let config: QueryConfig = serde_json::from_value(json).unwrap();
@@ -148,7 +157,11 @@ mod schema_tests {
             id: "query1".to_string(),
             query: "MATCH (n) RETURN n".to_string(),
             query_language: crate::config::QueryLanguage::Cypher,
-            sources: vec!["source1".to_string()],
+            middleware: vec![],
+            source_subscriptions: vec![crate::config::SourceSubscriptionConfig {
+                source_id: "source1".to_string(),
+                pipeline: vec![],
+            }],
             auto_start: true,
             joins: None,
             enable_bootstrap: true,
@@ -329,7 +342,11 @@ mod runtime_tests {
             id: "test-query".to_string(),
             query: "MATCH (n) RETURN n".to_string(),
             query_language: QueryLanguage::Cypher,
-            sources: vec!["source1".to_string()],
+            middleware: vec![],
+            source_subscriptions: vec![crate::config::SourceSubscriptionConfig {
+                source_id: "source1".to_string(),
+                pipeline: vec![],
+            }],
             auto_start: false,
             joins: None,
             enable_bootstrap: true,
@@ -343,7 +360,10 @@ mod runtime_tests {
         let runtime = QueryRuntime::from(config.clone());
         assert_eq!(runtime.id, config.id);
         assert_eq!(runtime.query, config.query);
-        assert_eq!(runtime.sources, config.sources);
+        assert_eq!(
+            runtime.source_subscriptions.len(),
+            config.source_subscriptions.len()
+        );
         matches!(runtime.status, ComponentStatus::Stopped);
     }
 

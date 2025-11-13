@@ -17,7 +17,7 @@
 //! 2. Server global setting
 //! 3. Hardcoded default (1000)
 
-use drasi_server_core::config::SourceSpecificConfig;
+use drasi_server_core::config::{SourceSpecificConfig, SourceSubscriptionConfig};
 use drasi_server_core::sources::grpc::GrpcSourceConfig;
 use drasi_server_core::sources::http::HttpSourceConfig;
 use drasi_server_core::sources::mock::MockSourceConfig;
@@ -67,7 +67,11 @@ async fn test_dispatch_buffer_capacity_hierarchy_all_defaults() {
                 id: "query1".to_string(),
                 query: "MATCH (n) RETURN n".to_string(),
                 query_language: QueryLanguage::Cypher,
-                sources: vec!["source1".to_string()],
+                source_subscriptions: vec![SourceSubscriptionConfig {
+                    source_id: "source1".to_string(),
+                    pipeline: vec![],
+                }],
+                middleware: vec![],
                 auto_start: true,
                 joins: None,
                 enable_bootstrap: true,
@@ -81,7 +85,11 @@ async fn test_dispatch_buffer_capacity_hierarchy_all_defaults() {
                 id: "query2".to_string(),
                 query: "MATCH (m) RETURN m".to_string(),
                 query_language: QueryLanguage::Cypher,
-                sources: vec!["source2".to_string()],
+                source_subscriptions: vec![SourceSubscriptionConfig {
+                    source_id: "source2".to_string(),
+                    pipeline: vec![],
+                }],
+                middleware: vec![],
                 auto_start: true,
                 joins: None,
                 enable_bootstrap: true,
@@ -89,7 +97,7 @@ async fn test_dispatch_buffer_capacity_hierarchy_all_defaults() {
                 priority_queue_capacity: None,
                 dispatch_buffer_capacity: None, // No component override,
                 dispatch_mode: None,
-            storage_backend: None,
+                storage_backend: None,
             },
         ],
         reactions: vec![],
@@ -168,7 +176,11 @@ async fn test_dispatch_buffer_capacity_hierarchy_global_override() {
             id: "query1".to_string(),
             query: "MATCH (n) RETURN n".to_string(),
             query_language: QueryLanguage::Cypher,
-            sources: vec!["source1".to_string()],
+            source_subscriptions: vec![SourceSubscriptionConfig {
+                source_id: "source1".to_string(),
+                pipeline: vec![],
+            }],
+            middleware: vec![],
             auto_start: true,
             joins: None,
             enable_bootstrap: true,
@@ -250,7 +262,11 @@ async fn test_dispatch_buffer_capacity_hierarchy_component_override() {
                 id: "query1".to_string(),
                 query: "MATCH (n) RETURN n".to_string(),
                 query_language: QueryLanguage::Cypher,
-                sources: vec!["source1".to_string()],
+                source_subscriptions: vec![SourceSubscriptionConfig {
+                    source_id: "source1".to_string(),
+                    pipeline: vec![],
+                }],
+                middleware: vec![],
                 auto_start: true,
                 joins: None,
                 enable_bootstrap: true,
@@ -258,13 +274,17 @@ async fn test_dispatch_buffer_capacity_hierarchy_component_override() {
                 priority_queue_capacity: None,
                 dispatch_buffer_capacity: Some(8000), // Component override,
                 dispatch_mode: None,
-            storage_backend: None,
+                storage_backend: None,
             },
             QueryConfig {
                 id: "query2".to_string(),
                 query: "MATCH (m) RETURN m".to_string(),
                 query_language: QueryLanguage::Cypher,
-                sources: vec!["source2".to_string()],
+                source_subscriptions: vec![SourceSubscriptionConfig {
+                    source_id: "source2".to_string(),
+                    pipeline: vec![],
+                }],
+                middleware: vec![],
                 auto_start: true,
                 joins: None,
                 enable_bootstrap: true,
@@ -272,7 +292,7 @@ async fn test_dispatch_buffer_capacity_hierarchy_component_override() {
                 priority_queue_capacity: None,
                 dispatch_buffer_capacity: None, // No component override,
                 dispatch_mode: None,
-            storage_backend: None,
+                storage_backend: None,
             },
         ],
         reactions: vec![],
@@ -369,7 +389,11 @@ async fn test_dispatch_buffer_capacity_hierarchy_mixed() {
                 id: "high_fanout_query".to_string(),
                 query: "MATCH (n) RETURN n".to_string(),
                 query_language: QueryLanguage::Cypher,
-                sources: vec!["high_volume_source".to_string()],
+                source_subscriptions: vec![SourceSubscriptionConfig {
+                    source_id: "high_volume_source".to_string(),
+                    pipeline: vec![],
+                }],
+                middleware: vec![],
                 auto_start: true,
                 joins: None,
                 enable_bootstrap: true,
@@ -377,13 +401,17 @@ async fn test_dispatch_buffer_capacity_hierarchy_mixed() {
                 priority_queue_capacity: Some(100000),
                 dispatch_buffer_capacity: Some(15000), // Many reactions subscribe,
                 dispatch_mode: None,
-            storage_backend: None,
+                storage_backend: None,
             },
             QueryConfig {
                 id: "standard_query".to_string(),
                 query: "MATCH (m) RETURN m".to_string(),
                 query_language: QueryLanguage::Cypher,
-                sources: vec!["standard_source".to_string()],
+                source_subscriptions: vec![SourceSubscriptionConfig {
+                    source_id: "standard_source".to_string(),
+                    pipeline: vec![],
+                }],
+                middleware: vec![],
                 auto_start: true,
                 joins: None,
                 enable_bootstrap: true,
@@ -391,7 +419,7 @@ async fn test_dispatch_buffer_capacity_hierarchy_mixed() {
                 priority_queue_capacity: None,  // Uses global (50000)
                 dispatch_buffer_capacity: None, // Uses global (3000),
                 dispatch_mode: None,
-            storage_backend: None,
+                storage_backend: None,
             },
         ],
         reactions: vec![],
@@ -470,7 +498,11 @@ async fn test_dispatch_buffer_capacity_hierarchy_nil_global_nil_component() {
             id: "query1".to_string(),
             query: "MATCH (n) RETURN n".to_string(),
             query_language: drasi_server_core::config::QueryLanguage::Cypher,
-            sources: vec!["source1".to_string()],
+            source_subscriptions: vec![SourceSubscriptionConfig {
+                source_id: "source1".to_string(),
+                pipeline: vec![],
+            }],
+            middleware: vec![],
             auto_start: true,
             joins: None,
             enable_bootstrap: true,

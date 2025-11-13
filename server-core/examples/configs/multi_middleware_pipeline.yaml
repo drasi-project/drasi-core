@@ -1,0 +1,98 @@
+# Multi-Middleware Pipeline Example
+#
+# This example demonstrates chaining multiple middleware components in a pipeline.
+# Data flows through: Parse JSON → Promote Fields → Filter → Enrich
+#
+# Use Case: Process raw JSON events, extract important fields, filter, and add metadata
+
+server_core:
+  id: event-processor
+
+sources:
+  - id: raw_event_stream
+    source_type: application
+    properties:
+      # Receives events with JSON payloads
+    auto_start: true
+
+queries:
+  - id: critical-events
+    query: |
+      MATCH (e:Event)
+      WHERE e.priority = 'high' AND e.is_critical = true
+      RETURN e.id, e.event_type, e.user_id, e.priority, e.processed_at
+
+    middleware:
+      # Step 1: Parse JSON payload field
+      - kind: parse_json
+        name: parse_event_payload
+        config:
+          field: payload
+          target_field: data
+
+      # Step 2: Promote nested fields to top level
+      - kind: promote
+        name: extract_event_fields
+        config:
+          fields:
+            - data.event_type
+            - data.priority
+            - data.user_id
+            - data.severity
+
+      # Step 3: Filter and enrich with JQ
+      - kind: jq
+        name: enrich_and_filter
+        config:
+          Event:
+            insert:
+              - op: Insert
+                label: "\"Event\""
+                id: .id
+                query: |
+                  {
+                    id: .id,
+                    event_type: .event_type,
+                    priority: .priority,
+                    user_id: .user_id,
+                    severity: .severity,
+                    is_critical: (.severity > 8),
+                    processed_at: (now | todate),
+                    source: "raw_stream"
+                  } | select(.priority != null and .event_type != null)
+
+    # Pipeline processes data in order: parse → promote → filter/enrich
+    source_subscriptions:
+      - source_id: raw_event_stream
+        pipeline:
+          - parse_event_payload
+          - extract_event_fields
+          - enrich_and_filter
+
+    auto_start: true
+
+reactions:
+  - id: critical-event-logger
+    reaction_type: log
+    queries: [critical-events]
+    properties:
+      log_level: warn
+    auto_start: true
+
+# Test Data (send to application source):
+# {
+#   "id": "evt-123",
+#   "payload": "{\"event_type\":\"security_alert\",\"priority\":\"high\",\"user_id\":\"user-456\",\"severity\":9}"
+# }
+#
+# After Pipeline Processing:
+# {
+#   "id": "evt-123",
+#   "event_type": "security_alert",
+#   "priority": "high",
+#   "user_id": "user-456",
+#   "severity": 9,
+#   "is_critical": true,
+#   "processed_at": "2024-01-01T12:00:00Z",
+#   "source": "raw_stream"
+# }

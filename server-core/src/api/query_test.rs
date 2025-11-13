@@ -26,7 +26,7 @@ mod tests {
         assert_eq!(query.id, "cypher-query");
         assert!(matches!(query.query_language, QueryLanguage::Cypher));
         assert_eq!(query.query, "");
-        assert!(query.sources.is_empty());
+        assert!(query.source_subscriptions.is_empty());
         assert!(query.auto_start);
         assert!(query.joins.is_none());
     }
@@ -38,7 +38,7 @@ mod tests {
         assert_eq!(query.id, "gql-query");
         assert!(matches!(query.query_language, QueryLanguage::GQL));
         assert_eq!(query.query, "");
-        assert!(query.sources.is_empty());
+        assert!(query.source_subscriptions.is_empty());
         assert!(query.auto_start);
     }
 
@@ -58,8 +58,8 @@ mod tests {
             .from_source("source-1")
             .build();
 
-        assert_eq!(query.sources.len(), 1);
-        assert_eq!(query.sources[0], "source-1");
+        assert_eq!(query.source_subscriptions.len(), 1);
+        assert_eq!(query.source_subscriptions[0].source_id, "source-1");
     }
 
     #[test]
@@ -71,8 +71,10 @@ mod tests {
             .from_source("source-3")
             .build();
 
-        assert_eq!(query.sources.len(), 3);
-        assert_eq!(query.sources, vec!["source-1", "source-2", "source-3"]);
+        assert_eq!(query.source_subscriptions.len(), 3);
+        assert_eq!(query.source_subscriptions[0].source_id, "source-1");
+        assert_eq!(query.source_subscriptions[1].source_id, "source-2");
+        assert_eq!(query.source_subscriptions[2].source_id, "source-3");
     }
 
     #[test]
@@ -83,9 +85,9 @@ mod tests {
             .from_sources(sources)
             .build();
 
-        assert_eq!(query.sources.len(), 2);
-        assert_eq!(query.sources[0], "source-1");
-        assert_eq!(query.sources[1], "source-2");
+        assert_eq!(query.source_subscriptions.len(), 2);
+        assert_eq!(query.source_subscriptions[0].source_id, "source-1");
+        assert_eq!(query.source_subscriptions[1].source_id, "source-2");
     }
 
     #[test]
@@ -187,7 +189,7 @@ mod tests {
             query.query,
             "MATCH (n:Order) WHERE n.status = 'active' RETURN n"
         );
-        assert_eq!(query.sources.len(), 1);
+        assert_eq!(query.source_subscriptions.len(), 1);
         assert!(query.auto_start);
     }
 
@@ -215,7 +217,7 @@ mod tests {
             .build();
 
         assert_eq!(query.id, "complex-query");
-        assert_eq!(query.sources.len(), 2);
+        assert_eq!(query.source_subscriptions.len(), 2);
         assert!(query.joins.is_some());
         assert_eq!(query.joins.unwrap().len(), 1);
     }
@@ -231,7 +233,7 @@ mod tests {
         assert_eq!(query.id, "gql-query");
         assert!(matches!(query.query_language, QueryLanguage::GQL));
         assert_eq!(query.query, "{ users { id name email } }");
-        assert_eq!(query.sources.len(), 1);
+        assert_eq!(query.source_subscriptions.len(), 1);
     }
 
     #[test]
@@ -243,8 +245,10 @@ mod tests {
             .from_sources(vec!["source-2".to_string(), "source-3".to_string()])
             .build();
 
-        assert_eq!(query.sources.len(), 3);
-        assert_eq!(query.sources, vec!["source-1", "source-2", "source-3"]);
+        assert_eq!(query.source_subscriptions.len(), 3);
+        assert_eq!(query.source_subscriptions[0].source_id, "source-1");
+        assert_eq!(query.source_subscriptions[1].source_id, "source-2");
+        assert_eq!(query.source_subscriptions[2].source_id, "source-3");
     }
 
     #[test]

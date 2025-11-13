@@ -28,6 +28,7 @@ use drasi_server_core::channels::{
 };
 use drasi_server_core::config::{
     PlatformReactionConfig, QueryConfig, ReactionConfig, ReactionSpecificConfig,
+    SourceSubscriptionConfig,
 };
 use drasi_server_core::queries::Query;
 use drasi_server_core::reactions::platform::{
@@ -60,7 +61,8 @@ impl MockQuery {
                 id: query_id.to_string(),
                 query: "MATCH (n) RETURN n".to_string(),
                 query_language: drasi_server_core::config::QueryLanguage::Cypher,
-                sources: vec![],
+                source_subscriptions: vec![],
+                middleware: vec![],
                 auto_start: false,
                 joins: None,
                 enable_bootstrap: false,
@@ -68,7 +70,7 @@ impl MockQuery {
                 priority_queue_capacity: None,
                 dispatch_buffer_capacity: None,
                 dispatch_mode: None,
-            storage_backend: None,
+                storage_backend: None,
             },
             status: Arc::new(RwLock::new(ComponentStatus::Running)),
             dispatcher,

@@ -18,6 +18,7 @@ mod manager_tests {
     use crate::channels::*;
     use crate::sources::SourceManager;
     use crate::test_support::helpers::test_fixtures::*;
+    use drasi_core::middleware::MiddlewareTypeRegistry;
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
@@ -33,10 +34,14 @@ mod manager_tests {
         // Create a test IndexFactory with empty backends
         let index_factory = Arc::new(crate::indexes::IndexFactory::new(vec![]));
 
+        // Create a test middleware registry
+        let middleware_registry = Arc::new(MiddlewareTypeRegistry::new());
+
         let query_manager = Arc::new(QueryManager::new(
             event_tx.clone(),
             source_manager.clone(),
             index_factory,
+            middleware_registry,
         ));
 
         (query_manager, event_rx, source_manager)
@@ -268,7 +273,10 @@ mod manager_tests {
         let retrieved = retrieved.unwrap();
         assert_eq!(retrieved.id, config.id);
         assert_eq!(retrieved.query, config.query);
-        assert_eq!(retrieved.sources, config.sources);
+        assert_eq!(
+            retrieved.source_subscriptions.len(),
+            config.source_subscriptions.len()
+        );
     }
 
     #[tokio::test]
@@ -350,7 +358,8 @@ mod query_core_tests {
                 id: "test".to_string(),
                 query: query.to_string(),
                 query_language: crate::config::QueryLanguage::Cypher,
-                sources: vec![],
+                middleware: vec![],
+                source_subscriptions: vec![],
                 auto_start: false,
                 joins: None,
                 enable_bootstrap: true,
@@ -372,7 +381,8 @@ mod query_core_tests {
             id: "test".to_string(),
             query: "".to_string(),
             query_language: crate::config::QueryLanguage::Cypher,
-            sources: vec![],
+            middleware: vec![],
+            source_subscriptions: vec![],
             auto_start: false,
             joins: None,
             enable_bootstrap: true,

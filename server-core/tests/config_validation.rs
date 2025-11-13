@@ -56,7 +56,7 @@ fn validate_config_file(path: &Path) -> Result<(), String> {
         if query.query.is_empty() {
             return Err(format!("Query '{}' has empty query string", query.id));
         }
-        if query.sources.is_empty() {
+        if query.source_subscriptions.is_empty() {
             return Err(format!("Query '{}' has no sources", query.id));
         }
     }

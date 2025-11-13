@@ -81,6 +81,57 @@ Examples of both Cypher and GQL query languages:
 - Query language specification
 - Join configuration
 
+## Middleware Configuration Examples
+
+The following standalone configuration files demonstrate middleware capabilities:
+
+### jq_transformation.yaml
+Simple JQ middleware transformation example:
+- Temperature conversion from Celsius to Fahrenheit
+- Single middleware in pipeline
+- Basic JQ expression usage
+
+**Key Features:**
+- Simple JQ transformation
+- Unit conversion example
+- Source pipeline association
+
+### multi_middleware_pipeline.yaml
+Multiple middleware components in a pipeline:
+- Parse JSON → Promote Fields → Filter → Enrich
+- 3-step transformation pipeline
+- Complex event processing
+
+**Key Features:**
+- Multi-step pipeline
+- JSON parsing and field promotion
+- JQ filtering and enrichment
+- Sequential middleware execution
+
+### multi_source_pipelines.yaml
+Different pipelines for different sources:
+- 4 sources with varying data quality
+- Source-specific transformation pipelines
+- Quality-based processing strategies
+
+**Key Features:**
+- Per-source pipeline configuration
+- Data quality management
+- Validation, normalization, and enrichment patterns
+- Empty pipeline for pre-processed data
+
+### no_middleware.yaml
+Backward compatibility with empty pipelines:
+- Sources without middleware
+- Empty pipeline configuration
+- Direct data passthrough
+
+**Key Features:**
+- No transformation applied
+- Backward compatibility
+- Simple query patterns
+- Performance optimization
+
 ## Bootstrap Provider Types
 
 ### Script File Provider
@@ -184,11 +235,14 @@ JSONL format uses one JSON object per line. Script files require:
 - `id`: Unique identifier for the query
 - `query`: Cypher query string
 - `query_language`: "cypher" or "gql" (default: "cypher")
-- `sources`: List of source IDs to query
+- `middleware`: List of middleware configurations (optional)
+- `source_subscriptions`: List of source subscriptions with pipelines
 - `auto_start`: Whether to start automatically
 - `priority_queue_capacity`: Optional override for this query's priority queue capacity
 - `dispatch_buffer_capacity`: Optional override for this query's dispatch buffer capacity
 - `dispatch_mode`: Optional dispatch mode ("Broadcast" or "Channel", default: "Channel")
+
+**Note:** The old `sources: [...]` field is deprecated. Use `source_subscriptions` instead. See [MIGRATION.md](../../MIGRATION.md) for migration guide.
 
 ### Reaction Configuration
 - `id`: Unique identifier for the reaction
@@ -319,3 +373,76 @@ Bootstrap providers can access source properties through the `BootstrapContext`,
 
 ### Component Lifecycle
 All components support start/stop lifecycle management for dynamic pipeline reconfiguration.
+
+## Middleware Configuration
+
+Middleware provides powerful data transformation capabilities as data flows from sources to queries. Each query can define middleware components and associate them with sources via pipelines.
+
+### Available Middleware Types
+
+- **JQ**: Transform data using JQ expressions (filtering, reshaping, calculations)
+- **Map**: Simple field mapping and renaming
+- **Unwind**: Flatten arrays into individual elements
+- **Relabel**: Change node/relationship labels
+- **Decoder**: Decode encoded values (Base64, URL, hex)
+- **ParseJson**: Parse JSON strings into structured objects
+- **Promote**: Promote nested fields to top level
+
+### Middleware Configuration Pattern
+
+```yaml
+queries:
+  - id: my-query
+    query: "MATCH (n) RETURN n"
+
+    # Define reusable middleware
+    middleware:
+      - kind: jq
+        name: my_transform
+        config:
+          # Middleware-specific configuration
+
+    # Associate with sources via pipelines
+    source_subscriptions:
+      - source_id: source1
+        pipeline: [my_transform]  # Apply middleware
+      - source_id: source2
+        pipeline: []  # No transformation
+```
+
+### Example: Temperature Conversion
+
+```yaml
+queries:
+  - id: temp-monitor
+    query: "MATCH (s:Sensor) WHERE s.temp_f > 80 RETURN s"
+
+    middleware:
+      - kind: jq
+        name: c_to_f
+        config:
+          Sensor:
+            insert:
+              - op: Insert
+                label: "\"Sensor\""
+                id: .id
+                query: "{ id: .id, temp_f: (.temp_c * 9/5 + 32) }"
+
+    source_subscriptions:
+      - source_id: metric_sensors
+        pipeline: [c_to_f]
+```
+
+### Detailed Middleware Documentation
+
+For comprehensive middleware documentation including all types, examples, and best practices:
+- [docs/MIDDLEWARE.md](../../docs/MIDDLEWARE.md) - Complete middleware guide
+- [MIGRATION.md](../../MIGRATION.md) - Migration from old `sources` format
+
+### Middleware Example Files
+
+See the middleware configuration examples in this directory:
+- `jq_transformation.yaml` - Simple JQ transformation
+- `multi_middleware_pipeline.yaml` - Chained middleware pipeline
+- `multi_source_pipelines.yaml` - Different pipelines per source
+- `no_middleware.yaml` - Backward compatibility example

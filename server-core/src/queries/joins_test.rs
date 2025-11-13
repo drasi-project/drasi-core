@@ -19,6 +19,7 @@ mod query_joins_tests {
     use crate::queries::QueryManager;
     use crate::sources::{convert_json_to_element_value, SourceManager};
     use crate::test_support::helpers::test_fixtures::*;
+    use drasi_core::middleware::MiddlewareTypeRegistry;
     use drasi_core::models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
     };
@@ -45,11 +46,19 @@ mod query_joins_tests {
         sources: Vec<String>,
         joins: Vec<QueryJoinConfig>,
     ) -> QueryConfig {
+        use crate::config::SourceSubscriptionConfig;
         QueryConfig {
             id: id.to_string(),
             query: query.to_string(),
             query_language: crate::config::QueryLanguage::Cypher,
-            sources,
+            middleware: vec![],
+            source_subscriptions: sources
+                .into_iter()
+                .map(|source_id| SourceSubscriptionConfig {
+                    source_id,
+                    pipeline: vec![],
+                })
+                .collect(),
             auto_start: false,
             joins: Some(joins),
             enable_bootstrap: true,
@@ -108,10 +117,14 @@ mod query_joins_tests {
         // Create a test IndexFactory with empty backends
         let index_factory = Arc::new(crate::indexes::IndexFactory::new(vec![]));
 
+        // Create a test middleware registry
+        let middleware_registry = Arc::new(MiddlewareTypeRegistry::new());
+
         let query_manager = Arc::new(QueryManager::new(
             event_tx.clone(),
             source_manager.clone(),
             index_factory,
+            middleware_registry,
         ));
 
         (query_manager, event_rx, source_manager)

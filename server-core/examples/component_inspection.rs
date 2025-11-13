@@ -89,7 +89,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  ID: {}", query_info.id);
     println!("  Query: {}", query_info.query);
     println!("  Status: {:?}", query_info.status);
-    println!("  Sources: {:?}", query_info.sources);
+    let source_ids: Vec<String> = query_info
+        .source_subscriptions
+        .iter()
+        .map(|s| s.source_id.clone())
+        .collect();
+    println!("  Sources: {:?}", source_ids);
     println!();
 
     // Get detailed information about a specific reaction

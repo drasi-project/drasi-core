@@ -120,7 +120,7 @@ async fn test_get_query_info() {
     let query_info = core.get_query_info("test-query").await.unwrap();
     assert_eq!(query_info.id, "test-query");
     assert_eq!(query_info.query, "MATCH (n) RETURN n");
-    assert!(query_info.sources.contains(&"source1".to_string()));
+    assert!(query_info.source_subscriptions.iter().any(|s| s.source_id == "source1"));
 }
 
 #[tokio::test]
