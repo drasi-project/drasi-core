@@ -25,6 +25,7 @@ use drasi_core::{
     evaluation::context::{QueryPartEvaluationContext, QueryVariables},
     evaluation::functions::FunctionRegistry,
     evaluation::variable_value::VariableValue,
+    middleware::MiddlewareTypeRegistry,
     query::{ContinuousQuery, QueryBuilder},
 };
 use drasi_functions_cypher::CypherFunctionSet;
@@ -134,6 +135,8 @@ pub struct DrasiQuery {
     bootstrap_state: Arc<RwLock<HashMap<String, BootstrapPhase>>>,
     // IndexFactory for creating storage backend indexes
     index_factory: Arc<crate::indexes::IndexFactory>,
+    // Middleware registry for query middleware
+    middleware_registry: Arc<MiddlewareTypeRegistry>,
 }
 
 impl DrasiQuery {
@@ -142,6 +145,7 @@ impl DrasiQuery {
         event_tx: ComponentEventSender,
         source_manager: Arc<SourceManager>,
         index_factory: Arc<crate::indexes::IndexFactory>,
+        middleware_registry: Arc<MiddlewareTypeRegistry>,
     ) -> Result<Self> {
         // Create priority queue with configured capacity (fallback to 10000 if not set)
         let priority_capacity = config.priority_queue_capacity.unwrap_or(10000);
@@ -159,6 +163,7 @@ impl DrasiQuery {
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
             bootstrap_state: Arc::new(RwLock::new(HashMap::new())),
             index_factory,
+            middleware_registry,
         })
     }
 
@@ -225,6 +230,19 @@ impl Query for DrasiQuery {
 
         let mut builder =
             QueryBuilder::new(&query_str, parser).with_function_registry(function_registry);
+
+        // Configure middleware registry and middleware
+        builder = builder.with_middleware_registry(self.middleware_registry.clone());
+
+        // Add all middleware configurations from config
+        for mw in &self.base.config.middleware {
+            builder = builder.with_source_middleware(Arc::new(mw.clone()));
+        }
+
+        // Configure source pipelines for all subscriptions
+        for sub in &self.base.config.source_subscriptions {
+            builder = builder.with_source_pipeline(&sub.source_id, &sub.pipeline);
+        }
 
         // Add joins if configured
         if let Some(joins) = &self.base.config.joins {
@@ -305,14 +323,20 @@ impl Query for DrasiQuery {
         info!(
             "Query '{}' subscribing to {} sources: {:?}",
             self.base.config.id,
-            self.base.config.sources.len(),
-            self.base.config.sources
+            self.base.config.source_subscriptions.len(),
+            self.base
+                .config
+                .source_subscriptions
+                .iter()
+                .map(|s| &s.source_id)
+                .collect::<Vec<_>>()
         );
 
         let mut bootstrap_channels = Vec::new();
         let mut subscription_tasks = Vec::new();
 
-        for source_id in &self.base.config.sources {
+        for subscription in &self.base.config.source_subscriptions {
+            let source_id = &subscription.source_id;
             // Get source from SourceManager
             let source = match self.source_manager.get_source_instance(source_id).await {
                 Some(src) => src,
@@ -366,7 +390,7 @@ impl Query for DrasiQuery {
             self.bootstrap_state
                 .write()
                 .await
-                .insert(source_id.clone(), BootstrapPhase::NotStarted);
+                .insert(source_id.to_string(), BootstrapPhase::NotStarted);
 
             // Spawn task to forward events from receiver to priority queue
             let mut receiver = subscription_response.receiver;
@@ -464,7 +488,7 @@ impl Query for DrasiQuery {
                 bootstrap_state
                     .write()
                     .await
-                    .insert(source_id.clone(), BootstrapPhase::InProgress);
+                    .insert(source_id.to_string(), BootstrapPhase::InProgress);
 
                 info!(
                     "[BOOTSTRAP] Query '{}' processing bootstrap from source '{}'",
@@ -515,7 +539,7 @@ impl Query for DrasiQuery {
                     bootstrap_state_clone
                         .write()
                         .await
-                        .insert(source_id_clone.clone(), BootstrapPhase::Completed);
+                        .insert(source_id_clone.to_string(), BootstrapPhase::Completed);
 
                     // Check if all sources have completed bootstrap
                     let all_completed = {
@@ -884,6 +908,7 @@ pub struct QueryManager {
     event_tx: ComponentEventSender,
     source_manager: Arc<SourceManager>,
     index_factory: Arc<crate::indexes::IndexFactory>,
+    middleware_registry: Arc<MiddlewareTypeRegistry>,
 }
 
 impl QueryManager {
@@ -891,12 +916,14 @@ impl QueryManager {
         event_tx: ComponentEventSender,
         source_manager: Arc<SourceManager>,
         index_factory: Arc<crate::indexes::IndexFactory>,
+        middleware_registry: Arc<MiddlewareTypeRegistry>,
     ) -> Self {
         Self {
             queries: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
             source_manager,
             index_factory,
+            middleware_registry,
         }
     }
 
@@ -937,6 +964,7 @@ impl QueryManager {
             self.event_tx.clone(),
             self.source_manager.clone(),
             self.index_factory.clone(),
+            self.middleware_registry.clone(),
         )?;
 
         let query: Arc<dyn Query> = Arc::new(query);
@@ -1037,7 +1065,7 @@ impl QueryManager {
                     ComponentStatus::Error => Some("Query error occurred".to_string()),
                     _ => None,
                 },
-                sources: config.sources.clone(),
+                source_subscriptions: config.source_subscriptions.clone(),
                 joins: config.joins.clone(),
             };
             Ok(runtime)

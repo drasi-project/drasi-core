@@ -48,7 +48,9 @@ mod tests {
         let yaml = r#"
             id: test_query
             query: "RETURN 1"
-            sources: ["source1"]
+            source_subscriptions:
+              - source_id: source1
+                pipeline: []
             dispatch_mode: broadcast
         "#;
 
@@ -62,7 +64,9 @@ mod tests {
         let yaml = r#"
             id: test_query
             query: "RETURN 1"
-            sources: ["source1"]
+            source_subscriptions:
+              - source_id: source1
+                pipeline: []
         "#;
 
         let config: QueryConfig = serde_yaml::from_str(yaml).unwrap();
@@ -120,7 +124,11 @@ mod tests {
             id: "query1".to_string(),
             query: "RETURN 1".to_string(),
             query_language: crate::config::QueryLanguage::Cypher,
-            sources: vec!["broadcast_source".to_string()],
+            middleware: vec![],
+            source_subscriptions: vec![crate::config::SourceSubscriptionConfig {
+                source_id: "broadcast_source".to_string(),
+                pipeline: vec![],
+            }],
             auto_start: true,
             joins: None,
             enable_bootstrap: true,
@@ -135,7 +143,11 @@ mod tests {
             id: "query2".to_string(),
             query: "RETURN 2".to_string(),
             query_language: crate::config::QueryLanguage::Cypher,
-            sources: vec!["channel_source".to_string()],
+            middleware: vec![],
+            source_subscriptions: vec![crate::config::SourceSubscriptionConfig {
+                source_id: "channel_source".to_string(),
+                pipeline: vec![],
+            }],
             auto_start: true,
             joins: None,
             enable_bootstrap: true,

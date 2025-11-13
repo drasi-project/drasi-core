@@ -92,13 +92,11 @@ pub fn convert_http_to_source_change(
 
     match http_change {
         HttpSourceChange::Insert { element, timestamp } => {
-            let element =
-                create_element_from_http(element, source_id, get_timestamp(*timestamp))?;
+            let element = create_element_from_http(element, source_id, get_timestamp(*timestamp))?;
             Ok(SourceChange::Insert { element })
         }
         HttpSourceChange::Update { element, timestamp } => {
-            let element =
-                create_element_from_http(element, source_id, get_timestamp(*timestamp))?;
+            let element = create_element_from_http(element, source_id, get_timestamp(*timestamp))?;
             Ok(SourceChange::Update { element })
         }
         HttpSourceChange::Delete {

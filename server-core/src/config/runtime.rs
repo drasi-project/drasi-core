@@ -127,8 +127,8 @@ pub struct QueryRuntime {
     /// Error message if status is Error
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
-    /// IDs of sources this query subscribes to
-    pub sources: Vec<String>,
+    /// Source subscriptions with middleware pipelines
+    pub source_subscriptions: Vec<super::schema::SourceSubscriptionConfig>,
     /// Optional synthetic joins for the query
     #[serde(skip_serializing_if = "Option::is_none")]
     pub joins: Option<Vec<super::schema::QueryJoinConfig>>,
@@ -210,7 +210,7 @@ impl From<QueryConfig> for QueryRuntime {
             query: config.query,
             status: ComponentStatus::Stopped,
             error_message: None,
-            sources: config.sources,
+            source_subscriptions: config.source_subscriptions,
             joins: config.joins,
         }
     }

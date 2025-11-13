@@ -29,6 +29,7 @@ use crate::reactions::ApplicationReactionHandle;
 use crate::reactions::ReactionManager;
 use crate::sources::{ApplicationSourceHandle, SourceManager};
 use crate::state_guard::StateGuard;
+use drasi_core::middleware::MiddlewareTypeRegistry;
 
 /// Core Drasi Server for continuous query processing
 ///
@@ -212,6 +213,8 @@ pub struct DrasiServerCore {
     inspection: InspectionAPI,
     // Lifecycle manager for orchestrating component lifecycle
     lifecycle: Arc<RwLock<LifecycleManager>>,
+    // Middleware registry for source middleware
+    middleware_registry: Arc<MiddlewareTypeRegistry>,
 }
 
 impl Clone for DrasiServerCore {
@@ -227,6 +230,7 @@ impl Clone for DrasiServerCore {
             handle_registry: self.handle_registry.clone(),
             inspection: self.inspection.clone(),
             lifecycle: Arc::clone(&self.lifecycle),
+            middleware_registry: Arc::clone(&self.middleware_registry),
         }
     }
 }
@@ -248,10 +252,28 @@ impl DrasiServerCore {
 
         let source_manager = Arc::new(SourceManager::new(channels.component_event_tx.clone()));
 
+        // Initialize middleware registry and register all standard middleware factories
+        let mut middleware_registry = MiddlewareTypeRegistry::new();
+        middleware_registry.register(Arc::new(drasi_middleware::jq::JQFactory::new()));
+        middleware_registry.register(Arc::new(drasi_middleware::map::MapFactory::new()));
+        middleware_registry.register(Arc::new(drasi_middleware::unwind::UnwindFactory::new()));
+        middleware_registry.register(Arc::new(
+            drasi_middleware::relabel::RelabelMiddlewareFactory::new(),
+        ));
+        middleware_registry.register(Arc::new(drasi_middleware::decoder::DecoderFactory::new()));
+        middleware_registry.register(Arc::new(
+            drasi_middleware::parse_json::ParseJsonFactory::new(),
+        ));
+        middleware_registry.register(Arc::new(
+            drasi_middleware::promote::PromoteMiddlewareFactory::new(),
+        ));
+        let middleware_registry = Arc::new(middleware_registry);
+
         let query_manager = Arc::new(QueryManager::new(
             channels.component_event_tx.clone(),
             source_manager.clone(),
             config.index_factory.clone(),
+            middleware_registry.clone(),
         ));
 
         let reaction_manager = Arc::new(ReactionManager::new(channels.component_event_tx.clone()));
@@ -289,6 +311,7 @@ impl DrasiServerCore {
             handle_registry: HandleRegistry::new(),
             inspection,
             lifecycle,
+            middleware_registry,
         }
     }
 
@@ -510,6 +533,31 @@ impl DrasiServerCore {
     /// The returned reference is thread-safe and can be used across threads.
     pub fn query_manager(&self) -> &QueryManager {
         &self.query_manager
+    }
+
+    /// Get access to the middleware registry
+    ///
+    /// Returns a reference to the middleware type registry that contains all registered
+    /// middleware factories. The registry is pre-populated with all standard middleware
+    /// types (jq, map, unwind, relabel, decoder, parse_json, promote).
+    ///
+    /// # Thread Safety
+    ///
+    /// The returned Arc can be cloned and used across threads.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::DrasiServerCore;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let core = DrasiServerCore::builder().build().await?;
+    /// let registry = core.middleware_registry();
+    /// // Use registry to create middleware instances
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn middleware_registry(&self) -> Arc<MiddlewareTypeRegistry> {
+        Arc::clone(&self.middleware_registry)
     }
 
     /// Get a handle to an application reaction for programmatic result consumption
@@ -1453,5 +1501,100 @@ impl crate::reactions::common::base::QuerySubscriber for DrasiServerCore {
             .get_query_instance(id)
             .await
             .map_err(|e| anyhow::anyhow!(e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_middleware_registry_is_initialized() {
+        let core = DrasiServerCore::builder()
+            .with_id("test-server")
+            .build()
+            .await
+            .expect("Failed to build server");
+
+        let registry = core.middleware_registry();
+
+        // Verify that all 7 standard middleware factories are registered
+        assert!(
+            registry.get("jq").is_some(),
+            "JQ factory should be registered"
+        );
+        assert!(
+            registry.get("map").is_some(),
+            "Map factory should be registered"
+        );
+        assert!(
+            registry.get("unwind").is_some(),
+            "Unwind factory should be registered"
+        );
+        assert!(
+            registry.get("relabel").is_some(),
+            "Relabel factory should be registered"
+        );
+        assert!(
+            registry.get("decoder").is_some(),
+            "Decoder factory should be registered"
+        );
+        assert!(
+            registry.get("parse_json").is_some(),
+            "ParseJson factory should be registered"
+        );
+        assert!(
+            registry.get("promote").is_some(),
+            "Promote factory should be registered"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_middleware_registry_arc_sharing() {
+        let core = DrasiServerCore::builder()
+            .with_id("test-server")
+            .build()
+            .await
+            .expect("Failed to build server");
+
+        let registry1 = core.middleware_registry();
+        let registry2 = core.middleware_registry();
+
+        // Both Arc instances should point to the same underlying registry
+        // We can't directly test Arc equality, but we can verify both work
+        assert!(registry1.get("jq").is_some());
+        assert!(registry2.get("jq").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_middleware_registry_accessible_before_start() {
+        let core = DrasiServerCore::builder()
+            .with_id("test-server")
+            .build()
+            .await
+            .expect("Failed to build server");
+
+        // Should be accessible even before server is started
+        assert!(!core.is_running().await);
+        let registry = core.middleware_registry();
+        assert!(registry.get("jq").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_middleware_registry_accessible_after_start() {
+        let core = DrasiServerCore::builder()
+            .with_id("test-server")
+            .build()
+            .await
+            .expect("Failed to build server");
+
+        core.start().await.expect("Failed to start server");
+
+        // Should be accessible after server is started
+        assert!(core.is_running().await);
+        let registry = core.middleware_registry();
+        assert!(registry.get("jq").is_some());
+
+        core.stop().await.expect("Failed to stop server");
     }
 }

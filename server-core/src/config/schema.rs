@@ -22,6 +22,7 @@ use crate::bootstrap::BootstrapProviderConfig;
 use crate::channels::DispatchMode;
 use crate::config::enums::{ReactionSpecificConfig, SourceSpecificConfig};
 use crate::indexes::{StorageBackendConfig, StorageBackendRef};
+use drasi_core::models::SourceMiddlewareConfig;
 
 /// Query language for continuous queries
 ///
@@ -79,6 +80,40 @@ impl Default for QueryLanguage {
     fn default() -> Self {
         QueryLanguage::Cypher
     }
+}
+
+/// Source subscription configuration for queries
+///
+/// `SourceSubscriptionConfig` defines how a query subscribes to a specific source,
+/// including any middleware pipeline to apply to changes from that source.
+///
+/// # Fields
+///
+/// - **source_id**: ID of the source to subscribe to
+/// - **pipeline**: Optional list of middleware IDs to apply to changes from this source
+///
+/// # Examples
+///
+/// ## Simple Subscription (No Pipeline)
+///
+/// ```yaml
+/// source_subscriptions:
+///   - source_id: orders_db
+///     pipeline: []
+/// ```
+///
+/// ## Subscription with Middleware Pipeline
+///
+/// ```yaml
+/// source_subscriptions:
+///   - source_id: raw_events
+///     pipeline: [decoder, mapper, validator]
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceSubscriptionConfig {
+    pub source_id: String,
+    #[serde(default)]
+    pub pipeline: Vec<String>,
 }
 
 /// Root configuration for Drasi Server Core
@@ -548,8 +583,11 @@ pub struct QueryConfig {
     /// Query language to use (default: Cypher)
     #[serde(default, rename = "queryLanguage")]
     pub query_language: QueryLanguage,
-    /// IDs of sources this query subscribes to
-    pub sources: Vec<String>,
+    /// Middleware configurations for this query
+    #[serde(default)]
+    pub middleware: Vec<SourceMiddlewareConfig>,
+    /// Source subscriptions with optional middleware pipelines
+    pub source_subscriptions: Vec<SourceSubscriptionConfig>,
     /// Whether to automatically start this query (default: true)
     #[serde(default = "default_auto_start")]
     pub auto_start: bool,
@@ -1019,18 +1057,22 @@ impl DrasiServerCoreConfig {
             }
             // Validate backend configuration
             backend.spec.validate().map_err(|e| {
-                anyhow::anyhow!("Storage backend '{}' has invalid configuration: {}", backend.id, e)
+                anyhow::anyhow!(
+                    "Storage backend '{}' has invalid configuration: {}",
+                    backend.id,
+                    e
+                )
             })?;
         }
 
         // Validate source references in queries
         for query in &self.queries {
-            for source_id in &query.sources {
-                if !source_ids.contains(source_id) {
+            for subscription in &query.source_subscriptions {
+                if !source_ids.contains(&subscription.source_id) {
                     return Err(anyhow::anyhow!(
                         "Query '{}' references unknown source: '{}'",
                         query.id,
-                        source_id
+                        subscription.source_id
                     ));
                 }
             }

@@ -155,7 +155,8 @@ pub struct QueryBuilder {
     id: String,
     query: String,
     query_language: QueryLanguage,
-    sources: Vec<String>,
+    middleware: Vec<drasi_core::models::SourceMiddlewareConfig>,
+    source_subscriptions: Vec<crate::config::SourceSubscriptionConfig>,
     auto_start: bool,
     joins: Option<Vec<QueryJoinConfig>>,
     priority_queue_capacity: Option<usize>,
@@ -171,7 +172,8 @@ impl QueryBuilder {
             id: id.into(),
             query: query.into(),
             query_language: language,
-            sources: Vec::new(),
+            middleware: Vec::new(),
+            source_subscriptions: Vec::new(),
             auto_start: true,
             joins: None,
             priority_queue_capacity: None,
@@ -261,7 +263,11 @@ impl QueryBuilder {
     /// # }
     /// ```
     pub fn from_source(mut self, source_id: impl Into<String>) -> Self {
-        self.sources.push(source_id.into());
+        self.source_subscriptions
+            .push(crate::config::SourceSubscriptionConfig {
+                source_id: source_id.into(),
+                pipeline: Vec::new(),
+            });
         self
     }
 
@@ -304,7 +310,13 @@ impl QueryBuilder {
     /// # }
     /// ```
     pub fn from_sources(mut self, source_ids: Vec<String>) -> Self {
-        self.sources.extend(source_ids);
+        for source_id in source_ids {
+            self.source_subscriptions
+                .push(crate::config::SourceSubscriptionConfig {
+                    source_id,
+                    pipeline: Vec::new(),
+                });
+        }
         self
     }
 
@@ -618,6 +630,128 @@ impl QueryBuilder {
         self
     }
 
+    /// Add a middleware configuration to the query
+    ///
+    /// Middleware transforms or filters data as it flows from sources to the query engine.
+    /// Multiple middleware can be added and will be available for use in source pipelines.
+    ///
+    /// # Arguments
+    ///
+    /// * `middleware` - The middleware configuration to add
+    ///
+    /// # Examples
+    ///
+    /// ## Add JQ Middleware
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::Query;
+    /// # use drasi_core::models::SourceMiddlewareConfig;
+    /// # use std::sync::Arc;
+    /// let query = Query::cypher("query1")
+    ///     .query("MATCH (n) RETURN n")
+    ///     .with_middleware(SourceMiddlewareConfig {
+    ///         kind: Arc::from("jq"),
+    ///         name: Arc::from("transform1"),
+    ///         config: serde_json::json!({"filter": ".value | tonumber"}).as_object().unwrap().clone(),
+    ///     })
+    ///     .from_source("source1")
+    ///     .build();
+    /// ```
+    ///
+    /// ## Multiple Middleware
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::Query;
+    /// # use drasi_core::models::SourceMiddlewareConfig;
+    /// # use std::sync::Arc;
+    /// let query = Query::cypher("query1")
+    ///     .query("MATCH (n) RETURN n")
+    ///     .with_middleware(SourceMiddlewareConfig {
+    ///         kind: Arc::from("jq"),
+    ///         name: Arc::from("decoder"),
+    ///         config: serde_json::json!({"filter": ".data | fromjson"}).as_object().unwrap().clone(),
+    ///     })
+    ///     .with_middleware(SourceMiddlewareConfig {
+    ///         kind: Arc::from("jq"),
+    ///         name: Arc::from("validator"),
+    ///         config: serde_json::json!({"filter": "select(.value > 0)"}).as_object().unwrap().clone(),
+    ///     })
+    ///     .from_source("source1")
+    ///     .build();
+    /// ```
+    pub fn with_middleware(
+        mut self,
+        middleware: drasi_core::models::SourceMiddlewareConfig,
+    ) -> Self {
+        self.middleware.push(middleware);
+        self
+    }
+
+    /// Configure a source subscription with a middleware pipeline
+    ///
+    /// This method allows you to specify both the source to subscribe to and an ordered
+    /// list of middleware to apply to changes from that source. Middleware must be defined
+    /// using `with_middleware()` before being referenced in a pipeline.
+    ///
+    /// # Arguments
+    ///
+    /// * `source_id` - The ID of the source to subscribe to
+    /// * `pipeline` - The ordered list of middleware names to apply
+    ///
+    /// # Examples
+    ///
+    /// ## Source with Pipeline
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::Query;
+    /// # use drasi_core::models::SourceMiddlewareConfig;
+    /// # use std::sync::Arc;
+    /// let query = Query::cypher("query1")
+    ///     .query("MATCH (n) RETURN n")
+    ///     .with_middleware(SourceMiddlewareConfig {
+    ///         kind: Arc::from("jq"),
+    ///         name: Arc::from("transform1"),
+    ///         config: serde_json::json!({"filter": ".value | tonumber"}).as_object().unwrap().clone(),
+    ///     })
+    ///     .with_source_pipeline("source1", vec!["transform1".to_string()])
+    ///     .build();
+    /// ```
+    ///
+    /// ## Multiple Sources with Different Pipelines
+    ///
+    /// ```no_run
+    /// # use drasi_server_core::Query;
+    /// # use drasi_core::models::SourceMiddlewareConfig;
+    /// # use std::sync::Arc;
+    /// let query = Query::cypher("query1")
+    ///     .query("MATCH (n) RETURN n")
+    ///     .with_middleware(SourceMiddlewareConfig {
+    ///         kind: Arc::from("jq"),
+    ///         name: Arc::from("decoder"),
+    ///         config: serde_json::json!({"filter": ".data | fromjson"}).as_object().unwrap().clone(),
+    ///     })
+    ///     .with_middleware(SourceMiddlewareConfig {
+    ///         kind: Arc::from("jq"),
+    ///         name: Arc::from("validator"),
+    ///         config: serde_json::json!({"filter": "select(.value > 0)"}).as_object().unwrap().clone(),
+    ///     })
+    ///     .with_source_pipeline("raw_source", vec!["decoder".to_string(), "validator".to_string()])
+    ///     .with_source_pipeline("clean_source", vec!["validator".to_string()])
+    ///     .build();
+    /// ```
+    pub fn with_source_pipeline(
+        mut self,
+        source_id: impl Into<String>,
+        pipeline: Vec<String>,
+    ) -> Self {
+        let subscription = crate::config::SourceSubscriptionConfig {
+            source_id: source_id.into(),
+            pipeline,
+        };
+        self.source_subscriptions.push(subscription);
+        self
+    }
+
     /// Build the query configuration
     ///
     /// Consumes the builder and creates the final [`QueryConfig`] that can be passed to
@@ -650,7 +784,8 @@ impl QueryBuilder {
             id: self.id,
             query: self.query,
             query_language: self.query_language,
-            sources: self.sources,
+            middleware: self.middleware,
+            source_subscriptions: self.source_subscriptions,
             auto_start: self.auto_start,
             joins: self.joins,
             enable_bootstrap: true,       // Default: bootstrap enabled
@@ -923,5 +1058,209 @@ impl Query {
     /// ```
     pub fn gql(id: impl Into<String>) -> QueryBuilder {
         QueryBuilder::new(id, "", QueryLanguage::GQL)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_with_middleware() {
+        // Create a query with middleware
+        let middleware = drasi_core::models::SourceMiddlewareConfig {
+            kind: Arc::from("jq"),
+            name: Arc::from("transform1"),
+            config: serde_json::json!({"filter": ".value | tonumber"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        };
+
+        let config = Query::cypher("test_query")
+            .query("MATCH (n) RETURN n")
+            .with_middleware(middleware.clone())
+            .from_source("source1")
+            .build();
+
+        // Verify middleware was added
+        assert_eq!(config.middleware.len(), 1);
+        assert_eq!(config.middleware[0].kind.as_ref(), "jq");
+        assert_eq!(config.middleware[0].name.as_ref(), "transform1");
+    }
+
+    #[test]
+    fn test_with_multiple_middleware() {
+        // Create a query with multiple middleware
+        let middleware1 = drasi_core::models::SourceMiddlewareConfig {
+            kind: Arc::from("jq"),
+            name: Arc::from("decoder"),
+            config: serde_json::json!({"filter": ".data | fromjson"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        };
+
+        let middleware2 = drasi_core::models::SourceMiddlewareConfig {
+            kind: Arc::from("jq"),
+            name: Arc::from("validator"),
+            config: serde_json::json!({"filter": "select(.value > 0)"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        };
+
+        let config = Query::cypher("test_query")
+            .query("MATCH (n) RETURN n")
+            .with_middleware(middleware1)
+            .with_middleware(middleware2)
+            .from_source("source1")
+            .build();
+
+        // Verify both middleware were added
+        assert_eq!(config.middleware.len(), 2);
+        assert_eq!(config.middleware[0].name.as_ref(), "decoder");
+        assert_eq!(config.middleware[1].name.as_ref(), "validator");
+    }
+
+    #[test]
+    fn test_with_source_pipeline() {
+        // Create a query with a source that has a pipeline
+        let config = Query::cypher("test_query")
+            .query("MATCH (n) RETURN n")
+            .with_source_pipeline("source1", vec!["transform1".to_string()])
+            .build();
+
+        // Verify source subscription was created with pipeline
+        assert_eq!(config.source_subscriptions.len(), 1);
+        assert_eq!(config.source_subscriptions[0].source_id, "source1");
+        assert_eq!(config.source_subscriptions[0].pipeline.len(), 1);
+        assert_eq!(config.source_subscriptions[0].pipeline[0], "transform1");
+    }
+
+    #[test]
+    fn test_with_source_pipeline_multiple_middleware() {
+        // Create a query with a source that has multiple middleware in pipeline
+        let config = Query::cypher("test_query")
+            .query("MATCH (n) RETURN n")
+            .with_source_pipeline(
+                "source1",
+                vec!["decoder".to_string(), "validator".to_string()],
+            )
+            .build();
+
+        // Verify source subscription was created with correct pipeline
+        assert_eq!(config.source_subscriptions.len(), 1);
+        assert_eq!(config.source_subscriptions[0].source_id, "source1");
+        assert_eq!(config.source_subscriptions[0].pipeline.len(), 2);
+        assert_eq!(config.source_subscriptions[0].pipeline[0], "decoder");
+        assert_eq!(config.source_subscriptions[0].pipeline[1], "validator");
+    }
+
+    #[test]
+    fn test_multiple_sources_with_different_pipelines() {
+        // Create a query with multiple sources that have different pipelines
+        let config = Query::cypher("test_query")
+            .query("MATCH (n) RETURN n")
+            .with_source_pipeline(
+                "raw_source",
+                vec!["decoder".to_string(), "validator".to_string()],
+            )
+            .with_source_pipeline("clean_source", vec!["validator".to_string()])
+            .build();
+
+        // Verify both source subscriptions were created
+        assert_eq!(config.source_subscriptions.len(), 2);
+        assert_eq!(config.source_subscriptions[0].source_id, "raw_source");
+        assert_eq!(config.source_subscriptions[0].pipeline.len(), 2);
+        assert_eq!(config.source_subscriptions[1].source_id, "clean_source");
+        assert_eq!(config.source_subscriptions[1].pipeline.len(), 1);
+    }
+
+    #[test]
+    fn test_full_middleware_configuration() {
+        // Test a complete middleware configuration with both middleware definitions and pipelines
+        let middleware1 = drasi_core::models::SourceMiddlewareConfig {
+            kind: Arc::from("jq"),
+            name: Arc::from("decoder"),
+            config: serde_json::json!({"filter": ".data | fromjson"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        };
+
+        let middleware2 = drasi_core::models::SourceMiddlewareConfig {
+            kind: Arc::from("jq"),
+            name: Arc::from("validator"),
+            config: serde_json::json!({"filter": "select(.value > 0)"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        };
+
+        let config = Query::cypher("test_query")
+            .query("MATCH (n) RETURN n")
+            .with_middleware(middleware1)
+            .with_middleware(middleware2)
+            .with_source_pipeline(
+                "raw_source",
+                vec!["decoder".to_string(), "validator".to_string()],
+            )
+            .with_source_pipeline("clean_source", vec!["validator".to_string()])
+            .build();
+
+        // Verify everything was configured correctly
+        assert_eq!(config.middleware.len(), 2);
+        assert_eq!(config.source_subscriptions.len(), 2);
+        assert_eq!(config.source_subscriptions[0].pipeline.len(), 2);
+        assert_eq!(config.source_subscriptions[1].pipeline.len(), 1);
+    }
+
+    #[test]
+    fn test_method_chaining() {
+        // Test that methods can be chained with other builder methods
+        let config = Query::cypher("test_query")
+            .query("MATCH (n) RETURN n")
+            .auto_start(false)
+            .with_middleware(drasi_core::models::SourceMiddlewareConfig {
+                kind: Arc::from("jq"),
+                name: Arc::from("transform1"),
+                config: serde_json::json!({"filter": ".value"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            })
+            .with_source_pipeline("source1", vec!["transform1".to_string()])
+            .with_priority_queue_capacity(5000)
+            .build();
+
+        // Verify all settings were applied
+        assert!(!config.auto_start);
+        assert_eq!(config.middleware.len(), 1);
+        assert_eq!(config.source_subscriptions.len(), 1);
+        assert_eq!(config.priority_queue_capacity, Some(5000));
+    }
+
+    #[test]
+    fn test_middleware_without_pipeline() {
+        // Test that middleware can be added without using it in a pipeline
+        let config = Query::cypher("test_query")
+            .query("MATCH (n) RETURN n")
+            .with_middleware(drasi_core::models::SourceMiddlewareConfig {
+                kind: Arc::from("jq"),
+                name: Arc::from("transform1"),
+                config: serde_json::json!({"filter": ".value"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            })
+            .from_source("source1")
+            .build();
+
+        // Verify middleware was added but source has no pipeline
+        assert_eq!(config.middleware.len(), 1);
+        assert_eq!(config.source_subscriptions.len(), 1);
+        assert_eq!(config.source_subscriptions[0].pipeline.len(), 0);
     }
 }

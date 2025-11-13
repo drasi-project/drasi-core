@@ -101,10 +101,7 @@ impl StorageBackendSpec {
                 // Validate path is absolute
                 let path_obj = Path::new(path);
                 if !path_obj.is_absolute() {
-                    return Err(format!(
-                        "RocksDB path must be absolute, got: {}",
-                        path
-                    ));
+                    return Err(format!("RocksDB path must be absolute, got: {}", path));
                 }
                 Ok(())
             }

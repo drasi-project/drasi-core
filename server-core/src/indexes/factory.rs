@@ -332,8 +332,8 @@ impl IndexFactory {
                         IndexError::NotSupported
                     })?;
 
-                let cached_result_index =
-                    CachedResultIndex::new(result_index, cache_size).map_err(|e| {
+                let cached_result_index = CachedResultIndex::new(result_index, cache_size)
+                    .map_err(|e| {
                         log::error!(
                             "Failed to create cached result index for query '{}': {}",
                             query_id,
