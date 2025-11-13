@@ -42,8 +42,6 @@ pub mod queries;
 #[cfg_attr(not(test), doc(hidden))]
 pub mod reactions;
 #[cfg_attr(not(test), doc(hidden))]
-pub mod routers;
-#[cfg_attr(not(test), doc(hidden))]
 pub mod server_core;
 #[cfg_attr(not(test), doc(hidden))]
 pub mod sources;
