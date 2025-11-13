@@ -13,15 +13,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime};
 use serde_json::json;
 
 use drasi_core::{
     evaluation::{
-        context::QueryPartEvaluationContext, functions::FunctionRegistry,
-        variable_value::{VariableValue, float::Float},
+        context::QueryPartEvaluationContext,
+        functions::FunctionRegistry,
+        variable_value::{float::Float, VariableValue},
     },
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{AutoFutureQueueConsumer, QueryBuilder},
@@ -76,19 +80,16 @@ pub async fn sliding_window_max(config: &(impl QueryTestConfig + Send)) {
             },
         };
 
-        let result = cq
-            .process_source_change(change.clone())
-            .await
-            .unwrap();
+        let result = cq.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
         println!("result: {result:#?}");
 
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation { 
-            before: Some(variablemap!("slidingMax"=>VariableValue::Null)), 
-            after: variablemap!("slidingMax"=>VariableValue::Float(Float::from(50.0))), 
-            grouping_keys: vec![], 
-            default_before: true, 
-            default_after: false 
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
+            before: Some(variablemap!("slidingMax"=>VariableValue::Null)),
+            after: variablemap!("slidingMax"=>VariableValue::Float(Float::from(50.0))),
+            grouping_keys: vec![],
+            default_before: true,
+            default_after: false
         }));
     }
 
@@ -112,10 +113,7 @@ pub async fn sliding_window_max(config: &(impl QueryTestConfig + Send)) {
             },
         };
 
-        _ = cq
-            .process_source_change(change.clone())
-            .await
-            .unwrap();
+        _ = cq.process_source_change(change.clone()).await.unwrap();
     }
 
     //jump to 5 minutes later
@@ -128,14 +126,13 @@ pub async fn sliding_window_max(config: &(impl QueryTestConfig + Send)) {
         assert_eq!(result.len(), 1);
         println!("result: {result:#?}");
 
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation { 
-            before: Some(variablemap!("slidingMax"=>VariableValue::Float(Float::from(50.0)))), 
-            after: variablemap!("slidingMax"=>VariableValue::Float(Float::from(30.0))), 
-            grouping_keys: vec![], 
-            default_before: false, 
-            default_after: false 
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
+            before: Some(variablemap!("slidingMax"=>VariableValue::Float(Float::from(50.0)))),
+            after: variablemap!("slidingMax"=>VariableValue::Float(Float::from(30.0))),
+            grouping_keys: vec![],
+            default_before: false,
+            default_after: false
         }));
-        
     }
 
     //jump to 2 minutes later, add sensor 3
@@ -158,20 +155,17 @@ pub async fn sliding_window_max(config: &(impl QueryTestConfig + Send)) {
             },
         };
 
-        let result = cq
-            .process_source_change(change.clone())
-            .await
-            .unwrap();
+        let result = cq.process_source_change(change.clone()).await.unwrap();
 
         assert_eq!(result.len(), 1);
         println!("result: {result:#?}");
 
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation { 
-            before: Some(variablemap!("slidingMax"=>VariableValue::Float(Float::from(30.0)))), 
-            after: variablemap!("slidingMax"=>VariableValue::Float(Float::from(45.0))), 
-            grouping_keys: vec![], 
-            default_before: true, 
-            default_after: false 
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
+            before: Some(variablemap!("slidingMax"=>VariableValue::Float(Float::from(30.0)))),
+            after: variablemap!("slidingMax"=>VariableValue::Float(Float::from(45.0))),
+            grouping_keys: vec![],
+            default_before: true,
+            default_after: false
         }));
     }
 
@@ -195,20 +189,17 @@ pub async fn sliding_window_max(config: &(impl QueryTestConfig + Send)) {
             },
         };
 
-        let result = cq
-            .process_source_change(change.clone())
-            .await
-            .unwrap();
+        let result = cq.process_source_change(change.clone()).await.unwrap();
 
         assert_eq!(result.len(), 1);
         println!("result: {result:#?}");
 
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation { 
-            before: Some(variablemap!("slidingMax"=>VariableValue::Float(Float::from(45.0)))), 
-            after: variablemap!("slidingMax"=>VariableValue::Float(Float::from(65.0))), 
-            grouping_keys: vec![], 
-            default_before: false, 
-            default_after: false 
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
+            before: Some(variablemap!("slidingMax"=>VariableValue::Float(Float::from(45.0)))),
+            after: variablemap!("slidingMax"=>VariableValue::Float(Float::from(65.0))),
+            grouping_keys: vec![],
+            default_before: false,
+            default_after: false
         }));
     }
 
@@ -232,16 +223,14 @@ pub async fn sliding_window_max(config: &(impl QueryTestConfig + Send)) {
         assert_eq!(result.len(), 1);
         println!("result: {result:#?}");
 
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation { 
-            before: Some(variablemap!("slidingMax"=>VariableValue::Float(Float::from(65.0)))), 
-            after: variablemap!("slidingMax"=>VariableValue::Null), 
-            grouping_keys: vec![], 
-            default_before: false, 
-            default_after: false 
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
+            before: Some(variablemap!("slidingMax"=>VariableValue::Float(Float::from(65.0)))),
+            after: variablemap!("slidingMax"=>VariableValue::Null),
+            grouping_keys: vec![],
+            default_before: false,
+            default_after: false
         }));
-        
     }
-
 }
 
 pub async fn sliding_window_avg_grouped(config: &(impl QueryTestConfig + Send)) {
@@ -280,27 +269,22 @@ pub async fn sliding_window_avg_grouped(config: &(impl QueryTestConfig + Send)) 
             },
         };
 
-        let result = cq
-            .process_source_change(change.clone())
-            .await
-            .unwrap();
+        let result = cq.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
         println!("result: {result:#?}");
 
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation { 
-            before: Some(
-                variablemap!(
-                    "slidingAvg"=>VariableValue::Float(Float::from(0.0)),
-                    "sensorGroup"=>VariableValue::String("A".to_string())
-                )
-            ), 
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
+            before: Some(variablemap!(
+                "slidingAvg"=>VariableValue::Float(Float::from(0.0)),
+                "sensorGroup"=>VariableValue::String("A".to_string())
+            )),
             after: variablemap!(
                 "slidingAvg"=>VariableValue::Float(Float::from(50.0)),
                 "sensorGroup"=>VariableValue::String("A".to_string())
-            ), 
-            grouping_keys: vec!["sensorGroup".to_string()], 
-            default_before: true, 
-            default_after: false 
+            ),
+            grouping_keys: vec!["sensorGroup".to_string()],
+            default_before: true,
+            default_after: false
         }));
     }
 
@@ -325,27 +309,22 @@ pub async fn sliding_window_avg_grouped(config: &(impl QueryTestConfig + Send)) 
             },
         };
 
-        let result = cq
-            .process_source_change(change.clone())
-            .await
-            .unwrap();
+        let result = cq.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
         println!("result: {result:#?}");
 
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation { 
-            before: Some(
-                variablemap!(
-                    "slidingAvg"=>VariableValue::Float(Float::from(50.0)),
-                    "sensorGroup"=>VariableValue::String("A".to_string())
-                )
-            ), 
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
+            before: Some(variablemap!(
+                "slidingAvg"=>VariableValue::Float(Float::from(50.0)),
+                "sensorGroup"=>VariableValue::String("A".to_string())
+            )),
             after: variablemap!(
                 "slidingAvg"=>VariableValue::Float(Float::from(40.0)),
                 "sensorGroup"=>VariableValue::String("A".to_string())
-            ), 
-            grouping_keys: vec!["sensorGroup".to_string()], 
-            default_before: true, 
-            default_after: false 
+            ),
+            grouping_keys: vec!["sensorGroup".to_string()],
+            default_before: true,
+            default_after: false
         }));
     }
 
@@ -366,27 +345,22 @@ pub async fn sliding_window_avg_grouped(config: &(impl QueryTestConfig + Send)) 
             },
         };
 
-        let result = cq
-            .process_source_change(change.clone())
-            .await
-            .unwrap();
+        let result = cq.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
         println!("result: {result:#?}");
 
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation { 
-            before: Some(
-                variablemap!(
-                    "slidingAvg"=>VariableValue::Float(Float::from(0.0)),
-                    "sensorGroup"=>VariableValue::String("B".to_string())
-                )
-            ), 
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
+            before: Some(variablemap!(
+                "slidingAvg"=>VariableValue::Float(Float::from(0.0)),
+                "sensorGroup"=>VariableValue::String("B".to_string())
+            )),
             after: variablemap!(
                 "slidingAvg"=>VariableValue::Float(Float::from(10.0)),
                 "sensorGroup"=>VariableValue::String("B".to_string())
-            ), 
-            grouping_keys: vec!["sensorGroup".to_string()], 
-            default_before: true, 
-            default_after: false 
+            ),
+            grouping_keys: vec!["sensorGroup".to_string()],
+            default_before: true,
+            default_after: false
         }));
     }
 
@@ -400,21 +374,19 @@ pub async fn sliding_window_avg_grouped(config: &(impl QueryTestConfig + Send)) 
         assert_eq!(result.len(), 1);
         println!("result: {result:#?}");
 
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation { 
-            before: Some(
-                variablemap!(
-                    "slidingAvg"=>VariableValue::Float(Float::from(40.0)),
-                    "sensorGroup"=>VariableValue::String("A".to_string())
-                )
-            ), 
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
+            before: Some(variablemap!(
+                "slidingAvg"=>VariableValue::Float(Float::from(40.0)),
+                "sensorGroup"=>VariableValue::String("A".to_string())
+            )),
             after: variablemap!(
                 "slidingAvg"=>VariableValue::Float(Float::from(30.0)),
                 "sensorGroup"=>VariableValue::String("A".to_string())
-            ), 
+            ),
             grouping_keys: vec!["sensorGroup".to_string()],
-            default_before: false, 
-            default_after: false 
-        }));    
+            default_before: false,
+            default_after: false
+        }));
     }
 
     //jump to 5 minutes later
@@ -433,38 +405,32 @@ pub async fn sliding_window_avg_grouped(config: &(impl QueryTestConfig + Send)) 
         assert_eq!(result.len(), 2);
         println!("result: {result:#?}");
 
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation { 
-            before: Some(
-                variablemap!(
-                    "slidingAvg"=>VariableValue::Float(Float::from(10.0)),
-                    "sensorGroup"=>VariableValue::String("B".to_string())
-                )
-            ), 
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
+            before: Some(variablemap!(
+                "slidingAvg"=>VariableValue::Float(Float::from(10.0)),
+                "sensorGroup"=>VariableValue::String("B".to_string())
+            )),
             after: variablemap!(
                 "slidingAvg"=>VariableValue::Float(Float::from(0.0)),
                 "sensorGroup"=>VariableValue::String("B".to_string())
-            ), 
+            ),
             grouping_keys: vec!["sensorGroup".to_string()],
-            default_before: false, 
-            default_after: false 
-        }));   
+            default_before: false,
+            default_after: false
+        }));
 
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation { 
-            before: Some(
-                variablemap!(
-                    "slidingAvg"=>VariableValue::Float(Float::from(30.0)),
-                    "sensorGroup"=>VariableValue::String("A".to_string())
-                )
-            ), 
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
+            before: Some(variablemap!(
+                "slidingAvg"=>VariableValue::Float(Float::from(30.0)),
+                "sensorGroup"=>VariableValue::String("A".to_string())
+            )),
             after: variablemap!(
                 "slidingAvg"=>VariableValue::Float(Float::from(0.0)),
                 "sensorGroup"=>VariableValue::String("A".to_string())
-            ), 
+            ),
             grouping_keys: vec!["sensorGroup".to_string()],
-            default_before: false, 
-            default_after: false 
-        }));   
+            default_before: false,
+            default_after: false
+        }));
     }
-
 }
-

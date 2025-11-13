@@ -21,7 +21,6 @@ use crate::evaluation::variable_value::VariableValue;
 use crate::evaluation::ExpressionEvaluationContext;
 use crate::evaluation::ExpressionEvaluator;
 use crate::evaluation::{FunctionError, FunctionEvaluationError};
-use crate::interface::ResultIndex;
 use crate::interface::{FutureQueue, PushType};
 use async_trait::async_trait;
 use chrono::Duration;
@@ -29,19 +28,16 @@ use drasi_query_ast::ast;
 
 pub struct SlidingWindow {
     future_queue: Arc<dyn FutureQueue>,
-    result_index: Arc<dyn ResultIndex>,
     expression_evaluator: Weak<ExpressionEvaluator>,
 }
 
 impl SlidingWindow {
     pub fn new(
         future_queue: Arc<dyn FutureQueue>,
-        result_index: Arc<dyn ResultIndex>,
         expression_evaluator: Weak<ExpressionEvaluator>,
     ) -> Self {
         Self {
             future_queue,
-            result_index,
             expression_evaluator,
         }
     }
@@ -55,7 +51,6 @@ impl LazyScalarFunction for SlidingWindow {
         expression: &ast::FunctionExpression,
         args: &Vec<ast::Expression>,
     ) -> Result<VariableValue, FunctionError> {
-        
         if args.len() != 2 {
             return Err(FunctionError {
                 function_name: expression.name.to_string(),
@@ -73,7 +68,10 @@ impl LazyScalarFunction for SlidingWindow {
             }
         };
 
-        let window_arg = match expression_evaluator.evaluate_expression(context, &args[0]).await {
+        let window_arg = match expression_evaluator
+            .evaluate_expression(context, &args[0])
+            .await
+        {
             Ok(value) => value,
             Err(e) => {
                 return Err(FunctionError {
@@ -113,15 +111,18 @@ impl LazyScalarFunction for SlidingWindow {
             if expired {
                 let mut new_context = context.clone();
                 new_context.set_side_effects(SideEffects::Snapshot);
-                return match expression_evaluator.evaluate_expression(&new_context, expression_arg).await {
+                return match expression_evaluator
+                    .evaluate_expression(&new_context, expression_arg)
+                    .await
+                {
                     Ok(value) => Ok(value),
                     Err(e) => Err(FunctionError {
                         function_name: expression.name.to_string(),
                         error: FunctionEvaluationError::EvaluationError(Box::new(e)),
                     }),
-                };   
+                };
             }
-    
+
             if let Some(anchor_element) = context.get_anchor_element() {
                 let anchor_ref = anchor_element.get_reference().clone();
                 match self
@@ -147,7 +148,10 @@ impl LazyScalarFunction for SlidingWindow {
             }
         }
 
-        match expression_evaluator.evaluate_expression(context, expression_arg).await {
+        match expression_evaluator
+            .evaluate_expression(context, expression_arg)
+            .await
+        {
             Ok(value) => Ok(value),
             Err(e) => Err(FunctionError {
                 function_name: expression.name.to_string(),

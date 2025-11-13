@@ -27,11 +27,11 @@ mod awaiting;
 mod future_element;
 mod previous_distinct_value;
 mod previous_value;
+mod sliding_window;
 mod true_for;
 mod true_later;
 mod true_now_or_later;
 mod true_until;
-mod sliding_window;
 
 #[cfg(test)]
 mod tests;
@@ -108,13 +108,10 @@ impl RegisterFutureFunctions for FunctionRegistry {
 
         self.register_function(
             "drasi.slidingWindow",
-            Function::LazyScalar(Arc::new(
-                sliding_window::SlidingWindow::new(
-                    future_queue.clone(),
-                    result_index.clone(),
-                    expression_evaluator.clone(),
-                ),
-            )),
+            Function::LazyScalar(Arc::new(sliding_window::SlidingWindow::new(
+                future_queue.clone(),
+                expression_evaluator.clone(),
+            ))),
         );
     }
 }
