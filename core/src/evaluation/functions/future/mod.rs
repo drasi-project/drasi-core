@@ -110,6 +110,7 @@ impl RegisterFutureFunctions for FunctionRegistry {
             "drasi.slidingWindow",
             Function::LazyScalar(Arc::new(sliding_window::SlidingWindow::new(
                 future_queue.clone(),
+                result_index.clone(),
                 expression_evaluator.clone(),
             ))),
         );

@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use crate::evaluation::{context::QueryVariables, variable_value::VariableValue};
+use crate::{evaluation::{context::QueryVariables, variable_value::VariableValue}, models::ElementReference};
 use async_trait::async_trait;
 use ordered_float::OrderedFloat;
 
@@ -93,6 +93,7 @@ pub enum ResultOwner {
 pub enum ResultKey {
     GroupBy(Arc<Vec<VariableValue>>),
     InputHash(u64),
+    Element(ElementReference),
 }
 
 impl ResultKey {
@@ -120,6 +121,9 @@ impl std::hash::Hash for ResultKey {
             }
             ResultKey::InputHash(hash) => {
                 hash.hash(state);
+            }
+            ResultKey::Element(element_reference) => {
+                element_reference.hash(state);
             }
         }
     }

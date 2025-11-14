@@ -231,6 +231,40 @@ pub async fn sliding_window_max(config: &(impl QueryTestConfig + Send)) {
             default_after: false
         }));
     }
+
+    //jump to 2 minutes later, update sensor 2
+    {
+        println!("-----------------later---------------------");
+        now += Duration::minutes(2).num_milliseconds() as u64;
+        now_override.store(now, Ordering::Relaxed);
+
+        let change = SourceChange::Update {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("test", "s2"),
+                    labels: Arc::new([Arc::from("Sensor")]),
+                    effective_from: now,
+                },
+                properties: ElementPropertyMap::from(json!({
+                    "id": "s2",
+                    "value": 15
+                })),
+            },
+        };
+
+        let result = cq.process_source_change(change.clone()).await.unwrap();
+
+        assert_eq!(result.len(), 1);
+        println!("result: {result:#?}");
+
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
+            before: Some(variablemap!("slidingMax"=>VariableValue::Null)),
+            after: variablemap!("slidingMax"=>VariableValue::Float(Float::from(15.0))),
+            grouping_keys: vec![],
+            default_before: false,
+            default_after: false
+        }));
+    }
 }
 
 pub async fn sliding_window_avg_grouped(config: &(impl QueryTestConfig + Send)) {
@@ -431,6 +465,71 @@ pub async fn sliding_window_avg_grouped(config: &(impl QueryTestConfig + Send)) 
             grouping_keys: vec!["sensorGroup".to_string()],
             default_before: false,
             default_after: false
+        }));
+    }
+
+    //update sensor 2
+    {
+        let change = SourceChange::Update {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("test", "s2"),
+                    labels: Arc::new([Arc::from("Sensor")]),
+                    effective_from: now,
+                },
+                properties: ElementPropertyMap::from(json!({
+                    "id": "s2",
+                    "group": "A",
+                    "value": 5
+                })),
+            },
+        };
+
+        let result = cq.process_source_change(change.clone()).await.unwrap();
+        assert_eq!(result.len(), 1);
+        println!("result: {result:#?}");
+
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
+            before: Some(variablemap!(
+                "slidingAvg"=>VariableValue::Float(Float::from(0.0)),
+                "sensorGroup"=>VariableValue::String("A".to_string())
+            )),
+            after: variablemap!(
+                "slidingAvg"=>VariableValue::Float(Float::from(5.0)),
+                "sensorGroup"=>VariableValue::String("A".to_string())
+            ),
+            grouping_keys: vec!["sensorGroup".to_string()],
+            default_before: false,
+            default_after: false
+        }));
+    }
+
+    //delete sensor 2
+    {
+        let change = SourceChange::Delete { 
+            metadata: ElementMetadata {
+                    reference: ElementReference::new("test", "s2"),
+                    labels: Arc::new([Arc::from("Sensor")]),
+                    effective_from: now,
+                } 
+            };
+
+        let result = cq.process_source_change(change.clone()).await.unwrap();
+        assert_eq!(result.len(), 1);
+        println!("result: {result:#?}");
+
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
+            before: Some(variablemap!(
+                "slidingAvg"=>VariableValue::Float(Float::from(5.0)),
+                "sensorGroup"=>VariableValue::String("A".to_string())
+            )),
+            after: variablemap!(
+                "slidingAvg"=>VariableValue::Float(Float::from(0.0)),
+                "sensorGroup"=>VariableValue::String("A".to_string())
+            ),
+            grouping_keys: vec!["sensorGroup".to_string()],
+            default_before: false,
+            default_after: true
         }));
     }
 }

@@ -12,15 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::result;
 use std::sync::Arc;
 use std::sync::Weak;
 
 use crate::evaluation::context::SideEffects;
 use crate::evaluation::functions::LazyScalarFunction;
+use crate::evaluation::functions::ValueAccumulator;
 use crate::evaluation::variable_value::VariableValue;
 use crate::evaluation::ExpressionEvaluationContext;
 use crate::evaluation::ExpressionEvaluator;
 use crate::evaluation::{FunctionError, FunctionEvaluationError};
+use crate::interface::ResultIndex;
+use crate::interface::ResultKey;
+use crate::interface::ResultOwner;
 use crate::interface::{FutureQueue, PushType};
 use async_trait::async_trait;
 use chrono::Duration;
@@ -28,16 +33,19 @@ use drasi_query_ast::ast;
 
 pub struct SlidingWindow {
     future_queue: Arc<dyn FutureQueue>,
+    result_index: Arc<dyn ResultIndex>,
     expression_evaluator: Weak<ExpressionEvaluator>,
 }
 
 impl SlidingWindow {
     pub fn new(
         future_queue: Arc<dyn FutureQueue>,
+        result_index: Arc<dyn ResultIndex>,
         expression_evaluator: Weak<ExpressionEvaluator>,
     ) -> Self {
         Self {
             future_queue,
+            result_index,
             expression_evaluator,
         }
     }
@@ -51,6 +59,13 @@ impl LazyScalarFunction for SlidingWindow {
         expression: &ast::FunctionExpression,
         args: &Vec<ast::Expression>,
     ) -> Result<VariableValue, FunctionError> {
+        println!(
+            "SlidingWindow called with side effects: {:?}",
+            context.get_side_effects()
+        );
+
+        let result_owner = ResultOwner::Function(expression.position_in_query);
+
         if args.len() != 2 {
             return Err(FunctionError {
                 function_name: expression.name.to_string(),
@@ -106,47 +121,137 @@ impl LazyScalarFunction for SlidingWindow {
         let input_signature = context.get_input_grouping_hash();
         let due_time = context.get_transaction_time() + (window_size.num_milliseconds() as u64);
         let expired = context.get_realtime() >= due_time;
+        println!("expired: {}, due_time: {}, current_time: {}", expired, due_time, context.get_realtime());
 
-        if let SideEffects::Apply = context.get_side_effects() {
-            if expired {
-                let mut new_context = context.clone();
-                new_context.set_side_effects(SideEffects::Snapshot);
-                return match expression_evaluator
-                    .evaluate_expression(&new_context, expression_arg)
-                    .await
-                {
-                    Ok(value) => Ok(value),
-                    Err(e) => Err(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::EvaluationError(Box::new(e)),
-                    }),
-                };
-            }
+        if let Some(anchor_element) = context.get_anchor_element() {
+            println!("found anchor element in context");
+            let result_key = ResultKey::Element(anchor_element.get_reference().clone());
 
-            if let Some(anchor_element) = context.get_anchor_element() {
-                let anchor_ref = anchor_element.get_reference().clone();
-                match self
-                    .future_queue
-                    .push(
-                        PushType::Overwrite,
-                        expression.position_in_query,
-                        input_signature,
-                        &anchor_ref,
-                        context.get_transaction_time(),
-                        due_time,
-                    )
-                    .await
-                {
-                    Ok(_) => (),
-                    Err(e) => {
-                        return Err(FunctionError {
-                            function_name: expression.name.to_string(),
-                            error: FunctionEvaluationError::IndexError(e),
-                        })
+            match context.get_side_effects() {
+                SideEffects::Apply => {
+                    if expired {
+                        println!("setting flag for result key {:?} owner {:?}", result_key, result_owner);
+                        match self
+                            .result_index
+                            .set(
+                                result_key,
+                                result_owner.clone(),
+                                Some(ValueAccumulator::Signature(1)),
+                            )
+                            .await
+                        {
+                            Ok(()) => (),
+                            Err(e) => {
+                                return Err(FunctionError {
+                                    function_name: expression.name.to_string(),
+                                    error: FunctionEvaluationError::IndexError(e),
+                                })
+                            }
+                        };
+
+                        let mut new_context = context.clone();
+                        new_context.set_side_effects(SideEffects::Snapshot);
+                        return match expression_evaluator
+                            .evaluate_expression(&new_context, expression_arg)
+                            .await
+                        {
+                            Ok(value) => Ok(value),
+                            Err(e) => Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::EvaluationError(Box::new(e)),
+                            }),
+                        };
                     }
+                    let anchor_ref = anchor_element.get_reference().clone();
+                    match self
+                        .future_queue
+                        .push(
+                            PushType::Overwrite,
+                            expression.position_in_query,
+                            input_signature,
+                            &anchor_ref,
+                            context.get_transaction_time(),
+                            due_time,
+                        )
+                        .await
+                    {
+                        Ok(_) => (),
+                        Err(e) => {
+                            return Err(FunctionError {
+                                function_name: expression.name.to_string(),
+                                error: FunctionEvaluationError::IndexError(e),
+                            })
+                        }
+                    };
+
+                    // match self
+                    //     .result_index
+                    //     .set(
+                    //         result_key,
+                    //         result_owner.clone(),
+                    //         None,
+                    //     )
+                    //     .await
+                    // {
+                    //     Ok(()) => (),
+                    //     Err(e) => {
+                    //         return Err(FunctionError {
+                    //             function_name: expression.name.to_string(),
+                    //             error: FunctionEvaluationError::IndexError(e),
+                    //         })
+                    //     }
+                    // };
+
                 }
+                SideEffects::RevertForUpdate | SideEffects::RevertForDelete => {
+                    //if !expired {
+                        println!("checking flag for result key {:?} owner {:?}", result_key, result_owner);
+                        match self.result_index.get(&result_key, &result_owner).await {
+                            Ok(Some(ValueAccumulator::Signature(_))) => {
+                                println!("skipping revert");
+                                println!("clearing flag for result key {:?} owner {:?}", result_key, result_owner);
+                                match self
+                                    .result_index
+                                    .set(result_key, result_owner, None)
+                                    .await
+                                {
+                                    Ok(()) => (),
+                                    Err(e) => {
+                                        return Err(FunctionError {
+                                            function_name: expression.name.to_string(),
+                                            error: FunctionEvaluationError::IndexError(e),
+                                        })
+                                    }
+                                };
+
+                                let mut new_context = context.clone();
+                                new_context.set_side_effects(SideEffects::Snapshot);
+                                return match expression_evaluator
+                                    .evaluate_expression(&new_context, expression_arg)
+                                    .await
+                                {
+                                    Ok(value) => Ok(value),
+                                    Err(e) => Err(FunctionError {
+                                        function_name: expression.name.to_string(),
+                                        error: FunctionEvaluationError::EvaluationError(Box::new(e)),
+                                    }),
+                                };
+                            }
+                            _ => {
+                                println!("not skipping revert");
+                            }
+                        }
+                    // } else {
+                    //     println!("not skipping revert because expired");
+                    // }
+                }
+                _ => (),
             }
+        } else {
+            println!("no anchor element found in context");
         }
+
+        println!("fall through evaluating expression_arg");
 
         match expression_evaluator
             .evaluate_expression(context, expression_arg)
