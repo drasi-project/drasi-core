@@ -587,6 +587,7 @@ pub struct QueryConfig {
     #[serde(default)]
     pub middleware: Vec<SourceMiddlewareConfig>,
     /// Source subscriptions with optional middleware pipelines
+    #[serde(default)]
     pub source_subscriptions: Vec<SourceSubscriptionConfig>,
     /// Whether to automatically start this query (default: true)
     #[serde(default = "default_auto_start")]

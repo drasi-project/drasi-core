@@ -24,7 +24,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -144,17 +144,37 @@ impl ReactionBase {
             let query_id_clone = query_id.clone();
             let reaction_id = self.config.id.clone();
 
+            // Get query dispatch mode to determine enqueue strategy
+            let query_config = query.get_config();
+            let dispatch_mode = query_config
+                .dispatch_mode
+                .unwrap_or(crate::channels::DispatchMode::Channel);
+            let use_blocking_enqueue = matches!(dispatch_mode, crate::channels::DispatchMode::Channel);
+
             // Spawn forwarder task to read from receiver and enqueue to priority queue
             let forwarder_task = tokio::spawn(async move {
+                debug!(
+                    "[{}] Started result forwarder for query '{}' (dispatch_mode: {:?}, blocking_enqueue: {})",
+                    reaction_id, query_id_clone, dispatch_mode, use_blocking_enqueue
+                );
+
                 loop {
                     match receiver.recv().await {
                         Ok(query_result) => {
-                            // Enqueue to priority queue for timestamp-ordered processing
-                            if !priority_queue.enqueue(query_result).await {
-                                warn!(
-                                    "[{}] Failed to enqueue result from query '{}' - priority queue at capacity",
-                                    reaction_id, query_id_clone
-                                );
+                            // Use appropriate enqueue method based on dispatch mode
+                            if use_blocking_enqueue {
+                                // Channel mode: Use blocking enqueue to prevent message loss
+                                // This creates backpressure when the priority queue is full
+                                priority_queue.enqueue_wait(query_result).await;
+                            } else {
+                                // Broadcast mode: Use non-blocking enqueue to prevent deadlock
+                                // Messages may be dropped when priority queue is full
+                                if !priority_queue.enqueue(query_result).await {
+                                    warn!(
+                                        "[{}] Failed to enqueue result from query '{}' - priority queue at capacity (broadcast mode)",
+                                        reaction_id, query_id_clone
+                                    );
+                                }
                             }
                         }
                         Err(e) => {

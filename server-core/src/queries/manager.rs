@@ -398,21 +398,36 @@ impl Query for DrasiQuery {
             let query_id = self.base.config.id.clone();
             let source_id_clone = source_id.clone();
 
+            // Get source dispatch mode to determine enqueue strategy
+            let source_config = source.get_config();
+            let dispatch_mode = source_config
+                .dispatch_mode
+                .unwrap_or(crate::channels::DispatchMode::Channel);
+            let use_blocking_enqueue = matches!(dispatch_mode, crate::channels::DispatchMode::Channel);
+
             let task = tokio::spawn(async move {
                 debug!(
-                    "Query '{}' started event forwarder for source '{}'",
-                    query_id, source_id_clone
+                    "Query '{}' started event forwarder for source '{}' (dispatch_mode: {:?}, blocking_enqueue: {})",
+                    query_id, source_id_clone, dispatch_mode, use_blocking_enqueue
                 );
 
                 loop {
                     match receiver.recv().await {
                         Ok(arc_event) => {
-                            // Enqueue the Arc-wrapped event into the priority queue
-                            if !priority_queue.enqueue(arc_event).await {
-                                warn!(
-                                    "Query '{}' priority queue at capacity, dropping event from source '{}'",
-                                    query_id, source_id_clone
-                                );
+                            // Use appropriate enqueue method based on dispatch mode
+                            if use_blocking_enqueue {
+                                // Channel mode: Use blocking enqueue to prevent message loss
+                                // This creates backpressure when the priority queue is full
+                                priority_queue.enqueue_wait(arc_event).await;
+                            } else {
+                                // Broadcast mode: Use non-blocking enqueue to prevent deadlock
+                                // Messages may be dropped when priority queue is full
+                                if !priority_queue.enqueue(arc_event).await {
+                                    warn!(
+                                        "Query '{}' priority queue at capacity, dropping event from source '{}' (broadcast mode)",
+                                        query_id, source_id_clone
+                                    );
+                                }
                             }
                         }
                         Err(e) => {

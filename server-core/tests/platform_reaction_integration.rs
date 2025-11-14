@@ -28,7 +28,6 @@ use drasi_server_core::channels::{
 };
 use drasi_server_core::config::{
     PlatformReactionConfig, QueryConfig, ReactionConfig, ReactionSpecificConfig,
-    SourceSubscriptionConfig,
 };
 use drasi_server_core::queries::Query;
 use drasi_server_core::reactions::platform::{

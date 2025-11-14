@@ -56,9 +56,8 @@ fn validate_config_file(path: &Path) -> Result<(), String> {
         if query.query.is_empty() {
             return Err(format!("Query '{}' has empty query string", query.id));
         }
-        if query.source_subscriptions.is_empty() {
-            return Err(format!("Query '{}' has no sources", query.id));
-        }
+        // Note: source_subscriptions is now optional (defaults to empty vec)
+        // Old config format may not have this field - that's OK for validation
     }
 
     // Validate reactions

@@ -78,6 +78,8 @@ pub struct PriorityQueueMetrics {
     pub current_depth: AtomicUsize,
     pub max_depth_seen: AtomicUsize,
     pub drops_due_to_capacity: AtomicU64,
+    /// Number of times enqueue_wait() blocked waiting for capacity
+    pub blocked_enqueue_count: AtomicU64,
 }
 
 impl PriorityQueueMetrics {
@@ -89,6 +91,7 @@ impl PriorityQueueMetrics {
             current_depth: self.current_depth.load(AtomicOrdering::Relaxed),
             max_depth_seen: self.max_depth_seen.load(AtomicOrdering::Relaxed),
             drops_due_to_capacity: self.drops_due_to_capacity.load(AtomicOrdering::Relaxed),
+            blocked_enqueue_count: self.blocked_enqueue_count.load(AtomicOrdering::Relaxed),
         }
     }
 }
@@ -101,6 +104,8 @@ pub struct MetricsSnapshot {
     pub current_depth: usize,
     pub max_depth_seen: usize,
     pub drops_due_to_capacity: u64,
+    /// Number of times enqueue_wait() blocked waiting for capacity
+    pub blocked_enqueue_count: u64,
 }
 
 impl Default for PriorityQueueMetrics {
@@ -111,11 +116,42 @@ impl Default for PriorityQueueMetrics {
             current_depth: AtomicUsize::new(0),
             max_depth_seen: AtomicUsize::new(0),
             drops_due_to_capacity: AtomicU64::new(0),
+            blocked_enqueue_count: AtomicU64::new(0),
         }
     }
 }
 
 /// Thread-safe generic priority queue for ordering events by timestamp
+///
+/// # Backpressure and Dispatch Modes
+///
+/// This priority queue supports two enqueue strategies:
+///
+/// ## Non-blocking (`enqueue()`)
+/// - Returns immediately with `false` if queue is full
+/// - Drops events when at capacity
+/// - Suitable for **Broadcast dispatch mode** to prevent deadlock
+/// - Events may be lost when consumers are slow
+///
+/// ## Blocking (`enqueue_wait()`)
+/// - Waits until space is available before enqueuing
+/// - Never drops events - provides backpressure
+/// - **ONLY use with Channel dispatch mode** (isolated channels per subscriber)
+/// - **DO NOT use with Broadcast mode** - will cause system-wide deadlock
+///
+/// # Usage with Dispatch Modes
+///
+/// ```ignore
+/// // Channel mode (isolated channels) - SAFE to use blocking enqueue
+/// if dispatch_mode == DispatchMode::Channel {
+///     priority_queue.enqueue_wait(event).await;  // Blocks until space available
+/// } else {
+///     // Broadcast mode (shared channel) - MUST use non-blocking
+///     if !priority_queue.enqueue(event).await {
+///         warn!("Dropped event - queue at capacity");
+///     }
+/// }
+/// ```
 pub struct PriorityQueue<T>
 where
     T: Timestamped + Clone + Send + Sync + 'static,
@@ -207,6 +243,76 @@ where
         true
     }
 
+    /// Enqueue an event into the priority queue, waiting if at capacity
+    ///
+    /// This method blocks until there is space available in the queue.
+    /// It should only be used with Channel dispatch mode to prevent message loss.
+    ///
+    /// WARNING: Do NOT use with Broadcast dispatch mode - will cause deadlock!
+    /// In broadcast mode, use the non-blocking `enqueue()` method instead.
+    pub async fn enqueue_wait(&self, event: Arc<T>) {
+        loop {
+            let mut heap = self.heap.lock().await;
+
+            // Check if there's capacity
+            if heap.len() < self.max_capacity {
+                // Space available - enqueue the event
+                heap.push(PriorityQueueEvent::new(event));
+
+                // Update metrics using atomic operations (lock-free)
+                self.metrics
+                    .total_enqueued
+                    .fetch_add(1, AtomicOrdering::Relaxed);
+                let current_depth = heap.len();
+                self.metrics
+                    .current_depth
+                    .store(current_depth, AtomicOrdering::Relaxed);
+
+                // Update max_depth_seen if needed (using compare-exchange loop)
+                let mut max_seen = self.metrics.max_depth_seen.load(AtomicOrdering::Relaxed);
+                while current_depth > max_seen {
+                    match self.metrics.max_depth_seen.compare_exchange_weak(
+                        max_seen,
+                        current_depth,
+                        AtomicOrdering::Relaxed,
+                        AtomicOrdering::Relaxed,
+                    ) {
+                        Ok(_) => break,
+                        Err(x) => max_seen = x,
+                    }
+                }
+
+                drop(heap);
+
+                // Notify waiting dequeuers
+                self.notify.notify_one();
+
+                return;
+            }
+
+            // Queue is full - increment blocked count and wait
+            let blocked_count = self
+                .metrics
+                .blocked_enqueue_count
+                .fetch_add(1, AtomicOrdering::Relaxed)
+                + 1;
+
+            // Log blocking event periodically (every 100th block or first time)
+            if blocked_count == 1 || blocked_count % 100 == 0 {
+                debug!(
+                    "Priority queue enqueue blocked (capacity {}); blocked {} times so far",
+                    self.max_capacity, blocked_count
+                );
+            }
+
+            // Drop lock and wait for notification
+            drop(heap);
+
+            // Wait for dequeue to create space
+            self.notify.notified().await;
+        }
+    }
+
     /// Dequeue the oldest event from the priority queue (non-blocking)
     /// Returns None if queue is empty
     pub async fn try_dequeue(&self) -> Option<Arc<T>> {
@@ -220,6 +326,10 @@ where
             self.metrics
                 .current_depth
                 .store(heap.len(), AtomicOrdering::Relaxed);
+            drop(heap);
+
+            // Notify waiting enqueuers that space is available
+            self.notify.notify_one();
         }
 
         event
@@ -239,6 +349,10 @@ where
                     .current_depth
                     .store(heap.len(), AtomicOrdering::Relaxed);
                 drop(heap);
+
+                // Notify waiting enqueuers that space is available
+                self.notify.notify_one();
+
                 return event;
             }
             drop(heap);
@@ -279,6 +393,9 @@ where
             .store(0, AtomicOrdering::Relaxed);
         self.metrics
             .drops_due_to_capacity
+            .store(0, AtomicOrdering::Relaxed);
+        self.metrics
+            .blocked_enqueue_count
             .store(0, AtomicOrdering::Relaxed);
     }
 
@@ -429,5 +546,207 @@ mod tests {
         let drained = pq.drain().await;
         assert_eq!(drained.len(), 3);
         assert!(pq.is_empty().await);
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_wait_blocks_when_full() {
+        let pq = PriorityQueue::new(2);
+        let now = Utc::now();
+
+        // Fill queue to capacity
+        pq.enqueue_wait(create_test_event("event1", now)).await;
+        pq.enqueue_wait(create_test_event("event2", now)).await;
+
+        // Verify queue is at capacity
+        assert_eq!(pq.depth().await, 2);
+
+        // Try to enqueue with a timeout - should block
+        let pq_clone = pq.clone();
+        let event3 = create_test_event("event3", now);
+        let enqueue_task = tokio::spawn(async move {
+            pq_clone.enqueue_wait(event3).await;
+            "enqueued"
+        });
+
+        // Give it a moment to block
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Task should still be pending (blocked)
+        assert!(!enqueue_task.is_finished());
+
+        // Dequeue one item to make space
+        pq.try_dequeue().await;
+
+        // Now the blocked enqueue should complete
+        let result = tokio::time::timeout(
+            tokio::time::Duration::from_millis(100),
+            enqueue_task
+        )
+        .await;
+
+        assert!(result.is_ok(), "enqueue_wait should have unblocked");
+        assert_eq!(pq.depth().await, 2); // Should be back at capacity
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_wait_unblocks_on_dequeue() {
+        let pq = PriorityQueue::new(1);
+        let now = Utc::now();
+
+        // Fill queue
+        pq.enqueue_wait(create_test_event("event1", now)).await;
+
+        // Spawn task that will block on enqueue
+        let pq_clone = pq.clone();
+        let event2 = create_test_event("event2", now);
+        let enqueue_task = tokio::spawn(async move {
+            pq_clone.enqueue_wait(event2).await;
+        });
+
+        // Wait a bit to ensure it's blocked
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Dequeue to create space (this should notify the blocked enqueuer)
+        let dequeued = pq.try_dequeue().await;
+        assert!(dequeued.is_some());
+
+        // The enqueue should complete now
+        let result = tokio::time::timeout(
+            tokio::time::Duration::from_millis(100),
+            enqueue_task
+        )
+        .await;
+
+        assert!(result.is_ok(), "enqueue_wait should have been notified");
+        assert_eq!(pq.depth().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_wait_multiple_waiters() {
+        let pq = PriorityQueue::new(1);
+        let now = Utc::now();
+
+        // Fill queue
+        pq.enqueue_wait(create_test_event("event1", now)).await;
+
+        // Spawn multiple tasks that will block
+        let mut tasks = vec![];
+        for i in 2..=4 {
+            let pq_clone = pq.clone();
+            let event = create_test_event(&format!("event{}", i), now);
+            let task = tokio::spawn(async move {
+                pq_clone.enqueue_wait(event).await;
+                i
+            });
+            tasks.push(task);
+        }
+
+        // Wait to ensure all are blocked
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Dequeue items one by one and verify waiting tasks complete
+        for expected_id in 2..=4 {
+            pq.try_dequeue().await;
+
+            // One task should complete
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let completed_count = tasks.iter().filter(|t| t.is_finished()).count();
+            assert_eq!(
+                completed_count,
+                expected_id - 1,
+                "Expected {} tasks to complete",
+                expected_id - 1
+            );
+        }
+
+        // Wait for all tasks to finish
+        for task in tasks {
+            tokio::time::timeout(tokio::time::Duration::from_millis(100), task)
+                .await
+                .expect("Task should complete")
+                .expect("Task should not panic");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_wait_metrics() {
+        let pq = PriorityQueue::new(2);
+        let now = Utc::now();
+
+        // Fill queue
+        pq.enqueue_wait(create_test_event("event1", now)).await;
+        pq.enqueue_wait(create_test_event("event2", now)).await;
+
+        // Reset metrics to test blocked count
+        pq.reset_metrics().await;
+
+        // Spawn task that will block
+        let pq_clone = pq.clone();
+        let event3 = create_test_event("event3", now);
+        let enqueue_task = tokio::spawn(async move {
+            pq_clone.enqueue_wait(event3).await;
+        });
+
+        // Wait for it to block
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Check metrics - blocked count should be at least 1
+        // Note: It might be higher if notify wakes it up but queue is still full
+        let metrics = pq.metrics().await;
+        assert!(
+            metrics.blocked_enqueue_count >= 1,
+            "Should have blocked at least once, got {}",
+            metrics.blocked_enqueue_count
+        );
+
+        // Dequeue to unblock
+        pq.try_dequeue().await;
+
+        // Wait for enqueue to complete
+        tokio::time::timeout(tokio::time::Duration::from_millis(100), enqueue_task)
+            .await
+            .expect("Task should complete")
+            .expect("Task should not panic");
+
+        // Metrics should show the enqueue completed
+        let final_metrics = pq.metrics().await;
+        assert_eq!(final_metrics.total_enqueued, 1);
+        assert!(final_metrics.blocked_enqueue_count >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_wait_vs_enqueue_behavior() {
+        let pq = PriorityQueue::new(2);
+        let now = Utc::now();
+
+        // Fill queue
+        pq.enqueue(create_test_event("event1", now)).await;
+        pq.enqueue(create_test_event("event2", now)).await;
+
+        // Non-blocking enqueue should fail
+        let result = pq.enqueue(create_test_event("event3", now)).await;
+        assert!(!result, "Non-blocking enqueue should return false when full");
+
+        // Check that drop counter increased
+        let metrics = pq.metrics().await;
+        assert_eq!(metrics.drops_due_to_capacity, 1);
+
+        // Blocking enqueue_wait should succeed (after dequeue)
+        let pq_clone = pq.clone();
+        let event4 = create_test_event("event4", now);
+        let enqueue_task = tokio::spawn(async move {
+            pq_clone.enqueue_wait(event4).await;
+        });
+
+        // Dequeue to make space
+        pq.try_dequeue().await;
+
+        // Blocking enqueue should complete
+        tokio::time::timeout(tokio::time::Duration::from_millis(100), enqueue_task)
+            .await
+            .expect("enqueue_wait should complete")
+            .expect("Task should not panic");
+
+        assert_eq!(pq.depth().await, 2);
     }
 }
