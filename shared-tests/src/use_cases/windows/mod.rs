@@ -506,13 +506,13 @@ pub async fn sliding_window_avg_grouped(config: &(impl QueryTestConfig + Send)) 
 
     //delete sensor 2
     {
-        let change = SourceChange::Delete { 
+        let change = SourceChange::Delete {
             metadata: ElementMetadata {
-                    reference: ElementReference::new("test", "s2"),
-                    labels: Arc::new([Arc::from("Sensor")]),
-                    effective_from: now,
-                } 
-            };
+                reference: ElementReference::new("test", "s2"),
+                labels: Arc::new([Arc::from("Sensor")]),
+                effective_from: now,
+            },
+        };
 
         let result = cq.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);

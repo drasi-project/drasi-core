@@ -14,7 +14,10 @@
 
 use std::sync::Arc;
 
-use crate::{evaluation::{context::QueryVariables, variable_value::VariableValue}, models::ElementReference};
+use crate::{
+    evaluation::{context::QueryVariables, variable_value::VariableValue},
+    models::ElementReference,
+};
 use async_trait::async_trait;
 use ordered_float::OrderedFloat;
 
