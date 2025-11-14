@@ -120,6 +120,7 @@ impl LazyScalarFunction for SlidingWindow {
         if let Some(anchor_element) = context.get_anchor_element() {
             let result_key = ResultKey::Element(anchor_element.get_reference().clone());
 
+            #[allow(clippy::single_match)]
             match context.get_side_effects() {
                 SideEffects::Apply => {
                     if expired {
