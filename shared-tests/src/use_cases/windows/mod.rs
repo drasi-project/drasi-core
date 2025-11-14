@@ -45,6 +45,7 @@ macro_rules! variablemap {
   }}
 }
 
+#[allow(clippy::print_stdout, clippy::unwrap_used)]
 pub async fn sliding_window_max(config: &(impl QueryTestConfig + Send)) {
     let cq = {
         let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
@@ -267,6 +268,7 @@ pub async fn sliding_window_max(config: &(impl QueryTestConfig + Send)) {
     }
 }
 
+#[allow(clippy::print_stdout, clippy::unwrap_used)]
 pub async fn sliding_window_avg_grouped(config: &(impl QueryTestConfig + Send)) {
     let cq = {
         let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
