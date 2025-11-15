@@ -57,6 +57,51 @@ impl Default for AdaptiveBatchConfig {
     }
 }
 
+impl AdaptiveBatchConfig {
+    /// Calculate recommended channel capacity for the internal batching channel
+    ///
+    /// Returns `max_batch_size × 5` to provide sufficient buffering for:
+    /// - **Pipeline parallelism**: Next batch can accumulate while current batch is being processed
+    /// - **Burst handling**: Absorbs temporary traffic spikes without triggering backpressure
+    /// - **Throughput smoothing**: Reduces frequency of blocking on channel sends
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use drasi_server_core::utils::AdaptiveBatchConfig;
+    /// use std::time::Duration;
+    ///
+    /// let config = AdaptiveBatchConfig {
+    ///     max_batch_size: 1000,
+    ///     min_batch_size: 10,
+    ///     max_wait_time: Duration::from_millis(100),
+    ///     min_wait_time: Duration::from_millis(1),
+    ///     throughput_window: Duration::from_secs(5),
+    ///     adaptive_enabled: true,
+    /// };
+    ///
+    /// assert_eq!(config.recommended_channel_capacity(), 5000);
+    /// ```
+    ///
+    /// # Buffer Multiplier Rationale
+    ///
+    /// The 5x multiplier is chosen to balance memory usage and throughput:
+    /// - **2-3x**: Minimum for effective pipelining (current + next batch)
+    /// - **5x**: Good balance for most workloads (2-3 batches buffered)
+    /// - **10x+**: For extreme burst scenarios (may use excessive memory)
+    ///
+    /// # Scaling Examples
+    ///
+    /// | max_batch_size | Channel Capacity | Memory Impact (1KB/event) |
+    /// |----------------|------------------|---------------------------|
+    /// | 100            | 500              | ~500 KB                   |
+    /// | 1,000          | 5,000            | ~5 MB                     |
+    /// | 5,000          | 25,000           | ~25 MB                    |
+    pub fn recommended_channel_capacity(&self) -> usize {
+        self.max_batch_size * 5
+    }
+}
+
 /// Monitors throughput and provides traffic classification
 pub struct ThroughputMonitor {
     window_size: Duration,
@@ -339,6 +384,62 @@ impl<T> FixedBatcher<T> {
 mod tests {
     use super::*;
     use tokio::time::sleep;
+
+    #[test]
+    fn test_recommended_channel_capacity() {
+        // Default config: max_batch_size = 1000
+        let config = AdaptiveBatchConfig::default();
+        assert_eq!(
+            config.recommended_channel_capacity(),
+            5000,
+            "Default config should recommend 5000 capacity (1000 × 5)"
+        );
+
+        // Small batch size
+        let small_config = AdaptiveBatchConfig {
+            max_batch_size: 100,
+            min_batch_size: 10,
+            max_wait_time: Duration::from_millis(100),
+            min_wait_time: Duration::from_millis(1),
+            throughput_window: Duration::from_secs(5),
+            adaptive_enabled: true,
+        };
+        assert_eq!(
+            small_config.recommended_channel_capacity(),
+            500,
+            "Small batch (100) should recommend 500 capacity (100 × 5)"
+        );
+
+        // Large batch size
+        let large_config = AdaptiveBatchConfig {
+            max_batch_size: 5000,
+            min_batch_size: 100,
+            max_wait_time: Duration::from_millis(500),
+            min_wait_time: Duration::from_millis(1),
+            throughput_window: Duration::from_secs(10),
+            adaptive_enabled: true,
+        };
+        assert_eq!(
+            large_config.recommended_channel_capacity(),
+            25000,
+            "Large batch (5000) should recommend 25000 capacity (5000 × 5)"
+        );
+
+        // Very small batch
+        let tiny_config = AdaptiveBatchConfig {
+            max_batch_size: 10,
+            min_batch_size: 1,
+            max_wait_time: Duration::from_millis(10),
+            min_wait_time: Duration::from_millis(1),
+            throughput_window: Duration::from_secs(1),
+            adaptive_enabled: true,
+        };
+        assert_eq!(
+            tiny_config.recommended_channel_capacity(),
+            50,
+            "Tiny batch (10) should recommend 50 capacity (10 × 5)"
+        );
+    }
 
     #[tokio::test]
     async fn test_throughput_monitor() {

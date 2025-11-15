@@ -370,12 +370,12 @@ impl Source for HttpSource {
             _ => ("0.0.0.0".to_string(), 8080u16),
         };
 
-        // Create batch channel
-        let batch_channel_capacity = 1000;
+        // Create batch channel with capacity based on batch configuration
+        let batch_channel_capacity = self.adaptive_config.recommended_channel_capacity();
         let (batch_tx, batch_rx) = mpsc::channel(batch_channel_capacity);
         info!(
-            "[{}] Created batch channel with capacity {}",
-            self.base.config.id, batch_channel_capacity
+            "[{}] HttpSource using batch channel capacity: {} (max_batch_size: {} × 5)",
+            self.base.config.id, batch_channel_capacity, self.adaptive_config.max_batch_size
         );
 
         // Start adaptive batcher task

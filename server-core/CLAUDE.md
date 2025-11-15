@@ -79,6 +79,26 @@ sources:
 - `current_depth`, `max_depth_seen`: Queue utilization
 - `total_enqueued`, `total_dequeued`: Throughput tracking
 
+#### Adaptive Batcher Channel Capacity
+
+Adaptive reactions (HTTP, gRPC) and the HTTP source use an internal channel between the receiver task and the `AdaptiveBatcher`. This channel capacity **automatically scales** with the `max_batch_size` configuration:
+
+**Automatic Scaling**: `channel_capacity = max_batch_size × 5`
+
+This 5x multiplier provides:
+- **Pipeline parallelism**: Next batch accumulates while current batch is being sent
+- **Burst handling**: Absorbs temporary traffic spikes without backpressure
+- **Throughput smoothing**: Reduces blocking on channel sends
+
+**Scaling Examples**:
+| max_batch_size | Channel Capacity | Memory (1KB/event) |
+|----------------|------------------|---------------------|
+| 100            | 500              | ~500 KB            |
+| 1,000 (default)| 5,000            | ~5 MB              |
+| 5,000          | 25,000           | ~25 MB             |
+
+**Implementation**: See `AdaptiveBatchConfig::recommended_channel_capacity()` in `/Users/allenjones/dev/agentofreality/drasi/drasi-core/server-core/src/utils/adaptive_batcher.rs`
+
 ### Bootstrap Provider Architecture
 DrasiServerCore features a **universal pluggable bootstrap provider system** where ALL sources support configurable bootstrap providers, completely separating bootstrap (initial data delivery) from source streaming logic.
 

@@ -321,8 +321,14 @@ impl AdaptiveHttpReaction {
         adaptive_config: AdaptiveBatchConfig,
         sender: Arc<Self>,
     ) {
-        // Create channel for batching
-        let (batch_tx, batch_rx) = mpsc::channel(1000);
+        // Create channel for batching with capacity based on batch configuration
+        let batch_channel_capacity = adaptive_config.recommended_channel_capacity();
+        let (batch_tx, batch_rx) = mpsc::channel(batch_channel_capacity);
+
+        debug!(
+            "[{}] HttpAdaptiveReaction using batch channel capacity: {} (max_batch_size: {} × 5)",
+            reaction_name, batch_channel_capacity, adaptive_config.max_batch_size
+        );
 
         // Spawn adaptive batcher task
         let batcher_handle = tokio::spawn({

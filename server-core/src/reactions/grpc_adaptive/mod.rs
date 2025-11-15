@@ -171,8 +171,14 @@ impl AdaptiveGrpcReaction {
     ) {
         let _timeout_ms = timeout_ms;
 
-        // Create channel for batching
-        let (batch_tx, batch_rx) = mpsc::channel(1000);
+        // Create channel for batching with capacity based on batch configuration
+        let batch_channel_capacity = adaptive_config.recommended_channel_capacity();
+        let (batch_tx, batch_rx) = mpsc::channel(batch_channel_capacity);
+
+        debug!(
+            "GrpcAdaptiveReaction using batch channel capacity: {} (max_batch_size: {} × 5)",
+            batch_channel_capacity, adaptive_config.max_batch_size
+        );
 
         // Spawn adaptive batcher task
         let batcher_handle = tokio::spawn(async move {
