@@ -27,15 +27,30 @@ The Application reaction enables:
 
 ## Configuration
 
-The Application reaction is typically created programmatically but supports standard YAML/JSON configuration:
+### Configuration Settings
 
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `id` | string | Required | Unique identifier for the reaction |
-| `reaction_type` | string | `"application"` | Must be "application" |
-| `queries` | array | `[]` | Query IDs to filter (empty = all queries) |
-| `auto_start` | boolean | `true` | Auto-start when server starts |
-| `properties` | object | `{}` | Additional properties (unused)
+The Application Reaction supports the following configuration settings:
+
+| Setting Name | Data Type | Description | Valid Values/Range | Default Value |
+|--------------|-----------|-------------|-------------------|---------------|
+| `id` | String | Unique identifier for the reaction | Any string | **(Required)** |
+| `queries` | Array[String] | IDs of queries this reaction subscribes to | Array of query IDs | **(Required)** |
+| `reaction_type` | String | Reaction type discriminator | "application" | **(Required)** |
+| `auto_start` | Boolean | Whether to automatically start this reaction | true, false | `true` |
+| `properties` | HashMap<String, serde_json::Value> | Application-specific properties. This is a flexible container for any custom configuration values your application might need. All properties are stored as JSON values | Map of property names to JSON values | Empty HashMap |
+| `priority_queue_capacity` | Integer (Optional) | Maximum events in priority queue before backpressure. Controls event queuing before the reaction processes them. Higher values allow more buffering but use more memory | Any positive integer | `10000` |
+
+**Note**: The Application reaction uses a flexible configuration approach where all properties are stored in a flattened HashMap. Unlike other reactions with strongly-typed configuration, you can add any custom properties you need and access them as JSON values.
+
+### Standard Reaction Properties
+
+These are part of the general `ReactionConfig` structure, not ApplicationReactionConfig:
+
+- `id` (String, Required): Unique identifier for the reaction
+- `reaction_type` (String): Must be `"application"`
+- `queries` (Vec<String>): List of query IDs to subscribe to
+- `auto_start` (bool): Whether to automatically start the reaction
+- `priority_queue_capacity` (Option<usize>): Optional capacity for the priority queue
 
 ### Configuration Examples
 
@@ -43,17 +58,18 @@ The Application reaction is typically created programmatically but supports stan
 ```yaml
 reactions:
   - id: "app-reaction"
-    reaction_type: "application"
     queries: ["sensor-monitor", "inventory-check"]
+    reaction_type: "application"
     auto_start: true
+    priority_queue_capacity: 20000
 ```
 
 **JSON:**
 ```json
 {
   "id": "app-reaction",
-  "reaction_type": "application",
   "queries": ["sensor-monitor"],
+  "reaction_type": "application",
   "auto_start": true
 }
 ```

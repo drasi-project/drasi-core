@@ -8,8 +8,8 @@ Sends query results to external gRPC services using Protocol Buffers format with
 ```yaml
 reactions:
   - id: "my-grpc-reaction"
-    reaction_type: "grpc"
     queries: ["my-query"]
+    reaction_type: "grpc"
     auto_start: true
     endpoint: "grpc://localhost:50052"
     batch_size: 100
@@ -32,16 +32,25 @@ core.start().await?;
 
 ## Configuration
 
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `endpoint` | string | `grpc://localhost:50052` | gRPC server endpoint |
-| `batch_size` | number | `100` | Max items per batch |
-| `batch_flush_timeout_ms` | number | `1000` | Max wait before flushing batch |
-| `timeout_ms` | number | `10000` | Request timeout |
-| `max_retries` | number | `3` | Max retry attempts |
-| `connection_retry_attempts` | number | `5` | Initial connection retries |
-| `initial_connection_timeout_ms` | number | `10000` | Initial connection timeout |
-| `metadata` | object | `{}` | gRPC metadata headers |
+### Configuration Settings
+
+The gRPC Reaction supports the following configuration settings:
+
+| Setting Name | Data Type | Description | Valid Values/Range | Default Value |
+|--------------|-----------|-------------|-------------------|---------------|
+| `id` | String | Unique identifier for the reaction | Any string | **(Required)** |
+| `queries` | Array[String] | IDs of queries this reaction subscribes to | Array of query IDs | **(Required)** |
+| `reaction_type` | String | Reaction type discriminator | "grpc" | **(Required)** |
+| `auto_start` | Boolean | Whether to automatically start this reaction | true, false | `true` |
+| `endpoint` | String | gRPC server endpoint URL. Must start with `grpc://` or `grpcs://` for secure connections | Valid gRPC URL (e.g., `grpc://localhost:50052`) | `"grpc://localhost:50052"` |
+| `timeout_ms` | u64 | Request timeout in milliseconds. Applies to individual gRPC calls | Any positive integer | `5000` |
+| `batch_size` | usize | Maximum number of items to include in a single batch. Results are batched together when multiple results for the same query are available | Any positive integer | `100` |
+| `batch_flush_timeout_ms` | u64 | Maximum time to wait before flushing a partial batch (milliseconds). Ensures results are sent even if batch size is not reached | Any positive integer | `1000` |
+| `max_retries` | u32 | Maximum number of retry attempts for failed batch send requests. Uses exponential backoff between retries | 0-100 | `3` |
+| `connection_retry_attempts` | u32 | Number of connection retry attempts when establishing initial connection to gRPC server | 0-100 | `5` |
+| `initial_connection_timeout_ms` | u64 | Timeout in milliseconds for the initial connection attempt to the gRPC server | Any positive integer | `10000` |
+| `metadata` | HashMap<String, String> | gRPC metadata headers to include in all requests. Key-value pairs are converted to gRPC metadata | Map of header names to values | Empty HashMap |
+| `priority_queue_capacity` | Integer (Optional) | Maximum events in priority queue before backpressure. Controls event queuing before the reaction processes them. Higher values allow more buffering but use more memory | Any positive integer | `10000` |
 
 ## Data Format
 
@@ -134,7 +143,9 @@ reactions:
 ```yaml
 reactions:
   - id: "production-grpc"
+    queries: ["production-query"]
     reaction_type: "grpc"
+    priority_queue_capacity: 25000
     endpoint: "grpc://api.example.com:443"
     connection_retry_attempts: 10
     initial_connection_timeout_ms: 30000

@@ -60,34 +60,64 @@ The PostgreSQL database must be configured for logical replication:
    ALTER TABLE your_table REPLICA IDENTITY DEFAULT;
    ```
 
-## Configuration Properties
+## Configuration
 
-| Property | Type | Default | Required | Description |
-|----------|------|---------|----------|-------------|
-| `host` | String | `"localhost"` | No | PostgreSQL server hostname or IP address |
-| `port` | Number | `5432` | No | PostgreSQL server port number |
-| `database` | String | - | **Yes** | Name of the PostgreSQL database to connect to |
-| `user` | String | - | **Yes** | PostgreSQL username with replication privileges |
-| `password` | String | `""` | No | PostgreSQL user password (empty string if not required) |
-| `tables` | Array[String] | `[]` | No | List of table names to monitor (empty array monitors all tables in publication) |
-| `slot_name` | String | `"drasi_slot"` | No | Name of the replication slot to use or create |
-| `publication_name` | String | `"drasi_publication"` | No | Name of the PostgreSQL publication to subscribe to |
-| `ssl_mode` | String | `"prefer"` | No | SSL connection mode: `"disable"`, `"prefer"`, `"require"` |
-| `table_keys` | Array[Object] | `[]` | No | Manual primary key configuration for tables (see Table Keys Configuration below) |
+### Configuration Settings
 
-### Table Keys Configuration
+The PostgreSQL Replication Source supports the following configuration settings:
+
+| Setting Name | Data Type | Description | Valid Values/Range | Default Value |
+|--------------|-----------|-------------|-------------------|---------------|
+| `id` | String | Unique identifier for the source | Any string | **(Required)** |
+| `source_type` | String | Source type discriminator | "postgres" | **(Required)** |
+| `auto_start` | Boolean | Whether to automatically start this source | true, false | `true` |
+| `host` | String | PostgreSQL server hostname or IP address | Any valid hostname or IP | `"localhost"` |
+| `port` | Integer (u16) | PostgreSQL server port number | 1 - 65535 | `5432` |
+| `database` | String | Name of the PostgreSQL database to connect to | Any valid database name | **(Required)** |
+| `user` | String | PostgreSQL username with replication privileges | Any valid username | **(Required)** |
+| `password` | String | PostgreSQL user password | Any string | `""` (empty string) |
+| `tables` | Array[String] | List of table names to monitor (empty monitors all tables in publication) | Array of table names | `[]` (empty array) |
+| `slot_name` | String | Name of the replication slot to use or create | Any valid slot name | `"drasi_slot"` |
+| `publication_name` | String | Name of the PostgreSQL publication to subscribe to | Any valid publication name | `"drasi_publication"` |
+| `ssl_mode` | SslMode (Enum) | SSL connection mode (see SslMode below) | `"disable"`, `"prefer"`, `"require"` | `"prefer"` |
+| `table_keys` | Array[TableKeyConfig] | Manual primary key configuration for tables (see TableKeyConfig below) | Array of TableKeyConfig objects | `[]` (empty array) |
+| `dispatch_mode` | String (Optional) | Event dispatch mode: "channel" (isolated channels per subscriber with backpressure, zero message loss) or "broadcast" (shared channel, no backpressure, possible message loss) | "channel", "broadcast" | `"channel"` |
+| `dispatch_buffer_capacity` | Integer (Optional) | Buffer size for dispatch channel | Any positive integer | `1000` |
+| `bootstrap_provider` | Object (Optional) | Bootstrap provider configuration | See Bootstrap Providers section | `None` |
+
+### Common Configuration Types
+
+#### SslMode (from config/common.rs)
+
+The `ssl_mode` setting controls SSL/TLS encryption for the PostgreSQL connection:
+
+| Value | Description |
+|-------|-------------|
+| `"disable"` | Disable SSL encryption entirely |
+| `"prefer"` | Prefer SSL but allow unencrypted connections if SSL is unavailable |
+| `"require"` | Require SSL encryption (connection will fail if SSL is unavailable) |
+
+**Default**: `"prefer"`
+
+**Example**:
+```yaml
+properties:
+  ssl_mode: "require"  # Force encrypted connections
+```
+
+#### TableKeyConfig (from config/common.rs)
 
 The `table_keys` property allows you to manually specify primary key columns for tables. This is useful when:
 - Tables don't have a defined primary key
 - You want to use a different set of columns for element ID generation
 - You need composite keys beyond what's defined in the database
 
-Each object in the `table_keys` array has the following structure:
+Each TableKeyConfig object has the following structure:
 
-| Property | Type | Required | Description |
-|----------|------|----------|-------------|
-| `table` | String | **Yes** | Fully qualified table name (e.g., `"users"` or `"schema.users"`) |
-| `key_columns` | Array[String] | **Yes** | List of column names to use as the primary key |
+| Field | Data Type | Description | Required |
+|-------|-----------|-------------|----------|
+| `table` | String | Fully qualified table name (e.g., `"users"` or `"schema.users"`) | **Yes** |
+| `key_columns` | Array[String] | List of column names to use as the primary key | **Yes** |
 
 **Example**:
 ```yaml
@@ -95,10 +125,12 @@ table_keys:
   - table: "users"
     key_columns: ["user_id"]
   - table: "events"
-    key_columns: ["event_id", "timestamp"]
+    key_columns: ["event_id", "timestamp"]  # Composite key
+  - table: "public.orders"  # Schema-qualified table
+    key_columns: ["order_id"]
 ```
 
-User-configured keys take precedence over automatically detected primary keys from PostgreSQL system catalogs.
+**Note**: User-configured keys take precedence over automatically detected primary keys from PostgreSQL system catalogs.
 
 ## Configuration Examples
 
@@ -108,24 +140,26 @@ User-configured keys take precedence over automatically detected primary keys fr
 sources:
   - id: postgres_source_1
     source_type: postgres
-    properties:
-      host: "postgres.example.com"
-      port: 5432
-      database: "production_db"
-      user: "drasi_user"
-      password: "secure_password"
-      tables:
-        - "orders"
-        - "customers"
-        - "products"
-      slot_name: "drasi_production_slot"
-      publication_name: "drasi_publication"
-      ssl_mode: "require"
-      table_keys:
-        - table: "orders"
-          key_columns: ["order_id"]
-        - table: "line_items"
-          key_columns: ["order_id", "line_number"]
+    auto_start: true
+    dispatch_mode: "channel"  # Isolated channels with backpressure
+    dispatch_buffer_capacity: 2000  # Larger buffer for high-volume CDC
+    host: "postgres.example.com"
+    port: 5432
+    database: "production_db"
+    user: "drasi_user"
+    password: "secure_password"
+    tables:
+      - "orders"
+      - "customers"
+      - "products"
+    slot_name: "drasi_production_slot"
+    publication_name: "drasi_publication"
+    ssl_mode: "require"
+    table_keys:
+      - table: "orders"
+        key_columns: ["order_id"]
+      - table: "line_items"
+        key_columns: ["order_id", "line_number"]
 ```
 
 ### JSON Configuration
@@ -136,27 +170,25 @@ sources:
     {
       "id": "postgres_source_1",
       "source_type": "postgres",
-      "properties": {
-        "host": "postgres.example.com",
-        "port": 5432,
-        "database": "production_db",
-        "user": "drasi_user",
-        "password": "secure_password",
-        "tables": ["orders", "customers", "products"],
-        "slot_name": "drasi_production_slot",
-        "publication_name": "drasi_publication",
-        "ssl_mode": "require",
-        "table_keys": [
-          {
-            "table": "orders",
-            "key_columns": ["order_id"]
-          },
-          {
-            "table": "line_items",
-            "key_columns": ["order_id", "line_number"]
-          }
-        ]
-      }
+      "host": "postgres.example.com",
+      "port": 5432,
+      "database": "production_db",
+      "user": "drasi_user",
+      "password": "secure_password",
+      "tables": ["orders", "customers", "products"],
+      "slot_name": "drasi_production_slot",
+      "publication_name": "drasi_publication",
+      "ssl_mode": "require",
+      "table_keys": [
+        {
+          "table": "orders",
+          "key_columns": ["order_id"]
+        },
+        {
+          "table": "line_items",
+          "key_columns": ["order_id", "line_number"]
+        }
+      ]
     }
   ]
 }
@@ -168,10 +200,9 @@ sources:
 sources:
   - id: postgres_local
     source_type: postgres
-    properties:
-      database: "myapp"
-      user: "myapp_user"
-      password: "myapp_password"
+    database: "myapp"
+    user: "myapp_user"
+    password: "myapp_password"
 ```
 
 ## Programmatic Construction (Rust)
@@ -499,14 +530,13 @@ Create your source configuration file (e.g., `postgres-source.yaml`):
 sources:
   - id: my_postgres_source
     source_type: postgres
-    properties:
-      host: "localhost"
-      port: 5432
-      database: "myapp"
-      user: "drasi_user"
-      password: "secure_password"
-      publication_name: "drasi_publication"
-      slot_name: "drasi_myapp_slot"
+    host: "localhost"
+    port: 5432
+    database: "myapp"
+    user: "drasi_user"
+    password: "secure_password"
+    publication_name: "drasi_publication"
+    slot_name: "drasi_myapp_slot"
 ```
 
 ### Step 6: Monitor Replication

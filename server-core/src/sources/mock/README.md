@@ -35,12 +35,24 @@ The Mock Source is a built-in synthetic data generator designed for testing, dev
 - Validate data routing between components
 - Test bootstrap and streaming integration
 
-## Configuration Properties
+## Configuration
 
-| Property | Type | Required | Default | Description |
-|----------|------|----------|---------|-------------|
-| `data_type` | String | No | `"generic"` | Type of data to generate: `"counter"`, `"sensor"`, or `"generic"` |
-| `interval_ms` | Integer | No | `5000` | Interval in milliseconds between data generation events |
+### Configuration Settings
+
+The Mock Source supports the following configuration settings:
+
+| Setting Name | Data Type | Description | Valid Values/Range | Default Value |
+|--------------|-----------|-------------|-------------------|---------------|
+| `id` | String | Unique identifier for the source | Any string | **(Required)** |
+| `source_type` | String | Source type discriminator | "mock" | **(Required)** |
+| `auto_start` | Boolean | Whether to automatically start this source | true, false | `true` |
+| `data_type` | String | Type of synthetic data to generate | `"counter"`, `"sensor"`, `"generic"` | `"generic"` |
+| `interval_ms` | Integer (u64) | Interval between data generation events in milliseconds | Any positive integer (1 - 2^64) | `5000` |
+| `dispatch_mode` | String (Optional) | Event dispatch mode: "channel" (isolated channels per subscriber with backpressure, zero message loss) or "broadcast" (shared channel, no backpressure, possible message loss) | "channel", "broadcast" | `"channel"` |
+| `dispatch_buffer_capacity` | Integer (Optional) | Buffer size for dispatch channel | Any positive integer | `1000` |
+| `bootstrap_provider` | Object (Optional) | Bootstrap provider configuration | See Bootstrap Providers section | `None` |
+
+**Note**: The Mock Source does not use any common configuration types from `config/common.rs` (such as SslMode or TableKeyConfig).
 
 ## Data Generation Modes
 
@@ -144,9 +156,10 @@ sources:
   - id: "counter-source"
     source_type: "mock"
     auto_start: true
-    properties:
-      data_type: "counter"
-      interval_ms: 2000  # Generate every 2 seconds
+    dispatch_mode: "channel"  # Isolated channels with backpressure
+    dispatch_buffer_capacity: 1000
+    data_type: "counter"
+    interval_ms: 2000  # Generate every 2 seconds
 ```
 
 #### Sensor Source
@@ -155,9 +168,8 @@ sources:
   - id: "sensor-source"
     source_type: "mock"
     auto_start: true
-    properties:
-      data_type: "sensor"
-      interval_ms: 1500  # Generate every 1.5 seconds
+    data_type: "sensor"
+    interval_ms: 1500  # Generate every 1.5 seconds
 ```
 
 #### Generic Source
@@ -166,9 +178,8 @@ sources:
   - id: "generic-source"
     source_type: "mock"
     auto_start: true
-    properties:
-      data_type: "generic"
-      interval_ms: 5000  # Generate every 5 seconds
+    data_type: "generic"
+    interval_ms: 5000  # Generate every 5 seconds
 ```
 
 #### With Bootstrap Provider
@@ -177,9 +188,8 @@ sources:
   - id: "mock-with-bootstrap"
     source_type: "mock"
     auto_start: true
-    properties:
-      data_type: "sensor"
-      interval_ms: 2000
+    data_type: "sensor"
+    interval_ms: 2000
     bootstrap_provider:
       type: scriptfile
       file_paths:
@@ -196,10 +206,8 @@ sources:
       "id": "counter-source",
       "source_type": "mock",
       "auto_start": true,
-      "properties": {
-        "data_type": "counter",
-        "interval_ms": 2000
-      }
+      "data_type": "counter",
+      "interval_ms": 2000
     }
   ]
 }
@@ -213,10 +221,8 @@ sources:
       "id": "sensor-source",
       "source_type": "mock",
       "auto_start": true,
-      "properties": {
-        "data_type": "sensor",
-        "interval_ms": 1500
-      }
+      "data_type": "sensor",
+      "interval_ms": 1500
     }
   ]
 }
@@ -406,9 +412,8 @@ sources:
   - id: "sensor-data"
     source_type: "mock"
     auto_start: true
-    properties:
-      data_type: "sensor"
-      interval_ms: 2000
+    data_type: "sensor"
+    interval_ms: 2000
 
 queries:
   - id: "high-temperature-alert"

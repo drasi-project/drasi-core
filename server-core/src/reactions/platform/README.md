@@ -36,23 +36,25 @@ Sources → Queries → Platform Reaction → Redis Streams → Dapr PubSub → 
 
 ## Configuration
 
-### Required Properties
+### Configuration Settings
 
-| Property | Type | Description |
-|----------|------|-------------|
-| `redis_url` | String | Redis connection URL (e.g., `redis://localhost:6379`) |
+The Platform Reaction supports the following configuration settings:
 
-### Optional Properties
-
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `pubsub_name` | String | `"drasi-pubsub"` | Dapr pubsub component name in CloudEvent |
-| `source_name` | String | `"drasi-core"` | CloudEvent source identifier |
-| `max_stream_length` | u64 | None | Max entries per stream (approximate trimming) |
-| `emit_control_events` | bool | `true` | Emit lifecycle control events |
-| `batch_enabled` | bool | `false` | Enable batch publishing for performance |
-| `batch_max_size` | usize | `100` | Max events per batch (1-10000) |
-| `batch_max_wait_ms` | u64 | `100` | Max wait time before flushing batch (ms) |
+| Setting Name | Data Type | Description | Valid Values/Range | Default Value |
+|--------------|-----------|-------------|-------------------|---------------|
+| `id` | String | Unique identifier for the reaction | Any string | **(Required)** |
+| `queries` | Array[String] | IDs of queries this reaction subscribes to | Array of query IDs | **(Required)** |
+| `reaction_type` | String | Reaction type discriminator | "platform" | **(Required)** |
+| `auto_start` | Boolean | Whether to automatically start this reaction | true, false | `true` |
+| `redis_url` | String | Redis connection URL. Supports redis:// (unencrypted) and rediss:// (TLS) schemes. Can include authentication and database selection | Valid Redis URL (e.g., `redis://localhost:6379`, `redis://:password@host:port/db`) | Required (no default) |
+| `pubsub_name` | String (Optional) | Dapr pubsub component name to include in CloudEvent metadata. Used by Dapr for routing published events | Any string | `"drasi-pubsub"` |
+| `source_name` | String (Optional) | CloudEvent source identifier. Identifies the origin of the events in the CloudEvent format | Any string | `"drasi-core"` |
+| `max_stream_length` | usize (Optional) | Maximum number of entries to retain in each Redis Stream. Uses MAXLEN ~ (approximate trimming) for performance. Prevents unbounded stream growth | Any positive integer | None (unlimited) |
+| `emit_control_events` | bool | Whether to emit control events for reaction lifecycle (Running, Stopped, BootstrapStarted, BootstrapCompleted) | true or false | `false` |
+| `batch_enabled` | bool | Enable batch publishing to send multiple events in a single Redis pipeline operation for improved throughput | true or false | `false` |
+| `batch_max_size` | usize | Maximum number of events to include in a single batch when batch publishing is enabled | 1-10000 (validated with warnings > 1000) | `100` |
+| `batch_max_wait_ms` | u64 | Maximum time to wait in milliseconds before flushing a partial batch. Ensures low latency even when batch is not full | Any positive integer (warnings > 1000ms) | `100` |
+| `priority_queue_capacity` | Integer (Optional) | Maximum events in priority queue before backpressure. Controls event queuing before the reaction processes them. Higher values allow more buffering but use more memory | Any positive integer | `10000` |
 
 ### Redis URL Formats
 ```
@@ -69,8 +71,8 @@ redis://localhost:6379/0                  # Specific database
 ```yaml
 reactions:
   - id: platform-output
-    reaction_type: platform
     queries: ["my-query"]
+    reaction_type: platform
     auto_start: true
     redis_url: "redis://localhost:6379"
 ```
@@ -79,8 +81,8 @@ reactions:
 ```yaml
 reactions:
   - id: platform-output
-    reaction_type: platform
     queries: ["my-query", "another-query"]
+    reaction_type: platform
     redis_url: "redis://localhost:6379"
     max_stream_length: 10000  # Keep last 10k results per stream
 ```
@@ -89,8 +91,9 @@ reactions:
 ```yaml
 reactions:
   - id: platform-output
-    reaction_type: platform
     queries: ["high-volume-query"]
+    reaction_type: platform
+    priority_queue_capacity: 50000
     redis_url: "redis://localhost:6379"
     batch_enabled: true
     batch_max_size: 500        # Batch up to 500 events
@@ -102,8 +105,8 @@ reactions:
 ```yaml
 reactions:
   - id: platform-output
-    reaction_type: platform
     queries: ["my-query"]
+    reaction_type: platform
     redis_url: "redis://localhost:6379"
     pubsub_name: "custom-pubsub"
     source_name: "my-application"

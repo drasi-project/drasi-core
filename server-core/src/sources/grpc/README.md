@@ -13,6 +13,29 @@ The gRPC source provides a gRPC service endpoint for submitting data changes to 
 
 ## Configuration
 
+### Configuration Settings
+
+The gRPC Source supports the following configuration settings:
+
+| Setting Name | Data Type | Description | Valid Values/Range | Default Value |
+|--------------|-----------|-------------|-------------------|---------------|
+| `id` | String | Unique identifier for the source | Any string | **(Required)** |
+| `source_type` | String | Source type discriminator | "grpc" | **(Required)** |
+| `auto_start` | Boolean | Whether to automatically start this source | true, false | `true` |
+| `host` | String | gRPC server host address to bind to | Any valid hostname or IP | **(Required)** |
+| `port` | Integer (u16) | gRPC server port number | 1 - 65535 | **(Required)** |
+| `endpoint` | String (Optional) | Optional service endpoint path | Any valid path string | `None` |
+| `timeout_ms` | Integer (u64) | Request timeout in milliseconds | Any positive integer | `5000` |
+| `dispatch_mode` | String (Optional) | Event dispatch mode: "channel" (isolated channels per subscriber with backpressure, zero message loss) or "broadcast" (shared channel, no backpressure, possible message loss) | "channel", "broadcast" | `"channel"` |
+| `dispatch_buffer_capacity` | Integer (Optional) | Buffer size for dispatch channel | Any positive integer | `1000` |
+| `bootstrap_provider` | Object (Optional) | Bootstrap provider configuration | See Bootstrap Providers section | `None` |
+
+**Note**: The gRPC Source does not use any common configuration types from `config/common.rs` (such as SslMode or TableKeyConfig).
+
+### Configuration Examples
+
+#### Basic Configuration
+
 The gRPC source is configured in your Drasi server YAML configuration file:
 
 ```yaml
@@ -20,9 +43,34 @@ sources:
   - id: "my-grpc-source"
     source_type: "grpc"
     auto_start: true
-    properties:
-      port: 50051       # Port to listen on (default: 50051)
-      host: "0.0.0.0"   # Host to bind to (default: 0.0.0.0)
+    dispatch_mode: "channel"  # Isolated channels with backpressure
+    dispatch_buffer_capacity: 1500
+    host: "0.0.0.0"   # Host to bind to
+    port: 50051       # Port to listen on
+```
+
+#### With Custom Timeout
+
+```yaml
+sources:
+  - id: "grpc-with-timeout"
+    source_type: "grpc"
+    auto_start: true
+    host: "127.0.0.1"
+    port: 50052
+    timeout_ms: 10000  # 10 second timeout
+```
+
+#### With Custom Endpoint
+
+```yaml
+sources:
+  - id: "grpc-custom-endpoint"
+    source_type: "grpc"
+    auto_start: true
+    host: "0.0.0.0"
+    port: 50051
+    endpoint: "/api/v1/drasi"  # Custom service endpoint
 ```
 
 ## Service Definition

@@ -27,25 +27,26 @@ The platform source acts as a bridge between external Drasi Platform sources and
 
 ## Configuration
 
-### Required Properties
+### Configuration Settings
 
-| Property | Type | Description |
-|----------|------|-------------|
-| `redis_url` | String | Redis connection URL (e.g., `redis://localhost:6379`) |
-| `stream_key` | String | Redis stream key to read from (e.g., `sensor-data:changes`) |
-| `consumer_group` | String | Consumer group name for coordinated consumption |
-| `consumer_name` | String | Unique consumer name within the group |
+The Platform Source supports the following configuration settings:
 
-### Optional Properties
+| Setting Name | Data Type | Description | Valid Values/Range | Default Value |
+|--------------|-----------|-------------|-------------------|---------------|
+| `id` | String | Unique identifier for the source | Any string | **(Required)** |
+| `source_type` | String | Source type discriminator | "platform" | **(Required)** |
+| `auto_start` | Boolean | Whether to automatically start this source | true, false | `true` |
+| `redis_url` | String | Redis connection URL | Valid Redis URL (e.g., `redis://localhost:6379`) | **(Required)** |
+| `stream_key` | String | Redis stream key to read from | Any valid Redis stream key | **(Required)** |
+| `consumer_group` | String | Consumer group name for coordinated consumption | Any valid consumer group name | `"drasi-core"` |
+| `consumer_name` | String (Optional) | Unique consumer name within the group | Any unique identifier | Auto-generated from source ID |
+| `batch_size` | Integer (usize) | Number of events to read per XREADGROUP call | Any positive integer | `100` |
+| `block_ms` | Integer (u64) | Milliseconds to block waiting for new events | Any positive integer | `5000` |
+| `dispatch_mode` | String (Optional) | Event dispatch mode: "channel" (isolated channels per subscriber with backpressure, zero message loss) or "broadcast" (shared channel, no backpressure, possible message loss) | "channel", "broadcast" | `"channel"` |
+| `dispatch_buffer_capacity` | Integer (Optional) | Buffer size for dispatch channel | Any positive integer | `1000` |
+| `bootstrap_provider` | Object (Optional) | Bootstrap provider configuration | See Bootstrap Providers section | `None` |
 
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `batch_size` | Number | 10 | Number of events to read per XREADGROUP call |
-| `block_ms` | Number | 5000 | Milliseconds to block waiting for new events |
-| `start_id` | String | ">" | Stream position to start from (">" for new, "0" for all) |
-| `always_create_consumer_group` | Boolean | false | If true, deletes and recreates consumer group on startup using start_id. If false, uses existing group position (ignores start_id if group exists) |
-| `max_retries` | Number | 3 | Maximum connection retry attempts |
-| `retry_delay_ms` | Number | 1000 | Delay between connection retries (with exponential backoff) |
+**Note**: The Platform Source does not use any common configuration types from `config/common.rs` (such as SslMode or TableKeyConfig).
 
 ### Example Configuration
 
@@ -54,15 +55,16 @@ sources:
   - id: external_sensor_data
     source_type: platform
     auto_start: true
-    properties:
-      redis_url: "redis://localhost:6379"
-      stream_key: "sensor-source:changes"
-      consumer_group: "drasi-core"
-      consumer_name: "consumer-1"
-      batch_size: 10
-      block_ms: 5000
-      start_id: ">"
-      always_create_consumer_group: false
+    dispatch_mode: "channel"  # Isolated channels with backpressure
+    dispatch_buffer_capacity: 1500
+    redis_url: "redis://localhost:6379"
+    stream_key: "sensor-source:changes"
+    consumer_group: "drasi-core"
+    consumer_name: "consumer-1"
+    batch_size: 10
+    block_ms: 5000
+    start_id: ">"
+    always_create_consumer_group: false
 ```
 
 ### Kubernetes/Multi-Instance Configuration
@@ -71,12 +73,11 @@ sources:
 sources:
   - id: platform_events
     source_type: platform
-    properties:
-      redis_url: "redis://redis.default.svc.cluster.local:6379"
-      stream_key: "events:changes"
-      consumer_group: "drasi-core-group"
-      consumer_name: "${HOSTNAME}"  # Use pod name for unique consumer
-      batch_size: 50
+    redis_url: "redis://redis.default.svc.cluster.local:6379"
+    stream_key: "events:changes"
+    consumer_group: "drasi-core-group"
+    consumer_name: "${HOSTNAME}"  # Use pod name for unique consumer
+    batch_size: 50
 ```
 
 ## Event Format

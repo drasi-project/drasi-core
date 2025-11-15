@@ -14,34 +14,42 @@ The Log reaction is designed for:
 
 ## Configuration
 
-### Basic Example
+### Configuration Settings
+
+The Log Reaction supports the following configuration settings:
+
+| Setting Name | Data Type | Description | Valid Values/Range | Default Value |
+|--------------|-----------|-------------|-------------------|---------------|
+| `id` | String | Unique identifier for the reaction | Any string | **(Required)** |
+| `queries` | Array[String] | IDs of queries this reaction subscribes to | Array of query IDs | **(Required)** |
+| `reaction_type` | String | Reaction type discriminator | "log" | **(Required)** |
+| `auto_start` | Boolean | Whether to automatically start this reaction | true, false | `true` |
+| `log_level` | LogLevel (enum) | Logging level for outputting query results. Determines which Rust log macro is used (trace!, debug!, info!, warn!, or error!) | `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"` (case-insensitive) | `"info"` |
+| `priority_queue_capacity` | Integer (Optional) | Maximum events in priority queue before backpressure. Controls event queuing before the reaction processes them. Higher values allow more buffering but use more memory | Any positive integer | `10000` |
+
+### Log Level Details
+
+| Level | Use Case | Output Frequency |
+|-------|----------|-----------------|
+| `trace` | Extremely verbose debugging (library internals) | Very high |
+| `debug` | Development debugging, includes profiling data | High |
+| `info` | General monitoring, standard operational logging | Medium |
+| `warn` | Alert conditions, important events | Low |
+| `error` | Critical issues requiring attention | Very low |
+
+**Note**: The log level must be enabled in your application's logging configuration (e.g., `RUST_LOG` environment variable) to see output. For example, setting `log_level: "debug"` in the reaction config requires `RUST_LOG=debug` or lower to actually display the logs.
+
+### Configuration Examples
 
 ```yaml
 reactions:
   - id: "sensor-logger"
-    reaction_type: "log"
     queries: ["sensor-monitor"]
+    reaction_type: "log"
     auto_start: true
+    priority_queue_capacity: 5000
     log_level: "info"
 ```
-
-### Properties
-
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `log_level` | String | `"info"` | Logging level for query results |
-
-### Supported Log Levels
-
-| Level | Use Case |
-|-------|----------|
-| `trace` | Extremely verbose debugging (library internals) |
-| `debug` | Development debugging, includes profiling data |
-| `info` | General monitoring, standard operational logging |
-| `warn` | Alert conditions, important events |
-| `error` | Critical issues requiring attention |
-
-**Note**: The log level must be enabled in your application's logging configuration (e.g., `RUST_LOG` environment variable) to see output.
 
 ## Output Format
 

@@ -31,31 +31,38 @@ SSE is a W3C standard for server-to-client streaming over HTTP:
 
 ## Configuration
 
-Configure via `ReactionConfig` with `reaction_type: "sse"`:
+### Configuration Settings
+
+The SSE Reaction supports the following configuration settings:
+
+| Setting Name | Data Type | Description | Valid Values/Range | Default Value |
+|--------------|-----------|-------------|-------------------|---------------|
+| `id` | String | Unique identifier for the reaction | Any string | **(Required)** |
+| `queries` | Array[String] | IDs of queries this reaction subscribes to | Array of query IDs | **(Required)** |
+| `reaction_type` | String | Reaction type discriminator | "sse" | **(Required)** |
+| `auto_start` | Boolean | Whether to automatically start this reaction | true, false | `true` |
+| `host` | String | Host/network interface to bind the SSE HTTP server to. Use `"0.0.0.0"` to listen on all interfaces or a specific IP address to bind to one interface | Any valid IP address or hostname | `"0.0.0.0"` |
+| `port` | u16 | TCP port number for the SSE HTTP server to listen on | 1-65535 | `8080` |
+| `sse_path` | String | URL path where the SSE endpoint will be exposed. Clients connect to `http://{host}:{port}{sse_path}` | Any valid URL path string | `"/events"` |
+| `heartbeat_interval_ms` | u64 | Interval in milliseconds between heartbeat messages sent to keep connections alive and detect disconnections | Any positive integer | `30000` |
+| `priority_queue_capacity` | Integer (Optional) | Maximum events in priority queue before backpressure. Controls event queuing before the reaction processes them. Higher values allow more buffering but use more memory | Any positive integer | `10000` |
+
+### Configuration Examples
 
 ```yaml
 reactions:
   - id: "web-dashboard"
+    queries: ["temperature-alerts"]
     reaction_type: "sse"
-    queries:
-      - "temperature-alerts"
     auto_start: true
-    host: "0.0.0.0"              # Network interface (default: "0.0.0.0")
-    port: 8080                    # HTTP port (default: 50051)
-    sse_path: "/events"           # SSE endpoint path (default: "/events")
-    heartbeat_interval_ms: 15000  # Heartbeat interval (default: 15000)
+    priority_queue_capacity: 5000
+    host: "0.0.0.0"
+    port: 8080
+    sse_path: "/events"
+    heartbeat_interval_ms: 30000
 ```
 
-### Configuration Properties
-
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `host` | String | `"0.0.0.0"` | Network interface to bind (`"0.0.0.0"` = all, `"127.0.0.1"` = localhost) |
-| `port` | Number | `50051` | TCP port for HTTP server |
-| `sse_path` | String | `"/events"` | HTTP path for SSE endpoint |
-| `heartbeat_interval_ms` | Number | `15000` | Interval between heartbeat events (milliseconds) |
-
-### Rust API Example
+## Rust API Example
 
 ```rust
 use drasi_server_core::{DrasiServerCore, DrasiServerCoreConfig, RuntimeConfig};

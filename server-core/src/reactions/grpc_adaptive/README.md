@@ -28,28 +28,41 @@ The Adaptive gRPC reaction extends the standard gRPC reaction with intelligent, 
 
 ## Configuration
 
-### Standard Properties
+### Configuration Settings
 
-Inherits all standard gRPC properties (see [standard gRPC docs](../grpc/README.md)):
-- `endpoint` - gRPC server endpoint (required)
-- `timeout_ms` - Request timeout (default: 5000)
-- `max_retries` - Retry attempts (default: 3)
-- `connection_retry_attempts` - Connection retries (default: 5)
-- `initial_connection_timeout_ms` - Initial timeout (default: 10000)
-- `metadata` - gRPC metadata headers
+The Adaptive gRPC Reaction supports the following configuration settings:
 
-**Note:** `batch_size` and `batch_flush_timeout_ms` are ignored - use adaptive properties instead.
+| Setting Name | Data Type | Description | Valid Values/Range | Default Value |
+|--------------|-----------|-------------|-------------------|---------------|
+| `id` | String | Unique identifier for the reaction | Any string | **(Required)** |
+| `queries` | Array[String] | IDs of queries this reaction subscribes to | Array of query IDs | **(Required)** |
+| `reaction_type` | String | Reaction type discriminator | "grpc_adaptive" | **(Required)** |
+| `auto_start` | Boolean | Whether to automatically start this reaction | true, false | `true` |
+| `endpoint` | String | gRPC server endpoint URL. Must start with `grpc://` or `grpcs://` for secure connections | Valid gRPC URL (e.g., `grpc://localhost:50052`) | `"grpc://localhost:50052"` |
+| `timeout_ms` | u64 | Request timeout in milliseconds. Applies to individual gRPC calls | Any positive integer | `5000` |
+| `max_retries` | u32 | Maximum number of retry attempts for failed batch send requests. Uses exponential backoff between retries | 0-100 | `3` |
+| `connection_retry_attempts` | u32 | Number of connection retry attempts when establishing initial connection to gRPC server | 0-100 | `5` |
+| `initial_connection_timeout_ms` | u64 | Timeout in milliseconds for the initial connection attempt to the gRPC server (used for lazy connection) | Any positive integer | `10000` |
+| `metadata` | HashMap<String, String> | gRPC metadata headers to include in all requests. Key-value pairs are converted to gRPC metadata | Map of header names to values | Empty HashMap |
+| `adaptive_min_batch_size` | usize | Minimum batch size (events per batch) used during idle/low traffic periods | Any positive integer | `1` |
+| `adaptive_max_batch_size` | usize | Maximum batch size (events per batch) used during burst traffic periods | Any positive integer | `100` |
+| `adaptive_window_size` | usize | Window size for throughput monitoring in 100ms units. For example: 10 = 1 second, 50 = 5 seconds, 100 = 10 seconds. Larger windows provide more stable adaptation but respond slower to traffic changes | 1-255 (in 100ms units) | `10` (1 second) |
+| `adaptive_batch_timeout_ms` | u64 | Maximum time to wait before flushing a partial batch (milliseconds). Ensures results are delivered even when batch size is not reached | Any positive integer in milliseconds | `1000` |
+| `priority_queue_capacity` | Integer (Optional) | Maximum events in priority queue before backpressure. Controls event queuing before the reaction processes them. Higher values allow more buffering but use more memory | Any positive integer | `10000` |
 
-### Adaptive Properties
+### Adaptive Algorithm Behavior
 
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `adaptive_max_batch_size` | number | 100 | Maximum batch size (burst traffic) |
-| `adaptive_min_batch_size` | number | 1 | Minimum batch size (idle/low traffic) |
-| `adaptive_window_size` | number | 10 | Window size in 100ms units (1-255) |
-| `adaptive_batch_timeout_ms` | number | 1000 | Maximum wait time before flush |
+The adaptive batcher monitors throughput over the configured window and adjusts batch size and wait time based on traffic level:
 
-**Note**: The `adaptive_window_size` is measured in 100ms units. For example, a value of 10 equals 1 second, 50 equals 5 seconds, etc.
+| Throughput Level | Messages/Sec | Batch Size | Wait Time |
+|-----------------|--------------|------------|-----------|
+| Idle | < 1 | min_batch_size | 1ms |
+| Low | 1-100 | 2 × min | 1ms |
+| Medium | 100-1K | 25% of max | 10ms |
+| High | 1K-10K | 50% of max | 25ms |
+| Burst | > 10K | max_batch_size | 50ms |
+
+**Note**: The standard gRPC properties `batch_size` and `batch_flush_timeout_ms` are not used in Adaptive gRPC - use the adaptive-specific properties instead.
 
 ## Configuration Examples
 
@@ -58,8 +71,8 @@ Inherits all standard gRPC properties (see [standard gRPC docs](../grpc/README.m
 ```yaml
 reactions:
   - id: "adaptive-grpc-reaction"
-    reaction_type: "grpc_adaptive"
     queries: ["sensor-alerts"]
+    reaction_type: "grpc_adaptive"
     auto_start: true
     endpoint: "grpc://localhost:50052"
 ```
@@ -69,9 +82,10 @@ reactions:
 ```yaml
 reactions:
   - id: "high-throughput"
-    reaction_type: "grpc_adaptive"
     queries: ["high-volume-events"]
+    reaction_type: "grpc_adaptive"
     auto_start: true
+    priority_queue_capacity: 30000
     endpoint: "grpc://event-processor:9090"
     adaptive_max_batch_size: 2000
     adaptive_min_batch_size: 50
@@ -86,8 +100,8 @@ reactions:
 ```yaml
 reactions:
   - id: "low-latency"
-    reaction_type: "grpc_adaptive"
     queries: ["critical-alerts"]
+    reaction_type: "grpc_adaptive"
     auto_start: true
     endpoint: "grpc://alert-service:50052"
     adaptive_max_batch_size: 100
@@ -103,8 +117,8 @@ reactions:
 {
   "reactions": [{
     "id": "adaptive-grpc-reaction",
-    "reaction_type": "grpc_adaptive",
     "queries": ["sensor-alerts"],
+    "reaction_type": "grpc_adaptive",
     "auto_start": true,
     "endpoint": "grpc://localhost:50052",
     "adaptive_max_batch_size": 2000,

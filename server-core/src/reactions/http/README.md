@@ -6,38 +6,46 @@ The HTTP reaction sends query results to external HTTP endpoints via webhook cal
 
 Enables real-time integration with external systems by pushing Drasi query results to HTTP endpoints for webhook integration, API synchronization, custom notifications, ETL pipelines, and third-party service integration.
 
-## Configuration Properties
+## Configuration
 
-### Standard Reaction Properties
+### Configuration Settings
 
-| Property | Type | Required | Description |
-|----------|------|----------|-------------|
-| `id` | string | Yes | Unique identifier for the reaction |
-| `reaction_type` | string | Yes | Must be `"http"` |
-| `queries` | array | Yes | List of query IDs to subscribe to |
-| `auto_start` | boolean | No | Whether to start automatically (default: `false`) |
+The HTTP Reaction supports the following configuration settings:
 
-### HTTP-Specific Properties
+| Setting Name | Data Type | Description | Valid Values/Range | Default Value |
+|--------------|-----------|-------------|-------------------|---------------|
+| `id` | String | Unique identifier for the reaction | Any string | **(Required)** |
+| `queries` | Array[String] | IDs of queries this reaction subscribes to | Array of query IDs | **(Required)** |
+| `reaction_type` | String | Reaction type discriminator | "http" | **(Required)** |
+| `auto_start` | Boolean | Whether to automatically start this reaction | true, false | `true` |
+| `base_url` | String | Base URL for HTTP requests. URLs in CallSpec are appended to this unless they are absolute URLs (starting with http:// or https://) | Any valid HTTP/HTTPS URL | `"http://localhost"` |
+| `token` | String (Optional) | Bearer token for authentication. When provided, adds `Authorization: Bearer <token>` header to all requests | Any string | None |
+| `timeout_ms` | u64 | Request timeout in milliseconds. Requests exceeding this duration will fail | Any positive integer | `5000` |
+| `routes` | HashMap<String, QueryConfig> | Query-specific route configurations mapping query IDs to QueryConfig objects | Map of query names to QueryConfig | Empty HashMap |
+| `priority_queue_capacity` | Integer (Optional) | Maximum events in priority queue before backpressure. Controls event queuing before the reaction processes them. Higher values allow more buffering but use more memory | Any positive integer | `10000` |
 
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `base_url` | string | `"http://localhost"` | Base URL for HTTP requests. Call URLs are appended unless absolute |
-| `token` | string | - | Bearer token for authentication (adds `Authorization: Bearer <token>` header) |
-| `timeout_ms` | number | `10000` | Request timeout in milliseconds |
-| `routes` | object | `{}` | Query-specific CallSpec configurations (see below) |
+### QueryConfig Structure
+
+For each query in `routes`, you can define operation-specific HTTP call specifications:
+
+| Setting Name | Data Type | Description | Valid Values/Range | Default Value |
+|--------------|-----------|-------------|-------------------|---------------|
+| `added` | CallSpec (Optional) | HTTP call specification for ADD operations (new rows in query results) | CallSpec object | None |
+| `updated` | CallSpec (Optional) | HTTP call specification for UPDATE operations (modified rows in query results) | CallSpec object | None |
+| `deleted` | CallSpec (Optional) | HTTP call specification for DELETE operations (removed rows from query results) | CallSpec object | None |
 
 ### CallSpec Structure
 
-Each query can specify `added`, `updated`, and `deleted` operations with:
+Each CallSpec defines how to make an HTTP request:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `url` | string | URL path or absolute URL (supports Handlebars templates) |
-| `method` | string | HTTP method: `GET`, `POST`, `PUT`, `DELETE`, or `PATCH` |
-| `body` | string | Request body template (empty = raw JSON data) |
-| `headers` | object | Additional HTTP headers (values support templates) |
+| Setting Name | Data Type | Description | Valid Values/Range | Default Value |
+|--------------|-----------|-------------|-------------------|---------------|
+| `url` | String | URL path (appended to base_url) or absolute URL. Supports Handlebars template syntax for dynamic URLs | Any string, supports Handlebars templates | Required (no default) |
+| `method` | String | HTTP method to use for the request | `"GET"`, `"POST"`, `"PUT"`, `"DELETE"`, `"PATCH"` (case-insensitive) | Required (no default) |
+| `body` | String | Request body as a Handlebars template. If empty, sends the raw JSON data | Any string, supports Handlebars templates | Empty string (sends raw data) |
+| `headers` | HashMap<String, String> | Additional HTTP headers as key-value pairs. Header values support Handlebars templates | Map of header names to values | Empty HashMap |
 
-**Default behavior**: If unconfigured, POSTs all changes to `/changes/<query_name>` with raw data.
+**Default behavior**: If a query is not configured in `routes`, all change types default to `POST /changes/<query_name>` with raw JSON data.
 
 ## Configuration Examples
 
@@ -46,9 +54,10 @@ Each query can specify `added`, `updated`, and `deleted` operations with:
 ```yaml
 reactions:
   - id: "my-http-reaction"
-    reaction_type: "http"
     queries: ["my-query"]
+    reaction_type: "http"
     auto_start: true
+    priority_queue_capacity: 15000
     base_url: "https://api.example.com"
     token: "your-api-token"
     timeout_ms: 10000
@@ -59,8 +68,8 @@ reactions:
 ```yaml
 reactions:
   - id: "entity-sync"
-    reaction_type: "http"
     queries: ["users-query"]
+    reaction_type: "http"
     base_url: "https://api.example.com"
     token: "your-api-token"
     routes:

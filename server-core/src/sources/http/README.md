@@ -2,23 +2,88 @@
 
 The HTTP source provides a REST API endpoint for receiving graph data changes via HTTP requests. It supports both single events and batch submissions with optional adaptive batching for optimal throughput.
 
-## Configuration Schema
+## Configuration
 
-### Basic Configuration
+### Configuration Settings
+
+The HTTP Source supports the following configuration settings:
+
+| Setting Name | Data Type | Description | Valid Values/Range | Default Value |
+|--------------|-----------|-------------|-------------------|---------------|
+| `id` | String | Unique identifier for the source | Any string | **(Required)** |
+| `source_type` | String | Source type discriminator | "http" | **(Required)** |
+| `auto_start` | Boolean | Whether to automatically start this source | true, false | `true` |
+| `host` | String | HTTP server host address to bind to | Any valid hostname or IP | **(Required)** |
+| `port` | Integer (u16) | HTTP server port number | 1 - 65535 | **(Required)** |
+| `endpoint` | String (Optional) | Optional custom endpoint path | Any valid path string | `None` |
+| `timeout_ms` | Integer (u64) | Request timeout in milliseconds | Any positive integer | `10000` |
+| `adaptive_enabled` | Boolean (Optional) | Enable adaptive batching | `true`, `false` | `None` (uses default) |
+| `adaptive_max_batch_size` | Integer (usize, Optional) | Maximum batch size for adaptive batching | Any positive integer | `None` (uses default: 1000) |
+| `adaptive_min_batch_size` | Integer (usize, Optional) | Minimum batch size for adaptive batching | Any positive integer | `None` (uses default: 10) |
+| `adaptive_max_wait_ms` | Integer (u64, Optional) | Maximum wait time in milliseconds | Any positive integer | `None` (uses default: 100) |
+| `adaptive_min_wait_ms` | Integer (u64, Optional) | Minimum wait time in milliseconds | Any positive integer | `None` (uses default: 1) |
+| `adaptive_window_secs` | Integer (u64, Optional) | Throughput measurement window in seconds | Any positive integer | `None` (uses default: 5) |
+| `dispatch_mode` | String (Optional) | Event dispatch mode: "channel" (isolated channels per subscriber with backpressure, zero message loss) or "broadcast" (shared channel, no backpressure, possible message loss) | "channel", "broadcast" | `"channel"` |
+| `dispatch_buffer_capacity` | Integer (Optional) | Buffer size for dispatch channel | Any positive integer | `1000` |
+| `bootstrap_provider` | Object (Optional) | Bootstrap provider configuration | See Bootstrap Providers section | `None` |
+
+**Note**: The HTTP Source does not use any common configuration types from `config/common.rs` (such as SslMode or TableKeyConfig).
+
+### Bootstrap Provider Configuration
+
+When using bootstrap providers with the HTTP source, additional properties may be required depending on the provider type. These properties are used by bootstrap providers and remain in the generic properties map for bootstrap providers to access via `BootstrapContext`.
+
+#### PostgreSQL Bootstrap Provider Properties
+
+When using `bootstrap_provider.type: postgres`:
+
+| Setting Name | Data Type | Description | Valid Values/Range | Default Value |
+|--------------|-----------|-------------|-------------------|---------------|
+| `database` | String | PostgreSQL database name | Any valid database name | **(Required by provider)** |
+| `user` | String | PostgreSQL user | Any valid username | **(Required by provider)** |
+| `password` | String | PostgreSQL password | Any string | **(Required by provider)** |
+| `host` | String | PostgreSQL host | Any valid hostname or IP | `"localhost"` |
+| `port` | Integer | PostgreSQL port | 1 - 65535 | `5432` |
+| `tables` | Array[String] | Tables to bootstrap | Array of table names | `[]` |
+| `table_keys` | Array[TableKeyConfig] | Primary key configuration per table | Array of TableKeyConfig objects | `[]` |
+| `ssl_mode` | SslMode (Enum) | SSL connection mode | `"disable"`, `"prefer"`, `"require"` | `"prefer"` |
+
+See the PostgreSQL source documentation for details on TableKeyConfig and SslMode.
+
+#### ScriptFile Bootstrap Provider Properties
+
+When using `bootstrap_provider.type: scriptfile`:
+
+| Setting Name | Data Type | Description | Valid Values/Range | Default Value |
+|--------------|-----------|-------------|-------------------|---------------|
+| `file_paths` | Array[String] | Paths to JSONL files for bootstrap | Array of file paths | **(Required by provider)** |
+
+#### Platform Bootstrap Provider Properties
+
+When using `bootstrap_provider.type: platform`:
+
+| Setting Name | Data Type | Description | Valid Values/Range | Default Value |
+|--------------|-----------|-------------|-------------------|---------------|
+| `query_api_url` | String | Remote Drasi Query API URL | Valid HTTP(S) URL | **(Required by provider)** |
+
+### Configuration Examples
+
+#### Basic Configuration
 
 ```yaml
 sources:
   - id: "my-http-source"
     source_type: "http"
     auto_start: true
-    properties:
-      host: "0.0.0.0"        # HTTP server host (default: localhost)
-      port: 8080             # HTTP server port (default: 8080)
-      endpoint: "/events"    # Optional custom endpoint path
-      timeout_ms: 30000      # Request timeout in milliseconds (default: 10000)
+    dispatch_mode: "channel"  # Isolated channels with backpressure
+    dispatch_buffer_capacity: 1500
+    host: "0.0.0.0"        # HTTP server host (default: localhost)
+    port: 8080             # HTTP server port (default: 8080)
+    endpoint: "/events"    # Optional custom endpoint path
+    timeout_ms: 30000      # Request timeout in milliseconds (default: 10000)
 ```
 
-### With Adaptive Batching
+#### With Adaptive Batching
 
 Adaptive batching automatically adjusts batch size and timing based on throughput for optimal performance:
 
@@ -26,24 +91,22 @@ Adaptive batching automatically adjusts batch size and timing based on throughpu
 sources:
   - id: "high-throughput-source"
     source_type: "http"
-    properties:
-      host: "0.0.0.0"
-      port: 9000
-
-      # Adaptive batching configuration
-      adaptive_enabled: true              # Enable adaptive batching (default: true)
-      adaptive_max_batch_size: 1000       # Maximum batch size (default: 1000)
-      adaptive_min_batch_size: 10         # Minimum batch size (default: 10)
-      adaptive_max_wait_ms: 100           # Maximum wait time ms (default: 100)
-      adaptive_min_wait_ms: 1             # Minimum wait time ms (default: 1)
-      adaptive_window_secs: 5             # Throughput measurement window (default: 5)
+    host: "0.0.0.0"
+    port: 9000
+    # Adaptive batching configuration
+    adaptive_enabled: true              # Enable adaptive batching (default: true)
+    adaptive_max_batch_size: 1000       # Maximum batch size (default: 1000)
+    adaptive_min_batch_size: 10         # Minimum batch size (default: 10)
+    adaptive_max_wait_ms: 100           # Maximum wait time ms (default: 100)
+    adaptive_min_wait_ms: 1             # Minimum wait time ms (default: 1)
+    adaptive_window_secs: 5             # Throughput measurement window (default: 5)
 ```
 
-### With Bootstrap Provider
+#### With Bootstrap Provider
 
 HTTP source supports **any** bootstrap provider through the universal SourceBase pattern. This enables powerful use cases like "bootstrap from database, stream changes via HTTP".
 
-#### PostgreSQL Bootstrap Example
+##### PostgreSQL Bootstrap Example
 
 Initial data load from PostgreSQL, then receive updates via HTTP:
 
@@ -53,25 +116,23 @@ sources:
     source_type: "http"
     bootstrap_provider:
       type: postgres
-    properties:
-      # HTTP source configuration
-      host: "localhost"
-      port: 9000
-
-      # PostgreSQL bootstrap provider configuration
-      # These properties are used by the bootstrap provider, not the HTTP source
-      database: "mydb"
-      user: "dbuser"
-      password: "dbpass"
-      tables: ["inventory", "orders"]
-      table_keys:
-        - table: inventory
-          key_columns: ["id"]
-        - table: orders
-          key_columns: ["order_id"]
+    # HTTP source configuration
+    host: "localhost"
+    port: 9000
+    # PostgreSQL bootstrap provider configuration
+    # These properties are used by the bootstrap provider, not the HTTP source
+    database: "mydb"
+    user: "dbuser"
+    password: "dbpass"
+    tables: ["inventory", "orders"]
+    table_keys:
+      - table: inventory
+        key_columns: ["id"]
+      - table: orders
+        key_columns: ["order_id"]
 ```
 
-#### ScriptFile Bootstrap Example
+##### ScriptFile Bootstrap Example
 
 Initial data load from JSONL files, then receive updates via HTTP:
 
@@ -84,50 +145,15 @@ sources:
       file_paths:
         - "/data/initial_nodes.jsonl"
         - "/data/initial_relations.jsonl"
-    properties:
-      host: "localhost"
-      port: 9000
+    host: "localhost"
+    port: 9000
 ```
 
-#### Other Bootstrap Providers
+##### Other Bootstrap Providers
 
 - **Platform**: Bootstrap from remote Drasi Query API via HTTP
 - **Application**: Replay previously stored insert events
 - **Noop**: No bootstrap, streaming only
-
-### Configuration Reference
-
-#### HTTP Source Configuration
-
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `host` | string | Yes | - | HTTP server host address |
-| `port` | u16 | Yes | - | HTTP server port |
-| `endpoint` | string | No | None | Custom endpoint path |
-| `timeout_ms` | u64 | No | 10000 | Request timeout in milliseconds |
-| `adaptive_enabled` | bool | No | None | Enable adaptive batching |
-| `adaptive_max_batch_size` | usize | No | None | Maximum batch size |
-| `adaptive_min_batch_size` | usize | No | None | Minimum batch size |
-| `adaptive_max_wait_ms` | u64 | No | None | Maximum wait time in ms |
-| `adaptive_min_wait_ms` | u64 | No | None | Minimum wait time in ms |
-| `adaptive_window_secs` | u64 | No | None | Throughput measurement window in seconds |
-
-#### Bootstrap Provider Configuration
-
-These properties are used by bootstrap providers when configured. They remain in the generic properties map for bootstrap providers to access via `BootstrapContext`.
-
-**PostgreSQL Bootstrap Provider**:
-- `database` (string): PostgreSQL database name
-- `user` (string): PostgreSQL user
-- `password` (string): PostgreSQL password
-- `tables` (array): Tables to bootstrap
-- `table_keys` (array): Primary key configuration per table
-
-**ScriptFile Bootstrap Provider**:
-- `file_paths` (array): Paths to JSONL files for bootstrap
-
-**Platform Bootstrap Provider**:
-- `query_api_url` (string): Remote Drasi Query API URL
 
 ## Pushing Data to HTTP Source
 

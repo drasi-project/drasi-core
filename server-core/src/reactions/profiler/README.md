@@ -57,28 +57,42 @@ Percentiles are computed from a sliding window of recent samples:
 
 ## Configuration
 
-### Properties
+### Configuration Settings
 
-- **window_size** (default: 1000): Number of recent samples retained for percentile calculation
+The Profiler Reaction supports the following configuration settings:
+
+| Setting Name | Data Type | Description | Valid Values/Range | Default Value |
+|--------------|-----------|-------------|-------------------|---------------|
+| `id` | String | Unique identifier for the reaction | Any string | **(Required)** |
+| `queries` | Array[String] | IDs of queries this reaction subscribes to | Array of query IDs | **(Required)** |
+| `reaction_type` | String | Reaction type discriminator | "profiler" | **(Required)** |
+| `auto_start` | Boolean | Whether to automatically start this reaction | true, false | `true` |
+| `window_size` | usize | Number of recent samples retained in a sliding window for percentile calculation. Larger windows provide more stable percentile statistics but respond slower to traffic changes and use more memory (~72 bytes per sample) | Any positive integer (recommended: 100-10000) | `1000` |
+| `report_interval_secs` | u64 | Interval in seconds between statistical reports logged to the console. Shorter intervals provide more frequent updates but increase logging overhead | Any positive integer in seconds | `60` |
+| `priority_queue_capacity` | Integer (Optional) | Maximum events in priority queue before backpressure. Controls event queuing before the reaction processes them. Higher values allow more buffering but use more memory | Any positive integer | `10000` |
+
+### Recommended Values
+
+- **window_size**:
   - Small (100-500): Recent trends, responsive to changes
   - Medium (1000-5000): Balanced stability (recommended)
   - Large (5000-10000): Very stable statistics, higher memory
 
-- **report_interval_secs** (default: 60): How often to log statistical reports
+- **report_interval_secs**:
   - Short (5-15s): Active debugging and development
   - Medium (30-60s): Production monitoring
   - Long (120-300s): Low-overhead monitoring
 
-### Configuration Example
+### Configuration Examples
 
 **YAML**:
 ```yaml
 reactions:
   - id: pipeline-profiler
+    queries: ["my-query"]
     reaction_type: profiler
-    queries:
-      - my-query
     auto_start: true
+    priority_queue_capacity: 5000
     window_size: 1000
     report_interval_secs: 30
 ```

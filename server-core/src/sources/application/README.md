@@ -25,15 +25,38 @@ This source is ideal for:
 
 ## Configuration
 
+### Configuration Settings
+
+The Application Source supports the following configuration settings:
+
+| Setting Name | Data Type | Description | Valid Values/Range | Default Value |
+|--------------|-----------|-------------|-------------------|---------------|
+| `id` | String | Unique identifier for the source | Any string | **(Required)** |
+| `source_type` | String | Source type discriminator | "application" | **(Required)** |
+| `auto_start` | Boolean | Whether to automatically start this source | true, false | `true` |
+| `properties` | HashMap<String, Value> | Application-specific properties (flexible, extensible) | Any key-value pairs | `{}` (empty map) |
+| `dispatch_mode` | String (Optional) | Event dispatch mode: "channel" (isolated channels per subscriber with backpressure, zero message loss) or "broadcast" (shared channel, no backpressure, possible message loss) | "channel", "broadcast" | `"channel"` |
+| `dispatch_buffer_capacity` | Integer (Optional) | Buffer size for dispatch channel | Any positive integer | `1000` |
+| `bootstrap_provider` | Object (Optional) | Bootstrap provider configuration | See Bootstrap Providers section | `None` |
+
+**Note**: The Application Source does not use any common configuration types from `config/common.rs` (such as SslMode or TableKeyConfig).
+
 The Application Source requires minimal configuration. It's typically created programmatically rather than via YAML configuration:
+
+### Configuration Examples
+
+#### YAML Configuration
 
 ```yaml
 sources:
   - id: my_app_source
     source_type: application
     auto_start: true
-    properties: {}  # No properties required
+    dispatch_mode: "channel"  # Isolated channels with backpressure
+    dispatch_buffer_capacity: 1000
 ```
+
+#### Programmatic Configuration
 
 In most cases, you'll create the source directly in code using `ApplicationSource::new()`.
 

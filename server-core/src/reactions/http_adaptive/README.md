@@ -25,30 +25,44 @@ The standard HTTP reaction sends one HTTP request per query result. The Adaptive
 - You have consistent, low-volume traffic
 - You prefer simpler, more predictable behavior
 
-## Configuration Properties
+## Configuration
 
-### Standard HTTP Properties
+### Configuration Settings
 
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `base_url` | string | `"http://localhost"` | Base URL for HTTP requests |
-| `token` | string | `null` | Bearer token for authentication |
-| `timeout_ms` | number | `10000` | Request timeout in milliseconds |
-| `queries` | object | `{}` | Query-specific configurations (see [HTTP Reaction README](../http/README.md)) |
+The Adaptive HTTP Reaction supports the following configuration settings:
 
-### Adaptive-Specific Properties
+| Setting Name | Data Type | Description | Valid Values/Range | Default Value |
+|--------------|-----------|-------------|-------------------|---------------|
+| `id` | String | Unique identifier for the reaction | Any string | **(Required)** |
+| `queries` | Array[String] | IDs of queries this reaction subscribes to | Array of query IDs | **(Required)** |
+| `reaction_type` | String | Reaction type discriminator | "http_adaptive" | **(Required)** |
+| `auto_start` | Boolean | Whether to automatically start this reaction | true, false | `true` |
+| `base_url` | String | Base URL for HTTP requests. Batch requests are sent to `{base_url}/batch`. Individual requests append CallSpec URLs to this base | Any valid HTTP/HTTPS URL | `"http://localhost"` |
+| `token` | String (Optional) | Bearer token for authentication. When provided, adds `Authorization: Bearer <token>` header to all requests | Any string | None |
+| `timeout_ms` | u64 | Request timeout in milliseconds. Applies to both batch and individual requests | Any positive integer | `5000` |
+| `routes` | HashMap<String, QueryConfig> | Query-specific route configurations for individual requests. Uses same structure as HTTP reaction (see [HTTP Reaction](../http/README.md)) | Map of query names to QueryConfig | Empty HashMap |
+| `adaptive_min_batch_size` | usize | Minimum batch size (events per batch) used during idle/low traffic periods | Any positive integer | `1` |
+| `adaptive_max_batch_size` | usize | Maximum batch size (events per batch) used during burst traffic periods | Any positive integer | `100` |
+| `adaptive_window_size` | usize | Window size for throughput monitoring in 100ms units. For example: 10 = 1 second, 50 = 5 seconds, 100 = 10 seconds. Larger windows provide more stable adaptation but respond slower to traffic changes | 1-255 (in 100ms units) | `10` (1 second) |
+| `adaptive_batch_timeout_ms` | u64 | Maximum time to wait before flushing a partial batch (milliseconds). Ensures results are delivered even when batch size is not reached | Any positive integer in milliseconds | `1000` |
+| `priority_queue_capacity` | Integer (Optional) | Maximum events in priority queue before backpressure. Controls event queuing before the reaction processes them. Higher values allow more buffering but use more memory | Any positive integer | `10000` |
 
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `adaptive_max_batch_size` | number | `100` | Maximum number of results in a batch |
-| `adaptive_min_batch_size` | number | `1` | Minimum batch size for efficient batching |
-| `adaptive_window_size` | number | `10` | Window size in 100ms units (1-255) |
-| `adaptive_batch_timeout_ms` | number | `1000` | Maximum wait time before flush (ms) |
+### Adaptive Algorithm Behavior
+
+The adaptive batcher monitors throughput over the configured window and adjusts batch size and wait time based on traffic level:
+
+| Throughput Level | Messages/Sec | Batch Size | Wait Time |
+|-----------------|--------------|------------|-----------|
+| Idle | < 1 | min_batch_size | 1ms |
+| Low | 1-100 | 2 × min | 1ms |
+| Medium | 100-1K | 25% of max | 10ms |
+| High | 1K-10K | 50% of max | 25ms |
+| Burst | > 10K | max_batch_size | 50ms |
 
 **Note**:
-- The `adaptive_window_size` is measured in 100ms units. For example, a value of 10 equals 1 second, 50 equals 5 seconds, etc.
-- Batch endpoints (`POST /batch`) are always enabled in Adaptive HTTP reactions.
-- Connection pool settings (`pool_idle_timeout: 90s`, `pool_max_idle_per_host: 10`) are hard-coded and not configurable.
+- Batch endpoints (`POST /batch`) are always enabled in Adaptive HTTP reactions
+- Connection pool settings (pool_idle_timeout: 90s, pool_max_idle_per_host: 10, HTTP/2 prior knowledge) are hard-coded and not configurable
+- The `routes` configuration uses the same QueryConfig and CallSpec structures as the standard HTTP reaction
 
 ## Route Configuration and Templates
 
@@ -72,10 +86,10 @@ For detailed route configuration and templating examples, see the [HTTP Reaction
 ```yaml
 reactions:
   - id: "adaptive-webhook"
+    queries: ["user-changes"]
     reaction_type: "http_adaptive"
-    queries:
-      - "user-changes"
     auto_start: true
+    priority_queue_capacity: 20000
     base_url: "https://api.example.com"
     token: "your-api-token"
     timeout_ms: 10000
@@ -90,9 +104,8 @@ reactions:
 ```yaml
 reactions:
   - id: "high-volume-sync"
+    queries: ["inventory-updates"]
     reaction_type: "http_adaptive"
-    queries:
-      - "inventory-updates"
     base_url: "https://data-ingestion.example.com"
     adaptive_max_batch_size: 1000
     adaptive_min_batch_size: 50
@@ -105,9 +118,8 @@ reactions:
 ```yaml
 reactions:
   - id: "routed-webhook"
+    queries: ["sensor-data"]
     reaction_type: "http_adaptive"
-    queries:
-      - "sensor-data"
     base_url: "https://api.example.com"
     routes:
       sensor-data:
