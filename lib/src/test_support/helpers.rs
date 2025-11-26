@@ -14,15 +14,24 @@
 
 pub mod test_fixtures {
     use crate::config::{
-        DrasiServerCoreConfig, DrasiServerCoreSettings, QueryConfig, ReactionConfig, SourceConfig,
+        DrasiLibConfig, DrasiLibSettings, QueryConfig, ReactionConfig, SourceConfig,
     };
+    use serde_json::json;
     use std::collections::HashMap;
+
+    /// Helper to convert a serde_json::Value object to HashMap<String, serde_json::Value>
+    fn to_hashmap(value: serde_json::Value) -> HashMap<String, serde_json::Value> {
+        match value {
+            serde_json::Value::Object(map) => map.into_iter().collect(),
+            _ => HashMap::new(),
+        }
+    }
 
     /// Creates a minimal valid server configuration for testing
     #[allow(dead_code)]
-    pub fn create_test_server_config() -> DrasiServerCoreConfig {
-        DrasiServerCoreConfig {
-            server_core: DrasiServerCoreSettings {
+    pub fn create_test_server_config() -> DrasiLibConfig {
+        DrasiLibConfig {
+            server_core: DrasiLibSettings {
                 id: "test-server".to_string(),
                 priority_queue_capacity: None,
                 dispatch_buffer_capacity: None,
@@ -36,64 +45,46 @@ pub mod test_fixtures {
 
     /// Creates a test source configuration
     pub fn create_test_source_config(id: &str, source_type: &str) -> SourceConfig {
-        use crate::sources::application::ApplicationSourceConfig;
-        use crate::sources::grpc::GrpcSourceConfig;
-        use crate::sources::http::HttpSourceConfig;
-        use crate::sources::mock::MockSourceConfig;
-        use crate::sources::platform::PlatformSourceConfig;
-        use crate::sources::postgres::PostgresSourceConfig;
-
         let config = match source_type {
-            "mock" => crate::config::SourceSpecificConfig::Mock(MockSourceConfig {
-                data_type: "counter".to_string(),
-                interval_ms: 1000,
-            }),
-            "postgres" => crate::config::SourceSpecificConfig::Postgres(PostgresSourceConfig {
-                host: "localhost".to_string(),
-                port: 5432,
-                database: "test_db".to_string(),
-                user: "test_user".to_string(),
-                password: "".to_string(),
-                tables: vec![],
-                slot_name: "drasi_slot".to_string(),
-                publication_name: "drasi_publication".to_string(),
-                ssl_mode: crate::config::SslMode::Prefer,
-                table_keys: vec![],
-            }),
-            "http" => crate::config::SourceSpecificConfig::Http(HttpSourceConfig {
-                host: "localhost".to_string(),
-                port: 8080,
-                endpoint: None,
-                timeout_ms: 30000,
-                adaptive_enabled: None,
-                adaptive_max_batch_size: None,
-                adaptive_min_batch_size: None,
-                adaptive_max_wait_ms: None,
-                adaptive_min_wait_ms: None,
-                adaptive_window_secs: None,
-            }),
-            "grpc" => crate::config::SourceSpecificConfig::Grpc(GrpcSourceConfig {
-                host: "localhost".to_string(),
-                port: 50051,
-                endpoint: None,
-                timeout_ms: 30000,
-            }),
-            "platform" => crate::config::SourceSpecificConfig::Platform(PlatformSourceConfig {
-                redis_url: "redis://localhost:6379".to_string(),
-                stream_key: "drasi:changes".to_string(),
-                consumer_group: "drasi-core".to_string(),
-                consumer_name: None,
-                batch_size: 10,
-                block_ms: 5000,
-            }),
-            "application" => {
-                crate::config::SourceSpecificConfig::Application(ApplicationSourceConfig {
-                    properties: HashMap::new(),
-                })
-            }
-            _ => crate::config::SourceSpecificConfig::Application(ApplicationSourceConfig {
-                properties: HashMap::new(),
-            }),
+            "mock" => crate::config::SourceSpecificConfig::Mock(to_hashmap(json!({
+                "data_type": "counter",
+                "interval_ms": 1000
+            }))),
+            "postgres" => crate::config::SourceSpecificConfig::Postgres(to_hashmap(json!({
+                "host": "localhost",
+                "port": 5432,
+                "database": "test_db",
+                "user": "test_user",
+                "password": "",
+                "tables": [],
+                "slot_name": "drasi_slot",
+                "publication_name": "drasi_publication",
+                "ssl_mode": "prefer",
+                "table_keys": []
+            }))),
+            "http" => crate::config::SourceSpecificConfig::Http(to_hashmap(json!({
+                "host": "localhost",
+                "port": 8080,
+                "timeout_ms": 30000
+            }))),
+            "grpc" => crate::config::SourceSpecificConfig::Grpc(to_hashmap(json!({
+                "host": "localhost",
+                "port": 50051,
+                "timeout_ms": 30000
+            }))),
+            "platform" => crate::config::SourceSpecificConfig::Platform(to_hashmap(json!({
+                "redis_url": "redis://localhost:6379",
+                "stream_key": "drasi:changes",
+                "consumer_group": "drasi-core",
+                "batch_size": 10,
+                "block_ms": 5000
+            }))),
+            "application" => crate::config::SourceSpecificConfig::Application(to_hashmap(json!({
+                "properties": {}
+            }))),
+            _ => crate::config::SourceSpecificConfig::Application(to_hashmap(json!({
+                "properties": {}
+            }))),
         };
 
         SourceConfig {
@@ -160,16 +151,13 @@ pub mod test_fixtures {
 
     /// Creates a test reaction configuration
     pub fn create_test_reaction_config(id: &str, queries: Vec<String>) -> ReactionConfig {
-        use crate::config::common::LogLevel;
-        use crate::reactions::log::LogReactionConfig;
-
         ReactionConfig {
             id: id.to_string(),
             queries,
             auto_start: true,
-            config: crate::config::ReactionSpecificConfig::Log(LogReactionConfig {
-                log_level: LogLevel::Info,
-            }),
+            config: crate::config::ReactionSpecificConfig::Log(to_hashmap(json!({
+                "log_level": "info"
+            }))),
             priority_queue_capacity: None,
         }
     }
@@ -181,51 +169,182 @@ pub mod mock_helpers {
     use crate::channels::*;
     use tokio::sync::mpsc;
 
-    /// Creates a test channel pair for query results
-    /// NOTE: This function is deprecated - QueryResultSender/QueryResultReceiver no longer exist
-    /// in the new broadcast subscription architecture. Queries now use broadcast channels.
-    // pub fn create_test_query_result_channel() -> (QueryResultSender, QueryResultReceiver) {
-    //     mpsc::channel(100)
-    // }
-
     /// Creates a test channel pair for component events
     pub fn create_test_event_channel() -> (ComponentEventSender, ComponentEventReceiver) {
         mpsc::channel(100)
     }
 }
 
-/// Helper functions for creating test components
-pub async fn create_test_application_source(
-    id: &str,
-) -> (
-    crate::sources::application::ApplicationSource,
-    crate::sources::ApplicationSourceHandle,
-) {
-    use crate::sources::application::ApplicationSource;
-    use crate::test_support::helpers::test_fixtures::create_test_source_config;
-    use tokio::sync::mpsc;
+/// Test mock implementations for unit testing without external plugin dependencies.
+/// These are simple inline mocks, not the actual plugin implementations.
+#[cfg(test)]
+pub mod test_mocks {
+    use crate::channels::dispatcher::{ChangeDispatcher, ChannelChangeDispatcher};
+    use crate::channels::*;
+    use crate::config::SourceConfig;
+    use crate::plugin_core::{ReactionRegistry, SourceRegistry};
+    use crate::reactions::{MockReaction, Reaction};
+    use crate::sources::Source;
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use drasi_core::models::SourceChange;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
 
-    let config = create_test_source_config(id, "application");
-    let (event_tx, _event_rx) = mpsc::channel(100);
+    /// A simple test mock source for unit testing the SourceManager.
+    /// This is NOT a real plugin - it's an inline test double.
+    ///
+    /// This mock source supports event injection for testing data flow through queries.
+    pub struct TestMockSource {
+        config: SourceConfig,
+        status: Arc<RwLock<ComponentStatus>>,
+        #[allow(dead_code)]
+        event_tx: ComponentEventSender,
+        /// Dispatchers for sending events to subscribed queries
+        dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper>>>>>,
+    }
 
-    ApplicationSource::new(config, event_tx).unwrap()
-}
+    impl TestMockSource {
+        pub fn new(config: SourceConfig, event_tx: ComponentEventSender) -> Result<Self> {
+            Ok(Self {
+                config,
+                status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
+                event_tx,
+                dispatchers: Arc::new(RwLock::new(Vec::new())),
+            })
+        }
 
-/// Helper function for creating test application reactions
-pub async fn create_test_application_reaction(
-    id: &str,
-) -> (
-    crate::reactions::application::ApplicationReaction,
-    crate::reactions::ApplicationReactionHandle,
-) {
-    use crate::reactions::application::ApplicationReaction;
-    use crate::test_support::helpers::test_fixtures::create_test_reaction_config;
-    use tokio::sync::mpsc;
+        /// Inject an event into all subscribed queries.
+        /// This is useful for testing query processing with mock data.
+        pub async fn inject_event(&self, change: SourceChange) -> Result<()> {
+            let dispatchers = self.dispatchers.read().await;
+            let wrapper = SourceEventWrapper::new(
+                self.config.id.clone(),
+                SourceEvent::Change(change),
+                chrono::Utc::now(),
+            );
+            let arc_wrapper = Arc::new(wrapper);
+            for dispatcher in dispatchers.iter() {
+                dispatcher.dispatch_change(arc_wrapper.clone()).await?;
+            }
+            Ok(())
+        }
+    }
 
-    let config = create_test_reaction_config(id, vec![]);
-    let (event_tx, _event_rx) = mpsc::channel(100);
+    #[async_trait]
+    impl Source for TestMockSource {
+        async fn start(&self) -> Result<()> {
+            *self.status.write().await = ComponentStatus::Starting;
 
-    ApplicationReaction::new(config, event_tx)
+            // Send Starting event
+            let event = ComponentEvent {
+                component_id: self.config.id.clone(),
+                component_type: ComponentType::Source,
+                status: ComponentStatus::Starting,
+                timestamp: chrono::Utc::now(),
+                message: Some("Starting source".to_string()),
+            };
+            let _ = self.event_tx.send(event).await;
+
+            *self.status.write().await = ComponentStatus::Running;
+
+            // Send Running event
+            let event = ComponentEvent {
+                component_id: self.config.id.clone(),
+                component_type: ComponentType::Source,
+                status: ComponentStatus::Running,
+                timestamp: chrono::Utc::now(),
+                message: Some("Source started".to_string()),
+            };
+            let _ = self.event_tx.send(event).await;
+
+            Ok(())
+        }
+
+        async fn stop(&self) -> Result<()> {
+            *self.status.write().await = ComponentStatus::Stopping;
+
+            // Send Stopping event
+            let event = ComponentEvent {
+                component_id: self.config.id.clone(),
+                component_type: ComponentType::Source,
+                status: ComponentStatus::Stopping,
+                timestamp: chrono::Utc::now(),
+                message: Some("Stopping source".to_string()),
+            };
+            let _ = self.event_tx.send(event).await;
+
+            *self.status.write().await = ComponentStatus::Stopped;
+
+            // Send Stopped event
+            let event = ComponentEvent {
+                component_id: self.config.id.clone(),
+                component_type: ComponentType::Source,
+                status: ComponentStatus::Stopped,
+                timestamp: chrono::Utc::now(),
+                message: Some("Source stopped".to_string()),
+            };
+            let _ = self.event_tx.send(event).await;
+
+            Ok(())
+        }
+
+        async fn status(&self) -> ComponentStatus {
+            self.status.read().await.clone()
+        }
+
+        fn get_config(&self) -> &SourceConfig {
+            &self.config
+        }
+
+        async fn subscribe(
+            &self,
+            query_id: String,
+            _enable_bootstrap: bool,
+            _node_labels: Vec<String>,
+            _relation_labels: Vec<String>,
+        ) -> Result<SubscriptionResponse> {
+            // Create a channel dispatcher for this subscription
+            let dispatcher = ChannelChangeDispatcher::<SourceEventWrapper>::new(100);
+            let receiver = dispatcher.create_receiver().await?;
+
+            // Store the dispatcher so we can inject events later
+            self.dispatchers.write().await.push(Box::new(dispatcher));
+
+            Ok(SubscriptionResponse {
+                query_id,
+                source_id: self.config.id.clone(),
+                receiver,
+                bootstrap_receiver: None,
+            })
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// Creates a SourceRegistry with the TestMockSource registered for "mock" type.
+    /// Use this in unit tests instead of depending on plugin crates.
+    pub fn create_test_source_registry() -> SourceRegistry {
+        let mut registry = SourceRegistry::new();
+        registry.register("mock".to_string(), |config, event_tx| {
+            let source = TestMockSource::new(config, event_tx)?;
+            Ok(Arc::new(source) as Arc<dyn Source>)
+        });
+        registry
+    }
+
+    /// Creates a ReactionRegistry with the MockReaction registered for "log" type.
+    /// Use this in unit tests instead of depending on plugin crates.
+    pub fn create_test_reaction_registry() -> ReactionRegistry {
+        let mut registry = ReactionRegistry::new();
+        registry.register("log".to_string(), |config, event_tx| {
+            let reaction = MockReaction::new(config, event_tx);
+            Ok(Arc::new(reaction) as Arc<dyn Reaction>)
+        });
+        registry
+    }
 }
 
 #[cfg(test)]

@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! # Storage Backend Configuration for DrasiServerCore
+//! # Storage Backend Configuration for DrasiLib
 //!
 //! This module provides configuration and factory support for different storage backends
-//! that can be used for query indexes. DrasiServerCore supports three storage backends:
+//! that can be used for query indexes. DrasiLib supports three storage backends:
 //!
 //! ## Storage Backend Types
 //!

@@ -19,8 +19,9 @@ mod manager_tests {
     use crate::channels::*;
     use crate::config::QueryConfig;
     use crate::queries::Query;
-    use crate::server_core::DrasiServerCore;
+    use crate::server_core::DrasiLib;
     use crate::test_support::helpers::test_fixtures::*;
+    use crate::test_support::helpers::test_mocks::create_test_reaction_registry;
     use anyhow::Result;
     use async_trait::async_trait;
     use std::sync::Arc;
@@ -98,9 +99,19 @@ mod manager_tests {
         }
     }
 
-    async fn create_test_server_with_query(query_id: &str) -> Result<Arc<DrasiServerCore>> {
+    async fn create_test_server_with_query(query_id: &str) -> Result<Arc<DrasiLib>> {
         let mock_query = Arc::new(MockQuery::new(query_id));
-        let server_core = DrasiServerCore::builder().build().await?;
+
+        let config_yaml = r#"
+server_core:
+  id: test-server
+
+sources: []
+queries: []
+reactions: []
+"#;
+
+        let server_core = DrasiLib::from_config_str(config_yaml).await?;
         server_core
             .query_manager()
             .add_query_instance_for_test(mock_query)
@@ -110,7 +121,8 @@ mod manager_tests {
 
     async fn create_test_manager() -> (Arc<ReactionManager>, mpsc::Receiver<ComponentEvent>) {
         let (event_tx, event_rx) = mpsc::channel(100);
-        let manager = Arc::new(ReactionManager::new(event_tx));
+        let registry = create_test_reaction_registry();
+        let manager = Arc::new(ReactionManager::with_registry(event_tx, registry));
         (manager, event_rx)
     }
 

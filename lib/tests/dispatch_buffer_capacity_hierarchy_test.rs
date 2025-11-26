@@ -18,21 +18,26 @@
 //! 3. Hardcoded default (1000)
 
 use drasi_lib::config::{SourceSpecificConfig, SourceSubscriptionConfig};
-use drasi_lib::sources::grpc::GrpcSourceConfig;
-use drasi_lib::sources::http::HttpSourceConfig;
-use drasi_lib::sources::mock::MockSourceConfig;
-use drasi_lib::sources::platform::PlatformSourceConfig;
-use drasi_lib::sources::postgres::PostgresSourceConfig;
 use drasi_lib::{
-    DrasiServerCoreConfig, DrasiServerCoreSettings, QueryConfig, QueryLanguage, RuntimeConfig,
+    DrasiLibConfig, DrasiLibSettings, QueryConfig, QueryLanguage, RuntimeConfig,
     SourceConfig,
 };
+use serde_json::json;
+use std::collections::HashMap;
+
+/// Helper to convert a serde_json::Value object to HashMap<String, serde_json::Value>
+fn to_hashmap(value: serde_json::Value) -> HashMap<String, serde_json::Value> {
+    match value {
+        serde_json::Value::Object(map) => map.into_iter().collect(),
+        _ => HashMap::new(),
+    }
+}
 
 /// Test that without any config, all use hardcoded default of 1000
 #[tokio::test]
 async fn test_dispatch_buffer_capacity_hierarchy_all_defaults() {
-    let config = DrasiServerCoreConfig {
-        server_core: DrasiServerCoreSettings {
+    let config = DrasiLibConfig {
+        server_core: DrasiLibSettings {
             id: "test-server".to_string(),
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None, // No global override
@@ -42,10 +47,10 @@ async fn test_dispatch_buffer_capacity_hierarchy_all_defaults() {
             SourceConfig {
                 id: "source1".to_string(),
                 auto_start: true,
-                config: SourceSpecificConfig::Mock(MockSourceConfig {
-                    data_type: "counter".to_string(),
-                    interval_ms: 1000,
-                }),
+                config: SourceSpecificConfig::Mock(to_hashmap(json!({
+                    "data_type": "counter",
+                    "interval_ms": 1000
+                }))),
                 bootstrap_provider: None,
                 dispatch_buffer_capacity: None, // No component override,
                 dispatch_mode: None,
@@ -53,10 +58,10 @@ async fn test_dispatch_buffer_capacity_hierarchy_all_defaults() {
             SourceConfig {
                 id: "source2".to_string(),
                 auto_start: true,
-                config: SourceSpecificConfig::Mock(MockSourceConfig {
-                    data_type: "counter".to_string(),
-                    interval_ms: 1000,
-                }),
+                config: SourceSpecificConfig::Mock(to_hashmap(json!({
+                    "data_type": "counter",
+                    "interval_ms": 1000
+                }))),
                 bootstrap_provider: None,
                 dispatch_buffer_capacity: None, // No component override,
                 dispatch_mode: None,
@@ -133,8 +138,8 @@ async fn test_dispatch_buffer_capacity_hierarchy_all_defaults() {
 /// Test that global setting applies to all components without overrides
 #[tokio::test]
 async fn test_dispatch_buffer_capacity_hierarchy_global_override() {
-    let config = DrasiServerCoreConfig {
-        server_core: DrasiServerCoreSettings {
+    let config = DrasiLibConfig {
+        server_core: DrasiLibSettings {
             id: "test-server".to_string(),
             priority_queue_capacity: None,
             dispatch_buffer_capacity: Some(5000), // Global override
@@ -144,10 +149,10 @@ async fn test_dispatch_buffer_capacity_hierarchy_global_override() {
             SourceConfig {
                 id: "source1".to_string(),
                 auto_start: true,
-                config: SourceSpecificConfig::Mock(MockSourceConfig {
-                    data_type: "counter".to_string(),
-                    interval_ms: 1000,
-                }),
+                config: SourceSpecificConfig::Mock(to_hashmap(json!({
+                    "data_type": "counter",
+                    "interval_ms": 1000
+                }))),
                 bootstrap_provider: None,
                 dispatch_buffer_capacity: None, // No component override,
                 dispatch_mode: None,
@@ -155,18 +160,18 @@ async fn test_dispatch_buffer_capacity_hierarchy_global_override() {
             SourceConfig {
                 id: "source2".to_string(),
                 auto_start: true,
-                config: SourceSpecificConfig::Postgres(PostgresSourceConfig {
-                    host: "localhost".to_string(),
-                    port: 5432,
-                    database: "test_db".to_string(),
-                    user: "test_user".to_string(),
-                    password: "".to_string(),
-                    tables: vec![],
-                    slot_name: "drasi_slot".to_string(),
-                    publication_name: "drasi_publication".to_string(),
-                    ssl_mode: drasi_lib::config::SslMode::Prefer,
-                    table_keys: vec![],
-                }),
+                config: SourceSpecificConfig::Postgres(to_hashmap(json!({
+                    "host": "localhost",
+                    "port": 5432,
+                    "database": "test_db",
+                    "user": "test_user",
+                    "password": "",
+                    "tables": [],
+                    "slot_name": "drasi_slot",
+                    "publication_name": "drasi_publication",
+                    "ssl_mode": "prefer",
+                    "table_keys": []
+                }))),
                 bootstrap_provider: None,
                 dispatch_buffer_capacity: None, // No component override,
                 dispatch_mode: None,
@@ -218,8 +223,8 @@ async fn test_dispatch_buffer_capacity_hierarchy_global_override() {
 /// Test that component overrides take precedence over global setting
 #[tokio::test]
 async fn test_dispatch_buffer_capacity_hierarchy_component_override() {
-    let config = DrasiServerCoreConfig {
-        server_core: DrasiServerCoreSettings {
+    let config = DrasiLibConfig {
+        server_core: DrasiLibSettings {
             id: "test-server".to_string(),
             priority_queue_capacity: None,
             dispatch_buffer_capacity: Some(2000), // Global override
@@ -229,10 +234,10 @@ async fn test_dispatch_buffer_capacity_hierarchy_component_override() {
             SourceConfig {
                 id: "source1".to_string(),
                 auto_start: true,
-                config: SourceSpecificConfig::Mock(MockSourceConfig {
-                    data_type: "counter".to_string(),
-                    interval_ms: 1000,
-                }),
+                config: SourceSpecificConfig::Mock(to_hashmap(json!({
+                    "data_type": "counter",
+                    "interval_ms": 1000
+                }))),
                 bootstrap_provider: None,
                 dispatch_buffer_capacity: Some(10000), // Component override,
                 dispatch_mode: None,
@@ -240,18 +245,11 @@ async fn test_dispatch_buffer_capacity_hierarchy_component_override() {
             SourceConfig {
                 id: "source2".to_string(),
                 auto_start: true,
-                config: SourceSpecificConfig::Http(HttpSourceConfig {
-                    host: "localhost".to_string(),
-                    port: 8080,
-                    endpoint: None,
-                    timeout_ms: 30000,
-                    adaptive_enabled: None,
-                    adaptive_max_batch_size: None,
-                    adaptive_min_batch_size: None,
-                    adaptive_max_wait_ms: None,
-                    adaptive_min_wait_ms: None,
-                    adaptive_window_secs: None,
-                }),
+                config: SourceSpecificConfig::Http(to_hashmap(json!({
+                    "host": "localhost",
+                    "port": 8080,
+                    "timeout_ms": 30000
+                }))),
                 bootstrap_provider: None,
                 dispatch_buffer_capacity: None, // No component override,
                 dispatch_mode: None,
@@ -332,8 +330,8 @@ async fn test_dispatch_buffer_capacity_hierarchy_component_override() {
 /// Test mix of all three levels
 #[tokio::test]
 async fn test_dispatch_buffer_capacity_hierarchy_mixed() {
-    let config = DrasiServerCoreConfig {
-        server_core: DrasiServerCoreSettings {
+    let config = DrasiLibConfig {
+        server_core: DrasiLibSettings {
             id: "test-server".to_string(),
             priority_queue_capacity: Some(50000),
             dispatch_buffer_capacity: Some(3000), // Global override
@@ -343,18 +341,18 @@ async fn test_dispatch_buffer_capacity_hierarchy_mixed() {
             SourceConfig {
                 id: "high_volume_source".to_string(),
                 auto_start: true,
-                config: SourceSpecificConfig::Postgres(PostgresSourceConfig {
-                    host: "localhost".to_string(),
-                    port: 5432,
-                    database: "test_db".to_string(),
-                    user: "test_user".to_string(),
-                    password: "".to_string(),
-                    tables: vec![],
-                    slot_name: "drasi_slot".to_string(),
-                    publication_name: "drasi_publication".to_string(),
-                    ssl_mode: drasi_lib::config::SslMode::Prefer,
-                    table_keys: vec![],
-                }),
+                config: SourceSpecificConfig::Postgres(to_hashmap(json!({
+                    "host": "localhost",
+                    "port": 5432,
+                    "database": "test_db",
+                    "user": "test_user",
+                    "password": "",
+                    "tables": [],
+                    "slot_name": "drasi_slot",
+                    "publication_name": "drasi_publication",
+                    "ssl_mode": "prefer",
+                    "table_keys": []
+                }))),
                 bootstrap_provider: None,
                 dispatch_buffer_capacity: Some(20000), // High volume, needs large capacity,
                 dispatch_mode: None,
@@ -362,12 +360,11 @@ async fn test_dispatch_buffer_capacity_hierarchy_mixed() {
             SourceConfig {
                 id: "standard_source".to_string(),
                 auto_start: true,
-                config: SourceSpecificConfig::Grpc(GrpcSourceConfig {
-                    host: "localhost".to_string(),
-                    port: 50051,
-                    endpoint: None,
-                    timeout_ms: 30000,
-                }),
+                config: SourceSpecificConfig::Grpc(to_hashmap(json!({
+                    "host": "localhost",
+                    "port": 50051,
+                    "timeout_ms": 30000
+                }))),
                 bootstrap_provider: None,
                 dispatch_buffer_capacity: None, // Uses global (3000),
                 dispatch_mode: None,
@@ -375,10 +372,10 @@ async fn test_dispatch_buffer_capacity_hierarchy_mixed() {
             SourceConfig {
                 id: "low_volume_source".to_string(),
                 auto_start: true,
-                config: SourceSpecificConfig::Mock(MockSourceConfig {
-                    data_type: "counter".to_string(),
-                    interval_ms: 1000,
-                }),
+                config: SourceSpecificConfig::Mock(to_hashmap(json!({
+                    "data_type": "counter",
+                    "interval_ms": 1000
+                }))),
                 bootstrap_provider: None,
                 dispatch_buffer_capacity: Some(500), // Low volume, small capacity,
                 dispatch_mode: None,
@@ -472,8 +469,8 @@ async fn test_dispatch_buffer_capacity_hierarchy_mixed() {
 /// Test that no global setting and no component override results in default
 #[tokio::test]
 async fn test_dispatch_buffer_capacity_hierarchy_nil_global_nil_component() {
-    let config = DrasiServerCoreConfig {
-        server_core: DrasiServerCoreSettings {
+    let config = DrasiLibConfig {
+        server_core: DrasiLibSettings {
             id: "test-server".to_string(),
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None, // No global
@@ -482,14 +479,13 @@ async fn test_dispatch_buffer_capacity_hierarchy_nil_global_nil_component() {
         sources: vec![SourceConfig {
             id: "source1".to_string(),
             auto_start: true,
-            config: SourceSpecificConfig::Platform(PlatformSourceConfig {
-                redis_url: "redis://localhost:6379".to_string(),
-                stream_key: "test-stream".to_string(),
-                consumer_group: "drasi-core".to_string(),
-                consumer_name: None,
-                batch_size: 10,
-                block_ms: 5000,
-            }),
+            config: SourceSpecificConfig::Platform(to_hashmap(json!({
+                "redis_url": "redis://localhost:6379",
+                "stream_key": "test-stream",
+                "consumer_group": "drasi-core",
+                "batch_size": 10,
+                "block_ms": 5000
+            }))),
             bootstrap_provider: None,
             dispatch_buffer_capacity: None, // No component override,
             dispatch_mode: None,

@@ -40,10 +40,10 @@ pub struct SourceBase {
     pub status: Arc<RwLock<ComponentStatus>>,
     /// Dispatchers for sending source events to subscribers
     ///
-    /// Note: This field is `pub(crate)` to limit access to within the crate.
-    /// External code should use the public methods like `dispatch_event()` or `test_subscribe()`.
-    /// Internal source implementations may access this for spawned tasks that need the Arc.
-    pub(crate) dispatchers:
+    /// This is a vector of dispatchers that send source events to all registered
+    /// subscribers (queries). When a source produces a change event, it broadcasts
+    /// it to all dispatchers in this vector.
+    pub dispatchers:
         Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     /// Channel for sending component lifecycle events
     pub event_tx: ComponentEventSender,

@@ -13,11 +13,17 @@
 // limitations under the License.
 
 // ============================================================================
-// Public API Module
+// Core Public Modules
 // ============================================================================
 
-/// Public API for configuring and running Drasi Server Core
-pub mod api;
+/// Fluent builders for DrasiLib and components
+pub mod builder;
+
+/// Plugin core infrastructure for extending drasi-lib
+pub mod plugin_core;
+
+/// Error types for drasi-lib
+pub mod error;
 
 // ============================================================================
 // Internal Modules (crate-private, but visible to integration tests)
@@ -25,8 +31,6 @@ pub mod api;
 
 // These modules are internal but need to be accessible to integration tests
 // that test platform-specific components
-#[cfg_attr(not(test), doc(hidden))]
-pub mod application;
 #[cfg_attr(not(test), doc(hidden))]
 pub mod bootstrap;
 #[cfg_attr(not(test), doc(hidden))]
@@ -67,40 +71,24 @@ mod test_support;
 // Clean Public API - Everything Users Need
 // ============================================================================
 
-/// Main server type - use `DrasiServerCore::builder()` or `DrasiServerCore::from_config_file()`
+/// Main server type - use `DrasiLib::builder()` or `DrasiLib::from_config_file()`
 ///
 /// # Examples
 ///
 /// ```no_run
-/// use drasi_lib::DrasiServerCore;
+/// use drasi_lib::DrasiLib;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// // From config file
-/// let core = DrasiServerCore::from_config_file("config.yaml").await?;
+/// let core = DrasiLib::from_config_file("config.yaml").await?;
 /// core.start().await?;
 /// # Ok(())
 /// # }
 /// ```
-pub use server_core::DrasiServerCore;
+pub use server_core::DrasiLib;
 
-/// Builder types for fluent API
-pub use api::{
-    DrasiServerCoreBuilder, Properties, Query, QueryBuilder, Reaction, ReactionBuilder, Source,
-    SourceBuilder,
-};
-
-/// Error types for the public API
-pub use api::{DrasiError, Result};
-
-/// Application integration handles for direct source/reaction access
-pub use reactions::ApplicationReactionHandle;
-pub use sources::ApplicationSourceHandle;
-
-/// Subscription options for configuring reactions
-pub use reactions::application::SubscriptionOptions;
-
-/// Property map builder for creating source data
-pub use sources::application::PropertyMapBuilder;
+/// Error types for drasi-lib
+pub use error::{DrasiError, Result};
 
 /// Component status type for monitoring component states
 pub use channels::ComponentStatus;
@@ -114,9 +102,47 @@ pub use channels::DispatchMode;
 
 /// Configuration types for YAML/JSON config files
 pub use config::{
-    DrasiServerCoreConfig, DrasiServerCoreSettings, QueryConfig, QueryLanguage, QueryRuntime,
+    DrasiLibConfig, DrasiLibSettings, QueryConfig, QueryLanguage, QueryRuntime,
     ReactionConfig, ReactionRuntime, RuntimeConfig, SourceConfig, SourceRuntime,
 };
 
 /// Storage backend configuration types
 pub use indexes::{StorageBackendConfig, StorageBackendRef, StorageBackendSpec};
+
+// ============================================================================
+// Plugin Core Types (for plugin development)
+// ============================================================================
+
+/// Plugin core abstractions for implementing sources, reactions, and bootstrap providers
+/// Note: Traits are named with 'Trait' suffix to avoid conflicts with builder API types
+pub use plugin_core::{
+    BootstrapFactory, BootstrapProvider, QuerySubscriber,
+    Reaction as ReactionTrait, ReactionBase, ReactionFactory,
+    Source as SourceTrait, SourceBase, SourceFactory,
+};
+
+// ============================================================================
+// Builder Types (for fluent configuration)
+// ============================================================================
+
+/// Fluent builder for DrasiLib instances
+pub use builder::DrasiLibBuilder;
+
+/// Fluent builder for source configurations
+pub use builder::Source;
+
+/// Fluent builder for query configurations
+pub use builder::Query;
+
+/// Fluent builder for reaction configurations
+pub use builder::Reaction;
+
+// ============================================================================
+// API Module (backward compatibility alias)
+// ============================================================================
+
+/// Re-export builders as `api` module for backward compatibility with tests.
+/// This allows `use crate::api::{Source, Query, Reaction};` to work.
+pub mod api {
+    pub use crate::builder::{Query, Reaction, Source};
+}

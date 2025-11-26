@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Performance profiling infrastructure for DrasiServerCore
+//! Performance profiling infrastructure for DrasiLib
 //!
 //! This module provides nanosecond-precision timestamp tracking through the entire
 //! Source → Query → Reaction pipeline, enabling detailed performance analysis and

@@ -17,12 +17,14 @@ mod manager_tests {
     use super::super::*;
     use crate::channels::*;
     use crate::test_support::helpers::test_fixtures::*;
+    use crate::test_support::helpers::test_mocks::create_test_source_registry;
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
     async fn create_test_manager() -> (Arc<SourceManager>, mpsc::Receiver<ComponentEvent>) {
         let (event_tx, event_rx) = mpsc::channel(100);
-        let manager = Arc::new(SourceManager::new(event_tx));
+        let registry = create_test_source_registry();
+        let manager = Arc::new(SourceManager::with_registry(event_tx, registry));
         (manager, event_rx)
     }
 
@@ -216,135 +218,5 @@ mod manager_tests {
 
         assert!(matches!(source1_status, ComponentStatus::Running));
         assert!(matches!(source2_status, ComponentStatus::Stopped));
-    }
-}
-
-#[cfg(test)]
-mod internal_source_tests {
-    use super::super::mock::MockSource;
-    use crate::channels::*;
-    use crate::config::SourceConfig;
-    use crate::sources::Source;
-    use tokio::sync::mpsc;
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_mock_source_counter() {
-        use crate::sources::mock::MockSourceConfig;
-
-        let (event_tx, _event_rx) = mpsc::channel(100);
-
-        let config = SourceConfig {
-            id: "test-counter".to_string(),
-            auto_start: false,
-            config: crate::config::SourceSpecificConfig::Mock(MockSourceConfig {
-                data_type: "counter".to_string(),
-                interval_ms: 100,
-            }),
-            bootstrap_provider: None,
-            dispatch_buffer_capacity: None,
-            dispatch_mode: Some(crate::channels::DispatchMode::Broadcast),
-        };
-
-        let source = MockSource::new(config, event_tx).unwrap();
-        let mut rx = source.test_subscribe();
-
-        // Start the source
-        let result = source.start().await;
-        assert!(result.is_ok());
-
-        // Collect changes
-        let mut changes = Vec::new();
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while let Ok(event) = rx.recv().await {
-                changes.push(event);
-                if changes.len() >= 3 {
-                    break;
-                }
-            }
-        })
-        .await
-        .expect("Timeout waiting for changes");
-
-        // Verify we got counter values
-        assert_eq!(changes.len(), 3);
-
-        // Stop the source
-        source.stop().await.unwrap();
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_mock_source_sensor() {
-        use crate::sources::mock::MockSourceConfig;
-
-        let (event_tx, _event_rx) = mpsc::channel(100);
-
-        let config = SourceConfig {
-            id: "test-sensor".to_string(),
-            auto_start: false,
-            config: crate::config::SourceSpecificConfig::Mock(MockSourceConfig {
-                data_type: "sensor".to_string(),
-                interval_ms: 100,
-            }),
-            bootstrap_provider: None,
-            dispatch_buffer_capacity: None,
-            dispatch_mode: Some(crate::channels::DispatchMode::Broadcast),
-        };
-
-        let source = MockSource::new(config, event_tx).unwrap();
-        let mut rx = source.test_subscribe();
-
-        // Start the source
-        source.start().await.unwrap();
-
-        // Collect a few sensor readings
-        let mut readings = Vec::new();
-        tokio::time::timeout(std::time::Duration::from_millis(350), async {
-            while let Ok(event) = rx.recv().await {
-                readings.push(event);
-                if readings.len() >= 3 {
-                    break;
-                }
-            }
-        })
-        .await
-        .expect("Timeout waiting for readings");
-
-        assert!(readings.len() >= 3);
-
-        // Stop the source
-        source.stop().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_mock_source_status() {
-        use crate::sources::mock::MockSourceConfig;
-
-        let (event_tx, _event_rx) = mpsc::channel(100);
-
-        let config = SourceConfig {
-            id: "test-status".to_string(),
-            auto_start: false,
-            config: crate::config::SourceSpecificConfig::Mock(MockSourceConfig {
-                data_type: "counter".to_string(),
-                interval_ms: 1000,
-            }),
-            bootstrap_provider: None,
-            dispatch_buffer_capacity: None,
-            dispatch_mode: None,
-        };
-
-        let source = MockSource::new(config, event_tx).unwrap();
-
-        // Initial status
-        assert_eq!(source.status().await, ComponentStatus::Stopped);
-
-        // Start the source
-        source.start().await.unwrap();
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        assert_eq!(source.status().await, ComponentStatus::Running);
-
-        // Stop the source
-        source.stop().await.unwrap();
-        assert_eq!(source.status().await, ComponentStatus::Stopped);
     }
 }

@@ -2,7 +2,7 @@
 // This example demonstrates how to configure a simple mock source
 // using the new fluent builder API.
 
-use drasi_lib::{DrasiServerCore, Properties, Query, Reaction, Source};
+use drasi_lib::{DrasiLib, Properties, Query, Reaction, Source};
 use serde_json::json;
 
 #[tokio::main]
@@ -13,7 +13,7 @@ async fn main() -> anyhow::Result<()> {
     println!("Building configuration with fluent API...\n");
 
     // Build server using new fluent API
-    let core = DrasiServerCore::builder()
+    let core = DrasiLib::builder()
         .with_id("basic-mock-example")
         // Mock source configuration with bootstrap provider
         .add_source(

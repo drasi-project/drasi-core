@@ -51,10 +51,10 @@ fn serialize_to_properties<T: serde::Serialize>(config: &T) -> HashMap<String, s
 /// # Examples
 ///
 /// ```no_run
-/// use drasi_lib::{DrasiServerCore, ComponentStatus};
+/// use drasi_lib::{DrasiLib, ComponentStatus};
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let core = DrasiServerCore::from_config_file("config.yaml").await?;
+/// let core = DrasiLib::from_config_file("config.yaml").await?;
 /// core.start().await?;
 ///
 /// // Get runtime information for a source
@@ -98,17 +98,17 @@ pub struct SourceRuntime {
 /// # Examples
 ///
 /// ```no_run
-/// use drasi_lib::{DrasiServerCore, ComponentStatus};
+/// use drasi_lib::{DrasiLib, ComponentStatus};
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let core = DrasiServerCore::from_config_file("config.yaml").await?;
+/// let core = DrasiLib::from_config_file("config.yaml").await?;
 /// core.start().await?;
 ///
 /// // Get runtime information for a query
 /// let query_info = core.get_query_info("active_orders").await?;
 /// println!("Query: {}", query_info.query);
 /// println!("Status: {:?}", query_info.status);
-/// println!("Sources: {:?}", query_info.sources);
+/// println!("Source subscriptions: {:?}", query_info.source_subscriptions);
 ///
 /// if let Some(joins) = query_info.joins {
 ///     println!("Synthetic joins configured: {}", joins.len());
@@ -150,10 +150,10 @@ pub struct QueryRuntime {
 /// # Examples
 ///
 /// ```no_run
-/// use drasi_lib::{DrasiServerCore, ComponentStatus};
+/// use drasi_lib::{DrasiLib, ComponentStatus};
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let core = DrasiServerCore::from_config_file("config.yaml").await?;
+/// let core = DrasiLib::from_config_file("config.yaml").await?;
 /// core.start().await?;
 ///
 /// // Get runtime information for a reaction
@@ -236,12 +236,12 @@ impl From<ReactionConfig> for ReactionRuntime {
 /// Runtime configuration with applied defaults
 ///
 /// `RuntimeConfig` represents a fully-resolved configuration with all global defaults
-/// applied to individual components. It's created from [`DrasiServerCoreConfig`](super::schema::DrasiServerCoreConfig)
-/// and used internally by [`DrasiServerCore`](crate::DrasiServerCore) for execution.
+/// applied to individual components. It's created from [`DrasiLibConfig`](super::schema::DrasiLibConfig)
+/// and used internally by [`DrasiLib`](crate::DrasiLib) for execution.
 ///
 /// # Default Application
 ///
-/// When converting from `DrasiServerCoreConfig` to `RuntimeConfig`, global capacity
+/// When converting from `DrasiLibConfig` to `RuntimeConfig`, global capacity
 /// settings are applied to components that don't specify their own values:
 ///
 /// - **priority_queue_capacity**: Applied to queries and reactions (default: 10000)
@@ -249,13 +249,13 @@ impl From<ReactionConfig> for ReactionRuntime {
 ///
 /// # Conversion
 ///
-/// Automatically created via `From<DrasiServerCoreConfig>`:
+/// Automatically created via `From<DrasiLibConfig>`:
 ///
 /// ```no_run
-/// use drasi_lib::{DrasiServerCoreConfig, RuntimeConfig};
+/// use drasi_lib::{DrasiLibConfig, RuntimeConfig};
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let config = DrasiServerCoreConfig::load_from_file("config.yaml")?;
+/// let config = DrasiLibConfig::load_from_file("config.yaml")?;
 /// let runtime_config: RuntimeConfig = config.into();
 /// # Ok(())
 /// # }
@@ -266,16 +266,16 @@ impl From<ReactionConfig> for ReactionRuntime {
 /// ## Creating RuntimeConfig
 ///
 /// ```no_run
-/// use drasi_lib::{DrasiServerCore, DrasiServerCoreConfig, RuntimeConfig};
+/// use drasi_lib::{DrasiLib, DrasiLibConfig, RuntimeConfig};
 /// use std::sync::Arc;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// // Load and convert to runtime config
-/// let config = DrasiServerCoreConfig::load_from_file("config.yaml")?;
+/// let config = DrasiLibConfig::load_from_file("config.yaml")?;
 /// let runtime_config: RuntimeConfig = config.into();
 ///
-/// // Use with DrasiServerCore (via from_config_file helper)
-/// let core = DrasiServerCore::from_config_file("config.yaml").await?;
+/// // Use with DrasiLib (via from_config_file helper)
+/// let core = DrasiLib::from_config_file("config.yaml").await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -303,7 +303,7 @@ impl From<ReactionConfig> for ReactionRuntime {
 /// - `q2` will have `priority_queue_capacity = Some(100000)`
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
-    pub server_core: super::schema::DrasiServerCoreSettings,
+    pub server_core: super::schema::DrasiLibSettings,
     /// Index factory for creating storage backend indexes for queries
     pub index_factory: Arc<IndexFactory>,
     pub sources: Vec<SourceConfig>,
@@ -311,8 +311,8 @@ pub struct RuntimeConfig {
     pub reactions: Vec<ReactionConfig>,
 }
 
-impl From<super::schema::DrasiServerCoreConfig> for RuntimeConfig {
-    fn from(config: super::schema::DrasiServerCoreConfig) -> Self {
+impl From<super::schema::DrasiLibConfig> for RuntimeConfig {
+    fn from(config: super::schema::DrasiLibConfig) -> Self {
         // Get the global defaults (or hardcoded fallbacks)
         let global_priority_queue = config.server_core.priority_queue_capacity.unwrap_or(10000);
         let global_dispatch_capacity = config.server_core.dispatch_buffer_capacity.unwrap_or(1000);

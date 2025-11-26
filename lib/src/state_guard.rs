@@ -17,7 +17,7 @@
 //! This module provides a centralized mechanism for verifying that the server
 //! is properly initialized before operations are performed.
 
-use crate::api::DrasiError;
+use crate::error::DrasiError;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -72,13 +72,13 @@ impl StateGuard {
     /// # Examples
     ///
     /// ```ignore
-    /// pub async fn some_operation(&self) -> crate::api::Result<()> {
+    /// pub async fn some_operation(&self) -> crate::error::Result<()> {
     ///     self.state_guard.require_initialized().await?;
     ///     // ... perform operation ...
     ///     Ok(())
     /// }
     /// ```
-    pub async fn require_initialized(&self) -> crate::api::Result<()> {
+    pub async fn require_initialized(&self) -> crate::error::Result<()> {
         if !*self.initialized.read().await {
             return Err(DrasiError::invalid_state(
                 "Server must be initialized before this operation",
@@ -117,10 +117,10 @@ mod tests {
         let result = guard.require_initialized().await;
         assert!(result.is_err());
         match result {
-            Err(DrasiError::InvalidState(message)) => {
+            Err(DrasiError::OperationFailed(message)) => {
                 assert!(message.contains("initialized"));
             }
-            _ => panic!("Expected InvalidState error"),
+            _ => panic!("Expected OperationFailed error"),
         }
     }
 

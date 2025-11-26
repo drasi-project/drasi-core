@@ -1,9 +1,10 @@
 use super::super::*;
 use crate::api::{Query, Reaction, Source};
+use crate::test_support::helpers::test_mocks::{create_test_reaction_registry, create_test_source_registry};
 
 #[tokio::test]
 async fn test_builder_creates_initialized_server() {
-    let core = DrasiServerCore::builder()
+    let core = DrasiLib::builder()
         .with_id("builder-test")
         .build()
         .await;
@@ -25,16 +26,19 @@ sources: []
 queries: []
 reactions: []
 "#;
-    let core = DrasiServerCore::from_config_str(yaml).await;
+    let core = DrasiLib::from_config_str(yaml).await;
     assert!(core.is_ok(), "from_config_str should create server");
     assert!(core.unwrap().state_guard.is_initialized().await);
 }
 
 #[tokio::test]
 async fn test_builder_with_components() {
-    let core = DrasiServerCore::builder()
+    // Use test mock registries that have "mock" and "log" types registered
+    let core = DrasiLib::builder()
         .with_id("complex-server")
-        .add_source(Source::application("source1").build())
+        .with_source_registry(create_test_source_registry())
+        .with_reaction_registry(create_test_reaction_registry())
+        .add_source(Source::mock("source1").build())
         .add_query(
             Query::cypher("query1")
                 .query("MATCH (n) RETURN n")

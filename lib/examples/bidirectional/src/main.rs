@@ -3,13 +3,13 @@
 
 use anyhow::Result;
 use drasi_lib::sources::application::PropertyMapBuilder;
-use drasi_lib::{DrasiServerCore, Query, Reaction, Source};
+use drasi_lib::{DrasiLib, Query, Reaction, Source};
 use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Configure server with Application source and reaction
-    let core = DrasiServerCore::builder()
+    let core = DrasiLib::builder()
         .with_id("bidirectional-example")
         // Application source - we'll send data into it
         .add_source(Source::application("app-source").build())

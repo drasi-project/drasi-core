@@ -11,11 +11,38 @@ members = [
   "index-garnet",
   "middleware",
   "lib",
-  
+
+  # Source Plugins
+  "components/sources/plugin-postgres",
+  "components/sources/plugin-http",
+  "components/sources/plugin-grpc",
+  "components/sources/plugin-platform",
+  "components/sources/plugin-application",
+  "components/sources/plugin-mock",
+
+  # Bootstrap Plugins
+  "components/bootstrappers/plugin-postgres",
+  "components/bootstrappers/plugin-platform",
+  "components/bootstrappers/plugin-scriptfile",
+  "components/bootstrappers/plugin-application",
+  "components/bootstrappers/plugin-noop",
+
+  # Reaction Plugins
+  "components/reactions/plugin-http",
+  "components/reactions/plugin-http-adaptive",
+  "components/reactions/plugin-grpc",
+  "components/reactions/plugin-grpc-adaptive",
+  "components/reactions/plugin-sse",
+  "components/reactions/plugin-platform",
+  "components/reactions/plugin-profiler",
+  "components/reactions/plugin-application",
+  "components/reactions/plugin-log",
+
   # Internal
   "shared-tests",
   "query-perf",
   "examples",
+  "examples/plugin-demo",
   ]
 
 resolver = "2"

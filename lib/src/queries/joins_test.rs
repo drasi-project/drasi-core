@@ -19,6 +19,7 @@ mod query_joins_tests {
     use crate::queries::QueryManager;
     use crate::sources::{convert_json_to_element_value, SourceManager};
     use crate::test_support::helpers::test_fixtures::*;
+    use crate::test_support::helpers::test_mocks::{create_test_source_registry, TestMockSource};
     use drasi_core::middleware::MiddlewareTypeRegistry;
     use drasi_core::models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
@@ -112,7 +113,8 @@ mod query_joins_tests {
     ) {
         let (event_tx, event_rx) = mpsc::channel(100);
 
-        let source_manager = Arc::new(SourceManager::new(event_tx.clone()));
+        let registry = create_test_source_registry();
+        let source_manager = Arc::new(SourceManager::with_registry(event_tx.clone(), registry));
 
         // Create a test IndexFactory with empty backends
         let index_factory = Arc::new(crate::indexes::IndexFactory::new(vec![]));
@@ -181,12 +183,12 @@ mod query_joins_tests {
         // Downcast to MockSource to access inject_event
         let vehicles_source = vehicles_mock
             .as_any()
-            .downcast_ref::<crate::sources::mock::MockSource>()
-            .expect("Should be MockSource");
+            .downcast_ref::<TestMockSource>()
+            .expect("Should be TestMockSource");
         let drivers_source = drivers_mock
             .as_any()
-            .downcast_ref::<crate::sources::mock::MockSource>()
-            .expect("Should be MockSource");
+            .downcast_ref::<TestMockSource>()
+            .expect("Should be TestMockSource");
 
         // Push vehicle data
         let vehicle1 = create_node_with_properties(
@@ -223,7 +225,7 @@ mod query_joins_tests {
             .unwrap();
 
         // NOTE: In the new broadcast architecture, tests would need to subscribe to the query
-        // to receive results. This requires a full DrasiServerCore setup which is complex.
+        // to receive results. This requires a full DrasiLib setup which is complex.
         // For now, we just verify the query starts successfully.
         tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -283,11 +285,11 @@ mod query_joins_tests {
             .expect("orders source");
         let restaurants_source = restaurants_mock
             .as_any()
-            .downcast_ref::<crate::sources::mock::MockSource>()
+            .downcast_ref::<TestMockSource>()
             .expect("MockSource");
         let orders_source = orders_mock
             .as_any()
-            .downcast_ref::<crate::sources::mock::MockSource>()
+            .downcast_ref::<TestMockSource>()
             .expect("MockSource");
 
         // Add initial data
@@ -428,15 +430,15 @@ mod query_joins_tests {
             .expect("restaurants source");
         let orders_source = orders_mock
             .as_any()
-            .downcast_ref::<crate::sources::mock::MockSource>()
+            .downcast_ref::<TestMockSource>()
             .expect("MockSource");
         let drivers_source = drivers_mock
             .as_any()
-            .downcast_ref::<crate::sources::mock::MockSource>()
+            .downcast_ref::<TestMockSource>()
             .expect("MockSource");
         let restaurants_source = restaurants_mock
             .as_any()
-            .downcast_ref::<crate::sources::mock::MockSource>()
+            .downcast_ref::<TestMockSource>()
             .expect("MockSource");
 
         // Add data for all three sources
@@ -537,11 +539,11 @@ mod query_joins_tests {
             .expect("source2");
         let source1_source = source1_mock
             .as_any()
-            .downcast_ref::<crate::sources::mock::MockSource>()
+            .downcast_ref::<TestMockSource>()
             .expect("MockSource");
         let source2_source = source2_mock
             .as_any()
-            .downcast_ref::<crate::sources::mock::MockSource>()
+            .downcast_ref::<TestMockSource>()
             .expect("MockSource");
 
         // Add nodes with non-matching link IDs
@@ -622,11 +624,11 @@ mod query_joins_tests {
             .expect("source2");
         let source1_source = source1_mock
             .as_any()
-            .downcast_ref::<crate::sources::mock::MockSource>()
+            .downcast_ref::<TestMockSource>()
             .expect("MockSource");
         let source2_source = source2_mock
             .as_any()
-            .downcast_ref::<crate::sources::mock::MockSource>()
+            .downcast_ref::<TestMockSource>()
             .expect("MockSource");
 
         // Add node without the join property
@@ -707,11 +709,11 @@ mod query_joins_tests {
             .expect("categories");
         let products_source = products_mock
             .as_any()
-            .downcast_ref::<crate::sources::mock::MockSource>()
+            .downcast_ref::<TestMockSource>()
             .expect("MockSource");
         let categories_source = categories_mock
             .as_any()
-            .downcast_ref::<crate::sources::mock::MockSource>()
+            .downcast_ref::<TestMockSource>()
             .expect("MockSource");
 
         // Add category
@@ -800,11 +802,11 @@ mod query_joins_tests {
             .expect("posts");
         let users_source = users_mock
             .as_any()
-            .downcast_ref::<crate::sources::mock::MockSource>()
+            .downcast_ref::<TestMockSource>()
             .expect("MockSource");
         let posts_source = posts_mock
             .as_any()
-            .downcast_ref::<crate::sources::mock::MockSource>()
+            .downcast_ref::<TestMockSource>()
             .expect("MockSource");
 
         // Inject data after query is subscribed (simulates initial data load)

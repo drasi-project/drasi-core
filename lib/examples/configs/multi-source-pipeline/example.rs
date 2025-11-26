@@ -2,7 +2,7 @@
 // This example demonstrates a complex pipeline with multiple sources,
 // different bootstrap providers, and multiple queries and reactions.
 
-use drasi_lib::{DrasiServerCore, Properties, Query, Reaction, Source};
+use drasi_lib::{DrasiLib, Properties, Query, Reaction, Source};
 use serde_json::json;
 
 #[tokio::main]
@@ -13,7 +13,7 @@ async fn main() -> anyhow::Result<()> {
     println!("Building complex pipeline with fluent API...\n");
 
     // Build server with multiple sources, queries, and reactions using fluent API
-    let core = DrasiServerCore::builder()
+    let core = DrasiLib::builder()
         .with_id("multi-source-pipeline")
         // Configure global capacity settings
         .with_priority_queue_capacity(20000) // Global default for queries/reactions

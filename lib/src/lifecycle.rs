@@ -32,7 +32,7 @@ pub(crate) struct ComponentsRunningState {
     pub reactions: HashSet<String>,
 }
 
-/// Manages the lifecycle orchestration for DrasiServerCore components
+/// Manages the lifecycle orchestration for DrasiLib components
 ///
 /// This module handles:
 /// - Loading configuration and creating components
@@ -184,7 +184,7 @@ impl LifecycleManager {
     /// After successful start, the saved running state is cleared.
     pub async fn start_components(
         &self,
-        server_core: Arc<crate::server_core::DrasiServerCore>,
+        server_core: Arc<crate::server_core::DrasiLib>,
     ) -> Result<()> {
         info!("Starting all auto-start components in sequence: Sources → Queries → Reactions");
 
@@ -313,7 +313,7 @@ impl LifecycleManager {
             .clear();
 
         info!("All required components started in sequence: Sources → Queries → Reactions");
-        info!("[STARTUP-COMPLETE] DrasiServerCore.start() is now returning - all components and subscriptions should be active");
+        info!("[STARTUP-COMPLETE] DrasiLib.start() is now returning - all components and subscriptions should be active");
         Ok(())
     }
 

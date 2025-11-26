@@ -25,34 +25,16 @@ mod tests;
 // Re-export common types
 pub use common::*;
 
-// Re-export the new enum types (source of truth for config enums)
-pub use enums::{ReactionSpecificConfig, SourceSpecificConfig};
-
 // Re-export runtime types
 pub use runtime::{QueryRuntime, ReactionRuntime, RuntimeConfig, SourceRuntime};
+
+// Re-export config enums for plugin deserialization
+pub use enums::{SourceSpecificConfig, ReactionSpecificConfig};
 
 // Re-export schema types
 pub use schema::*;
 
-// Convenience re-exports for all config types so they're accessible via `use crate::config::ConfigName;`
+// Convenience re-exports for config types that remain in core
 
-// Source configs
-pub use crate::sources::application::ApplicationSourceConfig;
-pub use crate::sources::grpc::GrpcSourceConfig;
-pub use crate::sources::http::HttpSourceConfig;
-pub use crate::sources::mock::MockSourceConfig;
-pub use crate::sources::platform::PlatformSourceConfig;
-pub use crate::sources::postgres::PostgresSourceConfig;
-
-// Reaction configs
-pub use crate::reactions::application::ApplicationReactionConfig;
+// Common reaction configs
 pub use crate::reactions::common::AdaptiveBatchConfig;
-pub use crate::reactions::grpc::GrpcReactionConfig;
-pub use crate::reactions::grpc_adaptive::GrpcAdaptiveReactionConfig;
-pub use crate::reactions::http::{CallSpec, HttpReactionConfig};
-// Note: QueryConfig is NOT re-exported to avoid collision with schema::QueryConfig
-pub use crate::reactions::http_adaptive::HttpAdaptiveReactionConfig;
-pub use crate::reactions::log::LogReactionConfig;
-pub use crate::reactions::platform::PlatformReactionConfig;
-pub use crate::reactions::profiler::ProfilerReactionConfig;
-pub use crate::reactions::sse::SseReactionConfig;

@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! ProfilerReaction Example
+//! ProfilerReaction Configuration Example
 //!
-//! This example demonstrates how to use ProfilerReaction to automatically
+//! This example demonstrates how to configure ProfilerReaction to automatically
 //! collect and analyze profiling statistics across many events.
 //!
 //! ProfilerReaction provides:
@@ -25,106 +25,84 @@
 //!
 //! Run with: cargo run --example profiling_with_profiler_reaction
 
-use drasi_lib::{
-    config::{ReactionConfig, ReactionSpecificConfig},
-    reactions::profiler::ProfilerReactionConfig,
-    reactions::{ProfilerReaction, Reaction},
-    server_core::DrasiServerCore,
-};
-use std::sync::Arc;
-use tokio::sync::mpsc;
+fn main() {
+    println!("=== ProfilerReaction Configuration Example ===\n");
 
-#[tokio::main]
-async fn main() {
-    println!("=== ProfilerReaction Example ===\n");
+    // STEP 1: Show ProfilerReaction configuration
+    println!("Step 1: ProfilerReaction YAML configuration");
 
-    // STEP 1: Create ProfilerReaction configuration
-    println!("Step 1: Creating ProfilerReaction configuration");
+    let config = r#"
+server_core:
+  id: profiler-example
 
-    let config = ReactionConfig {
-        id: "profiler".to_string(),
-        queries: vec!["example_query".to_string()],
-        auto_start: true,
-        config: ReactionSpecificConfig::Profiler(ProfilerReactionConfig {
-            window_size: 100,
-            report_interval_secs: 10,
-        }),
-        priority_queue_capacity: None,
-    };
+sources:
+  - id: sensor_source
+    source_type: mock
+    auto_start: true
+    properties:
+      data_type: sensor
+      interval_ms: 1000
 
-    println!("  window_size: 100 samples");
-    println!("  log_interval: 10 seconds\n");
+queries:
+  - id: example_query
+    query: "MATCH (n:Sensor) RETURN n"
+    sources:
+      - sensor_source
+    auto_start: true
 
-    // STEP 2: Create the profiler reaction
-    println!("Step 2: Creating ProfilerReaction");
+reactions:
+  - id: profiler
+    reaction_type: profiler
+    queries:
+      - example_query
+    auto_start: true
+    properties:
+      window_size: 100
+      report_interval_secs: 10
+"#;
 
-    let (event_tx, _event_rx) = mpsc::channel(100);
-    let profiler = ProfilerReaction::new(config, event_tx);
+    println!("{}", config);
+    println!("Configuration notes:");
+    println!("  - window_size: 100 samples (sliding window for percentiles)");
+    println!("  - report_interval_secs: 10 (log statistics every 10 seconds)\n");
 
-    // Create a DrasiServerCore with a mock query
-    let server_core = DrasiServerCore::builder()
-        .build()
-        .await
-        .expect("Failed to create server core");
-
-    // Create the mock query with ID matching the one in profiler config
-    // For simplicity, we'll just use the server core without actually creating a query
-    // The profiler will try to subscribe but since there's no query, it won't receive anything
-    // So we'll send results manually using a direct channel
-
-    println!("  Created ProfilerReaction and server core\n");
-
-    // STEP 3: Start the profiler reaction
-    println!("Step 3: Starting ProfilerReaction");
-    println!("  (It will log statistics every 10 seconds)\n");
-    println!("  Note: This is a simplified example. In production, reactions subscribe to real queries.\n");
-
-    let server_core_arc = Arc::new(server_core);
-    tokio::spawn(async move {
-        if let Err(e) = profiler.start(server_core_arc).await {
-            eprintln!("Error starting profiler: {}", e);
-        }
-    });
-
-    // Give the profiler a moment to start
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-    // STEP 4: Note about sending events
-    println!("Step 4: In a real scenario, events would come from queries");
-    println!("  For this simplified example, the profiler is running but won't receive events");
-    println!("  since we haven't set up a complete query pipeline.\n");
-    println!("  See the integration tests for complete examples.\n");
-
-    // Keep the program running for a bit to show the profiler is active
-    println!("Profiler is running. Press Ctrl+C to exit.\n");
-
-    // Simulate some passage of time to show profiler is running
-    for i in 0..5 {
-        println!("  Tick {}... (Profiler running in background)", i + 1);
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-    }
-
-    println!("\n=== What ProfilerReaction Would Show ===");
-    println!("In a real scenario with a complete query pipeline, the profiler logs:");
-    println!("Statistics every 10 seconds including:");
+    // STEP 2: Explain what ProfilerReaction tracks
+    println!("Step 2: What ProfilerReaction tracks");
     println!("  - Source to Query latency");
     println!("  - Query to Reaction latency");
     println!("  - Query Core processing time");
     println!("  - Reaction processing time");
-    println!("  - Total end-to-end latency");
-    println!("\nFor each metric you'll see:");
-    println!("  - Count, Mean, Std Dev");
-    println!("  - Min, Max");
-    println!("  - p50 (median), p95, p99 percentiles\n");
+    println!("  - Total end-to-end latency\n");
 
-    println!("\n=== Example Complete ===");
-    println!("\nKey Takeaways:");
+    // STEP 3: Show sample output
+    println!("Step 3: Sample ProfilerReaction output");
+    println!("  When running, the profiler logs statistics like:");
+    println!();
+    println!("  [ProfilerReaction] Statistics for query 'example_query':");
+    println!("    Source→Query:    count=100, mean=1.2ms, std=0.3ms, min=0.5ms, max=2.1ms");
+    println!("                     p50=1.1ms, p95=1.8ms, p99=2.0ms");
+    println!("    Query→Reaction:  count=100, mean=0.8ms, std=0.2ms, min=0.4ms, max=1.5ms");
+    println!("                     p50=0.7ms, p95=1.2ms, p99=1.4ms");
+    println!("    Query Core:      count=100, mean=0.5ms, std=0.1ms, min=0.3ms, max=0.9ms");
+    println!("                     p50=0.5ms, p95=0.7ms, p99=0.8ms");
+    println!("    Total E2E:       count=100, mean=2.5ms, std=0.5ms, min=1.2ms, max=4.5ms");
+    println!("                     p50=2.3ms, p95=3.5ms, p99=4.2ms\n");
+
+    // STEP 4: Usage notes
+    println!("Step 4: Using ProfilerReaction");
+    println!("  1. Add the profiler reaction to your config file");
+    println!("  2. Subscribe it to the queries you want to monitor");
+    println!("  3. Set appropriate window_size and report_interval_secs");
+    println!("  4. Run your server and check the logs for statistics\n");
+
+    println!("=== Key Takeaways ===");
     println!("1. ProfilerReaction automatically collects statistics");
     println!("2. Configure window_size to control sample retention");
-    println!("3. Configure log_interval_seconds for reporting frequency");
+    println!("3. Configure report_interval_secs for reporting frequency");
     println!("4. Statistics use Welford's algorithm for efficient calculation");
-    println!("5. Percentiles are calculated from a sliding window of samples");
-    println!("\nIn production, use ProfilerReaction to:");
+    println!("5. Percentiles are calculated from a sliding window of samples\n");
+
+    println!("In production, use ProfilerReaction to:");
     println!("- Monitor pipeline performance");
     println!("- Identify bottlenecks (which stage has highest latency)");
     println!("- Track latency distributions over time");

@@ -12,14 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod application;
 pub mod base;
-pub mod grpc;
-pub mod http;
 pub mod manager;
-pub mod mock;
-pub mod platform;
-pub mod postgres;
 
 #[cfg(test)]
 mod tests;
@@ -37,10 +31,4 @@ pub trait Publisher: Send + Sync {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }
 
-pub use application::{ApplicationSource, ApplicationSourceHandle};
-pub use grpc::GrpcSource;
-pub use http::HttpSource;
 pub use manager::*;
-pub use mock::MockSource;
-pub use platform::PlatformSource;
-pub use postgres::{PostgresReplicationSource, PostgresSourceConfig};

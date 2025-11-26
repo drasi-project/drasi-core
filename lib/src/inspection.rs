@@ -14,8 +14,8 @@
 
 use std::sync::Arc;
 
-use crate::api::DrasiError;
-use crate::config::{DrasiServerCoreConfig, DrasiServerCoreSettings, RuntimeConfig};
+use crate::error::DrasiError;
+use crate::config::{DrasiLibConfig, DrasiLibSettings, RuntimeConfig};
 use crate::queries::QueryManager;
 use crate::reactions::ReactionManager;
 use crate::sources::SourceManager;
@@ -59,8 +59,8 @@ impl InspectionAPI {
     ///
     /// # Example
     /// ```no_run
-    /// # use drasi_lib::DrasiServerCore;
-    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// # use drasi_lib::DrasiLib;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
     /// let sources = core.list_sources().await?;
     /// for (id, status) in sources {
     ///     println!("Source {}: {:?}", id, status);
@@ -70,7 +70,7 @@ impl InspectionAPI {
     /// ```
     pub async fn list_sources(
         &self,
-    ) -> crate::api::Result<Vec<(String, crate::channels::ComponentStatus)>> {
+    ) -> crate::error::Result<Vec<(String, crate::channels::ComponentStatus)>> {
         self.state_guard.require_initialized().await?;
         Ok(self.source_manager.list_sources().await)
     }
@@ -79,8 +79,8 @@ impl InspectionAPI {
     ///
     /// # Example
     /// ```no_run
-    /// # use drasi_lib::DrasiServerCore;
-    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// # use drasi_lib::DrasiLib;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
     /// let source_info = core.get_source_info("my-source").await?;
     /// println!("Source type: {}", source_info.source_type);
     /// println!("Status: {:?}", source_info.status);
@@ -90,7 +90,7 @@ impl InspectionAPI {
     pub async fn get_source_info(
         &self,
         id: &str,
-    ) -> crate::api::Result<crate::config::SourceRuntime> {
+    ) -> crate::error::Result<crate::config::SourceRuntime> {
         self.state_guard.require_initialized().await?;
         self.source_manager
             .get_source(id.to_string())
@@ -102,8 +102,8 @@ impl InspectionAPI {
     ///
     /// # Example
     /// ```no_run
-    /// # use drasi_lib::DrasiServerCore;
-    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// # use drasi_lib::DrasiLib;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
     /// let status = core.get_source_status("my-source").await?;
     /// println!("Source status: {:?}", status);
     /// # Ok(())
@@ -112,7 +112,7 @@ impl InspectionAPI {
     pub async fn get_source_status(
         &self,
         id: &str,
-    ) -> crate::api::Result<crate::channels::ComponentStatus> {
+    ) -> crate::error::Result<crate::channels::ComponentStatus> {
         self.state_guard.require_initialized().await?;
         self.source_manager
             .get_source_status(id.to_string())
@@ -127,8 +127,8 @@ impl InspectionAPI {
     ///
     /// # Example
     /// ```no_run
-    /// # use drasi_lib::DrasiServerCore;
-    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// # use drasi_lib::DrasiLib;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
     /// let config = core.get_source_config("my-source").await?;
     /// println!("Auto-start: {}", config.auto_start);
     /// # Ok(())
@@ -137,7 +137,7 @@ impl InspectionAPI {
     pub async fn get_source_config(
         &self,
         id: &str,
-    ) -> crate::api::Result<crate::config::SourceConfig> {
+    ) -> crate::error::Result<crate::config::SourceConfig> {
         self.state_guard.require_initialized().await?;
         self.source_manager
             .get_source_config(id)
@@ -153,8 +153,8 @@ impl InspectionAPI {
     ///
     /// # Example
     /// ```no_run
-    /// # use drasi_lib::DrasiServerCore;
-    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// # use drasi_lib::DrasiLib;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
     /// let queries = core.list_queries().await?;
     /// for (id, status) in queries {
     ///     println!("Query {}: {:?}", id, status);
@@ -164,7 +164,7 @@ impl InspectionAPI {
     /// ```
     pub async fn list_queries(
         &self,
-    ) -> crate::api::Result<Vec<(String, crate::channels::ComponentStatus)>> {
+    ) -> crate::error::Result<Vec<(String, crate::channels::ComponentStatus)>> {
         self.state_guard.require_initialized().await?;
         Ok(self.query_manager.list_queries().await)
     }
@@ -173,19 +173,19 @@ impl InspectionAPI {
     ///
     /// # Example
     /// ```no_run
-    /// # use drasi_lib::DrasiServerCore;
-    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// # use drasi_lib::DrasiLib;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
     /// let query_info = core.get_query_info("my-query").await?;
     /// println!("Query: {}", query_info.query);
     /// println!("Status: {:?}", query_info.status);
-    /// println!("Sources: {:?}", query_info.sources);
+    /// println!("Source subscriptions: {:?}", query_info.source_subscriptions);
     /// # Ok(())
     /// # }
     /// ```
     pub async fn get_query_info(
         &self,
         id: &str,
-    ) -> crate::api::Result<crate::config::QueryRuntime> {
+    ) -> crate::error::Result<crate::config::QueryRuntime> {
         self.state_guard.require_initialized().await?;
         self.query_manager
             .get_query(id.to_string())
@@ -197,8 +197,8 @@ impl InspectionAPI {
     ///
     /// # Example
     /// ```no_run
-    /// # use drasi_lib::DrasiServerCore;
-    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// # use drasi_lib::DrasiLib;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
     /// let status = core.get_query_status("my-query").await?;
     /// println!("Query status: {:?}", status);
     /// # Ok(())
@@ -207,7 +207,7 @@ impl InspectionAPI {
     pub async fn get_query_status(
         &self,
         id: &str,
-    ) -> crate::api::Result<crate::channels::ComponentStatus> {
+    ) -> crate::error::Result<crate::channels::ComponentStatus> {
         self.state_guard.require_initialized().await?;
         self.query_manager
             .get_query_status(id.to_string())
@@ -219,14 +219,14 @@ impl InspectionAPI {
     ///
     /// # Example
     /// ```no_run
-    /// # use drasi_lib::DrasiServerCore;
-    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// # use drasi_lib::DrasiLib;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
     /// let results = core.get_query_results("my-query").await?;
     /// println!("Current results: {} items", results.len());
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_query_results(&self, id: &str) -> crate::api::Result<Vec<serde_json::Value>> {
+    pub async fn get_query_results(&self, id: &str) -> crate::error::Result<Vec<serde_json::Value>> {
         self.state_guard.require_initialized().await?;
         self.query_manager.get_query_results(id).await.map_err(|e| {
             if e.to_string().contains("not found") {
@@ -246,8 +246,8 @@ impl InspectionAPI {
     ///
     /// # Example
     /// ```no_run
-    /// # use drasi_lib::DrasiServerCore;
-    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// # use drasi_lib::DrasiLib;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
     /// let config = core.get_query_config("my-query").await?;
     /// println!("Auto-start: {}", config.auto_start);
     /// # Ok(())
@@ -256,7 +256,7 @@ impl InspectionAPI {
     pub async fn get_query_config(
         &self,
         id: &str,
-    ) -> crate::api::Result<crate::config::QueryConfig> {
+    ) -> crate::error::Result<crate::config::QueryConfig> {
         self.state_guard.require_initialized().await?;
         self.query_manager
             .get_query_config(id)
@@ -272,8 +272,8 @@ impl InspectionAPI {
     ///
     /// # Example
     /// ```no_run
-    /// # use drasi_lib::DrasiServerCore;
-    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// # use drasi_lib::DrasiLib;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
     /// let reactions = core.list_reactions().await?;
     /// for (id, status) in reactions {
     ///     println!("Reaction {}: {:?}", id, status);
@@ -283,7 +283,7 @@ impl InspectionAPI {
     /// ```
     pub async fn list_reactions(
         &self,
-    ) -> crate::api::Result<Vec<(String, crate::channels::ComponentStatus)>> {
+    ) -> crate::error::Result<Vec<(String, crate::channels::ComponentStatus)>> {
         self.state_guard.require_initialized().await?;
         Ok(self.reaction_manager.list_reactions().await)
     }
@@ -292,8 +292,8 @@ impl InspectionAPI {
     ///
     /// # Example
     /// ```no_run
-    /// # use drasi_lib::DrasiServerCore;
-    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// # use drasi_lib::DrasiLib;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
     /// let reaction_info = core.get_reaction_info("my-reaction").await?;
     /// println!("Reaction type: {}", reaction_info.reaction_type);
     /// println!("Status: {:?}", reaction_info.status);
@@ -304,7 +304,7 @@ impl InspectionAPI {
     pub async fn get_reaction_info(
         &self,
         id: &str,
-    ) -> crate::api::Result<crate::config::ReactionRuntime> {
+    ) -> crate::error::Result<crate::config::ReactionRuntime> {
         self.state_guard.require_initialized().await?;
         self.reaction_manager
             .get_reaction(id.to_string())
@@ -316,8 +316,8 @@ impl InspectionAPI {
     ///
     /// # Example
     /// ```no_run
-    /// # use drasi_lib::DrasiServerCore;
-    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// # use drasi_lib::DrasiLib;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
     /// let status = core.get_reaction_status("my-reaction").await?;
     /// println!("Reaction status: {:?}", status);
     /// # Ok(())
@@ -326,7 +326,7 @@ impl InspectionAPI {
     pub async fn get_reaction_status(
         &self,
         id: &str,
-    ) -> crate::api::Result<crate::channels::ComponentStatus> {
+    ) -> crate::error::Result<crate::channels::ComponentStatus> {
         self.state_guard.require_initialized().await?;
         self.reaction_manager
             .get_reaction_status(id.to_string())
@@ -341,8 +341,8 @@ impl InspectionAPI {
     ///
     /// # Example
     /// ```no_run
-    /// # use drasi_lib::DrasiServerCore;
-    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// # use drasi_lib::DrasiLib;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
     /// let config = core.get_reaction_config("my-reaction").await?;
     /// println!("Auto-start: {}", config.auto_start);
     /// # Ok(())
@@ -351,7 +351,7 @@ impl InspectionAPI {
     pub async fn get_reaction_config(
         &self,
         id: &str,
-    ) -> crate::api::Result<crate::config::ReactionConfig> {
+    ) -> crate::error::Result<crate::config::ReactionConfig> {
         self.state_guard.require_initialized().await?;
         self.reaction_manager
             .get_reaction_config(id)
@@ -370,15 +370,15 @@ impl InspectionAPI {
     ///
     /// # Example
     /// ```no_run
-    /// # use drasi_lib::DrasiServerCore;
-    /// # async fn example(core: &DrasiServerCore) -> Result<(), Box<dyn std::error::Error>> {
+    /// # use drasi_lib::DrasiLib;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
     /// let config = core.get_current_config().await?;
     /// println!("Server has {} sources, {} queries, {} reactions",
     ///          config.sources.len(), config.queries.len(), config.reactions.len());
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_current_config(&self) -> crate::api::Result<DrasiServerCoreConfig> {
+    pub async fn get_current_config(&self) -> crate::error::Result<DrasiLibConfig> {
         self.state_guard.require_initialized().await?;
 
         // Collect all source configs
@@ -429,8 +429,8 @@ impl InspectionAPI {
             }
         }
 
-        Ok(DrasiServerCoreConfig {
-            server_core: DrasiServerCoreSettings {
+        Ok(DrasiLibConfig {
+            server_core: DrasiLibSettings {
                 id: self.config.server_core.id.clone(),
                 priority_queue_capacity: self.config.server_core.priority_queue_capacity,
                 dispatch_buffer_capacity: self.config.server_core.dispatch_buffer_capacity,

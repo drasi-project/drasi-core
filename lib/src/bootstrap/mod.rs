@@ -27,10 +27,6 @@ use std::sync::Arc;
 
 use crate::config::SourceConfig;
 
-pub mod providers;
-pub mod script_reader;
-pub mod script_types;
-
 /// Request for bootstrap data from a query
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootstrapRequest {
@@ -230,38 +226,56 @@ pub enum BootstrapProviderConfig {
 }
 
 /// Factory for creating bootstrap providers from configuration
+///
+/// This factory is designed to work with plugin-based providers loaded from
+/// separate crates. The default behavior returns errors for non-noop providers
+/// to encourage use of the dedicated plugin crates.
 pub struct BootstrapProviderFactory;
 
 impl BootstrapProviderFactory {
     /// Create a bootstrap provider from configuration
+    ///
+    /// Currently only supports the noop provider. Other providers are implemented
+    /// in dedicated plugin crates and should be instantiated directly:
+    ///
+    /// - PostgreSQL: Use `drasi_plugin_postgres_bootstrap::PostgresBootstrapProvider::new()`
+    /// - Platform: Use `drasi_plugin_platform_bootstrap::PlatformBootstrapProvider::new(...)`
+    /// - ScriptFile: Use `drasi_plugin_scriptfile_bootstrap::ScriptFileBootstrapProvider::new(...)`
+    /// - Application: Use `drasi_plugin_application_bootstrap::ApplicationBootstrapProvider::new()`
     pub fn create_provider(config: &BootstrapProviderConfig) -> Result<Box<dyn BootstrapProvider>> {
         match config {
-            BootstrapProviderConfig::Postgres(_) => Ok(Box::new(
-                providers::postgres::PostgresBootstrapProvider::new(),
-            )),
-            BootstrapProviderConfig::Application(_) => Ok(Box::new(
-                providers::application::ApplicationBootstrapProvider::new(),
-            )),
-            BootstrapProviderConfig::ScriptFile(config) => Ok(Box::new(
-                providers::script_file::ScriptFileBootstrapProvider::new(config.file_paths.clone()),
-            )),
+            BootstrapProviderConfig::Postgres(_) => {
+                Err(anyhow::anyhow!(
+                    "PostgreSQL bootstrap provider is available in the drasi-plugin-postgres-bootstrap crate. \
+                     Use drasi_plugin_postgres_bootstrap::PostgresBootstrapProvider::new() to create it."
+                ))
+            }
+            BootstrapProviderConfig::Application(_) => {
+                Err(anyhow::anyhow!(
+                    "Application bootstrap provider is available in the drasi-plugin-application-bootstrap crate. \
+                     Use drasi_plugin_application_bootstrap::ApplicationBootstrapProvider::new() to create it."
+                ))
+            }
+            BootstrapProviderConfig::ScriptFile(config) => {
+                Err(anyhow::anyhow!(
+                    "ScriptFile bootstrap provider is available in the drasi-plugin-scriptfile-bootstrap crate. \
+                     Use drasi_plugin_scriptfile_bootstrap::ScriptFileBootstrapProvider::new({:?}) to create it.",
+                    config.file_paths
+                ))
+            }
             BootstrapProviderConfig::Platform(config) => {
-                // Use provided query_api_url or will be extracted from source properties later
-                let url = config.query_api_url.clone().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "query_api_url must be provided in bootstrap config or source properties"
-                    )
-                })?;
-
-                Ok(Box::new(
-                    providers::platform::PlatformBootstrapProvider::new(
-                        url,
-                        config.timeout_seconds,
-                    )?,
+                Err(anyhow::anyhow!(
+                    "Platform bootstrap provider is available in the drasi-plugin-platform-bootstrap crate. \
+                     Use drasi_plugin_platform_bootstrap::PlatformBootstrapProvider::new(...) to create it. \
+                     Config: {:?}",
+                    config
                 ))
             }
             BootstrapProviderConfig::Noop => {
-                Ok(Box::new(providers::noop::NoOpBootstrapProvider::new()))
+                Err(anyhow::anyhow!(
+                    "No-op bootstrap provider is available in the drasi-plugin-noop-bootstrap crate. \
+                     Use drasi_plugin_noop_bootstrap::NoOpBootstrapProvider::new() to create it."
+                ))
             }
         }
     }

@@ -1,6 +1,6 @@
 // Core library for reactive data processing
 use anyhow::Result;
-use drasi_lib::{DrasiServerCore, Properties, Query, Reaction, Source};
+use drasi_lib::{DrasiLib, Properties, Query, Reaction, Source};
 use std::env;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -38,7 +38,7 @@ async fn run_config_mode(args: &[String]) -> Result<()> {
 
     // Load configuration from file and create ready-to-start server
     // This is the main integration point - just 2 lines to embed Drasi!
-    let core = DrasiServerCore::from_config_file(&config_file).await?;
+    let core = DrasiLib::from_config_file(&config_file).await?;
 
     println!("Configuration loaded and initialized successfully");
 
@@ -71,7 +71,7 @@ async fn run_builder_mode() -> Result<()> {
 
     // Create server using fluent builder API
     // This is the NEW clean API - elegant and type-safe!
-    let core = DrasiServerCore::builder()
+    let core = DrasiLib::builder()
         .with_id("example-server")
         // Add a mock source that generates sensor data
         .add_source(

@@ -16,10 +16,19 @@
 mod schema_tests {
     use super::super::schema::*;
     use serde_json::json;
+    use std::collections::HashMap;
+
+    /// Helper to convert a serde_json::Value object to HashMap<String, serde_json::Value>
+    fn to_hashmap(value: serde_json::Value) -> HashMap<String, serde_json::Value> {
+        match value {
+            serde_json::Value::Object(map) => map.into_iter().collect(),
+            _ => HashMap::new(),
+        }
+    }
 
     #[test]
     fn test_server_settings_defaults() {
-        let settings: DrasiServerCoreSettings = serde_json::from_value(json!({
+        let settings: DrasiLibSettings = serde_json::from_value(json!({
             "id": "default-server"
         }))
         .unwrap();
@@ -113,16 +122,13 @@ mod schema_tests {
     #[test]
     fn test_reaction_config_defaults() {
         // Test programmatically instead of deserializing to avoid tag conflicts
-        use crate::config::common::LogLevel;
-        use crate::reactions::log::LogReactionConfig;
-
         let config = ReactionConfig {
             id: "test-reaction".to_string(),
             queries: vec!["query1".to_string()],
             auto_start: true,
-            config: crate::config::ReactionSpecificConfig::Log(LogReactionConfig {
-                log_level: LogLevel::Info,
-            }),
+            config: crate::config::ReactionSpecificConfig::Log(to_hashmap(json!({
+                "log_level": "info"
+            }))),
             priority_queue_capacity: None,
         };
 
@@ -133,20 +139,16 @@ mod schema_tests {
 
     #[test]
     fn test_server_config_complete() {
-        use crate::config::common::LogLevel;
-        use crate::reactions::log::LogReactionConfig;
-        use crate::sources::mock::MockSourceConfig;
-
-        let mut config = DrasiServerCoreConfig::default();
+        let mut config = DrasiLibConfig::default();
 
         // Add a source
         config.sources.push(SourceConfig {
             id: "source1".to_string(),
             auto_start: true,
-            config: crate::config::SourceSpecificConfig::Mock(MockSourceConfig {
-                data_type: "counter".to_string(),
-                interval_ms: 1000,
-            }),
+            config: crate::config::SourceSpecificConfig::Mock(to_hashmap(json!({
+                "data_type": "counter",
+                "interval_ms": 1000
+            }))),
             bootstrap_provider: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -177,9 +179,9 @@ mod schema_tests {
             id: "reaction1".to_string(),
             queries: vec!["query1".to_string()],
             auto_start: true,
-            config: crate::config::ReactionSpecificConfig::Log(LogReactionConfig {
-                log_level: LogLevel::Info,
-            }),
+            config: crate::config::ReactionSpecificConfig::Log(to_hashmap(json!({
+                "log_level": "info"
+            }))),
             priority_queue_capacity: None,
         });
 
@@ -192,27 +194,35 @@ mod schema_tests {
 #[cfg(test)]
 mod persistence_tests {
     use super::super::schema::*;
+    use serde_json::json;
     use serde_yaml;
+    use std::collections::HashMap;
     use std::fs;
     use tempfile::TempDir;
 
+    /// Helper to convert a serde_json::Value object to HashMap<String, serde_json::Value>
+    fn to_hashmap(value: serde_json::Value) -> HashMap<String, serde_json::Value> {
+        match value {
+            serde_json::Value::Object(map) => map.into_iter().collect(),
+            _ => HashMap::new(),
+        }
+    }
+
     #[test]
     fn test_load_config_from_file() {
-        use crate::sources::mock::MockSourceConfig;
-
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().join("test_config.yaml");
 
         // Create config programmatically and serialize it
-        let mut config = DrasiServerCoreConfig::default();
+        let mut config = DrasiLibConfig::default();
         config.server_core.id = "test-server".to_string();
         config.sources.push(SourceConfig {
             id: "test-source".to_string(),
             auto_start: true,
-            config: crate::config::SourceSpecificConfig::Mock(MockSourceConfig {
-                data_type: "counter".to_string(),
-                interval_ms: 1000,
-            }),
+            config: crate::config::SourceSpecificConfig::Mock(to_hashmap(json!({
+                "data_type": "counter",
+                "interval_ms": 1000
+            }))),
             bootstrap_provider: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -243,7 +253,7 @@ mod persistence_tests {
         fs::write(&config_path, "invalid: yaml: content:").unwrap();
 
         let yaml_str = fs::read_to_string(&config_path).unwrap();
-        let result: Result<DrasiServerCoreConfig, _> = serde_yaml::from_str(&yaml_str);
+        let result: Result<DrasiLibConfig, _> = serde_yaml::from_str(&yaml_str);
         assert!(result.is_err());
     }
 
@@ -252,7 +262,7 @@ mod persistence_tests {
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().join("output_config.yaml");
 
-        let config = DrasiServerCoreConfig::default();
+        let config = DrasiLibConfig::default();
 
         // Save config
         let yaml_str = serde_yaml::to_string(&config).unwrap();
@@ -262,7 +272,7 @@ mod persistence_tests {
 
         // Load it back and verify
         let loaded_yaml = fs::read_to_string(&config_path).unwrap();
-        let loaded_config: DrasiServerCoreConfig = serde_yaml::from_str(&loaded_yaml).unwrap();
+        let loaded_config: DrasiLibConfig = serde_yaml::from_str(&loaded_yaml).unwrap();
 
         assert_eq!(loaded_config.server_core.id, config.server_core.id);
         assert_eq!(loaded_config.sources.len(), config.sources.len());
@@ -272,20 +282,18 @@ mod persistence_tests {
 
     #[test]
     fn test_config_roundtrip() {
-        use crate::sources::mock::MockSourceConfig;
-
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().join("config.yaml");
 
         // Create a config with all fields populated
-        let mut config = DrasiServerCoreConfig::default();
+        let mut config = DrasiLibConfig::default();
         config.sources.push(SourceConfig {
             id: "test-source".to_string(),
             auto_start: true,
-            config: crate::config::SourceSpecificConfig::Mock(MockSourceConfig {
-                data_type: "generic".to_string(),
-                interval_ms: 5000,
-            }),
+            config: crate::config::SourceSpecificConfig::Mock(to_hashmap(json!({
+                "data_type": "generic",
+                "interval_ms": 5000
+            }))),
             bootstrap_provider: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -312,18 +320,26 @@ mod runtime_tests {
     use super::super::runtime::*;
     use super::super::schema::*;
     use crate::channels::ComponentStatus;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    /// Helper to convert a serde_json::Value object to HashMap<String, serde_json::Value>
+    fn to_hashmap(value: serde_json::Value) -> HashMap<String, serde_json::Value> {
+        match value {
+            serde_json::Value::Object(map) => map.into_iter().collect(),
+            _ => HashMap::new(),
+        }
+    }
 
     #[test]
     fn test_source_runtime_conversion() {
-        use crate::sources::mock::MockSourceConfig;
-
         let config = SourceConfig {
             id: "test-source".to_string(),
             auto_start: true,
-            config: crate::config::SourceSpecificConfig::Mock(MockSourceConfig {
-                data_type: "generic".to_string(),
-                interval_ms: 5000,
-            }),
+            config: crate::config::SourceSpecificConfig::Mock(to_hashmap(json!({
+                "data_type": "generic",
+                "interval_ms": 5000
+            }))),
             bootstrap_provider: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -369,16 +385,13 @@ mod runtime_tests {
 
     #[test]
     fn test_reaction_runtime_conversion() {
-        use crate::config::common::LogLevel;
-        use crate::reactions::log::LogReactionConfig;
-
         let config = ReactionConfig {
             id: "test-reaction".to_string(),
             queries: vec!["query1".to_string()],
             auto_start: true,
-            config: crate::config::ReactionSpecificConfig::Log(LogReactionConfig {
-                log_level: LogLevel::Info,
-            }),
+            config: crate::config::ReactionSpecificConfig::Log(to_hashmap(json!({
+                "log_level": "info"
+            }))),
             priority_queue_capacity: None,
         };
 

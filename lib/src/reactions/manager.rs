@@ -22,20 +22,16 @@ use tokio::sync::RwLock;
 use crate::channels::*;
 use crate::config::{ReactionConfig, ReactionRuntime};
 use crate::reactions::common::base::QuerySubscriber;
-use crate::server_core::DrasiServerCore;
+use crate::server_core::DrasiLib;
+use crate::plugin_core::ReactionRegistry;
 use crate::utils::*;
-
-use super::{
-    AdaptiveGrpcReaction, AdaptiveHttpReaction, ApplicationReaction, ApplicationReactionHandle,
-    GrpcReaction, HttpReaction, LogReaction, PlatformReaction, ProfilerReaction, SseReaction,
-};
 
 /// Trait defining the interface for all reaction implementations.
 ///
 /// # Subscription Model
 ///
 /// Reactions now manage their own subscriptions to queries using the broadcast channel pattern:
-/// - Each reaction receives a reference to `DrasiServerCore` on startup
+/// - Each reaction receives a reference to `DrasiLib` on startup
 /// - Reactions access the `QueryManager` via `server_core.query_manager()`
 /// - For each query in their configuration, reactions call `query_manager.get_query_instance(query_id)`
 /// - They then subscribe directly to each query using `query.subscribe(reaction_id)`
@@ -177,20 +173,58 @@ impl Reaction for MockReaction {
 pub struct ReactionManager {
     reactions: Arc<RwLock<HashMap<String, Arc<dyn Reaction>>>>,
     event_tx: ComponentEventSender,
-    application_handles: Arc<RwLock<HashMap<String, ApplicationReactionHandle>>>,
+    registry: ReactionRegistry,
 }
 
 impl ReactionManager {
+    /// Create a new ReactionManager with default plugin registry
     pub fn new(event_tx: ComponentEventSender) -> Self {
+        Self::with_registry(event_tx, ReactionRegistry::default())
+    }
+
+    /// Create a new ReactionManager with a custom plugin registry
+    pub fn with_registry(event_tx: ComponentEventSender, registry: ReactionRegistry) -> Self {
         Self {
             reactions: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
-            application_handles: Arc::new(RwLock::new(HashMap::new())),
+            registry,
         }
     }
 
-    pub async fn get_application_handle(&self, name: &str) -> Option<ApplicationReactionHandle> {
-        self.application_handles.read().await.get(name).cloned()
+
+    /// Add a pre-built reaction instance directly.
+    ///
+    /// This method allows adding a reaction that was constructed externally,
+    /// bypassing the registry-based creation. This is useful for:
+    /// - Testing with mock reactions
+    /// - Programmatic reaction creation with custom configurations
+    /// - Plugin-specific builders that create instances directly
+    ///
+    /// # Parameters
+    /// - `reaction`: The pre-built reaction instance
+    ///
+    /// # Returns
+    /// - `Ok(())` if the reaction was added successfully
+    /// - `Err` if a reaction with the same ID already exists
+    ///
+    /// # Note
+    /// The reaction will NOT be auto-started. Call `start_reaction` separately
+    /// if you need to start it after adding.
+    pub async fn add_reaction_instance(&self, reaction: Arc<dyn Reaction>) -> Result<()> {
+        let reaction_id = reaction.get_config().id.clone();
+
+        // Check if reaction with this id already exists
+        if self.reactions.read().await.contains_key(&reaction_id) {
+            return Err(anyhow::anyhow!(
+                "Reaction with id '{}' already exists",
+                reaction_id
+            ));
+        }
+
+        self.reactions.write().await.insert(reaction_id.clone(), reaction);
+        info!("Added reaction instance: {}", reaction_id);
+
+        Ok(())
     }
 
     pub async fn add_reaction(&self, config: ReactionConfig) -> Result<()> {
@@ -210,38 +244,9 @@ impl ReactionManager {
             ));
         }
 
-        let reaction: Arc<dyn Reaction> = match config.reaction_type() {
-            "log" => Arc::new(LogReaction::new(config.clone(), self.event_tx.clone())),
-            "http" => Arc::new(HttpReaction::new(config.clone(), self.event_tx.clone())),
-            // Adaptive HTTP reaction
-            "http_adaptive" | "adaptive_http" => Arc::new(AdaptiveHttpReaction::new(
-                config.clone(),
-                self.event_tx.clone(),
-            )),
-            "grpc" => Arc::new(GrpcReaction::new(config.clone(), self.event_tx.clone())),
-            "sse" => Arc::new(SseReaction::new(config.clone(), self.event_tx.clone())),
-            // Adaptive gRPC reaction
-            "grpc_adaptive" | "adaptive_grpc" => Arc::new(AdaptiveGrpcReaction::new(
-                config.clone(),
-                self.event_tx.clone(),
-            )),
-            "platform" => Arc::new(PlatformReaction::new(
-                config.clone(),
-                self.event_tx.clone(),
-            )?),
-            "profiler" => Arc::new(ProfilerReaction::new(config.clone(), self.event_tx.clone())),
-            "application" => {
-                let (app_reaction, handle) =
-                    ApplicationReaction::new(config.clone(), self.event_tx.clone());
-                // Store the handle for the application to use
-                self.application_handles
-                    .write()
-                    .await
-                    .insert(config.id.clone(), handle);
-                Arc::new(app_reaction)
-            }
-            _ => Arc::new(MockReaction::new(config.clone(), self.event_tx.clone())),
-        };
+        // Create reaction using the plugin registry
+        // The plugin registry handles both application and other reaction types
+        let reaction = self.registry.create(config.clone(), self.event_tx.clone())?;
 
         let reaction_id = config.id.clone();
         let should_auto_start = config.auto_start;
@@ -439,7 +444,6 @@ impl ReactionManager {
 
             // Now remove the reaction
             self.reactions.write().await.remove(&id);
-            self.application_handles.write().await.remove(&id);
             info!("Deleted reaction: {}", id);
 
             Ok(())
@@ -474,10 +478,10 @@ impl ReactionManager {
     /// Start all reactions marked for auto-start.
     ///
     /// # Parameters
-    /// - `server_core`: Arc reference to DrasiServerCore for query subscriptions
+    /// - `server_core`: Arc reference to DrasiLib for query subscriptions
     ///
     /// Reactions will manage their own subscriptions to queries using the broadcast channel pattern.
-    pub async fn start_all(&self, server_core: Arc<DrasiServerCore>) -> Result<()> {
+    pub async fn start_all(&self, server_core: Arc<DrasiLib>) -> Result<()> {
         let reactions = self.reactions.read().await;
         let mut failed_reactions = Vec::new();
 

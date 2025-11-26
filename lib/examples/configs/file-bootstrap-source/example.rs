@@ -2,7 +2,7 @@
 // This example demonstrates how to configure a source with
 // script_file bootstrap provider for initial data loading from JSONL files.
 
-use drasi_lib::{DrasiServerCore, Properties, Query, Reaction, Source};
+use drasi_lib::{DrasiLib, Properties, Query, Reaction, Source};
 use serde_json::json;
 
 #[tokio::main]
@@ -13,7 +13,7 @@ async fn main() -> anyhow::Result<()> {
     println!("Building configuration with script_file bootstrap provider...\n");
 
     // Build server using fluent API with script_file bootstrap
-    let core = DrasiServerCore::builder()
+    let core = DrasiLib::builder()
         .with_id("file-bootstrap-example")
         // Source with script_file bootstrap provider
         .add_source(

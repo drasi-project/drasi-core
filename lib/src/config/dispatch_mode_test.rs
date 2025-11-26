@@ -2,18 +2,26 @@
 mod tests {
     use super::super::schema::*;
     use crate::channels::DispatchMode;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    /// Helper to convert a serde_json::Value object to HashMap<String, serde_json::Value>
+    fn to_hashmap(value: serde_json::Value) -> HashMap<String, serde_json::Value> {
+        match value {
+            serde_json::Value::Object(map) => map.into_iter().collect(),
+            _ => HashMap::new(),
+        }
+    }
 
     #[test]
     fn test_source_config_with_dispatch_mode() {
-        use crate::sources::mock::MockSourceConfig;
-
         let config = SourceConfig {
             id: "test_source".to_string(),
             auto_start: true,
-            config: crate::config::SourceSpecificConfig::Mock(MockSourceConfig {
-                data_type: "counter".to_string(),
-                interval_ms: 1000,
-            }),
+            config: crate::config::SourceSpecificConfig::Mock(to_hashmap(json!({
+                "data_type": "counter",
+                "interval_ms": 1000
+            }))),
             bootstrap_provider: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: Some(DispatchMode::Channel),
@@ -25,15 +33,13 @@ mod tests {
 
     #[test]
     fn test_source_config_without_dispatch_mode() {
-        use crate::sources::mock::MockSourceConfig;
-
         let config = SourceConfig {
             id: "test_source".to_string(),
             auto_start: true,
-            config: crate::config::SourceSpecificConfig::Mock(MockSourceConfig {
-                data_type: "counter".to_string(),
-                interval_ms: 1000,
-            }),
+            config: crate::config::SourceSpecificConfig::Mock(to_hashmap(json!({
+                "data_type": "counter",
+                "interval_ms": 1000
+            }))),
             bootstrap_provider: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -76,20 +82,16 @@ mod tests {
 
     #[test]
     fn test_full_config_with_mixed_dispatch_modes() {
-        use crate::config::common::LogLevel;
-        use crate::reactions::log::LogReactionConfig;
-        use crate::sources::mock::MockSourceConfig;
-
-        let mut config = DrasiServerCoreConfig::default();
+        let mut config = DrasiLibConfig::default();
 
         // Add sources with different dispatch modes
         config.sources.push(SourceConfig {
             id: "broadcast_source".to_string(),
             auto_start: true,
-            config: crate::config::SourceSpecificConfig::Mock(MockSourceConfig {
-                data_type: "counter".to_string(),
-                interval_ms: 1000,
-            }),
+            config: crate::config::SourceSpecificConfig::Mock(to_hashmap(json!({
+                "data_type": "counter",
+                "interval_ms": 1000
+            }))),
             bootstrap_provider: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: Some(DispatchMode::Broadcast),
@@ -98,10 +100,10 @@ mod tests {
         config.sources.push(SourceConfig {
             id: "channel_source".to_string(),
             auto_start: true,
-            config: crate::config::SourceSpecificConfig::Mock(MockSourceConfig {
-                data_type: "sensor".to_string(),
-                interval_ms: 1000,
-            }),
+            config: crate::config::SourceSpecificConfig::Mock(to_hashmap(json!({
+                "data_type": "sensor",
+                "interval_ms": 1000
+            }))),
             bootstrap_provider: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: Some(DispatchMode::Channel),
@@ -110,10 +112,10 @@ mod tests {
         config.sources.push(SourceConfig {
             id: "default_source".to_string(),
             auto_start: true,
-            config: crate::config::SourceSpecificConfig::Mock(MockSourceConfig {
-                data_type: "counter".to_string(),
-                interval_ms: 1000,
-            }),
+            config: crate::config::SourceSpecificConfig::Mock(to_hashmap(json!({
+                "data_type": "counter",
+                "interval_ms": 1000
+            }))),
             bootstrap_provider: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -163,9 +165,9 @@ mod tests {
             id: "reaction1".to_string(),
             queries: vec!["query1".to_string()],
             auto_start: true,
-            config: crate::config::ReactionSpecificConfig::Log(LogReactionConfig {
-                log_level: LogLevel::Info,
-            }),
+            config: crate::config::ReactionSpecificConfig::Log(to_hashmap(json!({
+                "log_level": "info"
+            }))),
             priority_queue_capacity: None,
         });
 

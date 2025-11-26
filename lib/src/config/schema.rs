@@ -118,7 +118,7 @@ pub struct SourceSubscriptionConfig {
 
 /// Root configuration for Drasi Server Core
 ///
-/// `DrasiServerCoreConfig` is the top-level configuration structure for loading Drasi
+/// `DrasiLibConfig` is the top-level configuration structure for loading Drasi
 /// configurations from YAML or JSON files. It defines all sources, queries, reactions,
 /// and global server settings.
 ///
@@ -137,13 +137,13 @@ pub struct SourceSubscriptionConfig {
 ///
 /// # Loading Configuration
 ///
-/// Use [`DrasiServerCoreConfig::load_from_file()`] to load from YAML or JSON:
+/// Use [`DrasiLibConfig::load_from_file()`] to load from YAML or JSON:
 ///
 /// ```no_run
-/// use drasi_lib::DrasiServerCoreConfig;
+/// use drasi_lib::DrasiLibConfig;
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let config = DrasiServerCoreConfig::load_from_file("config.yaml")?;
+/// let config = DrasiLibConfig::load_from_file("config.yaml")?;
 /// config.validate()?;  // Validate references between components
 /// # Ok(())
 /// # }
@@ -193,7 +193,7 @@ pub struct SourceSubscriptionConfig {
 ///
 /// # Validation
 ///
-/// Call [`validate()`](DrasiServerCoreConfig::validate) to check:
+/// Call [`validate()`](DrasiLibConfig::validate) to check:
 /// - Unique component IDs
 /// - Valid source references in queries
 /// - Valid query references in reactions
@@ -203,18 +203,18 @@ pub struct SourceSubscriptionConfig {
 /// Convert to [`RuntimeConfig`](crate::RuntimeConfig) for server execution:
 ///
 /// ```no_run
-/// use drasi_lib::{DrasiServerCoreConfig, RuntimeConfig};
+/// use drasi_lib::{DrasiLibConfig, RuntimeConfig};
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let config = DrasiServerCoreConfig::load_from_file("config.yaml")?;
+/// let config = DrasiLibConfig::load_from_file("config.yaml")?;
 /// let runtime_config: RuntimeConfig = config.into();
 /// # Ok(())
 /// # }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct DrasiServerCoreConfig {
+pub struct DrasiLibConfig {
     #[serde(default)]
-    pub server_core: DrasiServerCoreSettings,
+    pub server_core: DrasiLibSettings,
     /// Global storage backend definitions that can be referenced by queries
     #[serde(default)]
     pub storage_backends: Vec<StorageBackendConfig>,
@@ -225,7 +225,7 @@ pub struct DrasiServerCoreConfig {
 
 /// Global server settings for Drasi Server Core
 ///
-/// `DrasiServerCoreSettings` configures global behavior and default capacity settings
+/// `DrasiLibSettings` configures global behavior and default capacity settings
 /// that apply to all components unless overridden at the component level.
 ///
 /// # Capacity Settings
@@ -289,7 +289,7 @@ pub struct DrasiServerCoreConfig {
 /// - Too large: Higher memory usage, longer shutdown times
 /// - Recommended: 1000-10000 for most workloads
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DrasiServerCoreSettings {
+pub struct DrasiLibSettings {
     #[serde(default = "default_id")]
     pub id: String,
     /// Default priority queue capacity for queries and reactions (default: 10000 if not specified)
@@ -862,7 +862,7 @@ impl ReactionConfig {
     }
 }
 
-impl DrasiServerCoreConfig {
+impl DrasiLibConfig {
     /// Load configuration from a YAML or JSON file
     ///
     /// Attempts to parse the file as YAML first, then falls back to JSON if YAML parsing fails.
@@ -886,14 +886,14 @@ impl DrasiServerCoreConfig {
     /// # Examples
     ///
     /// ```no_run
-    /// use drasi_lib::DrasiServerCoreConfig;
+    /// use drasi_lib::DrasiLibConfig;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Load from YAML
-    /// let config = DrasiServerCoreConfig::load_from_file("config.yaml")?;
+    /// let config = DrasiLibConfig::load_from_file("config.yaml")?;
     ///
     /// // Load from JSON
-    /// let config_json = DrasiServerCoreConfig::load_from_file("config.json")?;
+    /// let config_json = DrasiLibConfig::load_from_file("config.json")?;
     ///
     /// // Validate the configuration
     /// config.validate()?;
@@ -907,11 +907,11 @@ impl DrasiServerCoreConfig {
         })?;
 
         // Try YAML first, then JSON
-        match serde_yaml::from_str::<DrasiServerCoreConfig>(&content) {
+        match serde_yaml::from_str::<DrasiLibConfig>(&content) {
             Ok(config) => Ok(config),
             Err(yaml_err) => {
                 // If YAML fails, try JSON
-                match serde_json::from_str::<DrasiServerCoreConfig>(&content) {
+                match serde_json::from_str::<DrasiLibConfig>(&content) {
                     Ok(config) => Ok(config),
                     Err(json_err) => {
                         // Both failed, return detailed error
@@ -947,11 +947,11 @@ impl DrasiServerCoreConfig {
     /// # Examples
     ///
     /// ```no_run
-    /// use drasi_lib::DrasiServerCoreConfig;
+    /// use drasi_lib::DrasiLibConfig;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Load and validate in one step - recommended approach
-    /// let config = DrasiServerCoreConfig::load_and_validate("config.yaml")?;
+    /// let config = DrasiLibConfig::load_and_validate("config.yaml")?;
     ///
     /// // Now safe to use - configuration is guaranteed to be valid
     /// println!("Loaded {} sources", config.sources.len());
@@ -981,10 +981,10 @@ impl DrasiServerCoreConfig {
     /// # Examples
     ///
     /// ```no_run
-    /// use drasi_lib::DrasiServerCoreConfig;
+    /// use drasi_lib::DrasiLibConfig;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let config = DrasiServerCoreConfig::load_from_file("config.yaml")?;
+    /// let config = DrasiLibConfig::load_from_file("config.yaml")?;
     /// config.save_to_file("config_backup.yaml")?;
     /// # Ok(())
     /// # }
@@ -1009,10 +1009,10 @@ impl DrasiServerCoreConfig {
     /// # Examples
     ///
     /// ```no_run
-    /// use drasi_lib::DrasiServerCoreConfig;
+    /// use drasi_lib::DrasiLibConfig;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let config = DrasiServerCoreConfig::load_from_file("config.yaml")?;
+    /// let config = DrasiLibConfig::load_from_file("config.yaml")?;
     ///
     /// // Validate before using
     /// match config.validate() {
@@ -1123,7 +1123,7 @@ impl DrasiServerCoreConfig {
     }
 }
 
-impl Default for DrasiServerCoreSettings {
+impl Default for DrasiLibSettings {
     fn default() -> Self {
         Self {
             // Default server ID to a random UUID

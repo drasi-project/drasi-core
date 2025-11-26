@@ -18,6 +18,7 @@ mod manager_tests {
     use crate::channels::*;
     use crate::sources::SourceManager;
     use crate::test_support::helpers::test_fixtures::*;
+    use crate::test_support::helpers::test_mocks::create_test_source_registry;
     use drasi_core::middleware::MiddlewareTypeRegistry;
     use std::sync::Arc;
     use tokio::sync::mpsc;
@@ -29,7 +30,8 @@ mod manager_tests {
     ) {
         let (event_tx, event_rx) = mpsc::channel(100);
 
-        let source_manager = Arc::new(SourceManager::new(event_tx.clone()));
+        let registry = create_test_source_registry();
+        let source_manager = Arc::new(SourceManager::with_registry(event_tx.clone(), registry));
 
         // Create a test IndexFactory with empty backends
         let index_factory = Arc::new(crate::indexes::IndexFactory::new(vec![]));

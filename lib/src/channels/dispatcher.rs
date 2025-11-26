@@ -87,10 +87,10 @@ use tokio::sync::{broadcast, mpsc};
 /// ## Builder API Configuration
 ///
 /// ```no_run
-/// use drasi_lib::{DrasiServerCore, Source, Query, DispatchMode};
+/// use drasi_lib::{DrasiLib, Source, Query, DispatchMode};
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let core = DrasiServerCore::builder()
+/// let core = DrasiLib::builder()
 ///     .add_source(
 ///         Source::postgres("orders_db")
 ///             .with_dispatch_mode(DispatchMode::Broadcast)  // High fanout

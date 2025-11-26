@@ -16,7 +16,7 @@
 //!
 //! Validates that all example config files can be loaded successfully
 
-use drasi_lib::config::DrasiServerCoreConfig;
+use drasi_lib::config::DrasiLibConfig;
 use std::path::{Path, PathBuf};
 
 /// Load and validate a config file
@@ -26,7 +26,7 @@ fn validate_config_file(path: &Path) -> Result<(), String> {
     let content =
         std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
 
-    let config: DrasiServerCoreConfig = if path.extension().and_then(|s| s.to_str()) == Some("json")
+    let config: DrasiLibConfig = if path.extension().and_then(|s| s.to_str()) == Some("json")
     {
         serde_json::from_str(&content).map_err(|e| format!("JSON parsing error: {}", e))?
     } else {

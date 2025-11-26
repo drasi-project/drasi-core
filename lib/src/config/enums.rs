@@ -12,34 +12,34 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Configuration enum types for sources and reactions.
+//! Discriminated union enums for source and reaction configurations
 //!
-//! This module contains discriminated union enums that enable polymorphic configuration
-//! deserialization. Config structs will be imported as they are moved from typed.rs.
+//! These enums allow for dynamic deserialization of different source and reaction types
+//! from YAML/JSON configuration files using serde's tag-based discriminators.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-// Config structs imported as they are moved
-use crate::sources::application::ApplicationSourceConfig;
-use crate::sources::grpc::GrpcSourceConfig;
-use crate::sources::http::HttpSourceConfig;
-use crate::sources::mock::MockSourceConfig;
-use crate::sources::platform::PlatformSourceConfig;
-use crate::sources::postgres::PostgresSourceConfig;
-
-/// Enum wrapping all source-specific configurations
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Source-specific configuration enum
+///
+/// This enum acts as a discriminated union for all source types supported by the system.
+/// The `source_type` field in the configuration determines which variant is deserialized.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "source_type", rename_all = "lowercase")]
 pub enum SourceSpecificConfig {
-    Mock(MockSourceConfig),
-    Postgres(PostgresSourceConfig),
-    Http(HttpSourceConfig),
-    Grpc(GrpcSourceConfig),
-    Platform(PlatformSourceConfig),
-    Application(ApplicationSourceConfig),
-
-    /// Custom source type with properties map (for extensibility)
+    /// Mock source for testing
+    Mock(HashMap<String, serde_json::Value>),
+    /// PostgreSQL source
+    Postgres(HashMap<String, serde_json::Value>),
+    /// HTTP source
+    Http(HashMap<String, serde_json::Value>),
+    /// gRPC source
+    Grpc(HashMap<String, serde_json::Value>),
+    /// Platform source
+    Platform(HashMap<String, serde_json::Value>),
+    /// Application source
+    Application(HashMap<String, serde_json::Value>),
+    /// Custom source type for extensions
     #[serde(rename = "custom")]
     Custom {
         #[serde(flatten)]
@@ -47,38 +47,34 @@ pub enum SourceSpecificConfig {
     },
 }
 
-// Reaction config structs imported as they are moved
-use crate::reactions::application::ApplicationReactionConfig;
-use crate::reactions::grpc::GrpcReactionConfig;
-use crate::reactions::grpc_adaptive::GrpcAdaptiveReactionConfig;
-use crate::reactions::http::HttpReactionConfig;
-use crate::reactions::http_adaptive::HttpAdaptiveReactionConfig;
-use crate::reactions::log::LogReactionConfig;
-use crate::reactions::platform::PlatformReactionConfig;
-use crate::reactions::profiler::ProfilerReactionConfig;
-use crate::reactions::sse::SseReactionConfig;
-
-/// Enum wrapping all reaction-specific configurations
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Reaction-specific configuration enum
+///
+/// This enum acts as a discriminated union for all reaction types supported by the system.
+/// The `reaction_type` field in the configuration determines which variant is deserialized.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "reaction_type", rename_all = "lowercase")]
 pub enum ReactionSpecificConfig {
-    Log(LogReactionConfig),
-    Http(HttpReactionConfig),
-    Grpc(GrpcReactionConfig),
-    Sse(SseReactionConfig),
-    Platform(PlatformReactionConfig),
-    Profiler(ProfilerReactionConfig),
-    Application(ApplicationReactionConfig),
-
-    /// gRPC Adaptive reaction with adaptive batching
+    /// Log reaction for debugging
+    Log(HashMap<String, serde_json::Value>),
+    /// HTTP reaction
+    Http(HashMap<String, serde_json::Value>),
+    /// gRPC reaction
+    Grpc(HashMap<String, serde_json::Value>),
+    /// SSE reaction
+    Sse(HashMap<String, serde_json::Value>),
+    /// Platform reaction
+    Platform(HashMap<String, serde_json::Value>),
+    /// Profiler reaction
+    Profiler(HashMap<String, serde_json::Value>),
+    /// Application reaction
+    Application(HashMap<String, serde_json::Value>),
+    /// gRPC Adaptive reaction
     #[serde(rename = "grpc_adaptive")]
-    GrpcAdaptive(GrpcAdaptiveReactionConfig),
-
-    /// HTTP Adaptive reaction with adaptive batching
+    GrpcAdaptive(HashMap<String, serde_json::Value>),
+    /// HTTP Adaptive reaction
     #[serde(rename = "http_adaptive")]
-    HttpAdaptive(HttpAdaptiveReactionConfig),
-
-    /// Custom reaction type with properties map (for extensibility)
+    HttpAdaptive(HashMap<String, serde_json::Value>),
+    /// Custom reaction type for extensions
     #[serde(rename = "custom")]
     Custom {
         #[serde(flatten)]

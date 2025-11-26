@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Test modules for DrasiServerCore
+//! Test modules for DrasiLib
 //!
 //! This module contains all unit tests for the server core functionality,
 //! organized by test category for better maintainability.

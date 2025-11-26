@@ -4,7 +4,7 @@ use crate::api::{Query, Reaction, Source};
 #[tokio::test]
 async fn test_server_initialization() {
     let config = Arc::new(RuntimeConfig {
-        server_core: crate::config::DrasiServerCoreSettings {
+        server_core: crate::config::DrasiLibSettings {
             id: "test-server".to_string(),
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
@@ -14,7 +14,7 @@ async fn test_server_initialization() {
         reactions: vec![],
     });
 
-    let mut core = DrasiServerCore::new(config);
+    let mut core = DrasiLib::new(config);
     let result = core.initialize().await;
 
     assert!(result.is_ok(), "Server initialization should succeed");
@@ -27,7 +27,7 @@ async fn test_server_initialization() {
 #[tokio::test]
 async fn test_server_initialization_idempotent() {
     let config = Arc::new(RuntimeConfig {
-        server_core: crate::config::DrasiServerCoreSettings {
+        server_core: crate::config::DrasiLibSettings {
             id: "test-server".to_string(),
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
@@ -37,7 +37,7 @@ async fn test_server_initialization_idempotent() {
         reactions: vec![],
     });
 
-    let mut core = DrasiServerCore::new(config);
+    let mut core = DrasiLib::new(config);
 
     // First initialization
     let result1 = core.initialize().await;
@@ -54,7 +54,7 @@ async fn test_server_initialization_idempotent() {
 #[tokio::test]
 async fn test_start_without_initialization_fails() {
     let config = Arc::new(RuntimeConfig {
-        server_core: crate::config::DrasiServerCoreSettings {
+        server_core: crate::config::DrasiLibSettings {
             id: "test-server".to_string(),
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
@@ -64,7 +64,7 @@ async fn test_start_without_initialization_fails() {
         reactions: vec![],
     });
 
-    let core = DrasiServerCore::new(config);
+    let core = DrasiLib::new(config);
     let result = core.start().await;
 
     assert!(result.is_err(), "Start should fail without initialization");
@@ -74,7 +74,7 @@ async fn test_start_without_initialization_fails() {
 #[tokio::test]
 async fn test_start_already_running_fails() {
     let config = Arc::new(RuntimeConfig {
-        server_core: crate::config::DrasiServerCoreSettings {
+        server_core: crate::config::DrasiLibSettings {
             id: "test-server".to_string(),
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
@@ -84,7 +84,7 @@ async fn test_start_already_running_fails() {
         reactions: vec![],
     });
 
-    let mut core = DrasiServerCore::new(config);
+    let mut core = DrasiLib::new(config);
     core.initialize().await.unwrap();
 
     // First start should succeed
@@ -99,7 +99,7 @@ async fn test_start_already_running_fails() {
 #[tokio::test]
 async fn test_stop_not_running_fails() {
     let config = Arc::new(RuntimeConfig {
-        server_core: crate::config::DrasiServerCoreSettings {
+        server_core: crate::config::DrasiLibSettings {
             id: "test-server".to_string(),
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
@@ -109,7 +109,7 @@ async fn test_stop_not_running_fails() {
         reactions: vec![],
     });
 
-    let mut core = DrasiServerCore::new(config);
+    let mut core = DrasiLib::new(config);
     core.initialize().await.unwrap();
 
     let result = core.stop().await;
@@ -120,7 +120,7 @@ async fn test_stop_not_running_fails() {
 #[tokio::test]
 async fn test_start_and_stop_lifecycle() {
     let config = Arc::new(RuntimeConfig {
-        server_core: crate::config::DrasiServerCoreSettings {
+        server_core: crate::config::DrasiLibSettings {
             id: "test-server".to_string(),
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
@@ -130,7 +130,7 @@ async fn test_start_and_stop_lifecycle() {
         reactions: vec![],
     });
 
-    let mut core = DrasiServerCore::new(config);
+    let mut core = DrasiLib::new(config);
     core.initialize().await.unwrap();
 
     assert!(
@@ -154,7 +154,7 @@ async fn test_start_and_stop_lifecycle() {
 #[tokio::test]
 async fn test_is_running_initial_state() {
     let config = Arc::new(RuntimeConfig {
-        server_core: crate::config::DrasiServerCoreSettings {
+        server_core: crate::config::DrasiLibSettings {
             id: "test-server".to_string(),
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
@@ -164,7 +164,7 @@ async fn test_is_running_initial_state() {
         reactions: vec![],
     });
 
-    let core = DrasiServerCore::new(config);
+    let core = DrasiLib::new(config);
     assert!(
         !core.is_running().await,
         "Server should not be running initially"
@@ -173,7 +173,7 @@ async fn test_is_running_initial_state() {
 
 #[tokio::test]
 async fn test_lifecycle_start_then_stop() {
-    let core = DrasiServerCore::builder()
+    let core = DrasiLib::builder()
         .add_source(Source::mock("test-source").auto_start(false).build())
         .build()
         .await
@@ -202,7 +202,7 @@ async fn test_lifecycle_start_then_stop() {
 
 #[tokio::test]
 async fn test_start_stop_all_component_types() {
-    let core = DrasiServerCore::builder()
+    let core = DrasiLib::builder()
         .add_source(Source::mock("source1").auto_start(false).build())
         .add_query(
             Query::cypher("query1")

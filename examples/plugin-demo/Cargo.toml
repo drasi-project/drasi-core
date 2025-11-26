@@ -1,0 +1,65 @@
+[package]
+name = "plugin-demo"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "minimal"
+path = "src/minimal.rs"
+
+[[bin]]
+name = "full"
+path = "src/full.rs"
+
+[[bin]]
+name = "selective"
+path = "src/selective.rs"
+
+[dependencies]
+# Core library
+drasi-lib = { path = "../../lib" }
+
+# Source plugins
+drasi-plugin-postgres = { path = "../../components/sources/plugin-postgres", optional = true }
+drasi-plugin-http = { path = "../../components/sources/plugin-http", optional = true }
+drasi-plugin-grpc = { path = "../../components/sources/plugin-grpc", optional = true }
+drasi-plugin-platform = { path = "../../components/sources/plugin-platform", optional = true }
+drasi-plugin-application = { path = "../../components/sources/plugin-application", optional = true }
+drasi-plugin-mock = { path = "../../components/sources/plugin-mock", optional = true }
+
+# Reaction plugins
+drasi-plugin-http-reaction = { path = "../../components/reactions/plugin-http", optional = true }
+drasi-plugin-http-adaptive-reaction = { path = "../../components/reactions/plugin-http-adaptive", optional = true }
+drasi-plugin-grpc-reaction = { path = "../../components/reactions/plugin-grpc", optional = true }
+drasi-plugin-grpc-adaptive-reaction = { path = "../../components/reactions/plugin-grpc-adaptive", optional = true }
+drasi-plugin-sse-reaction = { path = "../../components/reactions/plugin-sse", optional = true }
+drasi-plugin-platform-reaction = { path = "../../components/reactions/plugin-platform", optional = true }
+drasi-plugin-profiler-reaction = { path = "../../components/reactions/plugin-profiler", optional = true }
+drasi-plugin-application-reaction = { path = "../../components/reactions/plugin-application", optional = true }
+drasi-plugin-log-reaction = { path = "../../components/reactions/plugin-log", optional = true }
+
+# Bootstrap plugins
+drasi-plugin-postgres-bootstrap = { path = "../../components/bootstrappers/plugin-postgres", optional = true }
+drasi-plugin-platform-bootstrap = { path = "../../components/bootstrappers/plugin-platform", optional = true }
+drasi-plugin-scriptfile-bootstrap = { path = "../../components/bootstrappers/plugin-scriptfile", optional = true }
+drasi-plugin-application-bootstrap = { path = "../../components/bootstrappers/plugin-application", optional = true }
+drasi-plugin-noop-bootstrap = { path = "../../components/bootstrappers/plugin-noop", optional = true }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+anyhow = "1.0"
+
+[features]
+default = []
+full = [
+    "drasi-plugin-postgres", "drasi-plugin-http", "drasi-plugin-grpc",
+    "drasi-plugin-platform", "drasi-plugin-application", "drasi-plugin-mock",
+    "drasi-plugin-http-reaction", "drasi-plugin-http-adaptive-reaction",
+    "drasi-plugin-grpc-reaction", "drasi-plugin-grpc-adaptive-reaction",
+    "drasi-plugin-sse-reaction", "drasi-plugin-platform-reaction",
+    "drasi-plugin-profiler-reaction", "drasi-plugin-application-reaction", "drasi-plugin-log-reaction",
+    "drasi-plugin-postgres-bootstrap", "drasi-plugin-platform-bootstrap",
+    "drasi-plugin-scriptfile-bootstrap", "drasi-plugin-application-bootstrap",
+    "drasi-plugin-noop-bootstrap"
+]
+selective = ["drasi-plugin-postgres", "drasi-plugin-http-reaction", "drasi-plugin-scriptfile-bootstrap"]

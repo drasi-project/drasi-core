@@ -25,11 +25,9 @@ use ordered_float::OrderedFloat;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-use super::{
-    ApplicationSource, ApplicationSourceHandle, GrpcSource, HttpSource, MockSource, PlatformSource,
-};
 use crate::channels::*;
 use crate::config::{SourceConfig, SourceRuntime};
+use crate::plugin_core::SourceRegistry;
 use crate::utils::*;
 
 #[async_trait]
@@ -97,16 +95,21 @@ pub fn convert_json_to_element_properties(
 pub struct SourceManager {
     sources: Arc<RwLock<HashMap<String, Arc<dyn Source>>>>,
     event_tx: ComponentEventSender,
-    application_handles: Arc<RwLock<HashMap<String, ApplicationSourceHandle>>>,
+    registry: SourceRegistry,
 }
 
 impl SourceManager {
-    /// Create a new SourceManager
+    /// Create a new SourceManager with default plugin registry
     pub fn new(event_tx: ComponentEventSender) -> Self {
+        Self::with_registry(event_tx, SourceRegistry::default())
+    }
+
+    /// Create a new SourceManager with a custom plugin registry
+    pub fn with_registry(event_tx: ComponentEventSender, registry: SourceRegistry) -> Self {
         Self {
             sources: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
-            application_handles: Arc::new(RwLock::new(HashMap::new())),
+            registry,
         }
     }
 
@@ -114,8 +117,49 @@ impl SourceManager {
         self.sources.read().await.get(id).cloned()
     }
 
-    pub async fn get_application_handle(&self, id: &str) -> Option<ApplicationSourceHandle> {
-        self.application_handles.read().await.get(id).cloned()
+    /// Add a pre-built source instance directly.
+    ///
+    /// This method allows adding a source that was constructed externally,
+    /// bypassing the registry-based creation. This is useful for:
+    /// - Testing with mock sources
+    /// - Programmatic source creation with custom configurations
+    /// - Plugin-specific builders that create instances directly
+    ///
+    /// # Parameters
+    /// - `source`: The pre-built source instance
+    /// - `auto_start`: Whether to auto-start the source after adding
+    ///
+    /// # Returns
+    /// - `Ok(())` if the source was added successfully
+    /// - `Err` if a source with the same ID already exists
+    pub async fn add_source_instance(
+        &self,
+        source: Arc<dyn Source>,
+        auto_start: bool,
+    ) -> Result<()> {
+        let source_id = source.get_config().id.clone();
+
+        // Check if source with this id already exists
+        if self.sources.read().await.contains_key(&source_id) {
+            return Err(anyhow::anyhow!(
+                "Source with id '{}' already exists",
+                source_id
+            ));
+        }
+
+        self.sources.write().await.insert(source_id.clone(), source);
+        info!("Added source instance: {}", source_id);
+
+        // Auto-start the source if requested
+        if auto_start {
+            info!("Auto-starting source: {}", source_id);
+            if let Err(e) = self.start_source(source_id.clone()).await {
+                error!("Failed to auto-start source {}: {}", source_id, e);
+                // Don't fail the add operation, just log the error
+            }
+        }
+
+        Ok(())
     }
 
     pub async fn add_source(&self, config: SourceConfig) -> Result<()> {
@@ -151,33 +195,8 @@ impl SourceManager {
             ));
         }
 
-        let source: Arc<dyn Source> = match config.source_type() {
-            // Internal Rust sources running as tokio tasks
-            "mock" => Arc::new(MockSource::new(config.clone(), self.event_tx.clone())?),
-            "postgres" => Arc::new(super::PostgresReplicationSource::new(
-                config.clone(),
-                self.event_tx.clone(),
-            )?),
-            "http" => Arc::new(HttpSource::new(config.clone(), self.event_tx.clone())?),
-            "grpc" => Arc::new(GrpcSource::new(config.clone(), self.event_tx.clone())?),
-            "platform" => Arc::new(PlatformSource::new(config.clone(), self.event_tx.clone())?),
-            "application" => {
-                let (app_source, handle) =
-                    ApplicationSource::new(config.clone(), self.event_tx.clone())?;
-                // Store the handle for the application to use
-                self.application_handles
-                    .write()
-                    .await
-                    .insert(config.id.clone(), handle);
-                Arc::new(app_source)
-            }
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "Unknown source type: {}",
-                    config.source_type()
-                ));
-            }
-        };
+        // Create source using the plugin registry
+        let source: Arc<dyn Source> = self.registry.create(config.clone(), self.event_tx.clone())?;
 
         let source_id = config.id.clone();
         let should_auto_start = config.auto_start;
@@ -372,7 +391,6 @@ impl SourceManager {
 
             // Now remove the source
             self.sources.write().await.remove(&id);
-            self.application_handles.write().await.remove(&id);
             info!("Deleted source: {}", id);
 
             Ok(())

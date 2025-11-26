@@ -18,7 +18,7 @@
 //! lifecycle management. The error mapping logic is centralized here so that start/stop/delete
 //! operations for sources, queries, and reactions can share the same error handling code.
 
-use crate::api::DrasiError;
+use crate::error::DrasiError;
 use anyhow::Result as AnyhowResult;
 
 /// Maps anyhow::Error from manager operations to DrasiError
@@ -41,17 +41,16 @@ pub fn map_component_error<T>(
     component_type: &str,
     component_id: &str,
     operation: &str,
-) -> crate::api::Result<T> {
+) -> crate::error::Result<T> {
     result.map_err(|e| {
         let error_msg = e.to_string();
         if error_msg.contains("not found") {
             DrasiError::component_not_found(component_type, component_id)
         } else {
-            DrasiError::component_error(
-                component_type,
-                component_id,
-                format!("Failed to {} {}: {}", operation, component_type, e),
-            )
+            DrasiError::component_error(format!(
+                "Failed to {} {} '{}': {}",
+                operation, component_type, component_id, e
+            ))
         }
     })
 }
@@ -74,7 +73,7 @@ pub fn map_state_error<T>(
     result: AnyhowResult<T>,
     component_type: &str,
     component_id: &str,
-) -> crate::api::Result<T> {
+) -> crate::error::Result<T> {
     result.map_err(|e| {
         let error_msg = e.to_string();
         if error_msg.contains("not found") {

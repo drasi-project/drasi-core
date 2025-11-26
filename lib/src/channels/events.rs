@@ -60,11 +60,11 @@ pub enum ComponentType {
 ///
 /// # Usage
 ///
-/// Status is available through runtime information methods on [`DrasiServerCore`](crate::DrasiServerCore):
+/// Status is available through runtime information methods on [`DrasiLib`](crate::DrasiLib):
 ///
-/// - [`get_source_status()`](crate::DrasiServerCore::get_source_status)
-/// - [`get_query_status()`](crate::DrasiServerCore::get_query_status)
-/// - [`get_reaction_status()`](crate::DrasiServerCore::get_reaction_status)
+/// - [`get_source_status()`](crate::DrasiLib::get_source_status)
+/// - [`get_query_status()`](crate::DrasiLib::get_query_status)
+/// - [`get_reaction_status()`](crate::DrasiLib::get_reaction_status)
 ///
 /// And through runtime info structs:
 ///
@@ -77,10 +77,10 @@ pub enum ComponentType {
 /// ## Monitoring Component Status
 ///
 /// ```no_run
-/// use drasi_lib::{DrasiServerCore, ComponentStatus};
+/// use drasi_lib::{DrasiLib, ComponentStatus};
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let core = DrasiServerCore::from_config_file("config.yaml").await?;
+/// let core = DrasiLib::from_config_file("config.yaml").await?;
 /// core.start().await?;
 ///
 /// // Check source status
@@ -106,11 +106,11 @@ pub enum ComponentType {
 /// ## Waiting for Component to Start
 ///
 /// ```no_run
-/// use drasi_lib::{DrasiServerCore, ComponentStatus};
+/// use drasi_lib::{DrasiLib, ComponentStatus};
 /// use tokio::time::{sleep, Duration};
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let core = DrasiServerCore::from_config_file("config.yaml").await?;
+/// let core = DrasiLib::from_config_file("config.yaml").await?;
 /// core.start_source("orders_db").await?;
 ///
 /// // Poll until source is running
@@ -130,10 +130,10 @@ pub enum ComponentType {
 /// ## Checking All Components
 ///
 /// ```no_run
-/// use drasi_lib::{DrasiServerCore, ComponentStatus};
+/// use drasi_lib::{DrasiLib, ComponentStatus};
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let core = DrasiServerCore::from_config_file("config.yaml").await?;
+/// let core = DrasiLib::from_config_file("config.yaml").await?;
 /// core.start().await?;
 ///
 /// // Check all sources

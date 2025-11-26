@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # HTTP Integration Test Driver Script
-# This script sends test data to a running DrasiServerCore HTTP source
+# This script sends test data to a running DrasiLib HTTP source
 # to manually test the data flow from source through query to reaction.
 
 set -e
@@ -309,7 +309,7 @@ echo
 # Check if HTTP source is accessible
 if ! curl -s -f "$HTTP_SOURCE_URL/../../health" > /dev/null 2>&1; then
     log_warning "Cannot reach HTTP source at $HTTP_SOURCE_URL"
-    log_warning "Make sure DrasiServerCore is running with HTTP source enabled"
+    log_warning "Make sure DrasiLib is running with HTTP source enabled"
     echo
 fi
 

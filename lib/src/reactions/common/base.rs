@@ -35,9 +35,9 @@ use crate::channels::{
 use crate::config::ReactionConfig;
 use crate::queries::Query;
 
-/// Trait for subscribing to queries without requiring full DrasiServerCore dependency.
+/// Trait for subscribing to queries without requiring full DrasiLib dependency.
 ///
-/// This trait breaks the circular dependency between reactions and DrasiServerCore by
+/// This trait breaks the circular dependency between reactions and DrasiLib by
 /// providing a minimal interface for reactions to access queries.
 #[async_trait]
 pub trait QuerySubscriber: Send + Sync {
@@ -250,21 +250,29 @@ impl ReactionBase {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::collections::HashMap;
     use tokio::sync::mpsc;
+
+    /// Helper to convert a serde_json::Value object to HashMap<String, serde_json::Value>
+    fn to_hashmap(value: serde_json::Value) -> HashMap<String, serde_json::Value> {
+        match value {
+            serde_json::Value::Object(map) => map.into_iter().collect(),
+            _ => HashMap::new(),
+        }
+    }
 
     #[tokio::test]
     async fn test_reaction_base_creation() {
         let (event_tx, _event_rx) = mpsc::channel(100);
-        use crate::reactions::application::ApplicationReactionConfig;
 
         let config = ReactionConfig {
             id: "test-reaction".to_string(),
             queries: vec!["query1".to_string()],
             auto_start: true,
-            config: crate::config::ReactionSpecificConfig::Application(ApplicationReactionConfig {
-                properties: HashMap::new(),
-            }),
+            config: crate::config::ReactionSpecificConfig::Application(to_hashmap(json!({
+                "properties": {}
+            }))),
             priority_queue_capacity: Some(5000),
         };
 
@@ -275,16 +283,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_status_transitions() {
-        use crate::reactions::application::ApplicationReactionConfig;
-
         let (event_tx, mut event_rx) = mpsc::channel(100);
         let config = ReactionConfig {
             id: "test-reaction".to_string(),
             queries: vec![],
             auto_start: true,
-            config: crate::config::ReactionSpecificConfig::Application(ApplicationReactionConfig {
-                properties: HashMap::new(),
-            }),
+            config: crate::config::ReactionSpecificConfig::Application(to_hashmap(json!({
+                "properties": {}
+            }))),
             priority_queue_capacity: None,
         };
 
@@ -305,16 +311,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_priority_queue_operations() {
-        use crate::reactions::application::ApplicationReactionConfig;
-
         let (event_tx, _event_rx) = mpsc::channel(100);
         let config = ReactionConfig {
             id: "test-reaction".to_string(),
             queries: vec![],
             auto_start: true,
-            config: crate::config::ReactionSpecificConfig::Application(ApplicationReactionConfig {
-                properties: HashMap::new(),
-            }),
+            config: crate::config::ReactionSpecificConfig::Application(to_hashmap(json!({
+                "properties": {}
+            }))),
             priority_queue_capacity: Some(10),
         };
 

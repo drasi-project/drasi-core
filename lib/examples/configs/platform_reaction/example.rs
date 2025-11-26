@@ -5,7 +5,7 @@
 
 use drasi_lib::{
     api::{Query, Reaction, Source},
-    DrasiServerCore,
+    DrasiLib,
 };
 
 #[tokio::main]
@@ -14,7 +14,7 @@ async fn main() -> anyhow::Result<()> {
     env_logger::init();
 
     // Build the server using the fluent API
-    let core = DrasiServerCore::builder()
+    let core = DrasiLib::builder()
         .with_id("platform-reaction-example")
         .with_priority_queue_capacity(10000)
         .with_dispatch_buffer_capacity(1000)

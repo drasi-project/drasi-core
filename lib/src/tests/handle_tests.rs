@@ -2,7 +2,7 @@ use super::super::*;
 
 #[tokio::test]
 async fn test_source_handle_for_nonexistent_source() {
-    let core = DrasiServerCore::builder().build().await.unwrap();
+    let core = DrasiLib::builder().build().await.unwrap();
 
     let result = core.source_handle("nonexistent").await;
     assert!(
@@ -21,7 +21,7 @@ async fn test_source_handle_for_nonexistent_source() {
 
 #[tokio::test]
 async fn test_reaction_handle_for_nonexistent_reaction() {
-    let core = DrasiServerCore::builder().build().await.unwrap();
+    let core = DrasiLib::builder().build().await.unwrap();
 
     let result = core.reaction_handle("nonexistent").await;
     assert!(

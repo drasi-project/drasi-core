@@ -3,7 +3,7 @@ use crate::api::{Query, Reaction, Source};
 
 #[tokio::test]
 async fn test_list_sources() {
-    let core = DrasiServerCore::builder()
+    let core = DrasiLib::builder()
         .add_source(Source::application("source1").build())
         .add_source(Source::mock("source2").build())
         .build()
@@ -21,7 +21,7 @@ async fn test_list_sources() {
 #[tokio::test]
 async fn test_list_sources_without_initialization() {
     let config = Arc::new(RuntimeConfig {
-        server_core: crate::config::DrasiServerCoreSettings {
+        server_core: crate::config::DrasiLibSettings {
             id: "test-server".to_string(),
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
@@ -31,7 +31,7 @@ async fn test_list_sources_without_initialization() {
         reactions: vec![],
     });
 
-    let core = DrasiServerCore::new(config);
+    let core = DrasiLib::new(config);
     let result = core.list_sources().await;
 
     assert!(result.is_err());
@@ -40,7 +40,7 @@ async fn test_list_sources_without_initialization() {
 
 #[tokio::test]
 async fn test_get_source_info() {
-    let core = DrasiServerCore::builder()
+    let core = DrasiLib::builder()
         .add_source(Source::application("test-source").build())
         .build()
         .await
@@ -53,7 +53,7 @@ async fn test_get_source_info() {
 
 #[tokio::test]
 async fn test_get_source_info_not_found() {
-    let core = DrasiServerCore::builder().build().await.unwrap();
+    let core = DrasiLib::builder().build().await.unwrap();
 
     let result = core.get_source_info("nonexistent").await;
     assert!(result.is_err());
@@ -65,7 +65,7 @@ async fn test_get_source_info_not_found() {
 
 #[tokio::test]
 async fn test_get_source_status() {
-    let core = DrasiServerCore::builder()
+    let core = DrasiLib::builder()
         .add_source(Source::application("test-source").build())
         .build()
         .await
@@ -77,7 +77,7 @@ async fn test_get_source_status() {
 
 #[tokio::test]
 async fn test_list_queries() {
-    let core = DrasiServerCore::builder()
+    let core = DrasiLib::builder()
         .add_source(Source::application("source1").build())
         .add_query(
             Query::cypher("query1")
@@ -105,7 +105,7 @@ async fn test_list_queries() {
 
 #[tokio::test]
 async fn test_get_query_info() {
-    let core = DrasiServerCore::builder()
+    let core = DrasiLib::builder()
         .add_source(Source::application("source1").build())
         .add_query(
             Query::cypher("test-query")
@@ -125,7 +125,7 @@ async fn test_get_query_info() {
 
 #[tokio::test]
 async fn test_get_query_info_not_found() {
-    let core = DrasiServerCore::builder().build().await.unwrap();
+    let core = DrasiLib::builder().build().await.unwrap();
 
     let result = core.get_query_info("nonexistent").await;
     assert!(result.is_err());
@@ -137,7 +137,7 @@ async fn test_get_query_info_not_found() {
 
 #[tokio::test]
 async fn test_get_query_status() {
-    let core = DrasiServerCore::builder()
+    let core = DrasiLib::builder()
         .add_source(Source::application("source1").build())
         .add_query(
             Query::cypher("test-query")
@@ -155,7 +155,7 @@ async fn test_get_query_status() {
 
 #[tokio::test]
 async fn test_get_query_results_not_running() {
-    let core = DrasiServerCore::builder()
+    let core = DrasiLib::builder()
         .add_source(Source::application("source1").build())
         .add_query(
             Query::cypher("test-query")
@@ -176,7 +176,7 @@ async fn test_get_query_results_not_running() {
 
 #[tokio::test]
 async fn test_list_reactions() {
-    let core = DrasiServerCore::builder()
+    let core = DrasiLib::builder()
         .add_source(Source::application("source1").build())
         .add_query(
             Query::cypher("query1")
@@ -204,7 +204,7 @@ async fn test_list_reactions() {
 
 #[tokio::test]
 async fn test_get_reaction_info() {
-    let core = DrasiServerCore::builder()
+    let core = DrasiLib::builder()
         .add_source(Source::application("source1").build())
         .add_query(
             Query::cypher("query1")
@@ -229,7 +229,7 @@ async fn test_get_reaction_info() {
 
 #[tokio::test]
 async fn test_get_reaction_info_not_found() {
-    let core = DrasiServerCore::builder().build().await.unwrap();
+    let core = DrasiLib::builder().build().await.unwrap();
 
     let result = core.get_reaction_info("nonexistent").await;
     assert!(result.is_err());
@@ -241,7 +241,7 @@ async fn test_get_reaction_info_not_found() {
 
 #[tokio::test]
 async fn test_get_reaction_status() {
-    let core = DrasiServerCore::builder()
+    let core = DrasiLib::builder()
         .add_source(Source::application("source1").build())
         .add_query(
             Query::cypher("query1")
@@ -264,7 +264,7 @@ async fn test_get_reaction_status() {
 
 #[tokio::test]
 async fn test_listing_empty_components() {
-    let core = DrasiServerCore::builder().build().await.unwrap();
+    let core = DrasiLib::builder().build().await.unwrap();
 
     let sources = core.list_sources().await.unwrap();
     assert_eq!(sources.len(), 0);

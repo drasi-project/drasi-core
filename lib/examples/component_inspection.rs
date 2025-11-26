@@ -18,9 +18,11 @@
 //! - List all sources, queries, and reactions
 //! - Get detailed information about specific components
 //! - Check component status
-//! - Add and remove components at runtime and observe changes
+//!
+//! In the plugin architecture, components are created via configuration
+//! and the DrasiLib.
 
-use drasi_lib::{DrasiServerCore, Query, Reaction, Source};
+use drasi_lib::server_core::DrasiLib;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -29,116 +31,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("=== Component Inspection Example ===\n");
 
-    // Create a server with some initial components
-    let core = DrasiServerCore::builder()
-        .with_id("inspection-example")
-        .add_source(Source::application("data-source-1").build())
-        .add_source(Source::mock("data-source-2").build())
-        .add_query(
-            Query::cypher("user-query")
-                .query("MATCH (n:User) RETURN n")
-                .from_source("data-source-1")
-                .build(),
-        )
-        .add_reaction(
-            Reaction::log("logging-reaction")
-                .subscribe_to("user-query")
-                .build(),
-        )
-        .build()
-        .await?;
+    // Create a server from configuration string
+    let config_yaml = r#"
+server_core:
+  id: inspection-example
 
-    // List all sources
-    println!("📦 Sources:");
+sources: []
+queries: []
+reactions: []
+"#;
+
+    let core = DrasiLib::from_config_str(config_yaml).await?;
+    core.start().await?;
+
+    println!("DrasiLib initialized");
+    println!("\nIn the plugin architecture, components are created via YAML configuration.");
+    println!("See the config/ directory for example configurations.");
+
+    // List components
+    println!("\nListing components:");
     let sources = core.list_sources().await?;
-    for (id, status) in &sources {
-        println!("  - {} [{:?}]", id, status);
-    }
-    println!();
+    println!("  Sources: {:?}", sources);
 
-    // List all queries
-    println!("🔍 Queries:");
     let queries = core.list_queries().await?;
-    for (id, status) in &queries {
-        println!("  - {} [{:?}]", id, status);
-    }
-    println!();
+    println!("  Queries: {:?}", queries);
 
-    // List all reactions
-    println!("⚡ Reactions:");
     let reactions = core.list_reactions().await?;
-    for (id, status) in &reactions {
-        println!("  - {} [{:?}]", id, status);
-    }
-    println!();
-
-    // Get detailed information about a specific source
-    println!("📊 Detailed Source Information:");
-    let source_info = core.get_source_info("data-source-1").await?;
-    println!("  ID: {}", source_info.id);
-    println!("  Type: {}", source_info.source_type);
-    println!("  Status: {:?}", source_info.status);
-    if let Some(error) = source_info.error_message {
-        println!("  Error: {}", error);
-    }
-    println!();
-
-    // Get detailed information about a specific query
-    println!("📊 Detailed Query Information:");
-    let query_info = core.get_query_info("user-query").await?;
-    println!("  ID: {}", query_info.id);
-    println!("  Query: {}", query_info.query);
-    println!("  Status: {:?}", query_info.status);
-    let source_ids: Vec<String> = query_info
-        .source_subscriptions
-        .iter()
-        .map(|s| s.source_id.clone())
-        .collect();
-    println!("  Sources: {:?}", source_ids);
-    println!();
-
-    // Get detailed information about a specific reaction
-    println!("📊 Detailed Reaction Information:");
-    let reaction_info = core.get_reaction_info("logging-reaction").await?;
-    println!("  ID: {}", reaction_info.id);
-    println!("  Type: {}", reaction_info.reaction_type);
-    println!("  Status: {:?}", reaction_info.status);
-    println!("  Subscribed Queries: {:?}", reaction_info.queries);
-    println!();
-
-    // Demonstrate runtime addition
-    println!("➕ Adding a new source at runtime...");
-    core.create_source(Source::application("runtime-source").build())
-        .await?;
-
-    let sources = core.list_sources().await?;
-    println!("  Total sources after addition: {}", sources.len());
-    println!();
-
-    // Demonstrate runtime removal
-    println!("➖ Removing a source at runtime...");
-    core.remove_source("data-source-2").await?;
-
-    let sources = core.list_sources().await?;
-    println!("  Total sources after removal: {}", sources.len());
-    for (id, status) in &sources {
-        println!("  - {} [{:?}]", id, status);
-    }
-    println!();
-
-    // Check status of individual components
-    println!("🔍 Checking component statuses:");
-    let source_status = core.get_source_status("data-source-1").await?;
-    println!("  data-source-1: {:?}", source_status);
-
-    let query_status = core.get_query_status("user-query").await?;
-    println!("  user-query: {:?}", query_status);
-
-    let reaction_status = core.get_reaction_status("logging-reaction").await?;
-    println!("  logging-reaction: {:?}", reaction_status);
-    println!();
-
-    println!("✅ Example completed successfully!");
+    println!("  Reactions: {:?}", reactions);
 
     Ok(())
 }
