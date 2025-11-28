@@ -118,4 +118,4 @@ mod mock;
 mod tests;
 
 pub use config::MockSourceConfig;
-pub use mock::MockSource;
+pub use mock::{MockSource, MockSourceBuilder};

@@ -130,17 +130,55 @@ use proto::{
     SubmitEventResponse,
 };
 
-/// gRPC source that exposes a gRPC endpoint to receive SourceChangeEvents
+/// gRPC source that exposes a gRPC endpoint to receive SourceChangeEvents.
+///
+/// This source implements a gRPC service for receiving data change events from external
+/// systems. It supports both unary and streaming RPC methods for event submission.
+///
+/// # Fields
+///
+/// - `base`: Common source functionality (dispatchers, status, lifecycle)
+/// - `config`: gRPC-specific configuration (host, port, timeout)
 pub struct GrpcSource {
+    /// Base source implementation providing common functionality
     base: SourceBase,
+    /// gRPC source configuration
     config: GrpcSourceConfig,
 }
 
 impl GrpcSource {
-    /// Create a new gRPC source
+    /// Create a new gRPC source.
     ///
     /// The event channel is automatically injected when the source is added
     /// to DrasiLib via `add_source()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Unique identifier for this source instance
+    /// * `config` - gRPC source configuration
+    ///
+    /// # Returns
+    ///
+    /// A new `GrpcSource` instance, or an error if construction fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the base source cannot be initialized.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use drasi_plugin_grpc::{GrpcSource, GrpcSourceConfig};
+    ///
+    /// let config = GrpcSourceConfig {
+    ///     host: "0.0.0.0".to_string(),
+    ///     port: 50051,
+    ///     endpoint: None,
+    ///     timeout_ms: 5000,
+    /// };
+    ///
+    /// let source = GrpcSource::new("my-grpc-source", config)?;
+    /// ```
     pub fn new(id: impl Into<String>, config: GrpcSourceConfig) -> Result<Self> {
         let id = id.into();
         let params = SourceBaseParams::new(id);
@@ -317,9 +355,13 @@ impl Source for GrpcSource {
     }
 }
 
-/// gRPC service implementation
+/// gRPC service implementation for the SourceService RPC methods.
+///
+/// Handles incoming gRPC requests and dispatches events to registered subscribers.
 struct GrpcSourceService {
+    /// The source ID used for event attribution
     source_id: String,
+    /// Shared dispatchers for sending events to subscribers
     dispatchers: Arc<
         RwLock<Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>,
     >,
@@ -513,7 +555,23 @@ impl SourceService for GrpcSourceService {
     }
 }
 
-/// Convert protobuf SourceChange to Drasi Core SourceChange
+/// Convert protobuf SourceChange to Drasi Core SourceChange.
+///
+/// # Arguments
+///
+/// * `proto_change` - The protobuf source change message
+/// * `source_id` - Source ID to use in element references
+///
+/// # Returns
+///
+/// A Drasi Core `SourceChange` or an error if conversion fails.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The change type is invalid
+/// - Required fields are missing
+/// - Element data cannot be converted
 fn convert_proto_to_source_change(
     proto_change: &ProtoSourceChange,
     source_id: &str,
@@ -545,7 +603,9 @@ fn convert_proto_to_source_change(
     }
 }
 
-/// Convert protobuf Element to Drasi Core Element
+/// Convert protobuf Element to Drasi Core Element.
+///
+/// Handles both Node and Relation element types.
 fn convert_proto_element_to_core(
     proto_element: &proto::Element,
     source_id: &str,
@@ -712,7 +772,21 @@ fn proto_value_to_json(value: &prost_types::Value) -> serde_json::Value {
     }
 }
 
-/// Builder for gRPC source configuration
+/// Builder for gRPC source configuration.
+///
+/// Provides a fluent API for constructing gRPC source configurations
+/// with sensible defaults.
+///
+/// # Example
+///
+/// ```rust
+/// use drasi_plugin_grpc::GrpcSourceBuilder;
+///
+/// let config = GrpcSourceBuilder::new()
+///     .with_host("0.0.0.0")
+///     .with_port(50051)
+///     .build();
+/// ```
 pub struct GrpcSourceBuilder {
     host: String,
     port: u16,

@@ -12,6 +12,151 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Platform Source Plugin for Drasi
+//!
+//! This plugin consumes data change events from Redis Streams, which is the primary
+//! integration point for the Drasi platform. It supports CloudEvent-wrapped messages
+//! containing node and relation changes, as well as control events for query subscriptions.
+//!
+//! # Architecture
+//!
+//! The platform source connects to Redis as a consumer group member, enabling:
+//! - **At-least-once delivery**: Messages are acknowledged after processing
+//! - **Horizontal scaling**: Multiple consumers can share the workload
+//! - **Fault tolerance**: Unacknowledged messages are redelivered
+//!
+//! # Configuration
+//!
+//! | Field | Type | Default | Description |
+//! |-------|------|---------|-------------|
+//! | `redis_url` | string | *required* | Redis connection URL (e.g., `redis://localhost:6379`) |
+//! | `stream_key` | string | *required* | Redis stream key to consume from |
+//! | `consumer_group` | string | `"drasi-core"` | Consumer group name |
+//! | `consumer_name` | string | auto-generated | Unique consumer name within the group |
+//! | `batch_size` | usize | `100` | Number of events to read per XREADGROUP call |
+//! | `block_ms` | u64 | `5000` | Milliseconds to block waiting for events |
+//!
+//! # Data Format
+//!
+//! The platform source expects CloudEvent-wrapped messages with a `data` array
+//! containing change events. Each event includes an operation type and payload.
+//!
+//! ## Node Insert
+//!
+//! ```json
+//! {
+//!     "data": [{
+//!         "op": "i",
+//!         "payload": {
+//!             "after": {
+//!                 "id": "user-123",
+//!                 "labels": ["User"],
+//!                 "properties": {
+//!                     "name": "Alice",
+//!                     "email": "alice@example.com"
+//!                 }
+//!             },
+//!             "source": {
+//!                 "db": "mydb",
+//!                 "table": "node",
+//!                 "ts_ns": 1699900000000000000
+//!             }
+//!         }
+//!     }]
+//! }
+//! ```
+//!
+//! ## Node Update
+//!
+//! ```json
+//! {
+//!     "data": [{
+//!         "op": "u",
+//!         "payload": {
+//!             "after": {
+//!                 "id": "user-123",
+//!                 "labels": ["User"],
+//!                 "properties": { "name": "Alice Updated" }
+//!             },
+//!             "source": { "table": "node", "ts_ns": 1699900001000000000 }
+//!         }
+//!     }]
+//! }
+//! ```
+//!
+//! ## Node Delete
+//!
+//! ```json
+//! {
+//!     "data": [{
+//!         "op": "d",
+//!         "payload": {
+//!             "before": {
+//!                 "id": "user-123",
+//!                 "labels": ["User"],
+//!                 "properties": {}
+//!             },
+//!             "source": { "table": "node", "ts_ns": 1699900002000000000 }
+//!         }
+//!     }]
+//! }
+//! ```
+//!
+//! ## Relation Insert
+//!
+//! ```json
+//! {
+//!     "data": [{
+//!         "op": "i",
+//!         "payload": {
+//!             "after": {
+//!                 "id": "follows-1",
+//!                 "labels": ["FOLLOWS"],
+//!                 "startId": "user-123",
+//!                 "endId": "user-456",
+//!                 "properties": { "since": "2024-01-01" }
+//!             },
+//!             "source": { "table": "rel", "ts_ns": 1699900003000000000 }
+//!         }
+//!     }]
+//! }
+//! ```
+//!
+//! # Control Events
+//!
+//! Control events are identified by `payload.source.db = "Drasi"` (case-insensitive).
+//! Currently supported control types:
+//!
+//! - **SourceSubscription**: Query subscription management
+//!
+//! # Example Configuration (YAML)
+//!
+//! ```yaml
+//! source_type: platform
+//! properties:
+//!   redis_url: "redis://localhost:6379"
+//!   stream_key: "my-app-changes"
+//!   consumer_group: "drasi-consumers"
+//!   batch_size: 50
+//!   block_ms: 10000
+//! ```
+//!
+//! # Usage Example
+//!
+//! ```rust,ignore
+//! use drasi_plugin_platform::{PlatformSource, PlatformSourceBuilder};
+//! use std::sync::Arc;
+//!
+//! let config = PlatformSourceBuilder::new()
+//!     .with_redis_url("redis://localhost:6379")
+//!     .with_stream_key("my-changes")
+//!     .with_consumer_group("my-consumers")
+//!     .build();
+//!
+//! let source = Arc::new(PlatformSource::new("platform-source", config)?);
+//! drasi.add_source(source).await?;
+//! ```
+
 pub mod config;
 pub use config::PlatformSourceConfig;
 
@@ -81,17 +226,164 @@ impl Default for PlatformConfig {
     }
 }
 
-/// Platform source that reads events from Redis Streams
+/// Platform source that reads events from Redis Streams.
+///
+/// This source connects to a Redis instance and consumes CloudEvent-wrapped
+/// messages from a stream using consumer groups. It supports both data events
+/// (node/relation changes) and control events (query subscriptions).
+///
+/// # Fields
+///
+/// - `base`: Common source functionality (dispatchers, status, lifecycle)
+/// - `config`: Platform-specific configuration (Redis connection, stream settings)
 pub struct PlatformSource {
+    /// Base source implementation providing common functionality
     base: SourceBase,
+    /// Platform source configuration
     config: PlatformSourceConfig,
 }
 
+/// Builder for creating [`PlatformSourceConfig`] instances.
+///
+/// Provides a fluent API for constructing platform source configurations
+/// with sensible defaults.
+///
+/// # Example
+///
+/// ```rust
+/// use drasi_plugin_platform::PlatformSourceBuilder;
+///
+/// let config = PlatformSourceBuilder::new()
+///     .with_redis_url("redis://localhost:6379")
+///     .with_stream_key("my-app-changes")
+///     .with_consumer_group("my-consumers")
+///     .with_batch_size(50)
+///     .build();
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct PlatformSourceBuilder {
+    redis_url: String,
+    stream_key: String,
+    consumer_group: Option<String>,
+    consumer_name: Option<String>,
+    batch_size: Option<usize>,
+    block_ms: Option<u64>,
+}
+
+impl PlatformSourceBuilder {
+    /// Create a new builder with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the Redis connection URL.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - Redis connection URL (e.g., `redis://localhost:6379`)
+    pub fn with_redis_url(mut self, url: impl Into<String>) -> Self {
+        self.redis_url = url.into();
+        self
+    }
+
+    /// Set the Redis stream key to consume from.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - Name of the Redis stream
+    pub fn with_stream_key(mut self, key: impl Into<String>) -> Self {
+        self.stream_key = key.into();
+        self
+    }
+
+    /// Set the consumer group name.
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - Consumer group name (default: `"drasi-core"`)
+    pub fn with_consumer_group(mut self, group: impl Into<String>) -> Self {
+        self.consumer_group = Some(group.into());
+        self
+    }
+
+    /// Set a unique consumer name within the group.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Unique consumer name (auto-generated if not specified)
+    pub fn with_consumer_name(mut self, name: impl Into<String>) -> Self {
+        self.consumer_name = Some(name.into());
+        self
+    }
+
+    /// Set the batch size for reading events.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - Number of events to read per XREADGROUP call (default: 100)
+    pub fn with_batch_size(mut self, size: usize) -> Self {
+        self.batch_size = Some(size);
+        self
+    }
+
+    /// Set the block timeout for waiting on events.
+    ///
+    /// # Arguments
+    ///
+    /// * `ms` - Milliseconds to block waiting for events (default: 5000)
+    pub fn with_block_ms(mut self, ms: u64) -> Self {
+        self.block_ms = Some(ms);
+        self
+    }
+
+    /// Build the configuration.
+    ///
+    /// # Returns
+    ///
+    /// A [`PlatformSourceConfig`] with the specified values.
+    pub fn build(self) -> PlatformSourceConfig {
+        PlatformSourceConfig {
+            redis_url: self.redis_url,
+            stream_key: self.stream_key,
+            consumer_group: self.consumer_group.unwrap_or_else(|| "drasi-core".to_string()),
+            consumer_name: self.consumer_name,
+            batch_size: self.batch_size.unwrap_or(100),
+            block_ms: self.block_ms.unwrap_or(5000),
+        }
+    }
+}
+
 impl PlatformSource {
-    /// Create a new platform source
+    /// Create a new platform source.
     ///
     /// The event channel is automatically injected when the source is added
     /// to DrasiLib via `add_source()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Unique identifier for this source instance
+    /// * `config` - Platform source configuration
+    ///
+    /// # Returns
+    ///
+    /// A new `PlatformSource` instance, or an error if construction fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the base source cannot be initialized.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use drasi_plugin_platform::{PlatformSource, PlatformSourceBuilder};
+    ///
+    /// let config = PlatformSourceBuilder::new()
+    ///     .with_redis_url("redis://localhost:6379")
+    ///     .with_stream_key("my-changes")
+    ///     .build();
+    ///
+    /// let source = PlatformSource::new("my-platform-source", config)?;
+    /// ```
     pub fn new(id: impl Into<String>, config: PlatformSourceConfig) -> Result<Self> {
         let id = id.into();
         let params = SourceBaseParams::new(id);

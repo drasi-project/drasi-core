@@ -93,6 +93,62 @@
 //!       key_columns: [order_id]
 //! ```
 //!
+//! # Data Format
+//!
+//! The PostgreSQL source decodes WAL messages and converts them to Drasi source changes.
+//! Each row change is mapped as follows:
+//!
+//! ## Node Mapping
+//!
+//! - **Element ID**: `{schema}:{table}:{primary_key_value}` (e.g., `public:users:123`)
+//! - **Labels**: `[{table_name}]` (e.g., `["users"]`)
+//! - **Properties**: All columns from the row (column names become property keys)
+//!
+//! ## WAL Message to SourceChange
+//!
+//! | WAL Operation | SourceChange |
+//! |---------------|--------------|
+//! | INSERT | `SourceChange::Insert { element: Node }` |
+//! | UPDATE | `SourceChange::Update { element: Node }` |
+//! | DELETE | `SourceChange::Delete { metadata }` |
+//!
+//! ## Example Mapping
+//!
+//! Given a PostgreSQL table:
+//!
+//! ```sql
+//! CREATE TABLE users (
+//!     id SERIAL PRIMARY KEY,
+//!     name VARCHAR(100),
+//!     email VARCHAR(255),
+//!     age INTEGER
+//! );
+//!
+//! INSERT INTO users (name, email, age) VALUES ('Alice', 'alice@example.com', 30);
+//! ```
+//!
+//! Produces a SourceChange equivalent to:
+//!
+//! ```json
+//! {
+//!     "type": "Insert",
+//!     "element": {
+//!         "metadata": {
+//!             "element_id": "public:users:1",
+//!             "source_id": "pg-source",
+//!             "labels": ["users"],
+//!             "effective_from": 1699900000000000
+//!         },
+//!         "properties": {
+//!             "id": 1,
+//!             "name": "Alice",
+//!             "email": "alice@example.com",
+//!             "age": 30
+//!         }
+//!     }
+//! }
+//! ```
+//!
 //! # Usage Example
 //!
 //! ```rust,ignore
@@ -133,16 +189,54 @@ use drasi_lib::channels::*;
 use drasi_lib::plugin_core::Source;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 
+/// PostgreSQL replication source that captures changes via logical replication.
+///
+/// This source connects to PostgreSQL using the replication protocol and decodes
+/// WAL messages in real-time, converting them to Drasi source change events.
+///
+/// # Fields
+///
+/// - `base`: Common source functionality (dispatchers, status, lifecycle)
+/// - `config`: PostgreSQL connection and replication configuration
 pub struct PostgresReplicationSource {
+    /// Base source implementation providing common functionality
     base: SourceBase,
+    /// PostgreSQL source configuration
     config: PostgresSourceConfig,
 }
 
 impl PostgresReplicationSource {
-    /// Create a new PostgreSQL replication source
+    /// Create a new PostgreSQL replication source.
     ///
     /// The event channel is automatically injected when the source is added
     /// to DrasiLib via `add_source()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Unique identifier for this source instance
+    /// * `config` - PostgreSQL source configuration
+    ///
+    /// # Returns
+    ///
+    /// A new `PostgresReplicationSource` instance, or an error if construction fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the base source cannot be initialized.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use drasi_plugin_postgres::{PostgresReplicationSource, PostgresSourceBuilder};
+    ///
+    /// let config = PostgresSourceBuilder::new()
+    ///     .with_host("db.example.com")
+    ///     .with_database("mydb")
+    ///     .with_user("replication_user")
+    ///     .build();
+    ///
+    /// let source = PostgresReplicationSource::new("my-pg-source", config)?;
+    /// ```
     pub fn new(id: impl Into<String>, config: PostgresSourceConfig) -> Result<Self> {
         let id = id.into();
         let params = SourceBaseParams::new(id);
@@ -351,7 +445,25 @@ async fn run_replication(
     stream.run().await
 }
 
-/// Builder for PostgreSQL source configuration
+/// Builder for PostgreSQL source configuration.
+///
+/// Provides a fluent API for constructing PostgreSQL source configurations
+/// with sensible defaults.
+///
+/// # Example
+///
+/// ```rust
+/// use drasi_plugin_postgres::PostgresSourceBuilder;
+///
+/// let config = PostgresSourceBuilder::new()
+///     .with_host("db.example.com")
+///     .with_database("production")
+///     .with_user("replication_user")
+///     .with_password("secret")
+///     .with_tables(vec!["users".to_string(), "orders".to_string()])
+///     .with_slot_name("my_slot")
+///     .build();
+/// ```
 pub struct PostgresSourceBuilder {
     host: String,
     port: u16,

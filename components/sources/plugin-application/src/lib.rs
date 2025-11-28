@@ -12,6 +12,125 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Application Source Plugin for Drasi
+//!
+//! This plugin enables programmatic event injection into Drasi's continuous query
+//! processing pipeline. Unlike other sources that connect to external data systems,
+//! the application source allows your Rust code to directly send graph data changes.
+//!
+//! # Architecture
+//!
+//! The application source uses a handle-based pattern:
+//! - **`ApplicationSource`**: The source component that processes events
+//! - **`ApplicationSourceHandle`**: A clonable handle for sending events from anywhere in your code
+//!
+//! # API Overview
+//!
+//! The `ApplicationSourceHandle` provides high-level methods for common operations:
+//!
+//! - [`send_node_insert`](ApplicationSourceHandle::send_node_insert) - Insert a new node
+//! - [`send_node_update`](ApplicationSourceHandle::send_node_update) - Update an existing node
+//! - [`send_delete`](ApplicationSourceHandle::send_delete) - Delete a node or relation
+//! - [`send_relation_insert`](ApplicationSourceHandle::send_relation_insert) - Insert a relationship
+//! - [`send_batch`](ApplicationSourceHandle::send_batch) - Send multiple changes efficiently
+//! - [`send`](ApplicationSourceHandle::send) - Send a raw `SourceChange` event
+//!
+//! # Building Properties
+//!
+//! Use the [`PropertyMapBuilder`] to construct property maps fluently:
+//!
+//! ```rust,ignore
+//! use drasi_plugin_application::PropertyMapBuilder;
+//!
+//! let props = PropertyMapBuilder::new()
+//!     .string("name", "Alice")
+//!     .integer("age", 30)
+//!     .float("score", 95.5)
+//!     .bool("active", true)
+//!     .build();
+//! ```
+//!
+//! # Configuration
+//!
+//! The application source has minimal configuration since it receives events programmatically
+//! rather than connecting to an external system.
+//!
+//! | Field | Type | Default | Description |
+//! |-------|------|---------|-------------|
+//! | `properties` | object | `{}` | Custom properties (passed through to `properties()`) |
+//!
+//! # Bootstrap Support
+//!
+//! The application source automatically tracks all insert events for bootstrap purposes.
+//! When a query subscribes with bootstrap enabled, it receives all previously inserted
+//! data. You can also configure an external bootstrap provider.
+//!
+//! # Example Configuration (YAML)
+//!
+//! ```yaml
+//! source_type: application
+//! properties: {}
+//! ```
+//!
+//! # Usage Example
+//!
+//! ```rust,ignore
+//! use drasi_plugin_application::{
+//!     ApplicationSource, ApplicationSourceConfig, ApplicationSourceHandle,
+//!     PropertyMapBuilder
+//! };
+//! use std::sync::Arc;
+//!
+//! // Create the source and handle
+//! let config = ApplicationSourceConfig::default();
+//! let (source, handle) = ApplicationSource::new("my-app-source", config)?;
+//!
+//! // Add source to Drasi
+//! let source = Arc::new(source);
+//! drasi.add_source(source).await?;
+//!
+//! // Clone handle for use in different parts of your application
+//! let handle_clone = handle.clone();
+//!
+//! // Insert a node
+//! let props = PropertyMapBuilder::new()
+//!     .string("name", "Alice")
+//!     .integer("age", 30)
+//!     .build();
+//!
+//! handle.send_node_insert("user-1", vec!["User"], props).await?;
+//!
+//! // Insert a relationship
+//! let rel_props = PropertyMapBuilder::new()
+//!     .string("since", "2024-01-01")
+//!     .build();
+//!
+//! handle.send_relation_insert(
+//!     "follows-1",
+//!     vec!["FOLLOWS"],
+//!     rel_props,
+//!     "user-1",  // start node
+//!     "user-2",  // end node
+//! ).await?;
+//!
+//! // Update a node
+//! let updated_props = PropertyMapBuilder::new()
+//!     .integer("age", 31)
+//!     .build();
+//!
+//! handle.send_node_update("user-1", vec!["User"], updated_props).await?;
+//!
+//! // Delete a node
+//! handle.send_delete("user-1", vec!["User"]).await?;
+//! ```
+//!
+//! # Use Cases
+//!
+//! - **Testing**: Inject test data directly without setting up external sources
+//! - **Integration**: Bridge between your application logic and Drasi queries
+//! - **Simulation**: Generate synthetic events for development and demos
+//! - **Hybrid Sources**: Combine with other sources for complex data pipelines
+
 pub mod config;
 pub use config::ApplicationSourceConfig;
 
@@ -197,21 +316,63 @@ impl ApplicationSourceHandle {
     }
 }
 
-/// A source that allows applications to programmatically inject events
+/// A source that allows applications to programmatically inject events.
+///
+/// This source receives events from an [`ApplicationSourceHandle`] and forwards
+/// them to the Drasi query processing pipeline. It also maintains a record of
+/// all insert events for bootstrap purposes.
+///
+/// # Fields
+///
+/// - `base`: Common source functionality (dispatchers, status, lifecycle)
+/// - `config`: Application source configuration
+/// - `app_rx`: Receiver for events from the handle
+/// - `app_tx`: Sender for creating additional handles
+/// - `bootstrap_data`: Accumulated insert events for bootstrap
+/// - `bootstrap_provider_config`: Optional external bootstrap provider configuration
 pub struct ApplicationSource {
+    /// Base source implementation providing common functionality
     base: SourceBase,
+    /// Application source configuration
     config: ApplicationSourceConfig,
+    /// Receiver for events from handles (taken when processing starts)
     app_rx: Arc<RwLock<Option<mpsc::Receiver<SourceChange>>>>,
+    /// Sender for creating new handles
     app_tx: mpsc::Sender<SourceChange>,
+    /// Accumulated insert events for internal bootstrap
     bootstrap_data: Arc<RwLock<Vec<SourceChange>>>,
+    /// Optional external bootstrap provider configuration
     bootstrap_provider_config: Option<BootstrapProviderConfig>,
 }
 
 impl ApplicationSource {
-    /// Create a new application source and its handle
+    /// Create a new application source and its handle.
     ///
     /// The event channel is automatically injected when the source is added
     /// to DrasiLib via `add_source()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Unique identifier for this source instance
+    /// * `config` - Application source configuration
+    ///
+    /// # Returns
+    ///
+    /// A tuple of `(ApplicationSource, ApplicationSourceHandle)` where the handle
+    /// can be used to send events to the source.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the base source cannot be initialized.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use drasi_plugin_application::{ApplicationSource, ApplicationSourceConfig};
+    ///
+    /// let config = ApplicationSourceConfig::default();
+    /// let (source, handle) = ApplicationSource::new("my-source", config)?;
+    /// ```
     pub fn new(
         id: impl Into<String>,
         config: ApplicationSourceConfig,

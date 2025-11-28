@@ -207,10 +207,23 @@ pub struct EventResponse {
     pub error: Option<String>,
 }
 
-/// HTTP source with configurable adaptive batching
+/// HTTP source with configurable adaptive batching.
+///
+/// This source exposes HTTP endpoints for receiving data change events.
+/// It supports both single-event and batch submission modes, with adaptive
+/// batching for optimized throughput.
+///
+/// # Fields
+///
+/// - `base`: Common source functionality (dispatchers, status, lifecycle)
+/// - `config`: HTTP-specific configuration (host, port, timeout)
+/// - `adaptive_config`: Adaptive batching settings for throughput optimization
 pub struct HttpSource {
+    /// Base source implementation providing common functionality
     base: SourceBase,
+    /// HTTP source configuration
     config: HttpSourceConfig,
+    /// Adaptive batching configuration for throughput optimization
     adaptive_config: AdaptiveBatchConfig,
 }
 
@@ -220,18 +233,48 @@ pub struct BatchEventRequest {
     pub events: Vec<HttpSourceChange>,
 }
 
-/// HTTP source app state with batching channel
+/// HTTP source app state with batching channel.
+///
+/// Shared state passed to Axum route handlers.
 #[derive(Clone)]
 struct HttpAppState {
+    /// The source ID for validation against incoming requests
     source_id: String,
+    /// Channel for sending events to the adaptive batcher
     batch_tx: mpsc::Sender<SourceChangeEvent>,
 }
 
 impl HttpSource {
-    /// Create a new HTTP source
+    /// Create a new HTTP source.
     ///
     /// The event channel is automatically injected when the source is added
     /// to DrasiLib via `add_source()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Unique identifier for this source instance
+    /// * `config` - HTTP source configuration
+    ///
+    /// # Returns
+    ///
+    /// A new `HttpSource` instance, or an error if construction fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the base source cannot be initialized.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use drasi_plugin_http::{HttpSource, HttpSourceBuilder};
+    ///
+    /// let config = HttpSourceBuilder::new()
+    ///     .with_host("0.0.0.0")
+    ///     .with_port(8080)
+    ///     .build();
+    ///
+    /// let source = HttpSource::new("my-http-source", config)?;
+    /// ```
     pub fn new(id: impl Into<String>, config: HttpSourceConfig) -> Result<Self> {
         let id = id.into();
         let params = SourceBaseParams::new(id);
@@ -266,10 +309,25 @@ impl HttpSource {
         })
     }
 
-    /// Create a new HTTP source with custom dispatch settings
+    /// Create a new HTTP source with custom dispatch settings.
     ///
     /// The event channel is automatically injected when the source is added
     /// to DrasiLib via `add_source()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Unique identifier for this source instance
+    /// * `config` - HTTP source configuration
+    /// * `dispatch_mode` - Optional dispatch mode (Channel, Direct, etc.)
+    /// * `dispatch_buffer_capacity` - Optional buffer capacity for channel dispatch
+    ///
+    /// # Returns
+    ///
+    /// A new `HttpSource` instance with custom dispatch settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the base source cannot be initialized.
     pub fn with_dispatch(
         id: impl Into<String>,
         config: HttpSourceConfig,
@@ -313,6 +371,10 @@ impl HttpSource {
         })
     }
 
+    /// Handle a single event submission from `POST /sources/{source_id}/events`.
+    ///
+    /// Validates the source ID matches this source and converts the HTTP event
+    /// to a source change before sending to the adaptive batcher.
     async fn handle_single_event(
         Path(source_id): Path<String>,
         State(state): State<HttpAppState>,
@@ -325,6 +387,10 @@ impl HttpSource {
         Self::process_events(&source_id, &state, vec![event]).await
     }
 
+    /// Handle a batch event submission from `POST /sources/{source_id}/events/batch`.
+    ///
+    /// Validates the source ID and processes all events in the batch,
+    /// returning partial success if some events fail.
     async fn handle_batch_events(
         Path(source_id): Path<String>,
         State(state): State<HttpAppState>,
@@ -338,6 +404,17 @@ impl HttpSource {
         Self::process_events(&source_id, &state, batch.events).await
     }
 
+    /// Process a list of events, converting and sending them to the batcher.
+    ///
+    /// # Arguments
+    ///
+    /// * `source_id` - Source ID from the request path
+    /// * `state` - Shared app state containing the batch channel
+    /// * `events` - List of HTTP source changes to process
+    ///
+    /// # Returns
+    ///
+    /// Success response with count of processed events, or error if all fail.
     async fn process_events(
         source_id: &str,
         state: &HttpAppState,
@@ -760,7 +837,23 @@ impl Source for HttpSource {
     }
 }
 
-/// Builder for HTTP source configuration
+/// Builder for HTTP source configuration.
+///
+/// Provides a fluent API for constructing HTTP source configurations
+/// with sensible defaults and adaptive batching settings.
+///
+/// # Example
+///
+/// ```rust
+/// use drasi_plugin_http::HttpSourceBuilder;
+///
+/// let config = HttpSourceBuilder::new()
+///     .with_host("0.0.0.0")
+///     .with_port(8080)
+///     .with_adaptive_enabled(true)
+///     .with_adaptive_max_batch_size(500)
+///     .build();
+/// ```
 pub struct HttpSourceBuilder {
     host: String,
     port: u16,

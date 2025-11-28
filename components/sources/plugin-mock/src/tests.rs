@@ -12,14 +12,213 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(test)]
-mod mock_source_tests {
+//! Unit tests for the mock source plugin.
+//!
+//! Tests are organized into the following modules:
+//! - `construction`: Tests for creating mock sources
+//! - `properties`: Tests for source properties and type name
+//! - `builder`: Tests for the `MockSourceBuilder`
+//! - `lifecycle`: Tests for start/stop behavior
+//! - `event_generation`: Tests for data generation modes
+
+// ============================================================================
+// Construction Tests
+// ============================================================================
+
+mod construction {
+    use crate::{MockSource, MockSourceBuilder, MockSourceConfig};
+    use drasi_lib::plugin_core::Source;
+
+    #[test]
+    fn test_new_with_valid_config() {
+        let config = MockSourceBuilder::new()
+            .with_data_type("counter")
+            .with_interval_ms(1000)
+            .build();
+
+        let source = MockSource::new("test-source", config);
+        assert!(source.is_ok());
+    }
+
+    #[test]
+    fn test_new_with_custom_config() {
+        let config = MockSourceConfig {
+            data_type: "sensor".to_string(),
+            interval_ms: 500,
+        };
+
+        let source = MockSource::new("sensor-source", config).unwrap();
+        assert_eq!(source.id(), "sensor-source");
+    }
+
+    #[test]
+    fn test_with_dispatch_creates_source() {
+        let config = MockSourceBuilder::new().build();
+        let source = MockSource::with_dispatch(
+            "dispatch-source",
+            config,
+            Some(drasi_lib::channels::DispatchMode::Channel),
+            Some(1000),
+        );
+        assert!(source.is_ok());
+        assert_eq!(source.unwrap().id(), "dispatch-source");
+    }
+}
+
+// ============================================================================
+// Properties Tests
+// ============================================================================
+
+mod properties {
+    use crate::{MockSource, MockSourceBuilder};
+    use drasi_lib::plugin_core::Source;
+
+    #[test]
+    fn test_id_returns_correct_value() {
+        let config = MockSourceBuilder::new().build();
+        let source = MockSource::new("my-mock-source", config).unwrap();
+        assert_eq!(source.id(), "my-mock-source");
+    }
+
+    #[test]
+    fn test_type_name_returns_mock() {
+        let config = MockSourceBuilder::new().build();
+        let source = MockSource::new("test", config).unwrap();
+        assert_eq!(source.type_name(), "mock");
+    }
+
+    #[test]
+    fn test_properties_contains_data_type() {
+        let config = MockSourceBuilder::new()
+            .with_data_type("sensor")
+            .build();
+        let source = MockSource::new("test", config).unwrap();
+        let props = source.properties();
+
+        assert_eq!(
+            props.get("data_type"),
+            Some(&serde_json::Value::String("sensor".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_properties_contains_interval_ms() {
+        let config = MockSourceBuilder::new()
+            .with_interval_ms(2000)
+            .build();
+        let source = MockSource::new("test", config).unwrap();
+        let props = source.properties();
+
+        assert_eq!(
+            props.get("interval_ms"),
+            Some(&serde_json::Value::Number(2000.into()))
+        );
+    }
+}
+
+// ============================================================================
+// Lifecycle Tests
+// ============================================================================
+
+mod lifecycle {
     use crate::{MockSource, MockSourceConfig};
     use drasi_lib::channels::ComponentStatus;
     use drasi_lib::plugin_core::Source;
 
+    #[tokio::test]
+    async fn test_initial_status_is_stopped() {
+        let config = MockSourceConfig {
+            data_type: "counter".to_string(),
+            interval_ms: 1000,
+        };
+
+        let source = MockSource::new("test", config).unwrap();
+        assert_eq!(source.status().await, ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_status_transitions() {
+        let config = MockSourceConfig {
+            data_type: "counter".to_string(),
+            interval_ms: 1000,
+        };
+
+        let source = MockSource::new("test-status", config).unwrap();
+
+        // Initial status
+        assert_eq!(source.status().await, ComponentStatus::Stopped);
+
+        // Start the source
+        source.start().await.unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        assert_eq!(source.status().await, ComponentStatus::Running);
+
+        // Stop the source
+        source.stop().await.unwrap();
+        assert_eq!(source.status().await, ComponentStatus::Stopped);
+    }
+}
+
+// ============================================================================
+// Builder Tests
+// ============================================================================
+
+mod builder {
+    use crate::MockSourceBuilder;
+
+    #[test]
+    fn test_builder_defaults() {
+        let config = MockSourceBuilder::new().build();
+
+        assert_eq!(config.data_type, "generic");
+        assert_eq!(config.interval_ms, 5000);
+    }
+
+    #[test]
+    fn test_builder_with_all_options() {
+        let config = MockSourceBuilder::new()
+            .with_data_type("sensor")
+            .with_interval_ms(1000)
+            .build();
+
+        assert_eq!(config.data_type, "sensor");
+        assert_eq!(config.interval_ms, 1000);
+    }
+
+    #[test]
+    fn test_builder_chaining() {
+        let config = MockSourceBuilder::new()
+            .with_data_type("counter")
+            .with_data_type("sensor") // Override
+            .build();
+
+        assert_eq!(config.data_type, "sensor");
+    }
+
+    #[test]
+    fn test_builder_default_trait() {
+        let builder1 = MockSourceBuilder::new();
+        let builder2 = MockSourceBuilder::default();
+
+        let config1 = builder1.build();
+        let config2 = builder2.build();
+
+        // Default trait starts with empty values, so we check new() gives better defaults
+        assert_eq!(config1.data_type, "generic");
+        assert_eq!(config2.data_type, ""); // Default trait gives empty string
+    }
+}
+
+// ============================================================================
+// Event Generation Tests
+// ============================================================================
+
+mod event_generation {
+    use crate::{MockSource, MockSourceConfig};
+    use drasi_lib::plugin_core::Source;
+
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_mock_source_counter() {
+    async fn test_counter_data_generation() {
         let config = MockSourceConfig {
             data_type: "counter".to_string(),
             interval_ms: 100,
@@ -53,7 +252,7 @@ mod mock_source_tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_mock_source_sensor() {
+    async fn test_sensor_data_generation() {
         let config = MockSourceConfig {
             data_type: "sensor".to_string(),
             interval_ms: 100,
@@ -84,25 +283,75 @@ mod mock_source_tests {
         source.stop().await.unwrap();
     }
 
-    #[tokio::test]
-    async fn test_mock_source_status() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_generic_data_generation() {
         let config = MockSourceConfig {
-            data_type: "counter".to_string(),
-            interval_ms: 1000,
+            data_type: "generic".to_string(),
+            interval_ms: 100,
         };
 
-        let source = MockSource::new("test-status", config).unwrap();
-
-        // Initial status
-        assert_eq!(source.status().await, ComponentStatus::Stopped);
+        let source = MockSource::new("test-generic", config).unwrap();
+        let mut rx = source.test_subscribe();
 
         // Start the source
         source.start().await.unwrap();
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        assert_eq!(source.status().await, ComponentStatus::Running);
+
+        // Collect changes
+        let mut changes = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_millis(350), async {
+            while let Ok(event) = rx.recv().await {
+                changes.push(event);
+                if changes.len() >= 2 {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("Timeout waiting for changes");
+
+        assert!(changes.len() >= 2);
 
         // Stop the source
         source.stop().await.unwrap();
-        assert_eq!(source.status().await, ComponentStatus::Stopped);
+    }
+}
+
+// ============================================================================
+// Config Tests
+// ============================================================================
+
+mod config {
+    use crate::MockSourceConfig;
+
+    #[test]
+    fn test_config_serialization() {
+        let config = MockSourceConfig {
+            data_type: "sensor".to_string(),
+            interval_ms: 1000,
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: MockSourceConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(config.data_type, deserialized.data_type);
+        assert_eq!(config.interval_ms, deserialized.interval_ms);
+    }
+
+    #[test]
+    fn test_config_deserialization_with_defaults() {
+        let json = r#"{}"#;
+        let config: MockSourceConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(config.data_type, "generic"); // default
+        assert_eq!(config.interval_ms, 5000); // default
+    }
+
+    #[test]
+    fn test_config_deserialization_partial() {
+        let json = r#"{"data_type": "counter"}"#;
+        let config: MockSourceConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(config.data_type, "counter");
+        assert_eq!(config.interval_ms, 5000); // default
     }
 }

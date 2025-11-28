@@ -52,12 +52,10 @@ use std::sync::Arc;
 /// ```no_run
 /// use drasi_plugin_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
 /// use std::collections::HashMap;
-/// use tokio::sync::mpsc;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let (event_tx, _event_rx) = mpsc::channel(100);
 /// let config = ApplicationSourceConfig { properties: HashMap::new() };
-/// let (source, handle) = ApplicationSource::new("events", config, event_tx)?;
+/// let (source, handle) = ApplicationSource::new("events", config)?;
 ///
 /// // Create a user node with multiple properties
 /// let properties = PropertyMapBuilder::new()
