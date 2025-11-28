@@ -32,7 +32,7 @@
  */
 
 import "@typespec/json-schema";
-import "./common-types.tsp";
+import "../../../../typespec/core-types.tsp";
 
 using TypeSpec.JsonSchema;
 using Drasi.Sources;
