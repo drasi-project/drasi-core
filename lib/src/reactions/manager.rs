@@ -56,23 +56,23 @@ impl ReactionManager {
     pub async fn add_reaction(&self, reaction: Arc<dyn Reaction>) -> Result<()> {
         let reaction_id = reaction.id().to_string();
 
-        // Check if reaction with this id already exists
-        if self.reactions.read().await.contains_key(&reaction_id) {
-            return Err(anyhow::anyhow!(
-                "Reaction with id '{}' already exists",
-                reaction_id
-            ));
-        }
-
         // Inject the event channel before storing
         reaction.inject_event_tx(self.event_tx.clone()).await;
 
-        self.reactions
-            .write()
-            .await
-            .insert(reaction_id.clone(), reaction);
-        info!("Added reaction: {}", reaction_id);
+        // Use a single write lock to atomically check and insert
+        // This eliminates the TOCTOU race condition from separate read-then-write
+        {
+            let mut reactions = self.reactions.write().await;
+            if reactions.contains_key(&reaction_id) {
+                return Err(anyhow::anyhow!(
+                    "Reaction with id '{}' already exists",
+                    reaction_id
+                ));
+            }
+            reactions.insert(reaction_id.clone(), reaction);
+        }
 
+        info!("Added reaction: {}", reaction_id);
         Ok(())
     }
 

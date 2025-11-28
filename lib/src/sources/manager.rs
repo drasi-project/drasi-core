@@ -106,20 +106,23 @@ impl SourceManager {
     pub async fn add_source(&self, source: Arc<dyn Source>) -> Result<()> {
         let source_id = source.id().to_string();
 
-        // Check if source with this id already exists
-        if self.sources.read().await.contains_key(&source_id) {
-            return Err(anyhow::anyhow!(
-                "Source with id '{}' already exists",
-                source_id
-            ));
-        }
-
         // Inject the event channel before storing
         source.inject_event_tx(self.event_tx.clone()).await;
 
-        self.sources.write().await.insert(source_id.clone(), source);
-        info!("Added source: {}", source_id);
+        // Use a single write lock to atomically check and insert
+        // This eliminates the TOCTOU race condition from separate read-then-write
+        {
+            let mut sources = self.sources.write().await;
+            if sources.contains_key(&source_id) {
+                return Err(anyhow::anyhow!(
+                    "Source with id '{}' already exists",
+                    source_id
+                ));
+            }
+            sources.insert(source_id.clone(), source);
+        }
 
+        info!("Added source: {}", source_id);
         Ok(())
     }
 

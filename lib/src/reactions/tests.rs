@@ -282,4 +282,80 @@ mod manager_tests {
         assert!(status.is_err());
         assert!(status.unwrap_err().to_string().contains("not found"));
     }
+
+    /// Test that concurrent add_reaction calls with the same ID are handled atomically.
+    /// Only one should succeed, the others should fail with "already exists".
+    /// This tests the TOCTOU fix where we use a single write lock for check-and-insert.
+    #[tokio::test]
+    async fn test_concurrent_add_reaction_same_id() {
+        let (manager, _event_rx, event_tx) = create_test_manager().await;
+
+        // Spawn multiple tasks trying to add a reaction with the same ID concurrently
+        let mut handles = Vec::new();
+        for i in 0..10 {
+            let manager_clone = manager.clone();
+            let event_tx_clone = event_tx.clone();
+            handles.push(tokio::spawn(async move {
+                let reaction = create_test_mock_reaction(
+                    "same-reaction".to_string(),
+                    vec![],
+                    event_tx_clone,
+                );
+                let result = manager_clone.add_reaction(reaction).await;
+                (i, result.is_ok())
+            }));
+        }
+
+        // Wait for all tasks to complete
+        let mut success_count = 0;
+        let mut failure_count = 0;
+        for handle in handles {
+            let (_i, succeeded) = handle.await.unwrap();
+            if succeeded {
+                success_count += 1;
+            } else {
+                failure_count += 1;
+            }
+        }
+
+        // Exactly one should succeed, all others should fail
+        assert_eq!(success_count, 1, "Exactly one add_reaction should succeed");
+        assert_eq!(failure_count, 9, "All other add_reaction calls should fail");
+
+        // Verify only one reaction exists
+        let reactions = manager.list_reactions().await;
+        assert_eq!(reactions.len(), 1);
+        assert_eq!(reactions[0].0, "same-reaction");
+    }
+
+    /// Test that concurrent add_reaction calls with different IDs all succeed.
+    #[tokio::test]
+    async fn test_concurrent_add_reaction_different_ids() {
+        let (manager, _event_rx, event_tx) = create_test_manager().await;
+
+        // Spawn multiple tasks adding reactions with unique IDs
+        let mut handles = Vec::new();
+        for i in 0..10 {
+            let manager_clone = manager.clone();
+            let event_tx_clone = event_tx.clone();
+            handles.push(tokio::spawn(async move {
+                let reaction = create_test_mock_reaction(
+                    format!("reaction-{}", i),
+                    vec![],
+                    event_tx_clone,
+                );
+                manager_clone.add_reaction(reaction).await
+            }));
+        }
+
+        // Wait for all tasks to complete
+        for handle in handles {
+            let result = handle.await.unwrap();
+            assert!(result.is_ok(), "All add_reaction calls with unique IDs should succeed");
+        }
+
+        // Verify all 10 reactions exist
+        let reactions = manager.list_reactions().await;
+        assert_eq!(reactions.len(), 10);
+    }
 }

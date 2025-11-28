@@ -951,26 +951,21 @@ impl QueryManager {
     pub async fn add_query_instance_for_test(&self, query: Arc<dyn Query>) -> Result<()> {
         let query_id = query.get_config().id.clone();
 
-        if self.queries.read().await.contains_key(&query_id) {
+        // Use a single write lock to atomically check and insert
+        // This eliminates the TOCTOU race condition from separate read-then-write
+        let mut queries = self.queries.write().await;
+        if queries.contains_key(&query_id) {
             return Err(anyhow::anyhow!(
                 "Query with id '{}' already exists",
                 query_id
             ));
         }
-
-        self.queries.write().await.insert(query_id, query);
+        queries.insert(query_id, query);
         Ok(())
     }
 
     async fn add_query_internal(&self, config: QueryConfig) -> Result<()> {
-        // Check if query with this id already exists
-        if self.queries.read().await.contains_key(&config.id) {
-            return Err(anyhow::anyhow!(
-                "Query with id '{}' already exists",
-                config.id
-            ));
-        }
-
+        // Create the query instance first (before acquiring lock)
         let query = DrasiQuery::new(
             config.clone(),
             self.event_tx.clone(),
@@ -984,7 +979,19 @@ impl QueryManager {
         let query_id = config.id.clone();
         let should_auto_start = config.auto_start;
 
-        self.queries.write().await.insert(config.id.clone(), query);
+        // Use a single write lock to atomically check and insert
+        // This eliminates the TOCTOU race condition from separate read-then-write
+        {
+            let mut queries = self.queries.write().await;
+            if queries.contains_key(&config.id) {
+                return Err(anyhow::anyhow!(
+                    "Query with id '{}' already exists",
+                    config.id
+                ));
+            }
+            queries.insert(config.id.clone(), query);
+        }
+
         info!("Added query: {} with bootstrap support", config.id);
 
         // Note: Auto-start is handled by the caller (server.create_query)
