@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use crate::channels::ComponentStatus;
 use crate::component_ops::map_component_error;
-use crate::config::{SourceConfig, SourceRuntime};
+use crate::config::SourceRuntime;
 use crate::error::{DrasiError, Result};
 use crate::lib_core::DrasiLib;
 
@@ -182,30 +182,5 @@ impl DrasiLib {
     /// ```
     pub async fn get_source_status(&self, id: &str) -> Result<ComponentStatus> {
         self.inspection.get_source_status(id).await
-    }
-
-    /// Get the configuration for a source.
-    ///
-    /// Returns the `SourceConfig` that was used to create the source.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// * The source does not exist
-    /// * The source was created without a config (e.g., via `with_source()`)
-    pub async fn get_source_config(&self, id: &str) -> Result<SourceConfig> {
-        // First check if the source exists
-        if self.source_manager.get_source_instance(id).await.is_none() {
-            return Err(DrasiError::component_not_found("source", id));
-        }
-
-        // Get the stored config
-        let configs = self.source_configs.read().await;
-        configs.get(id).cloned().ok_or_else(|| {
-            DrasiError::component_not_found(
-                "source config",
-                &format!("{} (was it created via with_source()?)", id),
-            )
-        })
     }
 }

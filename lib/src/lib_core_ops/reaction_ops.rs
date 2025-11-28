@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use crate::channels::ComponentStatus;
 use crate::component_ops::map_state_error;
-use crate::config::{ReactionConfig, ReactionRuntime};
+use crate::config::ReactionRuntime;
 use crate::error::{DrasiError, Result};
 use crate::lib_core::DrasiLib;
 
@@ -185,35 +185,5 @@ impl DrasiLib {
     /// ```
     pub async fn get_reaction_status(&self, id: &str) -> Result<ComponentStatus> {
         self.inspection.get_reaction_status(id).await
-    }
-
-    /// Get the configuration for a reaction.
-    ///
-    /// Returns the `ReactionConfig` that was used to create the reaction.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// * The reaction does not exist
-    /// * The reaction was created without a config (e.g., via `with_reaction()`)
-    pub async fn get_reaction_config(&self, id: &str) -> Result<ReactionConfig> {
-        // First check if the reaction exists
-        if self
-            .reaction_manager
-            .get_reaction_status(id.to_string())
-            .await
-            .is_err()
-        {
-            return Err(DrasiError::component_not_found("reaction", id));
-        }
-
-        // Get the stored config
-        let configs = self.reaction_configs.read().await;
-        configs.get(id).cloned().ok_or_else(|| {
-            DrasiError::component_not_found(
-                "reaction config",
-                &format!("{} (was it created via with_reaction()?)", id),
-            )
-        })
     }
 }

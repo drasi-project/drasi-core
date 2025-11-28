@@ -23,12 +23,10 @@
 //! - `source_ops`: Source management operations (add, remove, start, stop)
 //! - `query_ops`: Query management operations (create, remove, start, stop)
 //! - `reaction_ops`: Reaction management operations (add, remove, start, stop)
-//! - `registry_ops`: Factory registry operations for config-based component creation
 
 mod source_ops;
 mod query_ops;
 mod reaction_ops;
-mod registry_ops;
 
 // These modules add impl blocks to DrasiLib, they don't export types
 // The modules are compiled but we don't need to re-export anything

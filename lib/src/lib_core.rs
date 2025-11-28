@@ -19,11 +19,10 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::channels::*;
-use crate::config::{DrasiLibConfig, ReactionConfig, RuntimeConfig, SourceConfig};
+use crate::config::{DrasiLibConfig, RuntimeConfig};
 use crate::error::DrasiError;
 use crate::inspection::InspectionAPI;
 use crate::lifecycle::{ComponentsRunningState, LifecycleManager};
-use crate::plugin_core::{ReactionRegistry, SourceRegistry};
 use crate::queries::QueryManager;
 use crate::reactions::ReactionManager;
 use crate::sources::SourceManager;
@@ -196,12 +195,6 @@ pub struct DrasiLib {
     pub(crate) lifecycle: Arc<RwLock<LifecycleManager>>,
     // Middleware registry for source middleware
     pub(crate) middleware_registry: Arc<MiddlewareTypeRegistry>,
-    // Plugin registries for factory-based component creation
-    pub(crate) source_registry: Arc<RwLock<Option<SourceRegistry>>>,
-    pub(crate) reaction_registry: Arc<RwLock<Option<ReactionRegistry>>>,
-    // Store source and reaction configs for retrieval
-    pub(crate) source_configs: Arc<RwLock<std::collections::HashMap<String, SourceConfig>>>,
-    pub(crate) reaction_configs: Arc<RwLock<std::collections::HashMap<String, ReactionConfig>>>,
 }
 
 impl Clone for DrasiLib {
@@ -217,10 +210,6 @@ impl Clone for DrasiLib {
             inspection: self.inspection.clone(),
             lifecycle: Arc::clone(&self.lifecycle),
             middleware_registry: Arc::clone(&self.middleware_registry),
-            source_registry: Arc::clone(&self.source_registry),
-            reaction_registry: Arc::clone(&self.reaction_registry),
-            source_configs: Arc::clone(&self.source_configs),
-            reaction_configs: Arc::clone(&self.reaction_configs),
         }
     }
 }
@@ -305,10 +294,6 @@ impl DrasiLib {
             inspection,
             lifecycle,
             middleware_registry,
-            source_registry: Arc::new(RwLock::new(None)),
-            reaction_registry: Arc::new(RwLock::new(None)),
-            source_configs: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            reaction_configs: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
 

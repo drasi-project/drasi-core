@@ -66,7 +66,6 @@
 
 pub mod bootstrap;
 pub mod reaction;
-pub mod registry;
 pub mod source;
 
 // Re-export core traits for convenience
@@ -80,6 +79,3 @@ pub use reaction::{QuerySubscriber, Reaction};
 
 // Bootstrap traits
 pub use bootstrap::BootstrapProvider;
-
-// Registry types for factory-based plugin creation
-pub use registry::{ReactionRegistry, SourceRegistry};

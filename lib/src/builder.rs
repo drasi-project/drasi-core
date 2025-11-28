@@ -72,7 +72,6 @@ use crate::error::{DrasiError, Result};
 use crate::indexes::StorageBackendConfig;
 use crate::plugin_core::Reaction as ReactionTrait;
 use crate::plugin_core::Source as SourceTrait;
-use crate::plugin_core::{ReactionRegistry, SourceRegistry};
 use crate::lib_core::DrasiLib;
 
 // ============================================================================
@@ -123,8 +122,6 @@ pub struct DrasiLibBuilder {
     query_configs: Vec<QueryConfig>,
     source_instances: Vec<Arc<dyn SourceTrait>>,
     reaction_instances: Vec<Arc<dyn ReactionTrait>>,
-    source_registry: Option<SourceRegistry>,
-    reaction_registry: Option<ReactionRegistry>,
 }
 
 impl Default for DrasiLibBuilder {
@@ -144,8 +141,6 @@ impl DrasiLibBuilder {
             query_configs: Vec::new(),
             source_instances: Vec::new(),
             reaction_instances: Vec::new(),
-            source_registry: None,
-            reaction_registry: None,
         }
     }
 
@@ -194,48 +189,6 @@ impl DrasiLibBuilder {
     /// drasi-lib only knows about the `Reaction` trait - it has no knowledge of which plugins exist.
     pub fn with_reaction(mut self, reaction: Arc<dyn ReactionTrait>) -> Self {
         self.reaction_instances.push(reaction);
-        self
-    }
-
-    /// Set the source registry for factory-based source creation.
-    ///
-    /// The registry maps source type names to factory functions that create source instances.
-    /// This enables dynamic source creation from generic `SourceConfig` objects.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let mut registry = SourceRegistry::new();
-    /// registry.register("mock", |config| { ... });
-    ///
-    /// let core = DrasiLib::builder()
-    ///     .with_source_registry(registry)
-    ///     .build()
-    ///     .await?;
-    /// ```
-    pub fn with_source_registry(mut self, registry: SourceRegistry) -> Self {
-        self.source_registry = Some(registry);
-        self
-    }
-
-    /// Set the reaction registry for factory-based reaction creation.
-    ///
-    /// The registry maps reaction type names to factory functions that create reaction instances.
-    /// This enables dynamic reaction creation from generic `ReactionConfig` objects.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let mut registry = ReactionRegistry::new();
-    /// registry.register("log", |config| { ... });
-    ///
-    /// let core = DrasiLib::builder()
-    ///     .with_reaction_registry(registry)
-    ///     .build()
-    ///     .await?;
-    /// ```
-    pub fn with_reaction_registry(mut self, registry: ReactionRegistry) -> Self {
-        self.reaction_registry = Some(registry);
         self
     }
 
@@ -293,14 +246,6 @@ impl DrasiLibBuilder {
                         reaction_id, e
                     ))
                 })?;
-        }
-
-        // Inject registries for factory-based creation
-        if let Some(registry) = self.source_registry {
-            core.set_source_registry(registry).await;
-        }
-        if let Some(registry) = self.reaction_registry {
-            core.set_reaction_registry(registry).await;
         }
 
         Ok(core)

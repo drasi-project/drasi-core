@@ -116,7 +116,7 @@ pub use indexes::{StorageBackendConfig, StorageBackendRef, StorageBackendSpec};
 /// Plugin core traits for implementing sources, reactions, and bootstrap providers
 /// Note: Traits are named with 'Trait' suffix to avoid conflicts with builder API types
 pub use plugin_core::{
-    BootstrapProvider, QuerySubscriber, ReactionRegistry, SourceRegistry,
+    BootstrapProvider, QuerySubscriber,
     Reaction as ReactionTrait,
     Source as SourceTrait,
 };
