@@ -18,7 +18,7 @@ mod query_joins_tests {
     use crate::config::{QueryConfig, QueryJoinConfig, QueryJoinKeyConfig};
     use crate::queries::QueryManager;
     use crate::sources::{convert_json_to_element_value, SourceManager};
-    use crate::test_support::helpers::test_mocks::{create_test_mock_source, TestMockSource};
+    use crate::sources::tests::{create_test_mock_source, TestMockSource};
     use drasi_core::middleware::MiddlewareTypeRegistry;
     use drasi_core::models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,

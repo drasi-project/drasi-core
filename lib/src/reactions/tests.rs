@@ -16,9 +16,121 @@
 mod manager_tests {
     use super::super::*;
     use crate::channels::*;
-    use crate::test_support::helpers::test_mocks::create_test_mock_reaction;
+    use async_trait::async_trait;
+    use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::mpsc;
+    use tokio::sync::RwLock;
+
+    /// A simple test mock reaction for unit testing the ReactionManager.
+    struct TestMockReaction {
+        id: String,
+        queries: Vec<String>,
+        status: Arc<RwLock<ComponentStatus>>,
+        event_tx: ComponentEventSender,
+    }
+
+    impl TestMockReaction {
+        fn new(id: String, queries: Vec<String>, event_tx: ComponentEventSender) -> Self {
+            Self {
+                id,
+                queries,
+                status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
+                event_tx,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl crate::plugin_core::Reaction for TestMockReaction {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn type_name(&self) -> &str {
+            "log"
+        }
+
+        fn properties(&self) -> HashMap<String, serde_json::Value> {
+            HashMap::new()
+        }
+
+        fn query_ids(&self) -> Vec<String> {
+            self.queries.clone()
+        }
+
+        async fn start(
+            &self,
+            _query_subscriber: Arc<dyn crate::plugin_core::QuerySubscriber>,
+        ) -> anyhow::Result<()> {
+            *self.status.write().await = ComponentStatus::Starting;
+
+            let event = ComponentEvent {
+                component_id: self.id.clone(),
+                component_type: ComponentType::Reaction,
+                status: ComponentStatus::Starting,
+                timestamp: chrono::Utc::now(),
+                message: Some("Starting reaction".to_string()),
+            };
+            let _ = self.event_tx.send(event).await;
+
+            *self.status.write().await = ComponentStatus::Running;
+
+            let event = ComponentEvent {
+                component_id: self.id.clone(),
+                component_type: ComponentType::Reaction,
+                status: ComponentStatus::Running,
+                timestamp: chrono::Utc::now(),
+                message: Some("Reaction started".to_string()),
+            };
+            let _ = self.event_tx.send(event).await;
+
+            Ok(())
+        }
+
+        async fn stop(&self) -> anyhow::Result<()> {
+            *self.status.write().await = ComponentStatus::Stopping;
+
+            let event = ComponentEvent {
+                component_id: self.id.clone(),
+                component_type: ComponentType::Reaction,
+                status: ComponentStatus::Stopping,
+                timestamp: chrono::Utc::now(),
+                message: Some("Stopping reaction".to_string()),
+            };
+            let _ = self.event_tx.send(event).await;
+
+            *self.status.write().await = ComponentStatus::Stopped;
+
+            let event = ComponentEvent {
+                component_id: self.id.clone(),
+                component_type: ComponentType::Reaction,
+                status: ComponentStatus::Stopped,
+                timestamp: chrono::Utc::now(),
+                message: Some("Reaction stopped".to_string()),
+            };
+            let _ = self.event_tx.send(event).await;
+
+            Ok(())
+        }
+
+        async fn status(&self) -> ComponentStatus {
+            self.status.read().await.clone()
+        }
+
+        async fn inject_event_tx(&self, _tx: ComponentEventSender) {
+            // No-op for tests
+        }
+    }
+
+    /// Helper to create a TestMockReaction instance
+    fn create_test_mock_reaction(
+        id: String,
+        queries: Vec<String>,
+        event_tx: ComponentEventSender,
+    ) -> Arc<dyn crate::plugin_core::Reaction> {
+        Arc::new(TestMockReaction::new(id, queries, event_tx))
+    }
 
     async fn create_test_manager() -> (Arc<ReactionManager>, mpsc::Receiver<ComponentEvent>, mpsc::Sender<ComponentEvent>) {
         let (event_tx, event_rx) = mpsc::channel(100);

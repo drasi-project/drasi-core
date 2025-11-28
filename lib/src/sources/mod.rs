@@ -16,7 +16,7 @@ pub mod base;
 pub mod manager;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use async_trait::async_trait;
 use drasi_core::models::SourceChange;

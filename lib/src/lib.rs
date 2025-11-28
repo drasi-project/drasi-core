@@ -64,9 +64,6 @@ pub mod indexes;
 #[cfg_attr(not(test), doc(hidden))]
 pub mod profiling;
 
-#[cfg(test)]
-mod test_support;
-
 // ============================================================================
 // Clean Public API - Everything Users Need
 // ============================================================================

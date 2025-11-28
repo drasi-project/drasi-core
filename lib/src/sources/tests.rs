@@ -12,12 +12,168 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Test utilities for source testing.
+//!
+//! This module provides `TestMockSource` which is shared across multiple test modules:
+//! - sources/tests.rs (this file)
+//! - queries/tests.rs
+//! - queries/joins_test.rs
+
+use crate::channels::dispatcher::{ChangeDispatcher, ChannelChangeDispatcher};
+use crate::channels::*;
+use crate::plugin_core::Source;
+use anyhow::Result;
+use async_trait::async_trait;
+use drasi_core::models::SourceChange;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+/// A simple test mock source for unit testing.
+///
+/// This mock source supports event injection for testing data flow through queries.
+pub struct TestMockSource {
+    id: String,
+    status: Arc<RwLock<ComponentStatus>>,
+    event_tx: ComponentEventSender,
+    /// Dispatchers for sending events to subscribed queries
+    dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper>>>>>,
+}
+
+impl TestMockSource {
+    pub fn new(id: String, event_tx: ComponentEventSender) -> Result<Self> {
+        Ok(Self {
+            id,
+            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
+            event_tx,
+            dispatchers: Arc::new(RwLock::new(Vec::new())),
+        })
+    }
+
+    /// Inject an event into all subscribed queries.
+    pub async fn inject_event(&self, change: SourceChange) -> Result<()> {
+        let dispatchers = self.dispatchers.read().await;
+        let wrapper = SourceEventWrapper::new(
+            self.id.clone(),
+            SourceEvent::Change(change),
+            chrono::Utc::now(),
+        );
+        let arc_wrapper = Arc::new(wrapper);
+        for dispatcher in dispatchers.iter() {
+            dispatcher.dispatch_change(arc_wrapper.clone()).await?;
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Source for TestMockSource {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn type_name(&self) -> &str {
+        "mock"
+    }
+
+    fn properties(&self) -> HashMap<String, serde_json::Value> {
+        HashMap::new()
+    }
+
+    async fn start(&self) -> Result<()> {
+        *self.status.write().await = ComponentStatus::Starting;
+
+        let event = ComponentEvent {
+            component_id: self.id.clone(),
+            component_type: ComponentType::Source,
+            status: ComponentStatus::Starting,
+            timestamp: chrono::Utc::now(),
+            message: Some("Starting source".to_string()),
+        };
+        let _ = self.event_tx.send(event).await;
+
+        *self.status.write().await = ComponentStatus::Running;
+
+        let event = ComponentEvent {
+            component_id: self.id.clone(),
+            component_type: ComponentType::Source,
+            status: ComponentStatus::Running,
+            timestamp: chrono::Utc::now(),
+            message: Some("Source started".to_string()),
+        };
+        let _ = self.event_tx.send(event).await;
+
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        *self.status.write().await = ComponentStatus::Stopping;
+
+        let event = ComponentEvent {
+            component_id: self.id.clone(),
+            component_type: ComponentType::Source,
+            status: ComponentStatus::Stopping,
+            timestamp: chrono::Utc::now(),
+            message: Some("Stopping source".to_string()),
+        };
+        let _ = self.event_tx.send(event).await;
+
+        *self.status.write().await = ComponentStatus::Stopped;
+
+        let event = ComponentEvent {
+            component_id: self.id.clone(),
+            component_type: ComponentType::Source,
+            status: ComponentStatus::Stopped,
+            timestamp: chrono::Utc::now(),
+            message: Some("Source stopped".to_string()),
+        };
+        let _ = self.event_tx.send(event).await;
+
+        Ok(())
+    }
+
+    async fn status(&self) -> ComponentStatus {
+        self.status.read().await.clone()
+    }
+
+    async fn subscribe(
+        &self,
+        query_id: String,
+        _enable_bootstrap: bool,
+        _node_labels: Vec<String>,
+        _relation_labels: Vec<String>,
+    ) -> Result<SubscriptionResponse> {
+        let dispatcher = ChannelChangeDispatcher::<SourceEventWrapper>::new(100);
+        let receiver = dispatcher.create_receiver().await?;
+
+        self.dispatchers.write().await.push(Box::new(dispatcher));
+
+        Ok(SubscriptionResponse {
+            query_id,
+            source_id: self.id.clone(),
+            receiver,
+            bootstrap_receiver: None,
+        })
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    async fn inject_event_tx(&self, _tx: ComponentEventSender) {
+        // TestMockSource already has event_tx from constructor
+    }
+}
+
+/// Helper to create a TestMockSource instance
+pub fn create_test_mock_source(id: String, event_tx: ComponentEventSender) -> Arc<dyn Source> {
+    Arc::new(TestMockSource::new(id, event_tx).unwrap())
+}
+
 #[cfg(test)]
 mod manager_tests {
-    use super::super::*;
-    use crate::channels::*;
-    use crate::test_support::helpers::test_mocks::create_test_mock_source;
-    use std::sync::Arc;
+    use super::*;
+    use crate::sources::SourceManager;
     use tokio::sync::mpsc;
 
     async fn create_test_manager(
