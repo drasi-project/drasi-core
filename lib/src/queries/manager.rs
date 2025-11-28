@@ -654,20 +654,37 @@ impl Query for DrasiQuery {
                 }
 
                 // Dequeue events from priority queue (blocks until available)
-                let source_event_wrapper = priority_queue.dequeue().await;
+                let arc_event = priority_queue.dequeue().await;
+
+                // Try to extract without cloning if we have sole ownership (zero-copy path).
+                // This succeeds in Channel dispatch mode where each query has its own event copy.
+                // Falls back to cloning in Broadcast mode where events are shared.
+                let (source_id, event, _timestamp, profiling_opt) =
+                    match SourceEventWrapper::try_unwrap_arc(arc_event) {
+                        Ok(parts) => parts,
+                        Err(arc) => {
+                            // Shared reference - must clone the data we need
+                            (
+                                arc.source_id.clone(),
+                                arc.event.clone(),
+                                arc.timestamp,
+                                arc.profiling.clone(),
+                            )
+                        }
+                    };
 
                 debug!(
-                    "Query '{}' processing event from source '{}' (timestamp: {})",
-                    query_id, source_event_wrapper.source_id, source_event_wrapper.timestamp
+                    "Query '{}' processing event from source '{}'",
+                    query_id, source_id
                 );
 
-                // Extract the SourceChange from the SourceEvent
-                let source_change = match &source_event_wrapper.event {
-                    SourceEvent::Change(change) => change.clone(),
+                // Extract the SourceChange from the SourceEvent (now owned, no clone needed)
+                let source_change = match event {
+                    SourceEvent::Change(change) => change,
                     SourceEvent::Control(_) => {
                         debug!(
                             "Query '{}' ignoring control event from source '{}'",
-                            query_id, source_event_wrapper.source_id
+                            query_id, source_id
                         );
                         continue;
                     }
@@ -680,11 +697,9 @@ impl Query for DrasiQuery {
                     }
                 };
 
-                // Extract profiling metadata from source event or create new
-                let mut profiling = source_event_wrapper
-                    .profiling
-                    .clone()
-                    .unwrap_or_else(|| crate::profiling::ProfilingMetadata::new());
+                // Use profiling metadata from source event or create new
+                let mut profiling =
+                    profiling_opt.unwrap_or_else(crate::profiling::ProfilingMetadata::new);
 
                 // Capture query_receive_ns timestamp
                 profiling.query_receive_ns = Some(crate::profiling::timestamp_ns());
@@ -806,9 +821,7 @@ impl Query for DrasiQuery {
                                     let mut meta = HashMap::new();
                                     meta.insert(
                                         "source_id".to_string(),
-                                        serde_json::Value::String(
-                                            source_event_wrapper.source_id.clone(),
-                                        ),
+                                        serde_json::Value::String(source_id.clone()),
                                     );
                                     meta.insert(
                                         "processed_by".to_string(),
