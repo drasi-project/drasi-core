@@ -61,14 +61,10 @@ assert_matches = "1.5"
 serial_test = "3.0"
 pretty_assertions = "1.4"
 test-case = "3.3"
-wiremock = "=0.6.2"
 
 # Additional testing dependencies
 futures = "0.3"
-tower = { version = "0.4", features = ["util"] }
-hyper = { version = "1.0", features = ["full"] }
 rstest = "0.18"
 
-# Integration testing with testcontainers
-testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["redis"] }
+# For integration tests that remain in lib (config validation, examples)
+# Redis/testcontainers moved to shared-tests crate

@@ -1,5 +1,0 @@
-{"kind":"Header","start_time":"2024-01-01T00:00:00+00:00","description":"Test person data (3 nodes)"}
-{"kind":"Node","id":"person_0","labels":["Person"],"properties":{"name":"Person 0","age":25,"_bootstrap":true}}
-{"kind":"Node","id":"person_1","labels":["Person"],"properties":{"name":"Person 1","age":26,"_bootstrap":true}}
-{"kind":"Node","id":"person_2","labels":["Person"],"properties":{"name":"Person 2","age":27,"_bootstrap":true}}
-{"kind":"Finish","description":"End of person data"}

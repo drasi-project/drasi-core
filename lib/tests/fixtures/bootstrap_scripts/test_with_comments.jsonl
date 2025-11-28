@@ -1,5 +1,0 @@
-{"kind":"Header","start_time":"2024-01-01T00:00:00+00:00","description":"Script with comments"}
-{"kind":"Comment","comment":"This is a comment that should be filtered"}
-{"kind":"Node","id":"n1","labels":["Test"],"properties":{"value":"data"}}
-{"kind":"Comment","comment":"Another comment"}
-{"kind":"Finish","description":"Done"}
