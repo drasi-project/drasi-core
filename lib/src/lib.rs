@@ -46,9 +46,12 @@ pub mod queries;
 #[cfg_attr(not(test), doc(hidden))]
 pub mod reactions;
 #[cfg_attr(not(test), doc(hidden))]
-pub mod server_core;
+pub mod lib_core;
 #[cfg_attr(not(test), doc(hidden))]
 pub mod sources;
+
+// Sub-modules for lib_core operations (split for maintainability)
+mod lib_core_ops;
 #[cfg_attr(not(test), doc(hidden))]
 pub mod state_guard;
 #[cfg_attr(not(test), doc(hidden))]
@@ -82,7 +85,7 @@ pub mod profiling;
 /// # Ok(())
 /// # }
 /// ```
-pub use server_core::DrasiLib;
+pub use lib_core::DrasiLib;
 
 /// Error types for drasi-lib
 pub use error::{DrasiError, Result};

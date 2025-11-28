@@ -21,7 +21,7 @@ use tokio::sync::RwLock;
 use crate::channels::*;
 use crate::config::ReactionRuntime;
 use crate::plugin_core::{QuerySubscriber, Reaction};
-use crate::server_core::DrasiLib;
+use crate::lib_core::DrasiLib;
 use crate::utils::*;
 
 pub struct ReactionManager {

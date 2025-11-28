@@ -73,7 +73,7 @@ use crate::indexes::StorageBackendConfig;
 use crate::plugin_core::Reaction as ReactionTrait;
 use crate::plugin_core::Source as SourceTrait;
 use crate::plugin_core::{ReactionRegistry, SourceRegistry};
-use crate::server_core::DrasiLib;
+use crate::lib_core::DrasiLib;
 
 // ============================================================================
 // DrasiLibBuilder

@@ -168,7 +168,7 @@ impl LifecycleManager {
     /// After successful start, the saved running state is cleared.
     pub async fn start_components(
         &self,
-        server_core: Arc<crate::server_core::DrasiLib>,
+        server_core: Arc<crate::lib_core::DrasiLib>,
     ) -> Result<()> {
         info!("Starting all auto-start components in sequence: Sources → Queries → Reactions");
 
