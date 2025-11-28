@@ -12,10 +12,161 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! HTTP source plugin for Drasi
+//! HTTP Source Plugin for Drasi
 //!
-//! This plugin provides the HTTP source implementation
-//! in the Drasi plugin architecture.
+//! This plugin exposes HTTP endpoints for receiving data change events. It includes
+//! adaptive batching for optimized throughput and supports both single-event and
+//! batch submission modes.
+//!
+//! # Endpoints
+//!
+//! The HTTP source exposes the following endpoints:
+//!
+//! - **`POST /sources/{source_id}/events`** - Submit a single event
+//! - **`POST /sources/{source_id}/events/batch`** - Submit multiple events
+//! - **`GET /health`** - Health check endpoint
+//!
+//! # Data Format
+//!
+//! Events are submitted as JSON using the `HttpSourceChange` format:
+//!
+//! ## Insert Operation
+//!
+//! ```json
+//! {
+//!     "operation": "insert",
+//!     "element": {
+//!         "type": "node",
+//!         "id": "user-123",
+//!         "labels": ["User"],
+//!         "properties": {
+//!             "name": "Alice",
+//!             "email": "alice@example.com"
+//!         }
+//!     },
+//!     "timestamp": 1699900000000000000
+//! }
+//! ```
+//!
+//! ## Update Operation
+//!
+//! ```json
+//! {
+//!     "operation": "update",
+//!     "element": {
+//!         "type": "node",
+//!         "id": "user-123",
+//!         "labels": ["User"],
+//!         "properties": {
+//!             "name": "Alice Updated"
+//!         }
+//!     }
+//! }
+//! ```
+//!
+//! ## Delete Operation
+//!
+//! ```json
+//! {
+//!     "operation": "delete",
+//!     "id": "user-123",
+//!     "labels": ["User"]
+//! }
+//! ```
+//!
+//! ## Relation Element
+//!
+//! ```json
+//! {
+//!     "operation": "insert",
+//!     "element": {
+//!         "type": "relation",
+//!         "id": "follows-1",
+//!         "labels": ["FOLLOWS"],
+//!         "from": "user-123",
+//!         "to": "user-456",
+//!         "properties": {}
+//!     }
+//! }
+//! ```
+//!
+//! # Batch Submission
+//!
+//! ```json
+//! {
+//!     "events": [
+//!         { "operation": "insert", ... },
+//!         { "operation": "update", ... }
+//!     ]
+//! }
+//! ```
+//!
+//! # Adaptive Batching
+//!
+//! The HTTP source includes adaptive batching to optimize throughput. Events are
+//! buffered and dispatched in batches, with batch size and timing adjusted based
+//! on throughput patterns.
+//!
+//! | Parameter | Default | Description |
+//! |-----------|---------|-------------|
+//! | `adaptive_enabled` | `true` | Enable/disable adaptive batching |
+//! | `adaptive_max_batch_size` | `1000` | Maximum events per batch |
+//! | `adaptive_min_batch_size` | `1` | Minimum events per batch |
+//! | `adaptive_max_wait_ms` | `100` | Maximum wait time before dispatching |
+//! | `adaptive_min_wait_ms` | `10` | Minimum wait time between batches |
+//!
+//! # Configuration
+//!
+//! | Field | Type | Default | Description |
+//! |-------|------|---------|-------------|
+//! | `host` | string | *required* | Host address to bind to |
+//! | `port` | u16 | `8080` | Port to listen on |
+//! | `endpoint` | string | None | Optional custom path prefix |
+//! | `timeout_ms` | u64 | `10000` | Request timeout in milliseconds |
+//!
+//! # Example Configuration (YAML)
+//!
+//! ```yaml
+//! source_type: http
+//! properties:
+//!   host: "0.0.0.0"
+//!   port: 8080
+//!   adaptive_enabled: true
+//!   adaptive_max_batch_size: 500
+//! ```
+//!
+//! # Usage Examples
+//!
+//! ## Rust
+//!
+//! ```rust,ignore
+//! use drasi_plugin_http::{HttpSource, HttpSourceBuilder};
+//!
+//! let config = HttpSourceBuilder::new()
+//!     .with_host("0.0.0.0")
+//!     .with_port(8080)
+//!     .with_adaptive_enabled(true)
+//!     .build();
+//!
+//! let source = Arc::new(HttpSource::new("http-source", config)?);
+//! drasi.add_source(source).await?;
+//! ```
+//!
+//! ## curl (Single Event)
+//!
+//! ```bash
+//! curl -X POST http://localhost:8080/sources/my-source/events \
+//!   -H "Content-Type: application/json" \
+//!   -d '{"operation":"insert","element":{"type":"node","id":"1","labels":["Test"],"properties":{}}}'
+//! ```
+//!
+//! ## curl (Batch)
+//!
+//! ```bash
+//! curl -X POST http://localhost:8080/sources/my-source/events/batch \
+//!   -H "Content-Type: application/json" \
+//!   -d '{"events":[...]}'
+//! ```
 
 pub mod config;
 pub use config::HttpSourceConfig;
@@ -376,7 +527,7 @@ impl HttpSource {
                 source_id, total_batches, sent_count, failed_count
             );
 
-            if total_batches % 100 == 0 {
+            if total_batches.is_multiple_of(100) {
                 info!(
                     "[{}] Adaptive HTTP metrics - Batches: {}, Events: {}, Avg batch size: {:.1}",
                     source_id,
@@ -727,46 +878,327 @@ impl HttpSourceBuilder {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_http_builder_defaults() {
-        let config = HttpSourceBuilder::new().build();
-        assert_eq!(config.port, 8080);
-        assert_eq!(config.timeout_ms, 10000);
-        assert_eq!(config.endpoint, None);
+    mod construction {
+        use super::*;
+
+        #[test]
+        fn test_new_with_valid_config() {
+            let config = HttpSourceBuilder::new()
+                .with_host("localhost")
+                .with_port(8080)
+                .build();
+            let source = HttpSource::new("test-source", config);
+            assert!(source.is_ok());
+        }
+
+        #[test]
+        fn test_new_with_custom_config() {
+            let config = HttpSourceBuilder::new()
+                .with_host("0.0.0.0")
+                .with_port(9000)
+                .with_endpoint("/events")
+                .build();
+            let source = HttpSource::new("http-source", config).unwrap();
+            assert_eq!(source.id(), "http-source");
+        }
+
+        #[test]
+        fn test_with_dispatch_creates_source() {
+            let config = HttpSourceBuilder::new()
+                .with_host("localhost")
+                .build();
+            let source = HttpSource::with_dispatch(
+                "dispatch-source",
+                config,
+                Some(DispatchMode::Channel),
+                Some(1000),
+            );
+            assert!(source.is_ok());
+            assert_eq!(source.unwrap().id(), "dispatch-source");
+        }
     }
 
-    #[test]
-    fn test_http_builder_custom_values() {
-        let config = HttpSourceBuilder::new()
-            .with_host("api.example.com")
-            .with_port(9000)
-            .with_endpoint("/webhook")
-            .with_timeout_ms(5000)
-            .build();
+    mod properties {
+        use super::*;
 
-        assert_eq!(config.host, "api.example.com");
-        assert_eq!(config.port, 9000);
-        assert_eq!(config.endpoint, Some("/webhook".to_string()));
-        assert_eq!(config.timeout_ms, 5000);
+        #[test]
+        fn test_id_returns_correct_value() {
+            let config = HttpSourceBuilder::new()
+                .with_host("localhost")
+                .build();
+            let source = HttpSource::new("my-http-source", config).unwrap();
+            assert_eq!(source.id(), "my-http-source");
+        }
+
+        #[test]
+        fn test_type_name_returns_http() {
+            let config = HttpSourceBuilder::new()
+                .with_host("localhost")
+                .build();
+            let source = HttpSource::new("test", config).unwrap();
+            assert_eq!(source.type_name(), "http");
+        }
+
+        #[test]
+        fn test_properties_contains_host_and_port() {
+            let config = HttpSourceBuilder::new()
+                .with_host("192.168.1.1")
+                .with_port(9000)
+                .build();
+            let source = HttpSource::new("test", config).unwrap();
+            let props = source.properties();
+
+            assert_eq!(
+                props.get("host"),
+                Some(&serde_json::Value::String("192.168.1.1".to_string()))
+            );
+            assert_eq!(
+                props.get("port"),
+                Some(&serde_json::Value::Number(9000.into()))
+            );
+        }
+
+        #[test]
+        fn test_properties_includes_endpoint_when_set() {
+            let config = HttpSourceBuilder::new()
+                .with_host("localhost")
+                .with_endpoint("/api/v1")
+                .build();
+            let source = HttpSource::new("test", config).unwrap();
+            let props = source.properties();
+
+            assert_eq!(
+                props.get("endpoint"),
+                Some(&serde_json::Value::String("/api/v1".to_string()))
+            );
+        }
+
+        #[test]
+        fn test_properties_excludes_endpoint_when_none() {
+            let config = HttpSourceBuilder::new()
+                .with_host("localhost")
+                .build();
+            let source = HttpSource::new("test", config).unwrap();
+            let props = source.properties();
+
+            assert!(props.get("endpoint").is_none());
+        }
     }
 
-    #[test]
-    fn test_http_builder_adaptive_batching() {
-        let config = HttpSourceBuilder::new()
-            .with_host("localhost")
-            .with_adaptive_max_batch_size(1000)
-            .with_adaptive_min_batch_size(10)
-            .with_adaptive_max_wait_ms(500)
-            .with_adaptive_min_wait_ms(50)
-            .with_adaptive_window_secs(60)
-            .with_adaptive_enabled(true)
-            .build();
+    mod lifecycle {
+        use super::*;
 
-        assert_eq!(config.adaptive_max_batch_size, Some(1000));
-        assert_eq!(config.adaptive_min_batch_size, Some(10));
-        assert_eq!(config.adaptive_max_wait_ms, Some(500));
-        assert_eq!(config.adaptive_min_wait_ms, Some(50));
-        assert_eq!(config.adaptive_window_secs, Some(60));
-        assert_eq!(config.adaptive_enabled, Some(true));
+        #[tokio::test]
+        async fn test_initial_status_is_stopped() {
+            let config = HttpSourceBuilder::new()
+                .with_host("localhost")
+                .build();
+            let source = HttpSource::new("test", config).unwrap();
+            assert_eq!(source.status().await, ComponentStatus::Stopped);
+        }
+    }
+
+    mod builder {
+        use super::*;
+
+        #[test]
+        fn test_http_builder_defaults() {
+            let config = HttpSourceBuilder::new().build();
+            assert_eq!(config.port, 8080);
+            assert_eq!(config.timeout_ms, 10000);
+            assert_eq!(config.endpoint, None);
+        }
+
+        #[test]
+        fn test_http_builder_custom_values() {
+            let config = HttpSourceBuilder::new()
+                .with_host("api.example.com")
+                .with_port(9000)
+                .with_endpoint("/webhook")
+                .with_timeout_ms(5000)
+                .build();
+
+            assert_eq!(config.host, "api.example.com");
+            assert_eq!(config.port, 9000);
+            assert_eq!(config.endpoint, Some("/webhook".to_string()));
+            assert_eq!(config.timeout_ms, 5000);
+        }
+
+        #[test]
+        fn test_http_builder_adaptive_batching() {
+            let config = HttpSourceBuilder::new()
+                .with_host("localhost")
+                .with_adaptive_max_batch_size(1000)
+                .with_adaptive_min_batch_size(10)
+                .with_adaptive_max_wait_ms(500)
+                .with_adaptive_min_wait_ms(50)
+                .with_adaptive_window_secs(60)
+                .with_adaptive_enabled(true)
+                .build();
+
+            assert_eq!(config.adaptive_max_batch_size, Some(1000));
+            assert_eq!(config.adaptive_min_batch_size, Some(10));
+            assert_eq!(config.adaptive_max_wait_ms, Some(500));
+            assert_eq!(config.adaptive_min_wait_ms, Some(50));
+            assert_eq!(config.adaptive_window_secs, Some(60));
+            assert_eq!(config.adaptive_enabled, Some(true));
+        }
+
+        #[test]
+        fn test_builder_default_trait() {
+            let builder1 = HttpSourceBuilder::new();
+            let builder2 = HttpSourceBuilder::default();
+
+            let config1 = builder1.build();
+            let config2 = builder2.build();
+
+            assert_eq!(config1.port, config2.port);
+            assert_eq!(config1.timeout_ms, config2.timeout_ms);
+        }
+    }
+
+    mod event_conversion {
+        use super::*;
+
+        #[test]
+        fn test_convert_node_insert() {
+            let mut props = serde_json::Map::new();
+            props.insert("name".to_string(), serde_json::Value::String("Alice".to_string()));
+            props.insert("age".to_string(), serde_json::Value::Number(30.into()));
+
+            let http_change = HttpSourceChange::Insert {
+                element: HttpElement::Node {
+                    id: "user-1".to_string(),
+                    labels: vec!["User".to_string()],
+                    properties: props,
+                },
+                timestamp: Some(1234567890000000000),
+            };
+
+            let result = convert_http_to_source_change(&http_change, "test-source");
+            assert!(result.is_ok());
+
+            match result.unwrap() {
+                drasi_core::models::SourceChange::Insert { element } => {
+                    match element {
+                        drasi_core::models::Element::Node { metadata, properties } => {
+                            assert_eq!(metadata.reference.element_id.as_ref(), "user-1");
+                            assert_eq!(metadata.labels.len(), 1);
+                            assert_eq!(metadata.effective_from, 1234567890000000000);
+                            assert!(properties.get("name").is_some());
+                            assert!(properties.get("age").is_some());
+                        }
+                        _ => panic!("Expected Node element"),
+                    }
+                }
+                _ => panic!("Expected Insert operation"),
+            }
+        }
+
+        #[test]
+        fn test_convert_relation_insert() {
+            let http_change = HttpSourceChange::Insert {
+                element: HttpElement::Relation {
+                    id: "follows-1".to_string(),
+                    labels: vec!["FOLLOWS".to_string()],
+                    from: "user-1".to_string(),
+                    to: "user-2".to_string(),
+                    properties: serde_json::Map::new(),
+                },
+                timestamp: None,
+            };
+
+            let result = convert_http_to_source_change(&http_change, "test-source");
+            assert!(result.is_ok());
+
+            match result.unwrap() {
+                drasi_core::models::SourceChange::Insert { element } => {
+                    match element {
+                        drasi_core::models::Element::Relation { metadata, out_node, in_node, .. } => {
+                            assert_eq!(metadata.reference.element_id.as_ref(), "follows-1");
+                            assert_eq!(out_node.element_id.as_ref(), "user-1");
+                            assert_eq!(in_node.element_id.as_ref(), "user-2");
+                        }
+                        _ => panic!("Expected Relation element"),
+                    }
+                }
+                _ => panic!("Expected Insert operation"),
+            }
+        }
+
+        #[test]
+        fn test_convert_delete() {
+            let http_change = HttpSourceChange::Delete {
+                id: "user-1".to_string(),
+                labels: Some(vec!["User".to_string()]),
+                timestamp: Some(9999999999),
+            };
+
+            let result = convert_http_to_source_change(&http_change, "test-source");
+            assert!(result.is_ok());
+
+            match result.unwrap() {
+                drasi_core::models::SourceChange::Delete { metadata } => {
+                    assert_eq!(metadata.reference.element_id.as_ref(), "user-1");
+                    assert_eq!(metadata.labels.len(), 1);
+                }
+                _ => panic!("Expected Delete operation"),
+            }
+        }
+
+        #[test]
+        fn test_convert_update() {
+            let http_change = HttpSourceChange::Update {
+                element: HttpElement::Node {
+                    id: "user-1".to_string(),
+                    labels: vec!["User".to_string()],
+                    properties: serde_json::Map::new(),
+                },
+                timestamp: None,
+            };
+
+            let result = convert_http_to_source_change(&http_change, "test-source");
+            assert!(result.is_ok());
+
+            match result.unwrap() {
+                drasi_core::models::SourceChange::Update { .. } => {
+                    // Success
+                }
+                _ => panic!("Expected Update operation"),
+            }
+        }
+    }
+
+    mod adaptive_config {
+        use super::*;
+
+        #[test]
+        fn test_adaptive_config_from_http_config() {
+            let config = HttpSourceBuilder::new()
+                .with_host("localhost")
+                .with_adaptive_max_batch_size(500)
+                .with_adaptive_enabled(true)
+                .build();
+
+            let source = HttpSource::new("test", config).unwrap();
+
+            // The adaptive config should be initialized from the http config
+            assert_eq!(source.adaptive_config.max_batch_size, 500);
+            assert!(source.adaptive_config.adaptive_enabled);
+        }
+
+        #[test]
+        fn test_adaptive_config_uses_defaults_when_not_specified() {
+            let config = HttpSourceBuilder::new()
+                .with_host("localhost")
+                .build();
+
+            let source = HttpSource::new("test", config).unwrap();
+
+            // Should use AdaptiveBatchConfig defaults
+            let default_config = AdaptiveBatchConfig::default();
+            assert_eq!(source.adaptive_config.max_batch_size, default_config.max_batch_size);
+            assert_eq!(source.adaptive_config.min_batch_size, default_config.min_batch_size);
+        }
     }
 }

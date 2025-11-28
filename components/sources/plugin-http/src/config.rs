@@ -68,6 +68,58 @@ fn default_timeout_ms() -> u64 {
     10000
 }
 
+impl HttpSourceConfig {
+    /// Validate the configuration and return an error if invalid.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Port is 0 (invalid port)
+    /// - Timeout is 0 (would cause immediate timeouts)
+    /// - Adaptive batching min values exceed max values
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.port == 0 {
+            return Err(anyhow::anyhow!(
+                "Validation error: port cannot be 0. \
+                 Please specify a valid port number (1-65535)"
+            ));
+        }
+
+        if self.timeout_ms == 0 {
+            return Err(anyhow::anyhow!(
+                "Validation error: timeout_ms cannot be 0. \
+                 Please specify a positive timeout value in milliseconds"
+            ));
+        }
+
+        // Validate adaptive batching settings
+        if let (Some(min), Some(max)) = (self.adaptive_min_batch_size, self.adaptive_max_batch_size)
+        {
+            if min > max {
+                return Err(anyhow::anyhow!(
+                    "Validation error: adaptive_min_batch_size ({}) cannot be greater than \
+                     adaptive_max_batch_size ({})",
+                    min,
+                    max
+                ));
+            }
+        }
+
+        if let (Some(min), Some(max)) = (self.adaptive_min_wait_ms, self.adaptive_max_wait_ms) {
+            if min > max {
+                return Err(anyhow::anyhow!(
+                    "Validation error: adaptive_min_wait_ms ({}) cannot be greater than \
+                     adaptive_max_wait_ms ({})",
+                    min,
+                    max
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

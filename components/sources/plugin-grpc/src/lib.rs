@@ -12,12 +12,97 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! gRPC source plugin for Drasi
+//! gRPC Source Plugin for Drasi
 //!
-//! This plugin provides the gRPC source implementation
-//! for the Drasi plugin architecture.
+//! This plugin exposes a gRPC endpoint for receiving data change events. External systems
+//! can stream events to Drasi using the gRPC protocol, which provides efficient binary
+//! serialization and bidirectional streaming support.
+//!
+//! # Service Endpoints
+//!
+//! The gRPC source implements the following service methods:
+//!
+//! - **`submit_event`** - Submit a single event (unary RPC)
+//! - **`stream_events`** - Stream multiple events (client streaming RPC)
+//! - **`request_bootstrap`** - Request initial data for bootstrapping (server streaming RPC)
+//! - **`health_check`** - Check service health (unary RPC)
+//!
+//! # Protocol Buffer Format
+//!
+//! Events are submitted using the `SourceChange` protobuf message. See the
+//! `proto/drasi/v1/source.proto` file for the full schema.
+//!
+//! ## Insert/Update
+//!
+//! ```protobuf
+//! SourceChange {
+//!     type: INSERT or UPDATE
+//!     change: Element {
+//!         node: Node {
+//!             metadata: ElementMetadata { ... }
+//!             properties: Struct { ... }
+//!         }
+//!     }
+//! }
+//! ```
+//!
+//! ## Delete
+//!
+//! ```protobuf
+//! SourceChange {
+//!     type: DELETE
+//!     change: Metadata {
+//!         reference: ElementReference { ... }
+//!         labels: ["Label1", "Label2"]
+//!     }
+//! }
+//! ```
+//!
+//! # Configuration
+//!
+//! | Field | Type | Default | Description |
+//! |-------|------|---------|-------------|
+//! | `host` | string | `"0.0.0.0"` | Host address to bind to |
+//! | `port` | u16 | `50051` | Port to listen on |
+//! | `endpoint` | string | None | Optional custom endpoint path |
+//! | `timeout_ms` | u64 | `5000` | Request timeout in milliseconds |
+//!
+//! # Example Configuration (YAML)
+//!
+//! ```yaml
+//! source_type: grpc
+//! properties:
+//!   host: "0.0.0.0"
+//!   port: 50051
+//! ```
+//!
+//! # Usage Example
+//!
+//! ```rust,ignore
+//! use drasi_plugin_grpc::{GrpcSource, GrpcSourceConfig};
+//! use std::sync::Arc;
+//!
+//! let config = GrpcSourceConfig {
+//!     host: "0.0.0.0".to_string(),
+//!     port: 50051,
+//!     endpoint: None,
+//!     timeout_ms: 5000,
+//! };
+//!
+//! let source = Arc::new(GrpcSource::new("my-grpc-source", config)?);
+//! drasi.add_source(source).await?;
+//! ```
+//!
+//! # Client Example (using grpcurl)
+//!
+//! ```bash
+//! grpcurl -plaintext -d '{"event": {...}}' localhost:50051 drasi.v1.SourceService/SubmitEvent
+//! ```
 
 pub mod config;
+
+#[cfg(test)]
+mod tests;
 pub use config::GrpcSourceConfig;
 
 use anyhow::Result;
@@ -350,7 +435,7 @@ impl SourceService for GrpcSourceService {
                         events_processed += 1;
 
                         // Send periodic updates
-                        if events_processed % 100 == 0 {
+                        if events_processed.is_multiple_of(100) {
                             let _ = tx
                                 .send(Ok(StreamEventResponse {
                                     success: true,

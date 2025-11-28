@@ -46,3 +46,34 @@ impl Default for MockSourceConfig {
         }
     }
 }
+
+impl MockSourceConfig {
+    /// Valid data types for mock source.
+    pub const VALID_DATA_TYPES: [&'static str; 3] = ["counter", "sensor", "generic"];
+
+    /// Validate the configuration and return an error if invalid.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Data type is not one of "counter", "sensor", or "generic"
+    /// - Interval is 0 (would cause continuous generation without pause)
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if !Self::VALID_DATA_TYPES.contains(&self.data_type.as_str()) {
+            return Err(anyhow::anyhow!(
+                "Validation error: data_type '{}' is not valid. \
+                 Valid options are: counter, sensor, generic",
+                self.data_type
+            ));
+        }
+
+        if self.interval_ms == 0 {
+            return Err(anyhow::anyhow!(
+                "Validation error: interval_ms cannot be 0. \
+                 Please specify a positive interval in milliseconds (minimum 1)"
+            ));
+        }
+
+        Ok(())
+    }
+}

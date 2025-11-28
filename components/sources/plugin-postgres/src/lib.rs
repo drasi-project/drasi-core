@@ -12,10 +12,104 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! PostgreSQL source plugin for Drasi
+//! PostgreSQL Replication Source Plugin for Drasi
 //!
-//! This plugin provides the PostgreSQL replication source implementation
-//! for the Drasi plugin architecture.
+//! This plugin captures data changes from PostgreSQL databases using logical replication.
+//! It connects to PostgreSQL as a replication client and decodes Write-Ahead Log (WAL)
+//! messages in real-time, converting them to Drasi source change events.
+//!
+//! # Prerequisites
+//!
+//! Before using this source, you must configure PostgreSQL for logical replication:
+//!
+//! 1. **Enable logical replication** in `postgresql.conf`:
+//!    ```text
+//!    wal_level = logical
+//!    max_replication_slots = 10
+//!    max_wal_senders = 10
+//!    ```
+//!
+//! 2. **Create a publication** for the tables you want to monitor:
+//!    ```sql
+//!    CREATE PUBLICATION drasi_publication FOR TABLE users, orders;
+//!    ```
+//!
+//! 3. **Create a replication slot** (optional - the source can create one automatically):
+//!    ```sql
+//!    SELECT pg_create_logical_replication_slot('drasi_slot', 'pgoutput');
+//!    ```
+//!
+//! 4. **Grant replication permissions** to the database user:
+//!    ```sql
+//!    ALTER ROLE drasi_user REPLICATION;
+//!    GRANT SELECT ON TABLE users, orders TO drasi_user;
+//!    ```
+//!
+//! # Architecture
+//!
+//! The source has two main components:
+//!
+//! - **Bootstrap Handler**: Performs an initial snapshot of table data when a query
+//!   subscribes with bootstrap enabled. Uses the replication slot's snapshot LSN to
+//!   ensure consistency.
+//!
+//! - **Streaming Handler**: Continuously reads WAL messages and decodes them using
+//!   the `pgoutput` protocol. Handles INSERT, UPDATE, and DELETE operations.
+//!
+//! # Configuration
+//!
+//! | Field | Type | Default | Description |
+//! |-------|------|---------|-------------|
+//! | `host` | string | `"localhost"` | PostgreSQL host |
+//! | `port` | u16 | `5432` | PostgreSQL port |
+//! | `database` | string | *required* | Database name |
+//! | `user` | string | *required* | Database user (must have replication permission) |
+//! | `password` | string | `""` | Database password |
+//! | `tables` | string[] | `[]` | Tables to replicate |
+//! | `slot_name` | string | `"drasi_slot"` | Replication slot name |
+//! | `publication_name` | string | `"drasi_publication"` | Publication name |
+//! | `ssl_mode` | string | `"prefer"` | SSL mode: disable, prefer, require |
+//! | `table_keys` | TableKeyConfig[] | `[]` | Primary key configuration for tables |
+//!
+//! # Example Configuration (YAML)
+//!
+//! ```yaml
+//! source_type: postgres
+//! properties:
+//!   host: db.example.com
+//!   port: 5432
+//!   database: production
+//!   user: replication_user
+//!   password: secret
+//!   tables:
+//!     - users
+//!     - orders
+//!   slot_name: drasi_slot
+//!   publication_name: drasi_publication
+//!   table_keys:
+//!     - table: users
+//!       key_columns: [id]
+//!     - table: orders
+//!       key_columns: [order_id]
+//! ```
+//!
+//! # Usage Example
+//!
+//! ```rust,ignore
+//! use drasi_plugin_postgres::{PostgresReplicationSource, PostgresSourceBuilder};
+//! use std::sync::Arc;
+//!
+//! let config = PostgresSourceBuilder::new()
+//!     .with_host("db.example.com")
+//!     .with_database("production")
+//!     .with_user("replication_user")
+//!     .with_password("secret")
+//!     .with_tables(vec!["users".to_string(), "orders".to_string()])
+//!     .build();
+//!
+//! let source = Arc::new(PostgresReplicationSource::new("pg-source", config)?);
+//! drasi.add_source(source).await?;
+//! ```
 
 pub mod bootstrap;
 pub mod config;
@@ -365,33 +459,273 @@ impl PostgresSourceBuilder {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_postgres_builder_defaults() {
-        let config = PostgresSourceBuilder::new().build();
-        assert_eq!(config.host, "localhost");
-        assert_eq!(config.port, 5432);
-        assert_eq!(config.slot_name, "drasi_slot");
-        assert_eq!(config.publication_name, "drasi_publication");
+    mod construction {
+        use super::*;
+
+        #[test]
+        fn test_new_with_valid_config() {
+            let config = PostgresSourceBuilder::new()
+                .with_database("testdb")
+                .with_user("testuser")
+                .build();
+            let source = PostgresReplicationSource::new("test-source", config);
+            assert!(source.is_ok());
+        }
+
+        #[test]
+        fn test_new_with_custom_config() {
+            let config = PostgresSourceBuilder::new()
+                .with_host("192.168.1.100")
+                .with_port(5433)
+                .with_database("production")
+                .with_user("admin")
+                .with_password("secret")
+                .build();
+            let source = PostgresReplicationSource::new("pg-source", config).unwrap();
+            assert_eq!(source.id(), "pg-source");
+        }
+
+        #[test]
+        fn test_with_dispatch_creates_source() {
+            let config = PostgresSourceBuilder::new()
+                .with_database("testdb")
+                .with_user("testuser")
+                .build();
+            let source = PostgresReplicationSource::with_dispatch(
+                "dispatch-source",
+                config,
+                Some(DispatchMode::Channel),
+                Some(2000),
+            );
+            assert!(source.is_ok());
+            assert_eq!(source.unwrap().id(), "dispatch-source");
+        }
     }
 
-    #[test]
-    fn test_postgres_builder_custom_values() {
-        let config = PostgresSourceBuilder::new()
-            .with_host("db.example.com")
-            .with_port(5433)
-            .with_database("production")
-            .with_user("app_user")
-            .with_password("secret")
-            .with_tables(vec!["users".to_string(), "orders".to_string()])
-            .build();
+    mod properties {
+        use super::*;
 
-        assert_eq!(config.host, "db.example.com");
-        assert_eq!(config.port, 5433);
-        assert_eq!(config.database, "production");
-        assert_eq!(config.user, "app_user");
-        assert_eq!(config.password, "secret");
-        assert_eq!(config.tables.len(), 2);
-        assert_eq!(config.tables[0], "users");
-        assert_eq!(config.tables[1], "orders");
+        #[test]
+        fn test_id_returns_correct_value() {
+            let config = PostgresSourceBuilder::new()
+                .with_database("db")
+                .with_user("user")
+                .build();
+            let source = PostgresReplicationSource::new("my-pg-source", config).unwrap();
+            assert_eq!(source.id(), "my-pg-source");
+        }
+
+        #[test]
+        fn test_type_name_returns_postgres() {
+            let config = PostgresSourceBuilder::new()
+                .with_database("db")
+                .with_user("user")
+                .build();
+            let source = PostgresReplicationSource::new("test", config).unwrap();
+            assert_eq!(source.type_name(), "postgres");
+        }
+
+        #[test]
+        fn test_properties_contains_connection_info() {
+            let config = PostgresSourceBuilder::new()
+                .with_host("db.example.com")
+                .with_port(5433)
+                .with_database("mydb")
+                .with_user("app_user")
+                .with_password("secret")
+                .with_tables(vec!["users".to_string()])
+                .build();
+            let source = PostgresReplicationSource::new("test", config).unwrap();
+            let props = source.properties();
+
+            assert_eq!(
+                props.get("host"),
+                Some(&serde_json::Value::String("db.example.com".to_string()))
+            );
+            assert_eq!(
+                props.get("port"),
+                Some(&serde_json::Value::Number(5433.into()))
+            );
+            assert_eq!(
+                props.get("database"),
+                Some(&serde_json::Value::String("mydb".to_string()))
+            );
+            assert_eq!(
+                props.get("user"),
+                Some(&serde_json::Value::String("app_user".to_string()))
+            );
+        }
+
+        #[test]
+        fn test_properties_does_not_expose_password() {
+            let config = PostgresSourceBuilder::new()
+                .with_database("db")
+                .with_user("user")
+                .with_password("super_secret_password")
+                .build();
+            let source = PostgresReplicationSource::new("test", config).unwrap();
+            let props = source.properties();
+
+            // Password should not be exposed in properties
+            assert!(props.get("password").is_none());
+        }
+
+        #[test]
+        fn test_properties_includes_tables() {
+            let config = PostgresSourceBuilder::new()
+                .with_database("db")
+                .with_user("user")
+                .with_tables(vec!["users".to_string(), "orders".to_string()])
+                .build();
+            let source = PostgresReplicationSource::new("test", config).unwrap();
+            let props = source.properties();
+
+            let tables = props.get("tables").unwrap().as_array().unwrap();
+            assert_eq!(tables.len(), 2);
+            assert_eq!(tables[0], "users");
+            assert_eq!(tables[1], "orders");
+        }
+    }
+
+    mod lifecycle {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_initial_status_is_stopped() {
+            let config = PostgresSourceBuilder::new()
+                .with_database("db")
+                .with_user("user")
+                .build();
+            let source = PostgresReplicationSource::new("test", config).unwrap();
+            assert_eq!(source.status().await, ComponentStatus::Stopped);
+        }
+    }
+
+    mod builder {
+        use super::*;
+
+        #[test]
+        fn test_postgres_builder_defaults() {
+            let config = PostgresSourceBuilder::new().build();
+            assert_eq!(config.host, "localhost");
+            assert_eq!(config.port, 5432);
+            assert_eq!(config.slot_name, "drasi_slot");
+            assert_eq!(config.publication_name, "drasi_publication");
+        }
+
+        #[test]
+        fn test_postgres_builder_custom_values() {
+            let config = PostgresSourceBuilder::new()
+                .with_host("db.example.com")
+                .with_port(5433)
+                .with_database("production")
+                .with_user("app_user")
+                .with_password("secret")
+                .with_tables(vec!["users".to_string(), "orders".to_string()])
+                .build();
+
+            assert_eq!(config.host, "db.example.com");
+            assert_eq!(config.port, 5433);
+            assert_eq!(config.database, "production");
+            assert_eq!(config.user, "app_user");
+            assert_eq!(config.password, "secret");
+            assert_eq!(config.tables.len(), 2);
+            assert_eq!(config.tables[0], "users");
+            assert_eq!(config.tables[1], "orders");
+        }
+
+        #[test]
+        fn test_builder_add_table() {
+            let config = PostgresSourceBuilder::new()
+                .add_table("table1")
+                .add_table("table2")
+                .add_table("table3")
+                .build();
+
+            assert_eq!(config.tables.len(), 3);
+            assert_eq!(config.tables[0], "table1");
+            assert_eq!(config.tables[1], "table2");
+            assert_eq!(config.tables[2], "table3");
+        }
+
+        #[test]
+        fn test_builder_slot_and_publication() {
+            let config = PostgresSourceBuilder::new()
+                .with_slot_name("custom_slot")
+                .with_publication_name("custom_pub")
+                .build();
+
+            assert_eq!(config.slot_name, "custom_slot");
+            assert_eq!(config.publication_name, "custom_pub");
+        }
+
+        #[test]
+        fn test_builder_default_trait() {
+            let builder1 = PostgresSourceBuilder::new();
+            let builder2 = PostgresSourceBuilder::default();
+
+            let config1 = builder1.build();
+            let config2 = builder2.build();
+
+            assert_eq!(config1.host, config2.host);
+            assert_eq!(config1.port, config2.port);
+        }
+    }
+
+    mod config {
+        use super::*;
+
+        #[test]
+        fn test_config_serialization() {
+            let config = PostgresSourceBuilder::new()
+                .with_host("localhost")
+                .with_database("testdb")
+                .with_user("testuser")
+                .build();
+
+            let json = serde_json::to_string(&config).unwrap();
+            let deserialized: PostgresSourceConfig = serde_json::from_str(&json).unwrap();
+
+            assert_eq!(config, deserialized);
+        }
+
+        #[test]
+        fn test_config_deserialization_with_required_fields() {
+            let json = r#"{
+                "database": "mydb",
+                "user": "myuser"
+            }"#;
+            let config: PostgresSourceConfig = serde_json::from_str(json).unwrap();
+
+            assert_eq!(config.database, "mydb");
+            assert_eq!(config.user, "myuser");
+            assert_eq!(config.host, "localhost"); // default
+            assert_eq!(config.port, 5432); // default
+            assert_eq!(config.slot_name, "drasi_slot"); // default
+        }
+
+        #[test]
+        fn test_config_deserialization_full() {
+            let json = r#"{
+                "host": "db.prod.internal",
+                "port": 5433,
+                "database": "production",
+                "user": "replication_user",
+                "password": "secret",
+                "tables": ["accounts", "transactions"],
+                "slot_name": "prod_slot",
+                "publication_name": "prod_publication"
+            }"#;
+            let config: PostgresSourceConfig = serde_json::from_str(json).unwrap();
+
+            assert_eq!(config.host, "db.prod.internal");
+            assert_eq!(config.port, 5433);
+            assert_eq!(config.database, "production");
+            assert_eq!(config.user, "replication_user");
+            assert_eq!(config.password, "secret");
+            assert_eq!(config.tables, vec!["accounts", "transactions"]);
+            assert_eq!(config.slot_name, "prod_slot");
+            assert_eq!(config.publication_name, "prod_publication");
+        }
     }
 }

@@ -59,3 +59,30 @@ impl Default for GrpcSourceConfig {
         }
     }
 }
+
+impl GrpcSourceConfig {
+    /// Validate the configuration and return an error if invalid.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Port is 0 (invalid port)
+    /// - Timeout is 0 (would cause immediate timeouts)
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.port == 0 {
+            return Err(anyhow::anyhow!(
+                "Validation error: port cannot be 0. \
+                 Please specify a valid port number (1-65535)"
+            ));
+        }
+
+        if self.timeout_ms == 0 {
+            return Err(anyhow::anyhow!(
+                "Validation error: timeout_ms cannot be 0. \
+                 Please specify a positive timeout value in milliseconds"
+            ));
+        }
+
+        Ok(())
+    }
+}

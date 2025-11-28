@@ -78,3 +78,54 @@ fn default_slot_name() -> String {
 fn default_publication_name() -> String {
     "drasi_publication".to_string()
 }
+
+impl PostgresSourceConfig {
+    /// Validate the configuration and return an error if invalid.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Database name is empty
+    /// - User is empty
+    /// - Port is 0
+    /// - Slot name is empty
+    /// - Publication name is empty
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.database.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Validation error: database cannot be empty. \
+                 Please specify the PostgreSQL database name"
+            ));
+        }
+
+        if self.user.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Validation error: user cannot be empty. \
+                 Please specify the PostgreSQL user for replication"
+            ));
+        }
+
+        if self.port == 0 {
+            return Err(anyhow::anyhow!(
+                "Validation error: port cannot be 0. \
+                 Please specify a valid port number (1-65535)"
+            ));
+        }
+
+        if self.slot_name.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Validation error: slot_name cannot be empty. \
+                 Please specify a replication slot name"
+            ));
+        }
+
+        if self.publication_name.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Validation error: publication_name cannot be empty. \
+                 Please specify a publication name"
+            ));
+        }
+
+        Ok(())
+    }
+}
