@@ -219,9 +219,8 @@ pub async fn read_from_stream(
         for stream_id in stream_key.ids {
             let mut data = HashMap::new();
             for (key, value) in stream_id.map {
-                // Handle redis::Value::Data (Vec<u8>)
-                if let redis::Value::Data(bytes) = value {
-                    let value_str = String::from_utf8(bytes)?;
+                // Handle redis::Value - use FromRedisValue trait
+                if let Ok(value_str) = redis::from_redis_value::<String>(&value) {
                     data.insert(key, value_str);
                 }
             }
