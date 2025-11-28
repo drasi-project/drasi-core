@@ -16,36 +16,50 @@ use super::config::LogReactionConfig;
 use anyhow::Result;
 use async_trait::async_trait;
 use log::{debug, error, info, trace, warn};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
 use drasi_lib::config::common::LogLevel;
-use drasi_lib::config::{ReactionConfig, ReactionSpecificConfig};
-use drasi_lib::reactions::common::base::ReactionBase;
-use drasi_lib::reactions::Reaction;
+use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
+use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::utils::log_component_start;
 
 pub struct LogReaction {
     base: ReactionBase,
-    log_level: LogLevel,
+    config: LogReactionConfig,
 }
 
 impl LogReaction {
-    pub fn new(config: ReactionConfig, event_tx: ComponentEventSender) -> Self {
-        let log_level = match &config.config {
-            ReactionSpecificConfig::Log(log_config_map) => {
-                // Deserialize HashMap into typed config
-                let log_config: LogReactionConfig = serde_json::from_value(
-                    serde_json::to_value(log_config_map).unwrap_or_default()
-                ).unwrap_or_default();
-                log_config.log_level
-            }
-            _ => LogLevel::Info,
-        };
-
+    /// Create a new log reaction
+    ///
+    /// The event channel is automatically injected when the reaction is added
+    /// to DrasiLib via `add_reaction()`.
+    pub fn new(id: impl Into<String>, queries: Vec<String>, config: LogReactionConfig) -> Self {
+        let id = id.into();
+        let params = ReactionBaseParams::new(id, queries);
         Self {
-            base: ReactionBase::new(config, event_tx),
-            log_level,
+            base: ReactionBase::new(params),
+            config,
+        }
+    }
+
+    /// Create a new log reaction with custom priority queue capacity
+    ///
+    /// The event channel is automatically injected when the reaction is added
+    /// to DrasiLib via `add_reaction()`.
+    pub fn with_priority_queue_capacity(
+        id: impl Into<String>,
+        queries: Vec<String>,
+        config: LogReactionConfig,
+        priority_queue_capacity: usize,
+    ) -> Self {
+        let id = id.into();
+        let params = ReactionBaseParams::new(id, queries)
+            .with_priority_queue_capacity(priority_queue_capacity);
+        Self {
+            base: ReactionBase::new(params),
+            config,
         }
     }
 
@@ -72,23 +86,44 @@ impl LogReaction {
     }
 
     fn log_result(&self, message: &str) {
-        match self.log_level {
-            LogLevel::Trace => trace!("[{}] {}", self.base.config.id, message),
-            LogLevel::Debug => debug!("[{}] {}", self.base.config.id, message),
-            LogLevel::Info => info!("[{}] {}", self.base.config.id, message),
-            LogLevel::Warn => warn!("[{}] {}", self.base.config.id, message),
-            LogLevel::Error => error!("[{}] {}", self.base.config.id, message),
+        match self.config.log_level {
+            LogLevel::Trace => trace!("[{}] {}", self.base.id, message),
+            LogLevel::Debug => debug!("[{}] {}", self.base.id, message),
+            LogLevel::Info => info!("[{}] {}", self.base.id, message),
+            LogLevel::Warn => warn!("[{}] {}", self.base.id, message),
+            LogLevel::Error => error!("[{}] {}", self.base.id, message),
         }
     }
 }
 
 #[async_trait]
 impl Reaction for LogReaction {
+    fn id(&self) -> &str {
+        &self.base.id
+    }
+
+    fn type_name(&self) -> &str {
+        "log"
+    }
+
+    fn properties(&self) -> HashMap<String, serde_json::Value> {
+        let mut props = HashMap::new();
+        props.insert(
+            "log_level".to_string(),
+            serde_json::to_value(&self.config.log_level).unwrap_or(serde_json::Value::Null),
+        );
+        props
+    }
+
+    fn query_ids(&self) -> Vec<String> {
+        self.base.queries.clone()
+    }
+
     async fn start(
         &self,
-        query_subscriber: Arc<dyn drasi_lib::reactions::common::base::QuerySubscriber>,
+        query_subscriber: Arc<dyn QuerySubscriber>,
     ) -> Result<()> {
-        log_component_start("Reaction", &self.base.config.id);
+        log_component_start("Reaction", &self.base.id);
 
         // Transition to Starting
         self.base
@@ -111,14 +146,14 @@ impl Reaction for LogReaction {
 
         self.log_result(&format!(
             "Started - receiving results from queries: {:?}",
-            self.base.config.queries
+            self.base.queries
         ));
 
         // Spawn processing task to dequeue and process results in timestamp order
         let priority_queue = self.base.priority_queue.clone();
-        let reaction_name = self.base.config.id.clone();
-        let log_level = self.log_level;
-        let config_name = self.base.config.id.clone();
+        let reaction_name = self.base.id.clone();
+        let log_level = self.config.log_level;
+        let config_name = self.base.id.clone();
 
         let processing_task = tokio::spawn(async move {
             let log_fn = |message: &str| match log_level {
@@ -228,8 +263,8 @@ impl Reaction for LogReaction {
         self.base.get_status().await
     }
 
-    fn get_config(&self) -> &ReactionConfig {
-        &self.base.config
+    async fn inject_event_tx(&self, tx: ComponentEventSender) {
+        self.base.inject_event_tx(tx).await;
     }
 }
 

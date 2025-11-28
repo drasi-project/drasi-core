@@ -12,6 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Log Reaction Plugin for drasi-lib
+//!
+//! This plugin provides console logging of query results.
+//!
+//! ## Instance-based Usage
+//!
+//! ```rust,ignore
+//! use drasi_plugin_log_reaction::LogReaction;
+//! use drasi_lib::config::{ReactionConfig, ReactionSpecificConfig};
+//! use std::sync::Arc;
+//!
+//! // Create configuration
+//! let config = ReactionConfig {
+//!     id: "my-log".to_string(),
+//!     queries: vec!["query1".to_string()],
+//!     config: ReactionSpecificConfig::Log(props),
+//!     ..Default::default()
+//! };
+//!
+//! // Create instance and add to DrasiLib
+//! let reaction = Arc::new(LogReaction::new(config, event_tx));
+//! drasi.add_reaction(reaction).await?;
+//! ```
+
 mod config;
 mod log;
 
@@ -20,19 +44,3 @@ mod tests;
 
 pub use config::LogReactionConfig;
 pub use log::LogReaction;
-
-// Extension trait for plugin registration
-use drasi_lib::plugin_core::ReactionRegistry;
-use std::sync::Arc;
-
-pub trait ReactionRegistryLogExt {
-    fn register_log(&mut self);
-}
-
-impl ReactionRegistryLogExt for ReactionRegistry {
-    fn register_log(&mut self) {
-        self.register("log".to_string(), |config, event_tx| {
-            Ok(Arc::new(LogReaction::new(config, event_tx)))
-        });
-    }
-}

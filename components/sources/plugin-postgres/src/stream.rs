@@ -39,7 +39,7 @@ pub struct ReplicationStream {
         RwLock<Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>,
     >,
     #[allow(dead_code)]
-    event_tx: ComponentEventSender,
+    event_tx: Arc<RwLock<Option<ComponentEventSender>>>,
     status: Arc<RwLock<ComponentStatus>>,
     current_lsn: u64,
     last_feedback_time: std::time::Instant,
@@ -65,7 +65,7 @@ impl ReplicationStream {
                 Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
             >,
         >,
-        event_tx: ComponentEventSender,
+        event_tx: Arc<RwLock<Option<ComponentEventSender>>>,
         status: Arc<RwLock<ComponentStatus>>,
     ) -> Self {
         Self {

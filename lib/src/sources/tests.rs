@@ -16,24 +16,23 @@
 mod manager_tests {
     use super::super::*;
     use crate::channels::*;
-    use crate::test_support::helpers::test_fixtures::*;
-    use crate::test_support::helpers::test_mocks::create_test_source_registry;
+    use crate::test_support::helpers::test_mocks::create_test_mock_source;
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
-    async fn create_test_manager() -> (Arc<SourceManager>, mpsc::Receiver<ComponentEvent>) {
+    async fn create_test_manager(
+    ) -> (Arc<SourceManager>, mpsc::Receiver<ComponentEvent>, mpsc::Sender<ComponentEvent>) {
         let (event_tx, event_rx) = mpsc::channel(100);
-        let registry = create_test_source_registry();
-        let manager = Arc::new(SourceManager::with_registry(event_tx, registry));
-        (manager, event_rx)
+        let manager = Arc::new(SourceManager::new(event_tx.clone()));
+        (manager, event_rx, event_tx)
     }
 
     #[tokio::test]
     async fn test_add_source() {
-        let (manager, _event_rx) = create_test_manager().await;
+        let (manager, _event_rx, event_tx) = create_test_manager().await;
 
-        let config = create_test_source_config("test-source", "mock");
-        let result = manager.add_source(config.clone()).await;
+        let source = create_test_mock_source("test-source".to_string(), event_tx);
+        let result = manager.add_source(source).await;
 
         assert!(result.is_ok());
 
@@ -45,25 +44,26 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_add_duplicate_source() {
-        let (manager, _event_rx) = create_test_manager().await;
+        let (manager, _event_rx, event_tx) = create_test_manager().await;
 
-        let config = create_test_source_config("test-source", "mock");
+        let source1 = create_test_mock_source("test-source".to_string(), event_tx.clone());
+        let source2 = create_test_mock_source("test-source".to_string(), event_tx);
 
         // Add source first time
-        assert!(manager.add_source(config.clone()).await.is_ok());
+        assert!(manager.add_source(source1).await.is_ok());
 
         // Try to add same source again
-        let result = manager.add_source(config).await;
+        let result = manager.add_source(source2).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
     }
 
     #[tokio::test]
     async fn test_remove_source() {
-        let (manager, _event_rx) = create_test_manager().await;
+        let (manager, _event_rx, event_tx) = create_test_manager().await;
 
-        let config = create_test_source_config("test-source", "mock");
-        manager.add_source(config).await.unwrap();
+        let source = create_test_mock_source("test-source".to_string(), event_tx);
+        manager.add_source(source).await.unwrap();
 
         // Remove the source
         let result = manager.delete_source("test-source".to_string()).await;
@@ -76,7 +76,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_remove_nonexistent_source() {
-        let (manager, _event_rx) = create_test_manager().await;
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
 
         let result = manager.delete_source("nonexistent".to_string()).await;
         assert!(result.is_err());
@@ -85,11 +85,10 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_start_source() {
-        let (manager, mut event_rx) = create_test_manager().await;
+        let (manager, mut event_rx, event_tx) = create_test_manager().await;
 
-        let mut config = create_test_source_config("test-source", "mock");
-        config.auto_start = false;
-        manager.add_source(config).await.unwrap();
+        let source = create_test_mock_source("test-source".to_string(), event_tx);
+        manager.add_source(source).await.unwrap();
 
         // Start the source
         let result = manager.start_source("test-source".to_string()).await;
@@ -113,11 +112,10 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_stop_source() {
-        let (manager, mut event_rx) = create_test_manager().await;
+        let (manager, mut event_rx, event_tx) = create_test_manager().await;
 
-        let mut config = create_test_source_config("test-source", "mock");
-        config.auto_start = false;
-        manager.add_source(config).await.unwrap();
+        let source = create_test_mock_source("test-source".to_string(), event_tx);
+        manager.add_source(source).await.unwrap();
         manager
             .start_source("test-source".to_string())
             .await
@@ -145,53 +143,30 @@ mod manager_tests {
     }
 
     #[tokio::test]
-    async fn test_get_source_config() {
-        let (manager, _event_rx) = create_test_manager().await;
+    async fn test_get_source_info() {
+        let (manager, _event_rx, event_tx) = create_test_manager().await;
 
-        let config = create_test_source_config("test-source", "mock");
-        manager.add_source(config.clone()).await.unwrap();
+        let source = create_test_mock_source("test-source".to_string(), event_tx);
+        manager.add_source(source).await.unwrap();
 
-        let retrieved = manager.get_source_config("test-source").await;
-        assert!(retrieved.is_some());
+        let retrieved = manager.get_source("test-source".to_string()).await;
+        assert!(retrieved.is_ok());
 
         let retrieved = retrieved.unwrap();
-        assert_eq!(retrieved.id, config.id);
-        assert_eq!(retrieved.source_type(), config.source_type());
-    }
-
-    #[tokio::test]
-    async fn test_update_source() {
-        let (manager, _event_rx) = create_test_manager().await;
-
-        let mut config = create_test_source_config("test-source", "mock");
-        config.auto_start = false;
-        manager.add_source(config.clone()).await.unwrap();
-
-        // Update config by modifying the typed config
-        // Since we have strongly-typed configs, we can't just insert a new property
-        // Instead, verify the config was updated correctly
-        let result = manager
-            .update_source("test-source".to_string(), config.clone())
-            .await;
-        assert!(result.is_ok());
-
-        // Verify update
-        let retrieved = manager.get_source_config("test-source").await.unwrap();
         assert_eq!(retrieved.id, "test-source");
+        assert_eq!(retrieved.source_type, "mock");
     }
 
     #[tokio::test]
     async fn test_list_sources_with_status() {
-        let (manager, _event_rx) = create_test_manager().await;
+        let (manager, _event_rx, event_tx) = create_test_manager().await;
 
         // Add multiple sources
-        let mut config1 = create_test_source_config("source1", "mock");
-        let mut config2 = create_test_source_config("source2", "mock");
-        config1.auto_start = false;
-        config2.auto_start = false;
+        let source1 = create_test_mock_source("source1".to_string(), event_tx.clone());
+        let source2 = create_test_mock_source("source2".to_string(), event_tx);
 
-        manager.add_source(config1).await.unwrap();
-        manager.add_source(config2).await.unwrap();
+        manager.add_source(source1).await.unwrap();
+        manager.add_source(source2).await.unwrap();
 
         // Start one source
         manager.start_source("source1".to_string()).await.unwrap();

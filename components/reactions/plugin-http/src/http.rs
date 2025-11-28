@@ -27,44 +27,45 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
-use drasi_lib::config::ReactionConfig;
-use drasi_lib::reactions::common::base::ReactionBase;
-use drasi_lib::reactions::Reaction;
+use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
+use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::utils::log_component_start;
 
 pub struct HttpReaction {
     base: ReactionBase,
-    base_url: String,
-    token: Option<String>,
-    timeout_ms: u64,
-    query_configs: HashMap<String, QueryConfig>,
+    config: HttpReactionConfig,
 }
 
 impl HttpReaction {
-    pub fn new(config: ReactionConfig, event_tx: ComponentEventSender) -> Self {
-        // Extract HTTP-specific configuration
-        let (base_url, token, timeout_ms, query_configs) = match &config.config {
-            drasi_lib::config::ReactionSpecificConfig::Http(http_config_map) => {
-                // Deserialize HashMap into typed config
-                let http_config: HttpReactionConfig = serde_json::from_value(
-                    serde_json::to_value(http_config_map).unwrap_or_default()
-                ).unwrap_or_default();
-                (
-                    http_config.base_url.clone(),
-                    http_config.token.clone(),
-                    http_config.timeout_ms,
-                    http_config.routes.clone(),
-                )
-            }
-            _ => ("http://localhost".to_string(), None, 10000, HashMap::new()),
-        };
-
+    /// Create a new HTTP reaction
+    ///
+    /// The event channel is automatically injected when the reaction is added
+    /// to DrasiLib via `add_reaction()`.
+    pub fn new(id: impl Into<String>, queries: Vec<String>, config: HttpReactionConfig) -> Self {
+        let id = id.into();
+        let params = ReactionBaseParams::new(id, queries);
         Self {
-            base: ReactionBase::new(config, event_tx),
-            base_url,
-            token,
-            timeout_ms,
-            query_configs,
+            base: ReactionBase::new(params),
+            config,
+        }
+    }
+
+    /// Create a new HTTP reaction with custom priority queue capacity
+    ///
+    /// The event channel is automatically injected when the reaction is added
+    /// to DrasiLib via `add_reaction()`.
+    pub fn with_priority_queue_capacity(
+        id: impl Into<String>,
+        queries: Vec<String>,
+        config: HttpReactionConfig,
+        priority_queue_capacity: usize,
+    ) -> Self {
+        let id = id.into();
+        let params = ReactionBaseParams::new(id, queries)
+            .with_priority_queue_capacity(priority_queue_capacity);
+        Self {
+            base: ReactionBase::new(params),
+            config,
         }
     }
 
@@ -211,15 +212,40 @@ impl HttpReaction {
 
 #[async_trait]
 impl Reaction for HttpReaction {
+    fn id(&self) -> &str {
+        &self.base.id
+    }
+
+    fn type_name(&self) -> &str {
+        "http"
+    }
+
+    fn properties(&self) -> HashMap<String, serde_json::Value> {
+        let mut props = HashMap::new();
+        props.insert(
+            "base_url".to_string(),
+            serde_json::Value::String(self.config.base_url.clone()),
+        );
+        props.insert(
+            "timeout_ms".to_string(),
+            serde_json::Value::Number(self.config.timeout_ms.into()),
+        );
+        props
+    }
+
+    fn query_ids(&self) -> Vec<String> {
+        self.base.queries.clone()
+    }
+
     async fn start(
         &self,
-        query_subscriber: Arc<dyn drasi_lib::reactions::common::base::QuerySubscriber>,
+        query_subscriber: Arc<dyn QuerySubscriber>,
     ) -> Result<()> {
-        log_component_start("HTTP Reaction", &self.base.config.id);
+        log_component_start("HTTP Reaction", &self.base.id);
 
         info!(
             "[{}] HTTP reaction started - sending to base URL: {}",
-            self.base.config.id, self.base_url
+            self.base.id, self.config.base_url
         );
 
         // Transition to Starting
@@ -242,12 +268,12 @@ impl Reaction for HttpReaction {
             .await?;
 
         // Spawn the main processing task
-        let reaction_name = self.base.config.id.clone();
+        let reaction_name = self.base.id.clone();
         let status = self.base.status.clone();
-        let query_configs = self.query_configs.clone();
-        let base_url = self.base_url.clone();
-        let token = self.token.clone();
-        let timeout_ms = self.timeout_ms;
+        let query_configs = self.config.routes.clone();
+        let base_url = self.config.base_url.clone();
+        let token = self.config.token.clone();
+        let timeout_ms = self.config.timeout_ms;
         let priority_queue = self.base.priority_queue.clone();
 
         let processing_task_handle = tokio::spawn(async move {
@@ -419,7 +445,7 @@ impl Reaction for HttpReaction {
         self.base.get_status().await
     }
 
-    fn get_config(&self) -> &ReactionConfig {
-        &self.base.config
+    async fn inject_event_tx(&self, tx: ComponentEventSender) {
+        self.base.inject_event_tx(tx).await;
     }
 }

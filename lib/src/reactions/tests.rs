@@ -15,123 +15,27 @@
 #[cfg(test)]
 mod manager_tests {
     use super::super::*;
-    use crate::channels::dispatcher::{BroadcastChangeDispatcher, ChangeDispatcher};
     use crate::channels::*;
-    use crate::config::QueryConfig;
-    use crate::queries::Query;
-    use crate::server_core::DrasiLib;
-    use crate::test_support::helpers::test_fixtures::*;
-    use crate::test_support::helpers::test_mocks::create_test_reaction_registry;
-    use anyhow::Result;
-    use async_trait::async_trait;
+    use crate::test_support::helpers::test_mocks::create_test_mock_reaction;
     use std::sync::Arc;
-    use tokio::sync::{mpsc, RwLock};
+    use tokio::sync::mpsc;
 
-    /// Mock query for testing reactions
-    struct MockQuery {
-        config: QueryConfig,
-        status: Arc<RwLock<ComponentStatus>>,
-        dispatcher: Arc<BroadcastChangeDispatcher<QueryResult>>,
-    }
-
-    impl MockQuery {
-        fn new(query_id: &str) -> Self {
-            let dispatcher = Arc::new(BroadcastChangeDispatcher::<QueryResult>::new(1000));
-            Self {
-                config: QueryConfig {
-                    id: query_id.to_string(),
-                    query: "MATCH (n) RETURN n".to_string(),
-                    query_language: crate::config::QueryLanguage::Cypher,
-                    middleware: vec![],
-                    source_subscriptions: vec![],
-                    auto_start: false,
-                    joins: None,
-                    enable_bootstrap: false,
-                    bootstrap_buffer_size: 10000,
-                    priority_queue_capacity: None,
-                    dispatch_buffer_capacity: None,
-                    dispatch_mode: None,
-                    storage_backend: None,
-                },
-                status: Arc::new(RwLock::new(ComponentStatus::Running)),
-                dispatcher,
-            }
-        }
-    }
-
-    #[async_trait]
-    impl Query for MockQuery {
-        async fn start(&self) -> Result<()> {
-            *self.status.write().await = ComponentStatus::Running;
-            Ok(())
-        }
-
-        async fn stop(&self) -> Result<()> {
-            *self.status.write().await = ComponentStatus::Stopped;
-            Ok(())
-        }
-
-        async fn status(&self) -> ComponentStatus {
-            self.status.read().await.clone()
-        }
-
-        fn get_config(&self) -> &QueryConfig {
-            &self.config
-        }
-
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-
-        async fn subscribe(
-            &self,
-            _reaction_id: String,
-        ) -> Result<QuerySubscriptionResponse, String> {
-            let receiver = self
-                .dispatcher
-                .create_receiver()
-                .await
-                .map_err(|e| format!("Failed to create receiver: {}", e))?;
-            Ok(QuerySubscriptionResponse {
-                query_id: self.config.id.clone(),
-                receiver,
-            })
-        }
-    }
-
-    async fn create_test_server_with_query(query_id: &str) -> Result<Arc<DrasiLib>> {
-        let mock_query = Arc::new(MockQuery::new(query_id));
-
-        let config_yaml = r#"
-server_core:
-  id: test-server
-
-sources: []
-queries: []
-reactions: []
-"#;
-
-        let server_core = DrasiLib::from_config_str(config_yaml).await?;
-        server_core
-            .query_manager()
-            .add_query_instance_for_test(mock_query)
-            .await?;
-        Ok(Arc::new(server_core))
-    }
-
-    async fn create_test_manager() -> (Arc<ReactionManager>, mpsc::Receiver<ComponentEvent>) {
+    async fn create_test_manager() -> (Arc<ReactionManager>, mpsc::Receiver<ComponentEvent>, mpsc::Sender<ComponentEvent>) {
         let (event_tx, event_rx) = mpsc::channel(100);
-        let registry = create_test_reaction_registry();
-        let manager = Arc::new(ReactionManager::with_registry(event_tx, registry));
-        (manager, event_rx)
+        let manager = Arc::new(ReactionManager::new(event_tx.clone()));
+        (manager, event_rx, event_tx)
     }
 
     #[tokio::test]
     async fn test_add_reaction() {
-        let (manager, _event_rx) = create_test_manager().await;
+        let (manager, _event_rx, event_tx) = create_test_manager().await;
 
-        let config = create_test_reaction_config("test-reaction", vec!["query1".to_string()]);
-        let result = manager.add_reaction(config.clone()).await;
+        let reaction = create_test_mock_reaction(
+            "test-reaction".to_string(),
+            vec!["query1".to_string()],
+            event_tx,
+        );
+        let result = manager.add_reaction(reaction).await;
 
         assert!(result.is_ok());
 
@@ -143,25 +47,38 @@ reactions: []
 
     #[tokio::test]
     async fn test_add_duplicate_reaction() {
-        let (manager, _event_rx) = create_test_manager().await;
+        let (manager, _event_rx, event_tx) = create_test_manager().await;
 
-        let config = create_test_reaction_config("test-reaction", vec![]);
+        let reaction1 = create_test_mock_reaction(
+            "test-reaction".to_string(),
+            vec![],
+            event_tx.clone(),
+        );
+        let reaction2 = create_test_mock_reaction(
+            "test-reaction".to_string(),
+            vec![],
+            event_tx,
+        );
 
         // Add reaction first time
-        assert!(manager.add_reaction(config.clone()).await.is_ok());
+        assert!(manager.add_reaction(reaction1).await.is_ok());
 
         // Try to add same reaction again
-        let result = manager.add_reaction(config).await;
+        let result = manager.add_reaction(reaction2).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
     }
 
     #[tokio::test]
     async fn test_delete_reaction() {
-        let (manager, _event_rx) = create_test_manager().await;
+        let (manager, _event_rx, event_tx) = create_test_manager().await;
 
-        let config = create_test_reaction_config("test-reaction", vec![]);
-        manager.add_reaction(config).await.unwrap();
+        let reaction = create_test_mock_reaction(
+            "test-reaction".to_string(),
+            vec![],
+            event_tx,
+        );
+        manager.add_reaction(reaction).await.unwrap();
 
         // Delete the reaction
         let result = manager.delete_reaction("test-reaction".to_string()).await;
@@ -173,162 +90,84 @@ reactions: []
     }
 
     #[tokio::test]
-    async fn test_start_reaction() {
-        let (manager, mut event_rx) = create_test_manager().await;
+    async fn test_delete_nonexistent_reaction() {
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
 
-        let config = create_test_reaction_config("test-reaction", vec!["query1".to_string()]);
-        manager.add_reaction(config).await.unwrap();
-
-        // Create test server with mock query
-        let server_core = create_test_server_with_query("query1").await.unwrap();
-
-        // Start the reaction
-        let result = manager
-            .start_reaction("test-reaction".to_string(), server_core)
-            .await;
-        assert!(result.is_ok(), "Should be able to start reaction");
-
-        // Wait for status event
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while let Some(event) = event_rx.recv().await {
-                if event.component_id == "test-reaction" {
-                    assert!(
-                        matches!(event.status, ComponentStatus::Starting)
-                            || matches!(event.status, ComponentStatus::Running)
-                    );
-                    break;
-                }
-            }
-        })
-        .await
-        .expect("Timeout waiting for status event");
+        let result = manager.delete_reaction("nonexistent".to_string()).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
     }
 
     #[tokio::test]
-    async fn test_stop_reaction() {
-        let (manager, mut event_rx) = create_test_manager().await;
+    async fn test_get_reaction_info() {
+        let (manager, _event_rx, event_tx) = create_test_manager().await;
 
-        let config = create_test_reaction_config("test-reaction", vec!["query1".to_string()]);
-        manager.add_reaction(config).await.unwrap();
+        let reaction = create_test_mock_reaction(
+            "test-reaction".to_string(),
+            vec!["query1".to_string()],
+            event_tx,
+        );
+        manager.add_reaction(reaction).await.unwrap();
 
-        // Create test server and start reaction
-        let server_core = create_test_server_with_query("query1").await.unwrap();
-        manager
-            .start_reaction("test-reaction".to_string(), server_core)
-            .await
-            .unwrap();
-
-        // Wait a bit for reaction to start
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Stop the reaction
-        let result = manager.stop_reaction("test-reaction".to_string()).await;
-        assert!(result.is_ok(), "Should be able to stop reaction");
-
-        // Wait for stop event
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while let Some(event) = event_rx.recv().await {
-                if event.component_id == "test-reaction"
-                    && matches!(event.status, ComponentStatus::Stopped)
-                {
-                    break;
-                }
-            }
-        })
-        .await
-        .expect("Timeout waiting for stop event");
-    }
-
-    #[tokio::test]
-    async fn test_get_reaction_config() {
-        let (manager, _event_rx) = create_test_manager().await;
-
-        let config = create_test_reaction_config("test-reaction", vec!["query1".to_string()]);
-        manager.add_reaction(config.clone()).await.unwrap();
-
-        let retrieved = manager.get_reaction_config("test-reaction").await;
-        assert!(retrieved.is_some());
+        let retrieved = manager.get_reaction("test-reaction".to_string()).await;
+        assert!(retrieved.is_ok());
 
         let retrieved = retrieved.unwrap();
-        assert_eq!(retrieved.id, config.id);
-        assert_eq!(retrieved.reaction_type(), config.reaction_type());
-        assert_eq!(retrieved.queries, config.queries);
+        assert_eq!(retrieved.id, "test-reaction");
+        assert_eq!(retrieved.reaction_type, "log");
+        assert_eq!(retrieved.queries, vec!["query1".to_string()]);
     }
 
     #[tokio::test]
-    async fn test_update_reaction() {
-        let (manager, _event_rx) = create_test_manager().await;
+    async fn test_list_reactions_with_status() {
+        let (manager, _event_rx, event_tx) = create_test_manager().await;
 
-        let mut config = create_test_reaction_config("test-reaction", vec!["query1".to_string()]);
-        manager.add_reaction(config.clone()).await.unwrap();
+        // Add multiple reactions
+        let reaction1 = create_test_mock_reaction(
+            "reaction1".to_string(),
+            vec![],
+            event_tx.clone(),
+        );
+        let reaction2 = create_test_mock_reaction(
+            "reaction2".to_string(),
+            vec![],
+            event_tx,
+        );
 
-        // Update config to add another query
-        config.queries.push("query2".to_string());
+        manager.add_reaction(reaction1).await.unwrap();
+        manager.add_reaction(reaction2).await.unwrap();
 
-        // Update with server_core (not started, so pass None)
-        let result = manager
-            .update_reaction("test-reaction".to_string(), config.clone(), None)
-            .await;
-        assert!(result.is_ok(), "Should be able to update reaction");
+        let reactions = manager.list_reactions().await;
+        assert_eq!(reactions.len(), 2);
 
-        // Verify config was updated
-        let retrieved = manager.get_reaction_config("test-reaction").await.unwrap();
-        assert_eq!(retrieved.queries.len(), 2);
-        assert_eq!(retrieved.queries[0], "query1");
-        assert_eq!(retrieved.queries[1], "query2");
+        // Both should be stopped initially
+        for (_, status) in reactions {
+            assert!(matches!(status, ComponentStatus::Stopped));
+        }
     }
 
     #[tokio::test]
-    async fn test_reaction_lifecycle() {
-        let (manager, _event_rx) = create_test_manager().await;
+    async fn test_get_reaction_status() {
+        let (manager, _event_rx, event_tx) = create_test_manager().await;
 
-        let config = create_test_reaction_config("test-reaction", vec!["query1".to_string()]);
-        manager.add_reaction(config).await.unwrap();
-
-        // 1. Verify reaction starts in stopped state
-        let status = manager
-            .get_reaction_status("test-reaction".to_string())
-            .await
-            .unwrap();
-        assert!(
-            matches!(status, ComponentStatus::Stopped),
-            "Reaction should start in stopped state"
+        let reaction = create_test_mock_reaction(
+            "test-reaction".to_string(),
+            vec![],
+            event_tx,
         );
+        manager.add_reaction(reaction).await.unwrap();
 
-        // 2. Create server and start reaction
-        let server_core = create_test_server_with_query("query1").await.unwrap();
-        manager
-            .start_reaction("test-reaction".to_string(), server_core)
-            .await
-            .unwrap();
+        let status = manager.get_reaction_status("test-reaction".to_string()).await;
+        assert!(status.is_ok());
+        assert!(matches!(status.unwrap(), ComponentStatus::Stopped));
+    }
 
-        // 3. Verify reaction is running
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        let status = manager
-            .get_reaction_status("test-reaction".to_string())
-            .await
-            .unwrap();
-        assert!(
-            matches!(status, ComponentStatus::Starting)
-                || matches!(status, ComponentStatus::Running),
-            "Reaction should be starting or running"
-        );
+    #[tokio::test]
+    async fn test_get_nonexistent_reaction_status() {
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
 
-        // 4. Stop reaction
-        manager
-            .stop_reaction("test-reaction".to_string())
-            .await
-            .unwrap();
-
-        // 5. Verify reaction is stopped
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        let status = manager
-            .get_reaction_status("test-reaction".to_string())
-            .await
-            .unwrap();
-        assert!(
-            matches!(status, ComponentStatus::Stopped),
-            "Reaction should be stopped"
-        );
+        let status = manager.get_reaction_status("nonexistent".to_string()).await;
+        assert!(status.is_err());
+        assert!(status.unwrap_err().to_string().contains("not found"));
     }
 }

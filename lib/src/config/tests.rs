@@ -16,15 +16,6 @@
 mod schema_tests {
     use super::super::schema::*;
     use serde_json::json;
-    use std::collections::HashMap;
-
-    /// Helper to convert a serde_json::Value object to HashMap<String, serde_json::Value>
-    fn to_hashmap(value: serde_json::Value) -> HashMap<String, serde_json::Value> {
-        match value {
-            serde_json::Value::Object(map) => map.into_iter().collect(),
-            _ => HashMap::new(),
-        }
-    }
 
     #[test]
     fn test_server_settings_defaults() {
@@ -120,39 +111,11 @@ mod schema_tests {
     }
 
     #[test]
-    fn test_reaction_config_defaults() {
-        // Test programmatically instead of deserializing to avoid tag conflicts
-        let config = ReactionConfig {
-            id: "test-reaction".to_string(),
-            queries: vec!["query1".to_string()],
-            auto_start: true,
-            config: crate::config::ReactionSpecificConfig::Log(to_hashmap(json!({
-                "log_level": "info"
-            }))),
-            priority_queue_capacity: None,
-        };
+    fn test_server_config_with_queries() {
+        // Note: Sources and reactions are now instance-based and not part of config.
+        // They are passed as pre-built Arc<dyn Source> and Arc<dyn Reaction> instances.
 
-        assert_eq!(config.id, "test-reaction");
-        assert_eq!(config.reaction_type(), "log");
-        assert!(config.auto_start); // default is true
-    }
-
-    #[test]
-    fn test_server_config_complete() {
         let mut config = DrasiLibConfig::default();
-
-        // Add a source
-        config.sources.push(SourceConfig {
-            id: "source1".to_string(),
-            auto_start: true,
-            config: crate::config::SourceSpecificConfig::Mock(to_hashmap(json!({
-                "data_type": "counter",
-                "interval_ms": 1000
-            }))),
-            bootstrap_provider: None,
-            dispatch_buffer_capacity: None,
-            dispatch_mode: None,
-        });
 
         // Add a query
         config.queries.push(QueryConfig {
@@ -174,39 +137,15 @@ mod schema_tests {
             storage_backend: None,
         });
 
-        // Add a reaction
-        config.reactions.push(ReactionConfig {
-            id: "reaction1".to_string(),
-            queries: vec!["query1".to_string()],
-            auto_start: true,
-            config: crate::config::ReactionSpecificConfig::Log(to_hashmap(json!({
-                "log_level": "info"
-            }))),
-            priority_queue_capacity: None,
-        });
-
-        assert_eq!(config.sources.len(), 1);
         assert_eq!(config.queries.len(), 1);
-        assert_eq!(config.reactions.len(), 1);
     }
 }
 
 #[cfg(test)]
 mod persistence_tests {
     use super::super::schema::*;
-    use serde_json::json;
-    use serde_yaml;
-    use std::collections::HashMap;
     use std::fs;
     use tempfile::TempDir;
-
-    /// Helper to convert a serde_json::Value object to HashMap<String, serde_json::Value>
-    fn to_hashmap(value: serde_json::Value) -> HashMap<String, serde_json::Value> {
-        match value {
-            serde_json::Value::Object(map) => map.into_iter().collect(),
-            _ => HashMap::new(),
-        }
-    }
 
     #[test]
     fn test_load_config_from_file() {
@@ -216,16 +155,22 @@ mod persistence_tests {
         // Create config programmatically and serialize it
         let mut config = DrasiLibConfig::default();
         config.server_core.id = "test-server".to_string();
-        config.sources.push(SourceConfig {
-            id: "test-source".to_string(),
+
+        // Note: Sources are now instance-based. Only queries are stored in config.
+        config.queries.push(QueryConfig {
+            id: "test-query".to_string(),
+            query: "MATCH (n) RETURN n".to_string(),
+            query_language: QueryLanguage::Cypher,
+            middleware: vec![],
+            source_subscriptions: vec![],
             auto_start: true,
-            config: crate::config::SourceSpecificConfig::Mock(to_hashmap(json!({
-                "data_type": "counter",
-                "interval_ms": 1000
-            }))),
-            bootstrap_provider: None,
+            joins: None,
+            enable_bootstrap: true,
+            bootstrap_buffer_size: 10000,
+            priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
+            storage_backend: None,
         });
 
         // Serialize to YAML
@@ -234,7 +179,6 @@ mod persistence_tests {
 
         // Load and parse the config back
         let _yaml_str = fs::read_to_string(&config_path).unwrap();
-        // Skip deserialization test due to serde(flatten) + serde(tag) conflicts
         // Just verify the file was written
         assert!(config_path.exists());
     }
@@ -275,9 +219,7 @@ mod persistence_tests {
         let loaded_config: DrasiLibConfig = serde_yaml::from_str(&loaded_yaml).unwrap();
 
         assert_eq!(loaded_config.server_core.id, config.server_core.id);
-        assert_eq!(loaded_config.sources.len(), config.sources.len());
         assert_eq!(loaded_config.queries.len(), config.queries.len());
-        assert_eq!(loaded_config.reactions.len(), config.reactions.len());
     }
 
     #[test]
@@ -285,18 +227,22 @@ mod persistence_tests {
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().join("config.yaml");
 
-        // Create a config with all fields populated
+        // Create a config with queries
         let mut config = DrasiLibConfig::default();
-        config.sources.push(SourceConfig {
-            id: "test-source".to_string(),
+        config.queries.push(QueryConfig {
+            id: "test-query".to_string(),
+            query: "MATCH (n) RETURN n".to_string(),
+            query_language: QueryLanguage::Cypher,
+            middleware: vec![],
+            source_subscriptions: vec![],
             auto_start: true,
-            config: crate::config::SourceSpecificConfig::Mock(to_hashmap(json!({
-                "data_type": "generic",
-                "interval_ms": 5000
-            }))),
-            bootstrap_provider: None,
+            joins: None,
+            enable_bootstrap: true,
+            bootstrap_buffer_size: 10000,
+            priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
+            storage_backend: None,
         });
 
         // Save config
@@ -308,10 +254,9 @@ mod persistence_tests {
         let yaml_content = fs::read_to_string(&config_path).unwrap();
         assert!(!yaml_content.is_empty());
 
-        // Note: Deserialization from YAML with serde(flatten) + serde(tag) has known issues
-        // We verify that serialization works correctly, which is the primary use case
-        assert_eq!(config.sources.len(), 1);
-        assert_eq!(config.sources[0].id, "test-source");
+        // Verify config
+        assert_eq!(config.queries.len(), 1);
+        assert_eq!(config.queries[0].id, "test-query");
     }
 }
 
@@ -320,37 +265,6 @@ mod runtime_tests {
     use super::super::runtime::*;
     use super::super::schema::*;
     use crate::channels::ComponentStatus;
-    use serde_json::json;
-    use std::collections::HashMap;
-
-    /// Helper to convert a serde_json::Value object to HashMap<String, serde_json::Value>
-    fn to_hashmap(value: serde_json::Value) -> HashMap<String, serde_json::Value> {
-        match value {
-            serde_json::Value::Object(map) => map.into_iter().collect(),
-            _ => HashMap::new(),
-        }
-    }
-
-    #[test]
-    fn test_source_runtime_conversion() {
-        let config = SourceConfig {
-            id: "test-source".to_string(),
-            auto_start: true,
-            config: crate::config::SourceSpecificConfig::Mock(to_hashmap(json!({
-                "data_type": "generic",
-                "interval_ms": 5000
-            }))),
-            bootstrap_provider: None,
-            dispatch_buffer_capacity: None,
-            dispatch_mode: None,
-        };
-
-        let runtime = SourceRuntime::from(config.clone());
-        assert_eq!(runtime.id, config.id);
-        assert_eq!(runtime.source_type, config.source_type());
-        // auto_start sources should be Stopped initially (will be started by manager)
-        matches!(runtime.status, ComponentStatus::Stopped);
-    }
 
     #[test]
     fn test_query_runtime_conversion() {
@@ -380,25 +294,6 @@ mod runtime_tests {
             runtime.source_subscriptions.len(),
             config.source_subscriptions.len()
         );
-        matches!(runtime.status, ComponentStatus::Stopped);
-    }
-
-    #[test]
-    fn test_reaction_runtime_conversion() {
-        let config = ReactionConfig {
-            id: "test-reaction".to_string(),
-            queries: vec!["query1".to_string()],
-            auto_start: true,
-            config: crate::config::ReactionSpecificConfig::Log(to_hashmap(json!({
-                "log_level": "info"
-            }))),
-            priority_queue_capacity: None,
-        };
-
-        let runtime = ReactionRuntime::from(config.clone());
-        assert_eq!(runtime.id, config.id);
-        assert_eq!(runtime.reaction_type, config.reaction_type());
-        assert_eq!(runtime.queries, config.queries);
         matches!(runtime.status, ComponentStatus::Stopped);
     }
 

@@ -11,9 +11,8 @@ use tokio::sync::mpsc;
 use tonic::transport::Channel;
 
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
-use drasi_lib::config::ReactionConfig;
-use drasi_lib::reactions::common::base::ReactionBase;
-use drasi_lib::reactions::Reaction;
+use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
+use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::utils::{AdaptiveBatchConfig, AdaptiveBatcher};
 
 // Use the proto module and helpers from the grpc-reaction plugin
@@ -28,6 +27,7 @@ mod tests;
 /// Adaptive gRPC reaction that dynamically adjusts batching based on throughput
 pub struct AdaptiveGrpcReaction {
     base: ReactionBase,
+    config: GrpcAdaptiveReactionConfig,
     endpoint: String,
     timeout_ms: u64,
     max_retries: u32,
@@ -39,74 +39,40 @@ pub struct AdaptiveGrpcReaction {
 }
 
 impl AdaptiveGrpcReaction {
-    pub fn new(config: ReactionConfig, event_tx: ComponentEventSender) -> Self {
-        // Extract gRPC Adaptive configuration from typed config
-        let (
-            endpoint,
-            timeout_ms,
-            max_retries,
-            connection_retry_attempts,
-            initial_connection_timeout_ms,
-            metadata,
-            adaptive_config,
-        ) = match &config.config {
-            drasi_lib::config::ReactionSpecificConfig::GrpcAdaptive(grpc_adaptive_config_map) => {
-                // Deserialize HashMap into typed config
-                let grpc_adaptive_config: GrpcAdaptiveReactionConfig = serde_json::from_value(
-                    serde_json::to_value(grpc_adaptive_config_map).unwrap_or_default()
-                ).unwrap_or_default();
+    /// Create a new adaptive gRPC reaction
+    ///
+    /// The event channel is automatically injected when the reaction is added
+    /// to DrasiLib via `add_reaction()`.
+    pub fn new(
+        id: impl Into<String>,
+        queries: Vec<String>,
+        config: GrpcAdaptiveReactionConfig,
+    ) -> Self {
+        let id = id.into();
 
-                // Convert from config adaptive fields to utils::AdaptiveBatchConfig
-                let utils_adaptive_config = AdaptiveBatchConfig {
-                    min_batch_size: grpc_adaptive_config.adaptive.adaptive_min_batch_size,
-                    max_batch_size: grpc_adaptive_config.adaptive.adaptive_max_batch_size,
-                    throughput_window: Duration::from_millis(
-                        grpc_adaptive_config.adaptive.adaptive_window_size as u64 * 100,
-                    ),
-                    max_wait_time: Duration::from_millis(
-                        grpc_adaptive_config.adaptive.adaptive_batch_timeout_ms,
-                    ),
-                    min_wait_time: Duration::from_millis(100),
-                    adaptive_enabled: true,
-                };
-
-                (
-                    grpc_adaptive_config.endpoint.clone(),
-                    grpc_adaptive_config.timeout_ms,
-                    grpc_adaptive_config.max_retries,
-                    grpc_adaptive_config.connection_retry_attempts,
-                    grpc_adaptive_config.initial_connection_timeout_ms,
-                    grpc_adaptive_config.metadata.clone(),
-                    utils_adaptive_config,
-                )
-            }
-            _ => {
-                // Provide defaults if wrong config type
-                warn!(
-                    "Expected GrpcAdaptive config, got different type. Using defaults for reaction: {}",
-                    config.id
-                );
-                (
-                    "grpc://localhost:50052".to_string(),
-                    5000u64,
-                    5u32,
-                    5u32,
-                    10000u64,
-                    HashMap::new(),
-                    AdaptiveBatchConfig::default(),
-                )
-            }
+        // Convert from config adaptive fields to utils::AdaptiveBatchConfig
+        let utils_adaptive_config = AdaptiveBatchConfig {
+            min_batch_size: config.adaptive.adaptive_min_batch_size,
+            max_batch_size: config.adaptive.adaptive_max_batch_size,
+            throughput_window: Duration::from_millis(
+                config.adaptive.adaptive_window_size as u64 * 100,
+            ),
+            max_wait_time: Duration::from_millis(config.adaptive.adaptive_batch_timeout_ms),
+            min_wait_time: Duration::from_millis(100),
+            adaptive_enabled: true,
         };
 
+        let params = ReactionBaseParams::new(id, queries);
         Self {
-            base: ReactionBase::new(config, event_tx),
-            endpoint,
-            timeout_ms,
-            max_retries,
-            metadata,
-            _connection_retry_attempts: connection_retry_attempts,
-            initial_connection_timeout_ms,
-            adaptive_config,
+            base: ReactionBase::new(params),
+            endpoint: config.endpoint.clone(),
+            timeout_ms: config.timeout_ms,
+            max_retries: config.max_retries,
+            metadata: config.metadata.clone(),
+            _connection_retry_attempts: config.connection_retry_attempts,
+            initial_connection_timeout_ms: config.initial_connection_timeout_ms,
+            adaptive_config: utils_adaptive_config,
+            config,
         }
     }
 
@@ -401,11 +367,40 @@ impl AdaptiveGrpcReaction {
 
 #[async_trait]
 impl Reaction for AdaptiveGrpcReaction {
+    fn id(&self) -> &str {
+        &self.base.id
+    }
+
+    fn type_name(&self) -> &str {
+        "grpc_adaptive"
+    }
+
+    fn properties(&self) -> HashMap<String, serde_json::Value> {
+        let mut props = HashMap::new();
+        props.insert(
+            "endpoint".to_string(),
+            serde_json::Value::String(self.config.endpoint.clone()),
+        );
+        props.insert(
+            "timeout_ms".to_string(),
+            serde_json::Value::Number(self.config.timeout_ms.into()),
+        );
+        props.insert(
+            "max_retries".to_string(),
+            serde_json::Value::Number(self.config.max_retries.into()),
+        );
+        props
+    }
+
+    fn query_ids(&self) -> Vec<String> {
+        self.base.queries.clone()
+    }
+
     async fn start(
         &self,
-        query_subscriber: Arc<dyn drasi_lib::reactions::common::base::QuerySubscriber>,
+        query_subscriber: Arc<dyn QuerySubscriber>,
     ) -> Result<()> {
-        info!("Starting adaptive gRPC reaction: {}", self.base.config.id);
+        info!("Starting adaptive gRPC reaction: {}", self.base.id);
 
         // Set status to Starting
         self.base
@@ -427,21 +422,14 @@ impl Reaction for AdaptiveGrpcReaction {
             .await?;
 
         // Start processing task that dequeues from priority queue
-        let reaction_name = self.base.config.id.clone();
+        let reaction_name = self.base.id.clone();
         let endpoint = self.endpoint.clone();
         let max_retries = self.max_retries;
         let metadata = self.metadata.clone();
         let timeout_ms = self.timeout_ms;
         let initial_connection_timeout_ms = self.initial_connection_timeout_ms;
         let adaptive_config = self.adaptive_config.clone();
-        let base = ReactionBase {
-            config: self.base.config.clone(),
-            status: self.base.status.clone(),
-            event_tx: self.base.event_tx.clone(),
-            priority_queue: self.base.priority_queue.clone(),
-            subscription_tasks: self.base.subscription_tasks.clone(),
-            processing_task: self.base.processing_task.clone(),
-        };
+        let base = self.base.clone_shared();
 
         let processing_task_handle = tokio::spawn(async move {
             Self::run_internal(
@@ -465,7 +453,7 @@ impl Reaction for AdaptiveGrpcReaction {
     }
 
     async fn stop(&self) -> Result<()> {
-        info!("[{}] Stopping adaptive gRPC reaction", self.base.config.id);
+        info!("[{}] Stopping adaptive gRPC reaction", self.base.id);
 
         // Set status to Stopping
         self.base
@@ -496,7 +484,7 @@ impl Reaction for AdaptiveGrpcReaction {
         self.base.get_status().await
     }
 
-    fn get_config(&self) -> &ReactionConfig {
-        &self.base.config
+    async fn inject_event_tx(&self, tx: ComponentEventSender) {
+        self.base.inject_event_tx(tx).await;
     }
 }

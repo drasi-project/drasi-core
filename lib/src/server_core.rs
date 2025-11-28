@@ -21,9 +21,10 @@ use tokio::sync::RwLock;
 use crate::error::DrasiError;
 use crate::channels::*;
 use crate::component_ops::{map_component_error, map_state_error};
-use crate::config::{DrasiLibConfig, RuntimeConfig};
+use crate::config::{DrasiLibConfig, ReactionConfig, RuntimeConfig, SourceConfig};
 use crate::inspection::InspectionAPI;
 use crate::lifecycle::{ComponentsRunningState, LifecycleManager};
+use crate::plugin_core::{ReactionRegistry, SourceRegistry};
 use crate::queries::QueryManager;
 use crate::reactions::ReactionManager;
 use crate::sources::SourceManager;
@@ -196,6 +197,12 @@ pub struct DrasiLib {
     lifecycle: Arc<RwLock<LifecycleManager>>,
     // Middleware registry for source middleware
     middleware_registry: Arc<MiddlewareTypeRegistry>,
+    // Plugin registries for factory-based component creation
+    source_registry: Arc<RwLock<Option<SourceRegistry>>>,
+    reaction_registry: Arc<RwLock<Option<ReactionRegistry>>>,
+    // Store source and reaction configs for retrieval
+    source_configs: Arc<RwLock<std::collections::HashMap<String, SourceConfig>>>,
+    reaction_configs: Arc<RwLock<std::collections::HashMap<String, ReactionConfig>>>,
 }
 
 impl Clone for DrasiLib {
@@ -211,6 +218,10 @@ impl Clone for DrasiLib {
             inspection: self.inspection.clone(),
             lifecycle: Arc::clone(&self.lifecycle),
             middleware_registry: Arc::clone(&self.middleware_registry),
+            source_registry: Arc::clone(&self.source_registry),
+            reaction_registry: Arc::clone(&self.reaction_registry),
+            source_configs: Arc::clone(&self.source_configs),
+            reaction_configs: Arc::clone(&self.reaction_configs),
         }
     }
 }
@@ -228,22 +239,9 @@ impl DrasiLib {
     /// Internal constructor - creates uninitialized server
     /// Use `builder()`, `from_config_file()`, or `from_config_str()` instead
     pub(crate) fn new(config: Arc<RuntimeConfig>) -> Self {
-        Self::new_with_registries(config, None, None)
-    }
-
-    /// Internal constructor with custom registries - creates uninitialized server
-    /// Use `builder()` with `.with_source_registry()` and `.with_reaction_registry()` instead
-    pub(crate) fn new_with_registries(
-        config: Arc<RuntimeConfig>,
-        source_registry: Option<crate::plugin_core::SourceRegistry>,
-        reaction_registry: Option<crate::plugin_core::ReactionRegistry>,
-    ) -> Self {
         let (channels, receivers) = EventChannels::new();
 
-        let source_manager = Arc::new(match source_registry {
-            Some(registry) => SourceManager::with_registry(channels.component_event_tx.clone(), registry),
-            None => SourceManager::new(channels.component_event_tx.clone()),
-        });
+        let source_manager = Arc::new(SourceManager::new(channels.component_event_tx.clone()));
 
         // Initialize middleware registry and register all standard middleware factories
         let mut middleware_registry = MiddlewareTypeRegistry::new();
@@ -269,10 +267,7 @@ impl DrasiLib {
             middleware_registry.clone(),
         ));
 
-        let reaction_manager = Arc::new(match reaction_registry {
-            Some(registry) => ReactionManager::with_registry(channels.component_event_tx.clone(), registry),
-            None => ReactionManager::new(channels.component_event_tx.clone()),
-        });
+        let reaction_manager = Arc::new(ReactionManager::new(channels.component_event_tx.clone()));
 
         let state_guard = StateGuard::new();
 
@@ -307,6 +302,10 @@ impl DrasiLib {
             inspection,
             lifecycle,
             middleware_registry,
+            source_registry: Arc::new(RwLock::new(None)),
+            reaction_registry: Arc::new(RwLock::new(None)),
+            source_configs: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            reaction_configs: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -491,28 +490,31 @@ impl DrasiLib {
     // Dynamic Runtime Configuration
     // ============================================================================
 
-    /// Create a source in a running server
+    /// Add a source instance to a running server
+    ///
+    /// Sources are now instance-based. The caller must create the source instance
+    /// and pass it as `Arc<dyn Source>`.
     ///
     /// # Example
     /// ```no_run
-    /// # use drasi_lib::{DrasiLib, Source};
+    /// # use drasi_lib::DrasiLib;
+    /// # use std::sync::Arc;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// core.create_source(
-    ///     Source::mock("new-source")
-    ///         .auto_start(true)
-    ///         .build()
-    /// ).await?;
+    /// // Sources must be created as instances by the caller
+    /// // let source = Arc::new(MySource::new("new-source"));
+    /// // core.add_source(source).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn create_source(
+    pub async fn add_source(
         &self,
-        source: crate::config::SourceConfig,
+        source: Arc<dyn crate::plugin_core::Source>,
     ) -> crate::error::Result<()> {
         self.state_guard.require_initialized().await?;
 
-        // Create source with auto-start enabled if requested
-        self.create_source_with_options(source, true)
+        // Add the source instance
+        self.source_manager
+            .add_source(source)
             .await
             .map_err(|e| DrasiError::provisioning(format!("Failed to add source: {}", e)))?;
 
@@ -546,29 +548,26 @@ impl DrasiLib {
         Ok(())
     }
 
-    /// Create a reaction in a running server
+    /// Add a reaction instance to a running server
     ///
     /// # Example
     /// ```no_run
-    /// # use drasi_lib::{DrasiLib, Reaction};
+    /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// core.create_reaction(
-    ///     Reaction::log("new-reaction")
-    ///         .subscribe_to("query1")
-    ///         .auto_start(true)
-    ///         .build()
-    /// ).await?;
+    /// // Reactions must be created as instances by the caller
+    /// // core.add_reaction(my_reaction_instance).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn create_reaction(
+    pub async fn add_reaction(
         &self,
-        reaction: crate::config::ReactionConfig,
+        reaction: Arc<dyn crate::plugin_core::Reaction>,
     ) -> crate::error::Result<()> {
         self.state_guard.require_initialized().await?;
 
-        // Create reaction with auto-start enabled if requested
-        self.create_reaction_with_options(reaction, true)
+        // Add the reaction instance
+        self.reaction_manager
+            .add_reaction(reaction)
             .await
             .map_err(|e| DrasiError::provisioning(format!("Failed to add reaction: {}", e)))?;
 
@@ -802,15 +801,8 @@ impl DrasiLib {
     pub async fn start_reaction(&self, id: &str) -> crate::error::Result<()> {
         self.state_guard.require_initialized().await?;
 
-        // Get the reaction config to determine which queries it subscribes to
-        let _config = self
-            .reaction_manager
-            .get_reaction_config(id)
-            .await
-            .ok_or_else(|| DrasiError::component_not_found("reaction", id))?;
-
         // Start the reaction with QuerySubscriber for query subscriptions
-        let subscriber: Arc<dyn crate::reactions::common::base::QuerySubscriber> = self.as_arc();
+        let subscriber: Arc<dyn crate::plugin_core::QuerySubscriber> = self.as_arc();
         map_state_error(
             self.reaction_manager
                 .start_reaction(id.to_string(), subscriber)
@@ -897,27 +889,6 @@ impl DrasiLib {
         id: &str,
     ) -> crate::error::Result<crate::channels::ComponentStatus> {
         self.inspection.get_source_status(id).await
-    }
-
-    /// Get the full configuration for a specific source
-    ///
-    /// This returns the complete source configuration including auto_start and bootstrap_provider,
-    /// unlike `get_source_info()` which only returns runtime information.
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use drasi_lib::DrasiLib;
-    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let config = core.get_source_config("my-source").await?;
-    /// println!("Auto-start: {}", config.auto_start);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn get_source_config(
-        &self,
-        id: &str,
-    ) -> crate::error::Result<crate::config::SourceConfig> {
-        self.inspection.get_source_config(id).await
     }
 
     /// List all queries with their current status
@@ -1070,43 +1041,22 @@ impl DrasiLib {
         self.inspection.get_reaction_status(id).await
     }
 
-    /// Get the full configuration for a specific reaction
-    ///
-    /// This returns the complete reaction configuration including all fields,
-    /// unlike `get_reaction_info()` which only returns runtime information.
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use drasi_lib::DrasiLib;
-    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let config = core.get_reaction_config("my-reaction").await?;
-    /// println!("Auto-start: {}", config.auto_start);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn get_reaction_config(
-        &self,
-        id: &str,
-    ) -> crate::error::Result<crate::config::ReactionConfig> {
-        self.inspection.get_reaction_config(id).await
-    }
-
     // ============================================================================
     // Full Configuration Snapshot
     // ============================================================================
 
     /// Get a complete configuration snapshot of all components
     ///
-    /// Returns the full server configuration including all sources, queries, and reactions
-    /// with their complete configurations. This is useful for persistence, backups, or introspection.
+    /// Returns the full server configuration including all queries with their complete configurations.
+    /// Note: Sources and reactions are now instance-based and not stored in config.
+    /// Use `list_sources()` and `list_reactions()` for runtime information about these components.
     ///
     /// # Example
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
     /// let config = core.get_current_config().await?;
-    /// println!("Server has {} sources, {} queries, {} reactions",
-    ///          config.sources.len(), config.queries.len(), config.reactions.len());
+    /// println!("Server has {} queries", config.queries.len());
     /// # Ok(())
     /// # }
     /// ```
@@ -1121,27 +1071,25 @@ impl DrasiLib {
 
     /// Create a builder for configuring a new DrasiLib instance.
     ///
-    /// The builder provides a fluent API for adding sources, queries, and reactions.
+    /// The builder provides a fluent API for adding queries and source/reaction instances.
+    /// Note: Sources and reactions are now instance-based. Use `with_source()` and `with_reaction()`
+    /// to add pre-built instances.
     ///
     /// # Example
     /// ```no_run
-    /// use drasi_lib::{DrasiLib, Source, Query, Reaction};
+    /// use drasi_lib::{DrasiLib, Query};
     ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let core = DrasiLib::builder()
     ///     .with_id("my-server")
-    ///     .add_source(Source::application("events").build())
     ///     .add_query(
     ///         Query::cypher("my-query")
     ///             .query("MATCH (n) RETURN n")
     ///             .from_source("events")
     ///             .build()
     ///     )
-    ///     .add_reaction(
-    ///         Reaction::log("output")
-    ///             .subscribe_to("my-query")
-    ///             .build()
-    ///     )
+    ///     // Use .with_source(source_instance) and .with_reaction(reaction_instance)
+    ///     // for pre-built source and reaction instances
     ///     .build()
     ///     .await?;
     ///
@@ -1269,7 +1217,7 @@ impl DrasiLib {
     ///
     /// let config = core.get_config();
     /// println!("Server ID: {}", config.server_core.id);
-    /// println!("Number of sources: {}", config.sources.len());
+    /// println!("Number of queries: {}", config.queries.len());
     /// # Ok(())
     /// # }
     /// ```
@@ -1278,23 +1226,187 @@ impl DrasiLib {
     }
 
     // ============================================================================
+    // Registry Management
+    // ============================================================================
+
+    /// Set the source registry for factory-based source creation.
+    ///
+    /// This is called by the builder when a registry is provided.
+    /// After setting, you can use `create_source()` to create sources from config.
+    pub async fn set_source_registry(&self, registry: SourceRegistry) {
+        *self.source_registry.write().await = Some(registry);
+    }
+
+    /// Set the reaction registry for factory-based reaction creation.
+    ///
+    /// This is called by the builder when a registry is provided.
+    /// After setting, you can use `create_reaction()` to create reactions from config.
+    pub async fn set_reaction_registry(&self, registry: ReactionRegistry) {
+        *self.reaction_registry.write().await = Some(registry);
+    }
+
+    /// Create a source from generic configuration.
+    ///
+    /// Uses the registered source factory to create a source instance from `SourceConfig`.
+    /// The source is added to the server and optionally auto-started.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * No source registry has been set
+    /// * No factory is registered for the source type
+    /// * The factory fails to create the source
+    /// * Adding the source to the server fails
+    pub async fn create_source(&self, config: SourceConfig) -> crate::error::Result<()> {
+        // Get the registry
+        let registry_guard = self.source_registry.read().await;
+        let registry = registry_guard
+            .as_ref()
+            .ok_or_else(|| DrasiError::provisioning("No source registry configured".to_string()))?;
+
+        // Create the source instance using the factory
+        let source = registry.create(&config).map_err(|e| {
+            DrasiError::provisioning(format!(
+                "Failed to create source '{}' of type '{}': {}",
+                config.id, config.source_type, e
+            ))
+        })?;
+
+        let source_id = config.id.clone();
+        let auto_start = config.auto_start;
+
+        // Store the config for later retrieval
+        self.source_configs.write().await.insert(source_id.clone(), config);
+
+        drop(registry_guard);
+
+        // Add the source to the manager
+        self.source_manager.add_source(source).await.map_err(|e| {
+            DrasiError::provisioning(format!("Failed to add source '{}': {}", source_id, e))
+        })?;
+
+        // Auto-start if configured and server is running
+        if auto_start && *self.running.read().await {
+            self.source_manager.start_source(source_id.clone()).await.map_err(|e| {
+                DrasiError::component_error(format!("Failed to start source '{}': {}", source_id, e))
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Get the configuration for a source.
+    ///
+    /// Returns the `SourceConfig` that was used to create the source.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * The source does not exist
+    /// * The source was created without a config (e.g., via `with_source()`)
+    pub async fn get_source_config(&self, id: &str) -> crate::error::Result<SourceConfig> {
+        // First check if the source exists using get_source_instance
+        if self.source_manager.get_source_instance(id).await.is_none() {
+            return Err(DrasiError::component_not_found("source", id));
+        }
+
+        // Get the stored config
+        let configs = self.source_configs.read().await;
+        configs.get(id).cloned().ok_or_else(|| {
+            DrasiError::component_not_found(
+                "source config",
+                &format!("{} (was it created via with_source()?)", id),
+            )
+        })
+    }
+
+    /// Create a reaction from generic configuration.
+    ///
+    /// Uses the registered reaction factory to create a reaction instance from `ReactionConfig`.
+    /// The reaction is added to the server and optionally auto-started.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * No reaction registry has been set
+    /// * No factory is registered for the reaction type
+    /// * The factory fails to create the reaction
+    /// * Adding the reaction to the server fails
+    pub async fn create_reaction(&self, config: ReactionConfig) -> crate::error::Result<()> {
+        // Get the registry
+        let registry_guard = self.reaction_registry.read().await;
+        let registry = registry_guard.as_ref().ok_or_else(|| {
+            DrasiError::provisioning("No reaction registry configured".to_string())
+        })?;
+
+        // Create the reaction instance using the factory
+        let reaction = registry.create(&config).map_err(|e| {
+            DrasiError::provisioning(format!(
+                "Failed to create reaction '{}' of type '{}': {}",
+                config.id, config.reaction_type, e
+            ))
+        })?;
+
+        let reaction_id = config.id.clone();
+        let auto_start = config.auto_start;
+
+        // Store the config for later retrieval
+        self.reaction_configs
+            .write()
+            .await
+            .insert(reaction_id.clone(), config);
+
+        drop(registry_guard);
+
+        // Add the reaction to the manager
+        self.reaction_manager
+            .add_reaction(reaction)
+            .await
+            .map_err(|e| {
+                DrasiError::provisioning(format!("Failed to add reaction '{}': {}", reaction_id, e))
+            })?;
+
+        // Auto-start if configured and server is running
+        if auto_start && *self.running.read().await {
+            self.reaction_manager
+                .start_reaction(reaction_id.clone(), self.as_arc())
+                .await
+                .map_err(|e| DrasiError::component_error(format!("Failed to start reaction '{}': {}", reaction_id, e)))?;
+        }
+
+        Ok(())
+    }
+
+    /// Get the configuration for a reaction.
+    ///
+    /// Returns the `ReactionConfig` that was used to create the reaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * The reaction does not exist
+    /// * The reaction was created without a config (e.g., via `with_reaction()`)
+    pub async fn get_reaction_config(&self, id: &str) -> crate::error::Result<ReactionConfig> {
+        // First check if the reaction exists by trying to get its status
+        if self.reaction_manager.get_reaction_status(id.to_string()).await.is_err() {
+            return Err(DrasiError::component_not_found("reaction", id));
+        }
+
+        // Get the stored config
+        let configs = self.reaction_configs.read().await;
+        configs.get(id).cloned().ok_or_else(|| {
+            DrasiError::component_not_found(
+                "reaction config",
+                &format!("{} (was it created via with_reaction()?)", id),
+            )
+        })
+    }
+
+    // ============================================================================
     // Internal Methods
     // ============================================================================
     // Note: Direct manager/router access methods were removed as they are not used
     // internally. Managers are accessed directly via self.source_manager, etc.
-
-    async fn create_source_with_options(
-        &self,
-        config: crate::config::SourceConfig,
-        allow_auto_start: bool,
-    ) -> Result<()> {
-        // Add the source (without saving during initialization)
-        self.source_manager
-            .add_source_without_save(config, allow_auto_start)
-            .await?;
-
-        Ok(())
-    }
 
     async fn create_query_with_options(
         &self,
@@ -1315,38 +1427,12 @@ impl DrasiLib {
 
         Ok(())
     }
-
-    async fn create_reaction_with_options(
-        &self,
-        config: crate::config::ReactionConfig,
-        allow_auto_start: bool,
-    ) -> Result<()> {
-        let reaction_id = config.id.clone();
-        let should_auto_start = config.auto_start;
-
-        // Add the reaction (without saving during initialization)
-        self.reaction_manager
-            .add_reaction_without_save(config)
-            .await?;
-
-        // Start if auto-start is enabled and allowed
-        if should_auto_start && allow_auto_start {
-            // Pass QuerySubscriber to reaction for query subscriptions
-            let subscriber: Arc<dyn crate::reactions::common::base::QuerySubscriber> =
-                self.as_arc();
-            self.reaction_manager
-                .start_reaction(reaction_id.clone(), subscriber)
-                .await?;
-        }
-
-        Ok(())
-    }
 }
 
 // Implement QuerySubscriber trait for DrasiLib
 // This breaks the circular dependency by providing a minimal interface for reactions
 #[async_trait::async_trait]
-impl crate::reactions::common::base::QuerySubscriber for DrasiLib {
+impl crate::plugin_core::QuerySubscriber for DrasiLib {
     async fn get_query_instance(&self, id: &str) -> Result<Arc<dyn crate::queries::Query>> {
         self.query_manager
             .get_query_instance(id)

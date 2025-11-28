@@ -62,10 +62,10 @@ use crate::types::{
 };
 
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
-use drasi_lib::config::ReactionConfig;
-use drasi_lib::reactions::common::base::ReactionBase;
-use drasi_lib::reactions::Reaction;
+use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
+use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::utils::log_component_start;
+use std::collections::HashMap;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use publisher::{PublisherConfig, RedisStreamPublisher};
@@ -75,6 +75,7 @@ use tokio::sync::RwLock;
 /// Platform Reaction for publishing to Redis Streams
 pub struct PlatformReaction {
     base: ReactionBase,
+    config: PlatformReactionConfig,
     publisher: Arc<RedisStreamPublisher>,
     sequence_counter: Arc<RwLock<i64>>,
     cloud_event_config: CloudEventConfig,
@@ -87,44 +88,31 @@ pub struct PlatformReaction {
 
 impl PlatformReaction {
     /// Create a new Platform Reaction
-    pub fn new(config: ReactionConfig, event_tx: ComponentEventSender) -> Result<Self> {
-        // Extract configuration from typed config
-        let (
-            redis_url,
-            pubsub_name,
-            source_name,
-            max_stream_length,
-            emit_control_events,
-            batch_enabled,
-            batch_max_size,
-            batch_max_wait_ms,
-        ) = match &config.config {
-            drasi_lib::config::ReactionSpecificConfig::Platform(platform_config_map) => {
-                // Deserialize HashMap into typed config
-                let platform_config: PlatformReactionConfig = serde_json::from_value(
-                    serde_json::to_value(platform_config_map)?
-                )?;
-                (
-                    platform_config.redis_url.clone(),
-                    platform_config
-                        .pubsub_name
-                        .clone()
-                        .unwrap_or_else(|| "drasi-pubsub".to_string()),
-                    platform_config
-                        .source_name
-                        .clone()
-                        .unwrap_or_else(|| "drasi-core".to_string()),
-                    platform_config.max_stream_length,
-                    platform_config.emit_control_events,
-                    platform_config.batch_enabled,
-                    platform_config.batch_max_size,
-                    platform_config.batch_max_wait_ms,
-                )
-            }
-            _ => {
-                return Err(anyhow!("Invalid config type for Platform reaction"));
-            }
-        };
+    ///
+    /// The event channel is automatically injected when the reaction is added
+    /// to DrasiLib via `add_reaction()`.
+    pub fn new(
+        id: impl Into<String>,
+        queries: Vec<String>,
+        config: PlatformReactionConfig,
+    ) -> Result<Self> {
+        let id = id.into();
+
+        // Extract configuration values
+        let redis_url = config.redis_url.clone();
+        let pubsub_name = config
+            .pubsub_name
+            .clone()
+            .unwrap_or_else(|| "drasi-pubsub".to_string());
+        let source_name = config
+            .source_name
+            .clone()
+            .unwrap_or_else(|| "drasi-core".to_string());
+        let max_stream_length = config.max_stream_length;
+        let emit_control_events = config.emit_control_events;
+        let batch_enabled = config.batch_enabled;
+        let batch_max_size = config.batch_max_size;
+        let batch_max_wait_ms = config.batch_max_wait_ms;
 
         // Validate batch configuration
         if batch_max_size == 0 {
@@ -153,8 +141,10 @@ impl PlatformReaction {
         // Create CloudEvent config
         let cloud_event_config = CloudEventConfig::with_values(pubsub_name, source_name);
 
+        let params = ReactionBaseParams::new(id, queries);
         Ok(Self {
-            base: ReactionBase::new(config, event_tx),
+            base: ReactionBase::new(params),
+            config,
             publisher: Arc::new(publisher),
             sequence_counter: Arc::new(RwLock::new(0)),
             cloud_event_config,
@@ -174,7 +164,6 @@ impl PlatformReaction {
         // Use first query ID from config for control events
         let query_id = self
             .base
-            .config
             .queries
             .first()
             .ok_or_else(|| anyhow!("No queries configured for reaction"))?;
@@ -203,11 +192,52 @@ impl PlatformReaction {
 
 #[async_trait]
 impl Reaction for PlatformReaction {
+    fn id(&self) -> &str {
+        &self.base.id
+    }
+
+    fn type_name(&self) -> &str {
+        "platform"
+    }
+
+    fn properties(&self) -> HashMap<String, serde_json::Value> {
+        let mut props = HashMap::new();
+        props.insert(
+            "redis_url".to_string(),
+            serde_json::Value::String(self.config.redis_url.clone()),
+        );
+        if let Some(ref pubsub_name) = self.config.pubsub_name {
+            props.insert(
+                "pubsub_name".to_string(),
+                serde_json::Value::String(pubsub_name.clone()),
+            );
+        }
+        if let Some(ref source_name) = self.config.source_name {
+            props.insert(
+                "source_name".to_string(),
+                serde_json::Value::String(source_name.clone()),
+            );
+        }
+        props.insert(
+            "emit_control_events".to_string(),
+            serde_json::Value::Bool(self.config.emit_control_events),
+        );
+        props.insert(
+            "batch_enabled".to_string(),
+            serde_json::Value::Bool(self.config.batch_enabled),
+        );
+        props
+    }
+
+    fn query_ids(&self) -> Vec<String> {
+        self.base.queries.clone()
+    }
+
     async fn start(
         &self,
-        query_subscriber: Arc<dyn drasi_lib::reactions::common::base::QuerySubscriber>,
+        query_subscriber: Arc<dyn QuerySubscriber>,
     ) -> Result<()> {
-        log_component_start("Reaction", &self.base.config.id);
+        log_component_start("Reaction", &self.base.id);
 
         // Transition to Starting
         self.base
@@ -237,7 +267,7 @@ impl Reaction for PlatformReaction {
         let publisher = self.publisher.clone();
         let sequence_counter = self.sequence_counter.clone();
         let cloud_event_config = self.cloud_event_config.clone();
-        let reaction_id = self.base.config.id.clone();
+        let reaction_id = self.base.id.clone();
         let emit_control_events = self.emit_control_events;
         let priority_queue = self.base.priority_queue.clone();
         let batch_enabled = self.batch_enabled;
@@ -455,7 +485,7 @@ impl Reaction for PlatformReaction {
         self.base.get_status().await
     }
 
-    fn get_config(&self) -> &ReactionConfig {
-        &self.base.config
+    async fn inject_event_tx(&self, tx: ComponentEventSender) {
+        self.base.inject_event_tx(tx).await;
     }
 }

@@ -23,13 +23,14 @@ pub use config::GrpcSourceConfig;
 use anyhow::Result;
 use async_trait::async_trait;
 use log::{debug, error, info};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tonic::{transport::Server, Request, Response, Status};
 
 use drasi_lib::channels::*;
-use drasi_lib::config::SourceConfig;
-use drasi_lib::sources::{base::SourceBase, Source};
+use drasi_lib::plugin_core::Source;
+use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::utils::*;
 
 // Include generated protobuf code
@@ -47,20 +48,79 @@ use proto::{
 /// gRPC source that exposes a gRPC endpoint to receive SourceChangeEvents
 pub struct GrpcSource {
     base: SourceBase,
+    config: GrpcSourceConfig,
 }
 
 impl GrpcSource {
-    pub fn new(config: SourceConfig, event_tx: ComponentEventSender) -> Result<Self> {
+    /// Create a new gRPC source
+    ///
+    /// The event channel is automatically injected when the source is added
+    /// to DrasiLib via `add_source()`.
+    pub fn new(id: impl Into<String>, config: GrpcSourceConfig) -> Result<Self> {
+        let id = id.into();
+        let params = SourceBaseParams::new(id);
         Ok(Self {
-            base: SourceBase::new(config, event_tx)?,
+            base: SourceBase::new(params)?,
+            config,
+        })
+    }
+
+    /// Create a new gRPC source with custom dispatch settings
+    ///
+    /// The event channel is automatically injected when the source is added
+    /// to DrasiLib via `add_source()`.
+    pub fn with_dispatch(
+        id: impl Into<String>,
+        config: GrpcSourceConfig,
+        dispatch_mode: Option<DispatchMode>,
+        dispatch_buffer_capacity: Option<usize>,
+    ) -> Result<Self> {
+        let id = id.into();
+        let mut params = SourceBaseParams::new(id);
+        if let Some(mode) = dispatch_mode {
+            params = params.with_dispatch_mode(mode);
+        }
+        if let Some(capacity) = dispatch_buffer_capacity {
+            params = params.with_dispatch_buffer_capacity(capacity);
+        }
+        Ok(Self {
+            base: SourceBase::new(params)?,
+            config,
         })
     }
 }
 
 #[async_trait]
 impl Source for GrpcSource {
+    fn id(&self) -> &str {
+        &self.base.id
+    }
+
+    fn type_name(&self) -> &str {
+        "grpc"
+    }
+
+    fn properties(&self) -> HashMap<String, serde_json::Value> {
+        let mut props = HashMap::new();
+        props.insert(
+            "host".to_string(),
+            serde_json::Value::String(self.config.host.clone()),
+        );
+        props.insert(
+            "port".to_string(),
+            serde_json::Value::Number(self.config.port.into()),
+        );
+        if let Some(ref endpoint) = self.config.endpoint {
+            props.insert(
+                "endpoint".to_string(),
+                serde_json::Value::String(endpoint.clone()),
+            );
+        }
+        props
+    }
+
     async fn start(&self) -> Result<()> {
-        log_component_start("gRPC Source", &self.base.config.id);
+        log_component_start("gRPC Source", &self.base.id);
 
         self.base.set_status(ComponentStatus::Starting).await;
         self.base
@@ -71,22 +131,14 @@ impl Source for GrpcSource {
             .await?;
 
         // Get configuration
-        let (host, port) = match &self.base.config.config {
-            drasi_lib::config::SourceSpecificConfig::Grpc(grpc_config_map) => {
-                // Deserialize HashMap into typed config
-                let grpc_config: crate::config::GrpcSourceConfig = serde_json::from_value(
-                    serde_json::to_value(grpc_config_map).unwrap_or_default()
-                ).unwrap_or_default();
-                (grpc_config.host.clone(), grpc_config.port)
-            }
-            _ => ("0.0.0.0".to_string(), 50051),
-        };
+        let host = self.config.host.clone();
+        let port = self.config.port;
 
         let addr = format!("{}:{}", host, port).parse()?;
 
         info!(
             "gRPC source '{}' listening on {}",
-            self.base.config.id, addr
+            self.base.id, addr
         );
 
         // Create shutdown channel
@@ -95,7 +147,7 @@ impl Source for GrpcSource {
 
         // Create gRPC service
         let service = GrpcSourceService {
-            source_id: self.base.config.id.clone(),
+            source_id: self.base.id.clone(),
             dispatchers: self.base.dispatchers.clone(),
         };
 
@@ -103,8 +155,8 @@ impl Source for GrpcSource {
 
         // Start the gRPC server
         let status = Arc::clone(&self.base.status);
-        let source_id = self.base.config.id.clone();
-        let event_tx = self.base.event_tx.clone();
+        let source_id = self.base.id.clone();
+        let event_tx = self.base.event_tx();
 
         let task = tokio::spawn(async move {
             *status.write().await = ComponentStatus::Running;
@@ -117,8 +169,10 @@ impl Source for GrpcSource {
                 message: Some(format!("gRPC source listening on {}", addr)),
             };
 
-            if let Err(e) = event_tx.send(running_event).await {
-                error!("Failed to send component event: {}", e);
+            if let Some(ref tx) = *event_tx.read().await {
+                if let Err(e) = tx.send(running_event).await {
+                    error!("Failed to send component event: {}", e);
+                }
             }
 
             // Run the server with graceful shutdown
@@ -143,16 +197,12 @@ impl Source for GrpcSource {
     }
 
     async fn stop(&self) -> Result<()> {
-        log_component_stop("gRPC Source", &self.base.config.id);
+        log_component_stop("gRPC Source", &self.base.id);
         self.base.stop_common().await
     }
 
     async fn status(&self) -> ComponentStatus {
         self.base.get_status().await
-    }
-
-    fn get_config(&self) -> &SourceConfig {
-        &self.base.config
     }
 
     async fn subscribe(
@@ -175,6 +225,10 @@ impl Source for GrpcSource {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    async fn inject_event_tx(&self, tx: ComponentEventSender) {
+        self.base.inject_event_tx(tx).await;
     }
 }
 
@@ -573,12 +627,6 @@ fn proto_value_to_json(value: &prost_types::Value) -> serde_json::Value {
     }
 }
 
-/// Extension trait for creating gRPC sources
-pub trait SourceConfigGrpcExt {
-    /// Create a new gRPC source configuration builder
-    fn grpc() -> GrpcSourceBuilder;
-}
-
 /// Builder for gRPC source configuration
 pub struct GrpcSourceBuilder {
     host: String,
@@ -622,10 +670,3 @@ impl GrpcSourceBuilder {
         }
     }
 }
-
-impl SourceConfigGrpcExt for SourceConfig {
-    fn grpc() -> GrpcSourceBuilder {
-        GrpcSourceBuilder::new()
-    }
-}
-

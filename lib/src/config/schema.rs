@@ -14,13 +14,10 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use crate::bootstrap::BootstrapProviderConfig;
 use crate::channels::DispatchMode;
-use crate::config::enums::{ReactionSpecificConfig, SourceSpecificConfig};
 use crate::indexes::{StorageBackendConfig, StorageBackendRef};
 use drasi_core::models::SourceMiddlewareConfig;
 
@@ -119,17 +116,21 @@ pub struct SourceSubscriptionConfig {
 /// Root configuration for Drasi Server Core
 ///
 /// `DrasiLibConfig` is the top-level configuration structure for loading Drasi
-/// configurations from YAML or JSON files. It defines all sources, queries, reactions,
-/// and global server settings.
+/// configurations from YAML or JSON files. It defines server settings and queries.
+///
+/// # Plugin Architecture
+///
+/// **Important**: drasi-lib has ZERO awareness of which plugins exist. Sources and
+/// reactions are passed as pre-built trait objects (`Arc<dyn Source>`, `Arc<dyn Reaction>`).
+/// Only queries can be configured via YAML/JSON files.
 ///
 /// # Configuration File Structure
 ///
-/// A typical configuration file has four main sections:
+/// A typical configuration file has these sections:
 ///
 /// 1. **server_core**: Global server settings (optional)
-/// 2. **sources**: Data ingestion sources
+/// 2. **storage_backends**: Storage backend definitions (optional)
 /// 3. **queries**: Continuous queries to process data
-/// 4. **reactions**: Output destinations for query results
 ///
 /// # Thread Safety
 ///
@@ -157,60 +158,24 @@ pub struct SourceSubscriptionConfig {
 ///   priority_queue_capacity: 50000
 ///   dispatch_buffer_capacity: 5000
 ///
-/// sources:
-///   - id: orders_db
-///     source_type: postgres
-///     auto_start: true
-///     host: localhost
-///     port: 5432
-///     database: orders
-///     user: postgres
-///     password: secret
-///     tables: [orders, customers]
-///     table_keys:
-///       - table: orders
-///         key_columns: [order_id]
-///       - table: customers
-///         key_columns: [customer_id]
-///
 /// queries:
 ///   - id: active_orders
 ///     query: "MATCH (o:Order) WHERE o.status = 'active' RETURN o"
 ///     queryLanguage: Cypher
-///     sources: [orders_db]
+///     source_subscriptions:
+///       - source_id: orders_db
 ///     auto_start: true
 ///     enableBootstrap: true
 ///     bootstrapBufferSize: 10000
-///
-/// reactions:
-///   - id: order_webhook
-///     reaction_type: http
-///     queries: [active_orders]
-///     auto_start: true
-///     base_url: "https://api.example.com/orders"
-///     timeout_ms: 10000
 /// ```
 ///
 /// # Validation
 ///
 /// Call [`validate()`](DrasiLibConfig::validate) to check:
-/// - Unique component IDs
-/// - Valid source references in queries
-/// - Valid query references in reactions
+/// - Unique query IDs
+/// - Valid storage backend references
 ///
-/// # Conversion to Runtime Config
-///
-/// Convert to [`RuntimeConfig`](crate::RuntimeConfig) for server execution:
-///
-/// ```no_run
-/// use drasi_lib::{DrasiLibConfig, RuntimeConfig};
-///
-/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let config = DrasiLibConfig::load_from_file("config.yaml")?;
-/// let runtime_config: RuntimeConfig = config.into();
-/// # Ok(())
-/// # }
-/// ```
+/// Note: Source and reaction validation happens at runtime when instances are added.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DrasiLibConfig {
     #[serde(default)]
@@ -218,9 +183,9 @@ pub struct DrasiLibConfig {
     /// Global storage backend definitions that can be referenced by queries
     #[serde(default)]
     pub storage_backends: Vec<StorageBackendConfig>,
-    pub sources: Vec<SourceConfig>,
+    /// Query configurations
+    #[serde(default)]
     pub queries: Vec<QueryConfig>,
-    pub reactions: Vec<ReactionConfig>,
 }
 
 /// Global server settings for Drasi Server Core
@@ -298,164 +263,6 @@ pub struct DrasiLibSettings {
     /// Default dispatch buffer capacity for sources and queries (default: 1000 if not specified)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_buffer_capacity: Option<usize>,
-}
-
-/// Configuration for a data ingestion source
-///
-/// `SourceConfig` defines how Drasi ingests data from external systems. Each source
-/// continuously monitors data changes and sends them to subscribed queries.
-///
-/// # Source Types
-///
-/// Sources are configured via the `source_type` discriminator field which determines
-/// the type-specific properties available:
-///
-/// - **postgres**: PostgreSQL replication via logical decoding
-/// - **http**: HTTP endpoint for change events (adaptive batching)
-/// - **grpc**: gRPC streaming endpoint
-/// - **mock**: Generated test data
-/// - **platform**: Redis Streams integration with Drasi Platform
-/// - **application**: Direct application integration via handles
-///
-/// # Bootstrap Providers
-///
-/// All sources support pluggable bootstrap providers for initial data delivery,
-/// independent from streaming configuration. This enables powerful patterns like
-/// "bootstrap from database, stream from HTTP" or "bootstrap from file for testing".
-///
-/// # Configuration Fields
-///
-/// - **id**: Unique identifier (referenced by queries)
-/// - **source_type**: Discriminator determining source implementation
-/// - **auto_start**: Whether to start automatically (default: true)
-/// - **bootstrap_provider**: Optional bootstrap configuration
-/// - **dispatch_buffer_capacity**: Event buffer size (overrides global default)
-/// - **dispatch_mode**: Broadcast or Channel routing mode
-///
-/// # Examples
-///
-/// ## PostgreSQL Source with Standard Bootstrap
-///
-/// ```yaml
-/// sources:
-///   - id: orders_db
-///     source_type: postgres
-///     auto_start: true
-///     host: localhost
-///     port: 5432
-///     database: orders
-///     user: postgres
-///     password: secret
-///     tables: [orders, customers]
-///     table_keys:
-///       - table: orders
-///         key_columns: [order_id]
-///     bootstrap_provider:
-///       type: postgres  # Use PostgreSQL snapshot bootstrap
-/// ```
-///
-/// ## HTTP Source with PostgreSQL Bootstrap (Mix-and-Match)
-///
-/// ```yaml
-/// sources:
-///   - id: http_with_db_bootstrap
-///     source_type: http
-///     host: localhost
-///     port: 8080
-///     database: mydb           # Used by postgres bootstrap provider
-///     user: dbuser
-///     password: dbpass
-///     tables: [stocks]
-///     table_keys:
-///       - table: stocks
-///         key_columns: [symbol]
-///     bootstrap_provider:
-///       type: postgres          # Bootstrap from PostgreSQL
-///     # HTTP source will stream changes after bootstrap completes
-/// ```
-///
-/// ## Mock Source with ScriptFile Bootstrap
-///
-/// ```yaml
-/// sources:
-///   - id: test_source
-///     source_type: mock
-///     data_type: sensor
-///     interval_ms: 1000
-///     bootstrap_provider:
-///       type: scriptfile
-///       file_paths:
-///         - "/path/to/test_data.jsonl"
-/// ```
-///
-/// ## Platform Source (Redis Streams)
-///
-/// ```yaml
-/// sources:
-///   - id: platform_events
-///     source_type: platform
-///     redis_url: "redis://localhost:6379"
-///     stream_key: "sensor-data:changes"
-///     consumer_group: "drasi-core"
-///     batch_size: 10
-/// ```
-///
-/// ## High-Throughput Configuration
-///
-/// ```yaml
-/// sources:
-///   - id: high_volume_source
-///     source_type: http
-///     host: localhost
-///     port: 9000
-///     dispatch_buffer_capacity: 10000  # Override global default
-///     dispatch_mode: Channel           # Or Broadcast for fanout
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SourceConfig {
-    /// Unique identifier for the source
-    pub id: String,
-    /// Whether to automatically start this source (default: true)
-    #[serde(default = "default_auto_start")]
-    pub auto_start: bool,
-    /// Typed source-specific configuration (contains source_type as discriminator)
-    #[serde(flatten)]
-    pub config: SourceSpecificConfig,
-    /// Optional bootstrap provider configuration
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bootstrap_provider: Option<BootstrapProviderConfig>,
-    /// Dispatch buffer capacity for this source (default: server global, or 1000 if not specified)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dispatch_buffer_capacity: Option<usize>,
-    /// Dispatch mode for this source (default: Channel)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dispatch_mode: Option<DispatchMode>,
-}
-
-impl SourceConfig {
-    /// Get the source type as a string from the enum variant
-    pub fn source_type(&self) -> &str {
-        match &self.config {
-            SourceSpecificConfig::Mock(_) => "mock",
-            SourceSpecificConfig::Postgres(_) => "postgres",
-            SourceSpecificConfig::Http(_) => "http",
-            SourceSpecificConfig::Grpc(_) => "grpc",
-            SourceSpecificConfig::Platform(_) => "platform",
-            SourceSpecificConfig::Application(_) => "application",
-            SourceSpecificConfig::Custom { .. } => "custom",
-        }
-    }
-
-    /// Get typed configuration properties as HashMap for backward compatibility
-    pub fn get_properties(&self) -> HashMap<String, serde_json::Value> {
-        match serde_json::to_value(&self.config) {
-            Ok(serde_json::Value::Object(map)) => map
-                .into_iter()
-                .filter(|(k, _)| k != "source_type")
-                .collect(),
-            _ => HashMap::new(),
-        }
-    }
 }
 
 /// Configuration for a continuous query
@@ -691,177 +498,6 @@ pub struct QueryJoinKeyConfig {
     pub property: String,
 }
 
-/// Configuration for a reaction (output destination)
-///
-/// `ReactionConfig` defines how query results are delivered to external systems. Reactions
-/// subscribe to one or more queries and receive incremental result updates as data changes.
-///
-/// # Reaction Types
-///
-/// Reactions are configured via the `reaction_type` discriminator field which determines
-/// the type-specific properties available:
-///
-/// - **log**: Write results to application logs (debug/info/warn/error levels)
-/// - **http**: Send results to HTTP webhooks with configurable retry
-/// - **grpc**: Stream results via gRPC with batching support
-/// - **sse**: Expose Server-Sent Events endpoint for client subscriptions
-/// - **platform**: Publish to Redis Streams for Drasi Platform integration
-/// - **profiler**: Performance monitoring and profiling output
-/// - **application**: Direct application integration via handles
-///
-/// # Result Delivery
-///
-/// Reactions receive **three types of events** from queries:
-/// - **added**: New results matching the query
-/// - **updated**: Existing results that changed
-/// - **deleted**: Results that no longer match
-///
-/// Each reaction type handles these events according to its specific protocol.
-///
-/// # Configuration Fields
-///
-/// - **id**: Unique identifier
-/// - **reaction_type**: Discriminator determining reaction implementation
-/// - **queries**: Query IDs to subscribe to
-/// - **auto_start**: Start automatically (default: true)
-/// - **priority_queue_capacity**: Event queue size for out-of-order handling (overrides global)
-///
-/// # Examples
-///
-/// ## Log Reaction
-///
-/// ```yaml
-/// reactions:
-///   - id: debug_logger
-///     reaction_type: log
-///     queries: [active_orders]
-///     auto_start: true
-///     log_level: info  # trace, debug, info, warn, error
-/// ```
-///
-/// ## HTTP Webhook Reaction
-///
-/// ```yaml
-/// reactions:
-///   - id: order_webhook
-///     reaction_type: http
-///     queries: [active_orders, pending_orders]
-///     auto_start: true
-///     base_url: "https://api.example.com/webhooks/orders"
-///     token: "secret-token"
-///     timeout_ms: 10000
-///     queries:
-///       active_orders:
-///         added:
-///           url: "/new-order"
-///           method: POST
-///           body: "{{payload}}"
-///         updated:
-///           url: "/update-order"
-///           method: PUT
-///         deleted:
-///           url: "/cancel-order"
-///           method: DELETE
-/// ```
-///
-/// ## gRPC Streaming Reaction
-///
-/// ```yaml
-/// reactions:
-///   - id: grpc_stream
-///     reaction_type: grpc
-///     queries: [events]
-///     endpoint: "grpc://service.example.com:50051"
-///     token: "bearer-token"
-///     batch_size: 100
-///     batch_flush_timeout_ms: 1000
-///     max_retries: 3
-/// ```
-///
-/// ## Server-Sent Events Reaction
-///
-/// ```yaml
-/// reactions:
-///   - id: sse_endpoint
-///     reaction_type: sse
-///     queries: [live_updates]
-///     host: "0.0.0.0"
-///     port: 8080
-///     sse_path: "/events"
-///     heartbeat_interval_ms: 30000
-/// ```
-///
-/// ## Platform Reaction (Redis Streams)
-///
-/// ```yaml
-/// reactions:
-///   - id: platform_publisher
-///     reaction_type: platform
-///     queries: [processed_data]
-///     redis_url: "redis://localhost:6379"
-///     pubsub_name: "drasi-pubsub"
-///     source_name: "processed-results"
-///     emit_control_events: true
-///     batch_enabled: true
-///     batch_max_size: 100
-/// ```
-///
-/// ## High-Throughput Reaction
-///
-/// ```yaml
-/// reactions:
-///   - id: high_volume_reaction
-///     reaction_type: http
-///     queries: [event_stream]
-///     base_url: "https://api.example.com/events"
-///     priority_queue_capacity: 100000  # Large queue for out-of-order events
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReactionConfig {
-    /// Unique identifier for the reaction
-    pub id: String,
-    /// IDs of queries this reaction subscribes to
-    pub queries: Vec<String>,
-    /// Whether to automatically start this reaction (default: true)
-    #[serde(default = "default_auto_start")]
-    pub auto_start: bool,
-    /// Typed reaction-specific configuration (contains reaction_type as discriminator)
-    #[serde(flatten)]
-    pub config: ReactionSpecificConfig,
-    /// Priority queue capacity for this reaction (default: server global, or 10000 if not specified)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub priority_queue_capacity: Option<usize>,
-}
-
-impl ReactionConfig {
-    /// Get the reaction type as a string from the enum variant
-    pub fn reaction_type(&self) -> &str {
-        match &self.config {
-            ReactionSpecificConfig::Log(_) => "log",
-            ReactionSpecificConfig::Http(_) => "http",
-            ReactionSpecificConfig::Grpc(_) => "grpc",
-            ReactionSpecificConfig::Sse(_) => "sse",
-            ReactionSpecificConfig::Platform(_) => "platform",
-            ReactionSpecificConfig::Profiler(_) => "profiler",
-            ReactionSpecificConfig::Application(_) => "application",
-            ReactionSpecificConfig::GrpcAdaptive(_) => "grpc_adaptive",
-            ReactionSpecificConfig::HttpAdaptive(_) => "http_adaptive",
-            ReactionSpecificConfig::Custom { .. } => "custom",
-        }
-    }
-
-    /// Get typed configuration properties as HashMap for backward compatibility
-    pub fn get_properties(&self) -> HashMap<String, serde_json::Value> {
-        match serde_json::to_value(&self.config) {
-            Ok(serde_json::Value::Object(map)) => map
-                .into_iter()
-                .filter(|(k, _)| k != "reaction_type")
-                .collect(),
-            _ => HashMap::new(),
-        }
-    }
-}
-
 impl DrasiLibConfig {
     /// Load configuration from a YAML or JSON file
     ///
@@ -954,7 +590,7 @@ impl DrasiLibConfig {
     /// let config = DrasiLibConfig::load_and_validate("config.yaml")?;
     ///
     /// // Now safe to use - configuration is guaranteed to be valid
-    /// println!("Loaded {} sources", config.sources.len());
+    /// println!("Loaded {} queries", config.queries.len());
     /// # Ok(())
     /// # }
     /// ```
@@ -998,9 +634,11 @@ impl DrasiLibConfig {
     /// Validate configuration consistency and references
     ///
     /// Performs comprehensive validation checks:
-    /// - Ensures all component IDs (sources, queries, reactions) are unique
-    /// - Validates that queries reference existing sources
-    /// - Validates that reactions reference existing queries
+    /// - Ensures all query IDs are unique
+    /// - Validates storage backend configurations
+    ///
+    /// Note: Source and reaction validation happens at runtime when instances are added,
+    /// since drasi-lib has no knowledge of specific plugin configurations.
     ///
     /// # Errors
     ///
@@ -1023,27 +661,11 @@ impl DrasiLibConfig {
     /// # }
     /// ```
     pub fn validate(&self) -> Result<()> {
-        // Validate unique source ids
-        let mut source_ids = std::collections::HashSet::new();
-        for source in &self.sources {
-            if !source_ids.insert(&source.id) {
-                return Err(anyhow::anyhow!("Duplicate source id: '{}'", source.id));
-            }
-        }
-
         // Validate unique query ids
         let mut query_ids = std::collections::HashSet::new();
         for query in &self.queries {
             if !query_ids.insert(&query.id) {
                 return Err(anyhow::anyhow!("Duplicate query id: '{}'", query.id));
-            }
-        }
-
-        // Validate unique reaction ids
-        let mut reaction_ids = std::collections::HashSet::new();
-        for reaction in &self.reactions {
-            if !reaction_ids.insert(&reaction.id) {
-                return Err(anyhow::anyhow!("Duplicate reaction id: '{}'", reaction.id));
             }
         }
 
@@ -1064,32 +686,6 @@ impl DrasiLibConfig {
                     e
                 )
             })?;
-        }
-
-        // Validate source references in queries
-        for query in &self.queries {
-            for subscription in &query.source_subscriptions {
-                if !source_ids.contains(&subscription.source_id) {
-                    return Err(anyhow::anyhow!(
-                        "Query '{}' references unknown source: '{}'",
-                        query.id,
-                        subscription.source_id
-                    ));
-                }
-            }
-        }
-
-        // Validate query references in reactions
-        for reaction in &self.reactions {
-            for query_id in &reaction.queries {
-                if !query_ids.contains(query_id) {
-                    return Err(anyhow::anyhow!(
-                        "Reaction '{}' references unknown query: '{}'",
-                        reaction.id,
-                        query_id
-                    ));
-                }
-            }
         }
 
         // Validate storage backend references in queries
@@ -1166,5 +762,180 @@ impl From<QueryJoinConfig> for drasi_core::models::QueryJoin {
             id: config.id,
             keys: config.keys.into_iter().map(|k| k.into()).collect(),
         }
+    }
+}
+
+// ============================================================================
+// Generic Config Types for API Compatibility
+// ============================================================================
+
+/// Generic source configuration for API use
+///
+/// `SourceConfig` provides a type-agnostic representation of source configuration
+/// that can be used in HTTP APIs and configuration files. The actual source instance
+/// is created by a registered factory in `SourceRegistry`.
+///
+/// # Usage
+///
+/// This type is used in REST APIs to accept source creation requests:
+/// ```json
+/// {
+///   "id": "my-source",
+///   "source_type": "postgres",
+///   "auto_start": true,
+///   "properties": {
+///     "host": "localhost",
+///     "port": 5432,
+///     "database": "mydb"
+///   }
+/// }
+/// ```
+///
+/// # Plugin Architecture
+///
+/// The `source_type` field determines which factory from `SourceRegistry` is used
+/// to create the actual source instance. The `properties` HashMap is passed to
+/// the factory which interprets it according to the plugin's typed config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceConfig {
+    /// Unique identifier for the source
+    pub id: String,
+    /// Type of source (e.g., "postgres", "http", "mock", "platform")
+    pub source_type: String,
+    /// Whether to automatically start the source (default: true)
+    #[serde(default = "default_auto_start")]
+    pub auto_start: bool,
+    /// Source-specific configuration properties
+    #[serde(default)]
+    pub properties: std::collections::HashMap<String, serde_json::Value>,
+}
+
+impl SourceConfig {
+    /// Create a new source config
+    pub fn new(id: impl Into<String>, source_type: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            source_type: source_type.into(),
+            auto_start: true,
+            properties: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Set auto_start
+    pub fn with_auto_start(mut self, auto_start: bool) -> Self {
+        self.auto_start = auto_start;
+        self
+    }
+
+    /// Add a property
+    pub fn with_property(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<serde_json::Value>,
+    ) -> Self {
+        self.properties.insert(key.into(), value.into());
+        self
+    }
+
+    /// Set all properties
+    pub fn with_properties(
+        mut self,
+        properties: std::collections::HashMap<String, serde_json::Value>,
+    ) -> Self {
+        self.properties = properties;
+        self
+    }
+}
+
+/// Generic reaction configuration for API use
+///
+/// `ReactionConfig` provides a type-agnostic representation of reaction configuration
+/// that can be used in HTTP APIs and configuration files. The actual reaction instance
+/// is created by a registered factory in `ReactionRegistry`.
+///
+/// # Usage
+///
+/// This type is used in REST APIs to accept reaction creation requests:
+/// ```json
+/// {
+///   "id": "my-reaction",
+///   "reaction_type": "http",
+///   "queries": ["query1", "query2"],
+///   "auto_start": true,
+///   "properties": {
+///     "endpoint": "http://localhost:8080/webhook"
+///   }
+/// }
+/// ```
+///
+/// # Plugin Architecture
+///
+/// The `reaction_type` field determines which factory from `ReactionRegistry` is used
+/// to create the actual reaction instance. The `properties` HashMap is passed to
+/// the factory which interprets it according to the plugin's typed config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReactionConfig {
+    /// Unique identifier for the reaction
+    pub id: String,
+    /// Type of reaction (e.g., "log", "http", "grpc", "sse", "platform")
+    pub reaction_type: String,
+    /// IDs of queries this reaction subscribes to
+    #[serde(default)]
+    pub queries: Vec<String>,
+    /// Whether to automatically start the reaction (default: true)
+    #[serde(default = "default_auto_start")]
+    pub auto_start: bool,
+    /// Reaction-specific configuration properties
+    #[serde(default)]
+    pub properties: std::collections::HashMap<String, serde_json::Value>,
+}
+
+impl ReactionConfig {
+    /// Create a new reaction config
+    pub fn new(id: impl Into<String>, reaction_type: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            reaction_type: reaction_type.into(),
+            queries: Vec::new(),
+            auto_start: true,
+            properties: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Add a query subscription
+    pub fn with_query(mut self, query_id: impl Into<String>) -> Self {
+        self.queries.push(query_id.into());
+        self
+    }
+
+    /// Set all query subscriptions
+    pub fn with_queries(mut self, queries: Vec<String>) -> Self {
+        self.queries = queries;
+        self
+    }
+
+    /// Set auto_start
+    pub fn with_auto_start(mut self, auto_start: bool) -> Self {
+        self.auto_start = auto_start;
+        self
+    }
+
+    /// Add a property
+    pub fn with_property(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<serde_json::Value>,
+    ) -> Self {
+        self.properties.insert(key.into(), value.into());
+        self
+    }
+
+    /// Set all properties
+    pub fn with_properties(
+        mut self,
+        properties: std::collections::HashMap<String, serde_json::Value>,
+    ) -> Self {
+        self.properties = properties;
+        self
     }
 }

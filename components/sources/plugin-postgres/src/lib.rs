@@ -31,40 +31,100 @@ pub use config::PostgresSourceConfig;
 use anyhow::Result;
 use async_trait::async_trait;
 use log::{error, info};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use drasi_lib::channels::*;
-use drasi_lib::config::SourceConfig;
-use drasi_lib::sources::{base::SourceBase, Source};
+use drasi_lib::plugin_core::Source;
+use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 
 pub struct PostgresReplicationSource {
     base: SourceBase,
+    config: PostgresSourceConfig,
 }
 
 impl PostgresReplicationSource {
-    pub fn new(config: SourceConfig, event_tx: ComponentEventSender) -> Result<Self> {
+    /// Create a new PostgreSQL replication source
+    ///
+    /// The event channel is automatically injected when the source is added
+    /// to DrasiLib via `add_source()`.
+    pub fn new(id: impl Into<String>, config: PostgresSourceConfig) -> Result<Self> {
+        let id = id.into();
+        let params = SourceBaseParams::new(id);
         Ok(Self {
-            base: SourceBase::new(config, event_tx)?,
+            base: SourceBase::new(params)?,
+            config,
         })
     }
 
-    fn parse_config(&self) -> Result<PostgresSourceConfig> {
-        match &self.base.config.config {
-            drasi_lib::config::SourceSpecificConfig::Postgres(postgres_config) => {
-                // Deserialize the HashMap into PostgresSourceConfig
-                let config: PostgresSourceConfig = serde_json::from_value(
-                    serde_json::to_value(postgres_config)?
-                )?;
-                Ok(config)
-            }
-            _ => Err(anyhow::anyhow!("Invalid config type for PostgreSQL source")),
+    /// Create a new PostgreSQL replication source with custom dispatch settings
+    ///
+    /// The event channel is automatically injected when the source is added
+    /// to DrasiLib via `add_source()`.
+    pub fn with_dispatch(
+        id: impl Into<String>,
+        config: PostgresSourceConfig,
+        dispatch_mode: Option<DispatchMode>,
+        dispatch_buffer_capacity: Option<usize>,
+    ) -> Result<Self> {
+        let id = id.into();
+        let mut params = SourceBaseParams::new(id);
+        if let Some(mode) = dispatch_mode {
+            params = params.with_dispatch_mode(mode);
         }
+        if let Some(capacity) = dispatch_buffer_capacity {
+            params = params.with_dispatch_buffer_capacity(capacity);
+        }
+        Ok(Self {
+            base: SourceBase::new(params)?,
+            config,
+        })
     }
 }
 
 #[async_trait]
 impl Source for PostgresReplicationSource {
+    fn id(&self) -> &str {
+        &self.base.id
+    }
+
+    fn type_name(&self) -> &str {
+        "postgres"
+    }
+
+    fn properties(&self) -> HashMap<String, serde_json::Value> {
+        let mut props = HashMap::new();
+        props.insert(
+            "host".to_string(),
+            serde_json::Value::String(self.config.host.clone()),
+        );
+        props.insert(
+            "port".to_string(),
+            serde_json::Value::Number(self.config.port.into()),
+        );
+        props.insert(
+            "database".to_string(),
+            serde_json::Value::String(self.config.database.clone()),
+        );
+        props.insert(
+            "user".to_string(),
+            serde_json::Value::String(self.config.user.clone()),
+        );
+        // Don't expose password in properties
+        props.insert(
+            "tables".to_string(),
+            serde_json::Value::Array(
+                self.config
+                    .tables
+                    .iter()
+                    .map(|t| serde_json::Value::String(t.clone()))
+                    .collect(),
+            ),
+        );
+        props
+    }
+
     async fn start(&self) -> Result<()> {
         if self.base.get_status().await == ComponentStatus::Running {
             return Ok(());
@@ -73,13 +133,13 @@ impl Source for PostgresReplicationSource {
         self.base.set_status(ComponentStatus::Starting).await;
         info!(
             "Starting PostgreSQL replication source: {}",
-            self.base.config.id
+            self.base.id
         );
 
-        let config = self.parse_config()?;
-        let source_id = self.base.config.id.clone();
+        let config = self.config.clone();
+        let source_id = self.base.id.clone();
         let dispatchers = self.base.dispatchers.clone();
-        let event_tx = self.base.event_tx.clone();
+        let event_tx = self.base.event_tx();
         let status_clone = self.base.status.clone();
 
         let task = tokio::spawn(async move {
@@ -94,15 +154,17 @@ impl Source for PostgresReplicationSource {
             {
                 error!("Replication task failed for {}: {}", source_id, e);
                 *status_clone.write().await = ComponentStatus::Error;
-                let _ = event_tx
-                    .send(ComponentEvent {
-                        component_id: source_id,
-                        component_type: ComponentType::Source,
-                        status: ComponentStatus::Error,
-                        timestamp: chrono::Utc::now(),
-                        message: Some(format!("Replication failed: {}", e)),
-                    })
-                    .await;
+                if let Some(ref tx) = *event_tx.read().await {
+                    let _ = tx
+                        .send(ComponentEvent {
+                            component_id: source_id,
+                            component_type: ComponentType::Source,
+                            status: ComponentStatus::Error,
+                            timestamp: chrono::Utc::now(),
+                            message: Some(format!("Replication failed: {}", e)),
+                        })
+                        .await;
+                }
             }
         });
 
@@ -126,7 +188,7 @@ impl Source for PostgresReplicationSource {
 
         info!(
             "Stopping PostgreSQL replication source: {}",
-            self.base.config.id
+            self.base.id
         );
 
         self.base.set_status(ComponentStatus::Stopping).await;
@@ -151,10 +213,6 @@ impl Source for PostgresReplicationSource {
         self.base.get_status().await
     }
 
-    fn get_config(&self) -> &SourceConfig {
-        &self.base.config
-    }
-
     async fn subscribe(
         &self,
         query_id: String,
@@ -176,6 +234,10 @@ impl Source for PostgresReplicationSource {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+
+    async fn inject_event_tx(&self, tx: ComponentEventSender) {
+        self.base.inject_event_tx(tx).await;
+    }
 }
 
 async fn run_replication(
@@ -184,7 +246,7 @@ async fn run_replication(
     dispatchers: Arc<
         RwLock<Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>,
     >,
-    event_tx: ComponentEventSender,
+    event_tx: Arc<RwLock<Option<ComponentEventSender>>>,
     status: Arc<RwLock<ComponentStatus>>,
 ) -> Result<()> {
     info!("Starting replication for source {}", source_id);
@@ -193,30 +255,6 @@ async fn run_replication(
         stream::ReplicationStream::new(config, source_id, dispatchers, event_tx, status);
 
     stream.run().await
-}
-
-/// Extension trait for creating PostgreSQL sources
-///
-/// This trait is implemented on `SourceConfig` to provide a fluent builder API
-/// for configuring PostgreSQL replication sources.
-///
-/// # Example
-///
-/// ```no_run
-/// use drasi_lib::config::SourceConfig;
-/// use drasi_plugin_postgres::SourceConfigPostgresExt;
-///
-/// let config = SourceConfig::postgres()
-///     .with_host("localhost")
-///     .with_port(5432)
-///     .with_database("mydb")
-///     .with_user("postgres")
-///     .with_password("password")
-///     .build();
-/// ```
-pub trait SourceConfigPostgresExt {
-    /// Create a new PostgreSQL source configuration builder
-    fn postgres() -> PostgresSourceBuilder;
 }
 
 /// Builder for PostgreSQL source configuration
@@ -323,12 +361,6 @@ impl PostgresSourceBuilder {
     }
 }
 
-impl SourceConfigPostgresExt for SourceConfig {
-    fn postgres() -> PostgresSourceBuilder {
-        PostgresSourceBuilder::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,18 +393,5 @@ mod tests {
         assert_eq!(config.tables.len(), 2);
         assert_eq!(config.tables[0], "users");
         assert_eq!(config.tables[1], "orders");
-    }
-
-    #[test]
-    fn test_postgres_builder_fluent_api() {
-        let config = SourceConfig::postgres()
-            .with_host("localhost")
-            .with_database("test_db")
-            .with_user("postgres")
-            .build();
-
-        assert_eq!(config.host, "localhost");
-        assert_eq!(config.database, "test_db");
-        assert_eq!(config.user, "postgres");
     }
 }

@@ -12,79 +12,123 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Selective example using only specific plugins
+//! Selective example showing how to use specific plugins.
+//!
+//! This example demonstrates the instance-based plugin architecture
+//! using only PostgreSQL source, HTTP reaction, and ScriptFile bootstrap.
+//!
+//! Run with: cargo run --bin selective --features selective
 
-#[cfg(feature = "selective")]
 use anyhow::Result;
-#[cfg(feature = "selective")]
-use drasi_lib::config::{SourceConfig, ReactionConfig};
-#[cfg(feature = "selective")]
-use drasi_lib::bootstrap::BootstrapProviderConfig;
 
-// Import only the plugins we need
-#[cfg(feature = "selective")]
-use drasi_plugin_postgres::SourceConfigPostgresExt;
-#[cfg(feature = "selective")]
-use drasi_plugin_http_reaction::ReactionConfigHttpExt;
-#[cfg(feature = "selective")]
-use drasi_plugin_scriptfile_bootstrap::BootstrapProviderConfigScriptFileExt;
+fn main() -> Result<()> {
+    println!("=== Drasi Instance-Based Plugin Architecture - Selective Example ===\n");
 
-#[cfg(feature = "selective")]
-#[tokio::main]
-async fn main() -> Result<()> {
-    println!("=== Drasi Plugin Architecture - Selective Example ===");
-    println!("Using only PostgreSQL source, HTTP reaction, and ScriptFile bootstrap\n");
+    println!("This example shows how to use specific plugins:");
+    println!("• PostgreSQL source (drasi-plugin-postgres)");
+    println!("• HTTP reaction (drasi-plugin-http-reaction)");
+    println!("• ScriptFile bootstrap (drasi-plugin-scriptfile-bootstrap)\n");
 
-    // Create PostgreSQL source config
-    let postgres_source = SourceConfig::postgres()
-        .with_host("localhost")
-        .with_port(5432)
-        .with_database("mydb")
-        .with_user("postgres")
-        .with_password("secret")
-        .with_tables(vec!["users", "orders"])
-        .build();
+    println!("=== Example Code ===\n");
 
-    println!("✓ Created PostgreSQL source configuration");
-    println!("  Database: mydb");
-    println!("  Tables: users, orders");
+    println!("```rust");
+    println!("use drasi_lib::{{DrasiLib, api::Query}};");
+    println!("use drasi_lib::channels::ComponentEventSender;");
+    println!("use drasi_lib::config::*;");
+    println!("use std::sync::Arc;");
+    println!("use std::collections::HashMap;");
+    println!();
+    println!("// Import only the plugins you need");
+    println!("use drasi_plugin_postgres::PostgresSource;");
+    println!("use drasi_plugin_http_reaction::HttpReaction;");
+    println!();
+    println!("#[tokio::main]");
+    println!("async fn main() -> Result<()> {{");
+    println!("    // 1. Build DrasiLib with queries");
+    println!("    let mut drasi = DrasiLib::builder()");
+    println!("        .with_id(\"selective-demo\")");
+    println!("        .add_query(");
+    println!("            Query::cypher(\"user-query\")");
+    println!("                .query(\"MATCH (u:User) WHERE u.active = true RETURN u\")");
+    println!("                .from_source(\"postgres-source\")");
+    println!("                .build(),");
+    println!("        )");
+    println!("        .build()");
+    println!("        .await?;");
+    println!();
+    println!("    // 2. Create event channel");
+    println!("    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(100);");
+    println!();
+    println!("    // 3. Create PostgreSQL source");
+    println!("    let pg_config = SourceConfig {{");
+    println!("        id: \"postgres-source\".to_string(),");
+    println!("        auto_start: true,");
+    println!("        config: SourceSpecificConfig::Postgres({{");
+    println!("            let mut props = HashMap::new();");
+    println!("            props.insert(\"host\".into(), json!(\"localhost\"));");
+    println!("            props.insert(\"port\".into(), json!(5432));");
+    println!("            props.insert(\"database\".into(), json!(\"mydb\"));");
+    println!("            props.insert(\"user\".into(), json!(\"postgres\"));");
+    println!("            props.insert(\"password\".into(), json!(\"secret\"));");
+    println!("            props.insert(\"tables\".into(), json!([\"users\"]));");
+    println!("            props");
+    println!("        }}),");
+    println!("        bootstrap_provider: Some(BootstrapProviderConfig {{");
+    println!("            provider_type: \"scriptfile\".to_string(),");
+    println!("            config: {{");
+    println!("                let mut props = HashMap::new();");
+    println!("                props.insert(\"file_paths\".into(), ");
+    println!("                    json!([\"/data/initial_users.jsonl\"]));");
+    println!("                props");
+    println!("            }},");
+    println!("        }}),");
+    println!("        ..Default::default()");
+    println!("    }};");
+    println!("    let postgres_source = Arc::new(PostgresSource::new(pg_config, event_tx.clone())?);");
+    println!("    drasi.add_source(postgres_source).await?;");
+    println!();
+    println!("    // 4. Create HTTP reaction");
+    println!("    let http_config = ReactionConfig {{");
+    println!("        id: \"http-reaction\".to_string(),");
+    println!("        queries: vec![\"user-query\".to_string()],");
+    println!("        auto_start: true,");
+    println!("        config: ReactionSpecificConfig::Http({{");
+    println!("            let mut props = HashMap::new();");
+    println!("            props.insert(\"base_url\".into(), ");
+    println!("                json!(\"https://api.example.com/webhook\"));");
+    println!("            props.insert(\"timeout_ms\".into(), json!(5000));");
+    println!("            props");
+    println!("        }}),");
+    println!("        ..Default::default()");
+    println!("    }};");
+    println!("    let http_reaction = Arc::new(HttpReaction::new(http_config, event_tx)?);");
+    println!("    drasi.add_reaction(http_reaction).await?;");
+    println!();
+    println!("    // 5. Start everything");
+    println!("    drasi.start().await?;");
+    println!();
+    println!("    Ok(())");
+    println!("}}");
+    println!("```");
+    println!();
 
-    // Create HTTP reaction config
-    let http_reaction = ReactionConfig::http()
-        .with_base_url("https://webhook.site/unique-id")
-        .with_token("Bearer abc123")
-        .with_timeout_ms(10000)
-        .build();
+    println!("=== Selective Build Benefits ===\n");
+    println!("• Smaller binary size (~10MB vs ~18MB for full build)");
+    println!("• Faster compilation");
+    println!("• Only include dependencies you actually use");
+    println!("• Clear dependency documentation in Cargo.toml");
+    println!();
 
-    println!("\n✓ Created HTTP reaction configuration");
-    println!("  Endpoint: https://webhook.site/unique-id");
-    println!("  Timeout: 10s");
-
-    // Create ScriptFile bootstrap provider
-    let bootstrap_provider = BootstrapProviderConfig::scriptfile()
-        .add_file_path("/data/initial_users.jsonl")
-        .add_file_path("/data/initial_orders.jsonl")
-        .build();
-
-    println!("\n✓ Created ScriptFile bootstrap provider");
-    println!("  Files: initial_users.jsonl, initial_orders.jsonl");
-
-    println!("\n=== Selective Build Benefits ===");
-    println!("• Only include plugins you actually use");
-    println!("• Reduced binary size vs full build");
-    println!("• Clear dependencies in Cargo.toml");
-    println!("• ~10MB binary size (between minimal and full)");
-
-    println!("\nPlugins NOT included in this build:");
-    println!("✗ HTTP, gRPC, Platform, Application sources");
-    println!("✗ gRPC, SSE, Platform, Profiler reactions");
-    println!("✗ PostgreSQL, Platform, Application bootstrap providers");
+    println!("=== Cargo.toml Configuration ===\n");
+    println!("```toml");
+    println!("[dependencies]");
+    println!("drasi-lib = {{ path = \"../../lib\" }}");
+    println!("drasi-plugin-postgres = {{ path = \"../../components/sources/plugin-postgres\" }}");
+    println!("drasi-plugin-http-reaction = {{ path = \"../../components/reactions/plugin-http\" }}");
+    println!("drasi-plugin-scriptfile-bootstrap = {{ ");
+    println!("    path = \"../../components/bootstrappers/plugin-scriptfile\" ");
+    println!("}}");
+    println!("```");
 
     Ok(())
-}
-
-#[cfg(not(feature = "selective"))]
-fn main() {
-    println!("This example requires the 'selective' feature.");
-    println!("Run with: cargo run --bin selective --features selective");
 }

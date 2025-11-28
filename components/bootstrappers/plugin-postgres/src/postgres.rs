@@ -28,12 +28,22 @@ use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest
 use drasi_lib::channels::SourceChangeEvent;
 use drasi_lib::config::common::{SslMode, TableKeyConfig};
 
+pub use drasi_plugin_postgres::PostgresSourceConfig;
+
 /// Bootstrap provider for PostgreSQL sources
-pub struct PostgresBootstrapProvider;
+///
+/// This provider takes its configuration directly at construction time,
+/// following the instance-based plugin architecture.
+pub struct PostgresBootstrapProvider {
+    config: PostgresConfig,
+}
 
 impl PostgresBootstrapProvider {
-    pub fn new() -> Self {
-        Self
+    /// Create a new PostgreSQL bootstrap provider with the given configuration
+    pub fn new(postgres_config: PostgresSourceConfig) -> Self {
+        Self {
+            config: PostgresConfig::from_source_config(postgres_config),
+        }
     }
 }
 
@@ -52,11 +62,8 @@ impl BootstrapProvider for PostgresBootstrapProvider {
             request.relation_labels.len()
         );
 
-        // Parse PostgreSQL configuration from source properties
-        let config = PostgresConfig::from_context(context)?;
-
-        // Create bootstrap handler
-        let mut handler = PostgresBootstrapHandler::new(config, context.source_id.clone());
+        // Create bootstrap handler with pre-configured settings
+        let mut handler = PostgresBootstrapHandler::new(self.config.clone(), context.source_id.clone());
 
         // Store query_id before moving request
         let query_id = request.query_id.clone();
@@ -93,33 +100,18 @@ struct PostgresConfig {
 }
 
 impl PostgresConfig {
-    fn from_context(context: &BootstrapContext) -> Result<Self> {
-        use drasi_lib::config::SourceSpecificConfig;
-        match &context.source_config.config {
-            SourceSpecificConfig::Postgres(postgres_config_map) => {
-                // Deserialize HashMap into typed config
-                let postgres_config: drasi_plugin_postgres::PostgresSourceConfig = serde_json::from_value(
-                    serde_json::to_value(postgres_config_map)?
-                )?;
-                Ok(PostgresConfig {
-                    host: postgres_config.host.clone(),
-                    port: postgres_config.port,
-                    database: postgres_config.database.clone(),
-                    user: postgres_config.user.clone(),
-                    password: postgres_config.password.clone(),
-                    tables: postgres_config.tables.clone(),
-                    slot_name: postgres_config.slot_name.clone(),
-                    publication_name: postgres_config.publication_name.clone(),
-                    ssl_mode: postgres_config.ssl_mode,
-                    table_keys: postgres_config.table_keys.clone(),
-                })
-            }
-            _ => Err(anyhow!(
-                "PostgreSQL bootstrap provider requires PostgreSQL source configuration. \
-                     Current source type: {}. \
-                     This usually means the bootstrap provider type doesn't match the source type.",
-                std::any::type_name_of_val(&context.source_config.config)
-            )),
+    fn from_source_config(postgres_config: PostgresSourceConfig) -> Self {
+        PostgresConfig {
+            host: postgres_config.host.clone(),
+            port: postgres_config.port,
+            database: postgres_config.database.clone(),
+            user: postgres_config.user.clone(),
+            password: postgres_config.password.clone(),
+            tables: postgres_config.tables.clone(),
+            slot_name: postgres_config.slot_name.clone(),
+            publication_name: postgres_config.publication_name.clone(),
+            ssl_mode: postgres_config.ssl_mode,
+            table_keys: postgres_config.table_keys.clone(),
         }
     }
 }

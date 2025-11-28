@@ -23,10 +23,10 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus, QueryResult};
-use drasi_lib::config::ReactionConfig;
-use drasi_lib::reactions::common::base::ReactionBase;
-use drasi_lib::reactions::Reaction;
+use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
+use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::utils::log_component_start;
+use std::collections::HashMap;
 
 /// Handle for programmatic consumption of query results from an Application Reaction
 ///
@@ -565,19 +565,25 @@ pub struct ApplicationReaction {
 }
 
 impl ApplicationReaction {
+    /// Create a new application reaction
+    ///
+    /// The event channel is automatically injected when the reaction is added
+    /// to DrasiLib via `add_reaction()`.
     pub fn new(
-        config: ReactionConfig,
-        event_tx: ComponentEventSender,
+        id: impl Into<String>,
+        queries: Vec<String>,
     ) -> (Self, ApplicationReactionHandle) {
+        let id = id.into();
         let (app_tx, app_rx) = mpsc::channel(1000);
 
         let handle = ApplicationReactionHandle {
             rx: Arc::new(RwLock::new(Some(app_rx))),
-            reaction_id: config.id.clone(),
+            reaction_id: id.clone(),
         };
 
+        let params = ReactionBaseParams::new(id, queries);
         let reaction = Self {
-            base: ReactionBase::new(config, event_tx),
+            base: ReactionBase::new(params),
             app_tx,
         };
 
@@ -587,11 +593,27 @@ impl ApplicationReaction {
 
 #[async_trait]
 impl Reaction for ApplicationReaction {
+    fn id(&self) -> &str {
+        &self.base.id
+    }
+
+    fn type_name(&self) -> &str {
+        "application"
+    }
+
+    fn properties(&self) -> HashMap<String, serde_json::Value> {
+        HashMap::new()
+    }
+
+    fn query_ids(&self) -> Vec<String> {
+        self.base.queries.clone()
+    }
+
     async fn start(
         &self,
-        query_subscriber: Arc<dyn drasi_lib::reactions::common::base::QuerySubscriber>,
+        query_subscriber: Arc<dyn QuerySubscriber>,
     ) -> Result<()> {
-        log_component_start("Reaction", &self.base.config.id);
+        log_component_start("Reaction", &self.base.id);
 
         // Transition to Starting
         self.base
@@ -614,9 +636,9 @@ impl Reaction for ApplicationReaction {
 
         // Spawn processing task to dequeue and process results in timestamp order
         let priority_queue = self.base.priority_queue.clone();
-        let reaction_name = self.base.config.id.clone();
+        let reaction_name = self.base.id.clone();
         let app_tx = self.app_tx.clone();
-        let query_filter = self.base.config.queries.clone();
+        let query_filter = self.base.queries.clone();
 
         let processing_task = tokio::spawn(async move {
             info!(
@@ -676,8 +698,8 @@ impl Reaction for ApplicationReaction {
         self.base.get_status().await
     }
 
-    fn get_config(&self) -> &ReactionConfig {
-        &self.base.config
+    async fn inject_event_tx(&self, tx: ComponentEventSender) {
+        self.base.inject_event_tx(tx).await;
     }
 }
 

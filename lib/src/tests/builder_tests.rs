@@ -1,6 +1,5 @@
 use super::super::*;
-use crate::api::{Query, Reaction, Source};
-use crate::test_support::helpers::test_mocks::{create_test_reaction_registry, create_test_source_registry};
+use crate::api::Query;
 
 #[tokio::test]
 async fn test_builder_creates_initialized_server() {
@@ -32,27 +31,22 @@ reactions: []
 }
 
 #[tokio::test]
-async fn test_builder_with_components() {
-    // Use test mock registries that have "mock" and "log" types registered
+async fn test_builder_with_query() {
+    // In the instance-based approach, sources and reactions are added as instances
+    // after the builder creates the core. Here we just test query config addition.
     let core = DrasiLib::builder()
         .with_id("complex-server")
-        .with_source_registry(create_test_source_registry())
-        .with_reaction_registry(create_test_reaction_registry())
-        .add_source(Source::mock("source1").build())
         .add_query(
             Query::cypher("query1")
                 .query("MATCH (n) RETURN n")
                 .from_source("source1")
                 .build(),
         )
-        .add_reaction(Reaction::log("reaction1").subscribe_to("query1").build())
         .build()
         .await;
 
-    assert!(core.is_ok(), "Builder with components should succeed");
+    assert!(core.is_ok(), "Builder with query should succeed");
     let core = core.unwrap();
     assert!(core.state_guard.is_initialized().await);
-    assert_eq!(core.config.sources.len(), 1);
     assert_eq!(core.config.queries.len(), 1);
-    assert_eq!(core.config.reactions.len(), 1);
 }

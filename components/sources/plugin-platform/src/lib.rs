@@ -29,10 +29,9 @@ use drasi_lib::channels::{
     ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, ControlOperation,
     SourceControl, SourceEvent, SourceEventWrapper, SubscriptionResponse,
 };
-use drasi_lib::config::SourceConfig;
-use drasi_lib::sources::base::SourceBase;
+use drasi_lib::plugin_core::Source;
+use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::manager::convert_json_to_element_properties;
-use drasi_lib::sources::Source;
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 
 #[cfg(test)]
@@ -85,13 +84,20 @@ impl Default for PlatformConfig {
 /// Platform source that reads events from Redis Streams
 pub struct PlatformSource {
     base: SourceBase,
+    config: PlatformSourceConfig,
 }
 
 impl PlatformSource {
     /// Create a new platform source
-    pub fn new(config: SourceConfig, event_tx: ComponentEventSender) -> Result<Self> {
+    ///
+    /// The event channel is automatically injected when the source is added
+    /// to DrasiLib via `add_source()`.
+    pub fn new(id: impl Into<String>, config: PlatformSourceConfig) -> Result<Self> {
+        let id = id.into();
+        let params = SourceBaseParams::new(id);
         Ok(Self {
-            base: SourceBase::new(config, event_tx)?,
+            base: SourceBase::new(params)?,
+            config,
         })
     }
 
@@ -324,7 +330,7 @@ impl PlatformSource {
                 Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
             >,
         >,
-        event_tx: ComponentEventSender,
+        event_tx: Arc<RwLock<Option<ComponentEventSender>>>,
         status: Arc<RwLock<ComponentStatus>>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
@@ -344,15 +350,17 @@ impl PlatformSource {
                 Ok(conn) => conn,
                 Err(e) => {
                     error!("Failed to connect to Redis: {}", e);
-                    let _ = event_tx
-                        .send(ComponentEvent {
-                            component_id: source_id.clone(),
-                            component_type: ComponentType::Source,
-                            status: ComponentStatus::Stopped,
-                            timestamp: chrono::Utc::now(),
-                            message: Some(format!("Failed to connect to Redis: {}", e)),
-                        })
-                        .await;
+                    if let Some(ref tx) = *event_tx.read().await {
+                        let _ = tx
+                            .send(ComponentEvent {
+                                component_id: source_id.clone(),
+                                component_type: ComponentType::Source,
+                                status: ComponentStatus::Stopped,
+                                timestamp: chrono::Utc::now(),
+                                message: Some(format!("Failed to connect to Redis: {}", e)),
+                            })
+                            .await;
+                    }
                     *status.write().await = ComponentStatus::Stopped;
                     return;
                 }
@@ -369,15 +377,17 @@ impl PlatformSource {
             .await
             {
                 error!("Failed to create consumer group: {}", e);
-                let _ = event_tx
-                    .send(ComponentEvent {
-                        component_id: source_id.clone(),
-                        component_type: ComponentType::Source,
-                        status: ComponentStatus::Stopped,
-                        timestamp: chrono::Utc::now(),
-                        message: Some(format!("Failed to create consumer group: {}", e)),
-                    })
-                    .await;
+                if let Some(ref tx) = *event_tx.read().await {
+                    let _ = tx
+                        .send(ComponentEvent {
+                            component_id: source_id.clone(),
+                            component_type: ComponentType::Source,
+                            status: ComponentStatus::Stopped,
+                            timestamp: chrono::Utc::now(),
+                            message: Some(format!("Failed to create consumer group: {}", e)),
+                        })
+                        .await;
+                }
                 *status.write().await = ComponentStatus::Stopped;
                 return;
             }
@@ -531,19 +541,21 @@ impl PlatformSource {
                                                                     "Failed to transform event {}: {}",
                                                                     stream_id.id, e
                                                                 );
-                                                                let _ = event_tx
-                                                                    .send(ComponentEvent {
-                                                                        component_id: source_id.clone(),
-                                                                        component_type:
-                                                                            ComponentType::Source,
-                                                                        status: ComponentStatus::Running,
-                                                                        timestamp: chrono::Utc::now(),
-                                                                        message: Some(format!(
-                                                                            "Transformation error: {}",
-                                                                            e
-                                                                        )),
-                                                                    })
-                                                                    .await;
+                                                                if let Some(ref tx) = *event_tx.read().await {
+                                                                    let _ = tx
+                                                                        .send(ComponentEvent {
+                                                                            component_id: source_id.clone(),
+                                                                            component_type:
+                                                                                ComponentType::Source,
+                                                                            status: ComponentStatus::Running,
+                                                                            timestamp: chrono::Utc::now(),
+                                                                            message: Some(format!(
+                                                                                "Transformation error: {}",
+                                                                                e
+                                                                            )),
+                                                                        })
+                                                                        .await;
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -626,15 +638,17 @@ impl PlatformSource {
                         // Check if it's a connection error
                         if is_connection_error(&e) {
                             error!("Redis connection lost: {}", e);
-                            let _ = event_tx
-                                .send(ComponentEvent {
-                                    component_id: source_id.clone(),
-                                    component_type: ComponentType::Source,
-                                    status: ComponentStatus::Running,
-                                    timestamp: chrono::Utc::now(),
-                                    message: Some(format!("Redis connection lost: {}", e)),
-                                })
-                                .await;
+                            if let Some(ref tx) = *event_tx.read().await {
+                                let _ = tx
+                                    .send(ComponentEvent {
+                                        component_id: source_id.clone(),
+                                        component_type: ComponentType::Source,
+                                        status: ComponentStatus::Running,
+                                        timestamp: chrono::Utc::now(),
+                                        message: Some(format!("Redis connection lost: {}", e)),
+                                    })
+                                    .await;
+                            }
 
                             // Try to reconnect
                             match Self::connect_with_retry(
@@ -667,33 +681,64 @@ impl PlatformSource {
 
 #[async_trait::async_trait]
 impl Source for PlatformSource {
+    fn id(&self) -> &str {
+        &self.base.id
+    }
+
+    fn type_name(&self) -> &str {
+        "platform"
+    }
+
+    fn properties(&self) -> HashMap<String, serde_json::Value> {
+        let mut props = HashMap::new();
+        props.insert(
+            "redis_url".to_string(),
+            serde_json::Value::String(self.config.redis_url.clone()),
+        );
+        props.insert(
+            "stream_key".to_string(),
+            serde_json::Value::String(self.config.stream_key.clone()),
+        );
+        props.insert(
+            "consumer_group".to_string(),
+            serde_json::Value::String(self.config.consumer_group.clone()),
+        );
+        if let Some(ref consumer_name) = self.config.consumer_name {
+            props.insert(
+                "consumer_name".to_string(),
+                serde_json::Value::String(consumer_name.clone()),
+            );
+        }
+        props.insert(
+            "batch_size".to_string(),
+            serde_json::Value::Number(self.config.batch_size.into()),
+        );
+        props.insert(
+            "block_ms".to_string(),
+            serde_json::Value::Number(self.config.block_ms.into()),
+        );
+        props
+    }
+
     async fn start(&self) -> Result<()> {
-        info!("Starting platform source: {}", self.base.config.id);
+        info!("Starting platform source: {}", self.base.id);
 
         // Extract configuration from typed config
-        let platform_config = match &self.base.config.config {
-            drasi_lib::config::SourceSpecificConfig::Platform(platform_config_map) => {
-                // Deserialize HashMap into typed config
-                let typed_config: PlatformSourceConfig = serde_json::from_value(
-                    serde_json::to_value(platform_config_map)?
-                )?;
-                PlatformConfig {
-                    redis_url: typed_config.redis_url.clone(),
-                    stream_key: typed_config.stream_key.clone(),
-                    consumer_group: typed_config.consumer_group.clone(),
-                    consumer_name: typed_config
-                        .consumer_name
-                        .clone()
-                        .unwrap_or_else(|| format!("drasi-consumer-{}", self.base.config.id)),
-                    batch_size: typed_config.batch_size,
-                    block_ms: typed_config.block_ms,
-                    start_id: ">".to_string(),
-                    always_create_consumer_group: false,
-                    max_retries: 5,
-                    retry_delay_ms: 1000,
-                }
-            }
-            _ => return Err(anyhow::anyhow!("Invalid config type for platform source")),
+        let platform_config = PlatformConfig {
+            redis_url: self.config.redis_url.clone(),
+            stream_key: self.config.stream_key.clone(),
+            consumer_group: self.config.consumer_group.clone(),
+            consumer_name: self
+                .config
+                .consumer_name
+                .clone()
+                .unwrap_or_else(|| format!("drasi-consumer-{}", self.base.id)),
+            batch_size: self.config.batch_size,
+            block_ms: self.config.block_ms,
+            start_id: ">".to_string(),
+            always_create_consumer_group: false,
+            max_retries: 5,
+            retry_delay_ms: 1000,
         };
 
         // Update status
@@ -701,10 +746,10 @@ impl Source for PlatformSource {
 
         // Start consumer task
         let task = Self::start_consumer_task(
-            self.base.config.id.clone(),
+            self.base.id.clone(),
             platform_config,
             self.base.dispatchers.clone(),
-            self.base.event_tx.clone(),
+            self.base.event_tx(),
             self.base.status.clone(),
         )
         .await;
@@ -715,7 +760,7 @@ impl Source for PlatformSource {
     }
 
     async fn stop(&self) -> Result<()> {
-        info!("Stopping platform source: {}", self.base.config.id);
+        info!("Stopping platform source: {}", self.base.id);
 
         // Cancel the task
         if let Some(handle) = self.base.task_handle.write().await.take() {
@@ -730,10 +775,6 @@ impl Source for PlatformSource {
 
     async fn status(&self) -> ComponentStatus {
         self.base.status.read().await.clone()
-    }
-
-    fn get_config(&self) -> &SourceConfig {
-        &self.base.config
     }
 
     async fn subscribe(
@@ -756,6 +797,10 @@ impl Source for PlatformSource {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    async fn inject_event_tx(&self, tx: ComponentEventSender) {
+        self.base.inject_event_tx(tx).await;
     }
 }
 

@@ -14,78 +14,32 @@
 
 //! PostgreSQL bootstrap plugin for Drasi
 //!
-//! This plugin provides the PostgreSQL bootstrap provider implementation and extension
-//! traits for creating PostgreSQL bootstrap providers in the Drasi plugin architecture.
+//! This plugin provides the PostgreSQL bootstrap provider implementation following
+//! the instance-based plugin architecture.
+//!
+//! # Example
+//!
+//! ```no_run
+//! use drasi_plugin_postgres_bootstrap::{PostgresBootstrapProvider, PostgresSourceConfig};
+//! use drasi_lib::config::common::SslMode;
+//!
+//! // Create the bootstrap provider with typed configuration
+//! let config = PostgresSourceConfig {
+//!     host: "localhost".to_string(),
+//!     port: 5432,
+//!     database: "mydb".to_string(),
+//!     user: "user".to_string(),
+//!     password: "password".to_string(),
+//!     tables: vec!["users".to_string()],
+//!     slot_name: "drasi_slot".to_string(),
+//!     publication_name: "drasi_pub".to_string(),
+//!     ssl_mode: SslMode::Disable,
+//!     table_keys: vec![],
+//! };
+//!
+//! let provider = PostgresBootstrapProvider::new(config);
+//! ```
 
 pub mod postgres;
 
-pub use drasi_lib::bootstrap::{PostgresBootstrapConfig, BootstrapProviderConfig};
-pub use postgres::PostgresBootstrapProvider;
-
-/// Extension trait for creating PostgreSQL bootstrap providers
-///
-/// This trait is implemented on `BootstrapProviderConfig` to provide a fluent builder API
-/// for configuring PostgreSQL bootstrap providers.
-///
-/// # Example
-///
-/// ```no_run
-/// use drasi_lib::bootstrap::BootstrapProviderConfig;
-/// use drasi_plugin_postgres_bootstrap::BootstrapProviderConfigPostgresExt;
-///
-/// let config = BootstrapProviderConfig::postgres().build();
-/// ```
-pub trait BootstrapProviderConfigPostgresExt {
-    /// Create a new PostgreSQL bootstrap provider configuration builder
-    fn postgres() -> PostgresBootstrapBuilder;
-}
-
-/// Builder for PostgreSQL bootstrap provider configuration
-pub struct PostgresBootstrapBuilder;
-
-impl PostgresBootstrapBuilder {
-    /// Create a new PostgreSQL bootstrap provider builder
-    pub fn new() -> Self {
-        Self
-    }
-
-    /// Build the PostgreSQL bootstrap provider configuration
-    pub fn build(self) -> PostgresBootstrapConfig {
-        PostgresBootstrapConfig::default()
-    }
-}
-
-impl Default for PostgresBootstrapBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl BootstrapProviderConfigPostgresExt for BootstrapProviderConfig {
-    fn postgres() -> PostgresBootstrapBuilder {
-        PostgresBootstrapBuilder::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_postgres_bootstrap_builder() {
-        let config = PostgresBootstrapBuilder::new().build();
-        assert_eq!(config, PostgresBootstrapConfig::default());
-    }
-
-    #[test]
-    fn test_postgres_bootstrap_extension_trait() {
-        let config = BootstrapProviderConfig::postgres().build();
-        assert_eq!(config, PostgresBootstrapConfig::default());
-    }
-
-    #[test]
-    fn test_postgres_bootstrap_builder_default() {
-        let config = PostgresBootstrapBuilder::default().build();
-        assert_eq!(config, PostgresBootstrapConfig::default());
-    }
-}
+pub use postgres::{PostgresBootstrapProvider, PostgresSourceConfig};

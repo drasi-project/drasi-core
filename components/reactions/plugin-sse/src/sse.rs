@@ -18,6 +18,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::{routing::get, Router};
 use log::{debug, error, info};
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -25,52 +26,54 @@ use tokio_stream::StreamExt;
 use tower_http::cors::{Any, CorsLayer};
 
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
-use drasi_lib::config::ReactionConfig;
-use drasi_lib::reactions::common::base::ReactionBase;
-use drasi_lib::reactions::Reaction;
+use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
+use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::utils::log_component_start;
 
 pub use super::config::SseReactionConfig;
 
-// SSE tests currently have compilation errors - needs to be fixed separately
-// #[cfg(test)]
-// mod tests;
-
 /// SSE reaction exposes query results to browser clients via Server-Sent Events.
 pub struct SseReaction {
     base: ReactionBase,
-    host: String,
-    port: u16,
-    sse_path: String,
-    heartbeat_interval_ms: u64,
+    config: SseReactionConfig,
     broadcaster: broadcast::Sender<String>,
     task_handles: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 impl SseReaction {
-    pub fn new(config: ReactionConfig, event_tx: ComponentEventSender) -> Self {
-        let (host, port, sse_path, heartbeat_interval_ms) = match &config.config {
-            drasi_lib::config::ReactionSpecificConfig::Sse(sse_config_map) => {
-                // Deserialize HashMap into typed config
-                let sse_config: SseReactionConfig = serde_json::from_value(
-                    serde_json::to_value(sse_config_map).unwrap_or_default()
-                ).unwrap_or_default();
-                (
-                    sse_config.host.clone(),
-                    sse_config.port,
-                    sse_config.sse_path.clone(),
-                    sse_config.heartbeat_interval_ms,
-                )
-            }
-            _ => ("0.0.0.0".to_string(), 50051, "/events".to_string(), 15_000),
-        };
+    /// Create a new SSE reaction
+    ///
+    /// The event channel is automatically injected when the reaction is added
+    /// to DrasiLib via `add_reaction()`.
+    pub fn new(id: impl Into<String>, queries: Vec<String>, config: SseReactionConfig) -> Self {
+        let id = id.into();
+        let params = ReactionBaseParams::new(id, queries);
         let (tx, _rx) = broadcast::channel(1024);
         Self {
-            base: ReactionBase::new(config, event_tx),
-            host,
-            port,
-            sse_path,
-            heartbeat_interval_ms,
+            base: ReactionBase::new(params),
+            config,
+            broadcaster: tx,
+            task_handles: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Create a new SSE reaction with custom priority queue capacity
+    ///
+    /// The event channel is automatically injected when the reaction is added
+    /// to DrasiLib via `add_reaction()`.
+    pub fn with_priority_queue_capacity(
+        id: impl Into<String>,
+        queries: Vec<String>,
+        config: SseReactionConfig,
+        priority_queue_capacity: usize,
+    ) -> Self {
+        let id = id.into();
+        let params = ReactionBaseParams::new(id, queries)
+            .with_priority_queue_capacity(priority_queue_capacity);
+        let (tx, _rx) = broadcast::channel(1024);
+        Self {
+            base: ReactionBase::new(params),
+            config,
             broadcaster: tx,
             task_handles: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         }
@@ -79,11 +82,40 @@ impl SseReaction {
 
 #[async_trait]
 impl Reaction for SseReaction {
+    fn id(&self) -> &str {
+        &self.base.id
+    }
+
+    fn type_name(&self) -> &str {
+        "sse"
+    }
+
+    fn properties(&self) -> HashMap<String, serde_json::Value> {
+        let mut props = HashMap::new();
+        props.insert(
+            "host".to_string(),
+            serde_json::Value::String(self.config.host.clone()),
+        );
+        props.insert(
+            "port".to_string(),
+            serde_json::Value::Number(self.config.port.into()),
+        );
+        props.insert(
+            "sse_path".to_string(),
+            serde_json::Value::String(self.config.sse_path.clone()),
+        );
+        props
+    }
+
+    fn query_ids(&self) -> Vec<String> {
+        self.base.queries.clone()
+    }
+
     async fn start(
         &self,
-        query_subscriber: Arc<dyn drasi_lib::reactions::common::base::QuerySubscriber>,
+        query_subscriber: Arc<dyn QuerySubscriber>,
     ) -> anyhow::Result<()> {
-        log_component_start("SSE Reaction", &self.base.config.id);
+        log_component_start("SSE Reaction", &self.base.id);
 
         // Transition to Starting
         self.base
@@ -107,7 +139,7 @@ impl Reaction for SseReaction {
         // Spawn processing task
         let status = self.base.status.clone();
         let broadcaster = self.broadcaster.clone();
-        let reaction_id = self.base.config.id.clone();
+        let reaction_id = self.base.id.clone();
         let priority_queue = self.base.priority_queue.clone();
         let processing_handle = tokio::spawn(async move {
             info!("[{}] SSE result processing task started", reaction_id);
@@ -150,7 +182,7 @@ impl Reaction for SseReaction {
 
         // Heartbeat task
         let hb_tx = self.broadcaster.clone();
-        let interval = self.heartbeat_interval_ms;
+        let interval = self.config.heartbeat_interval_ms;
         let hb_handle = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_millis(interval));
             loop {
@@ -163,9 +195,9 @@ impl Reaction for SseReaction {
         self.task_handles.lock().await.push(hb_handle);
 
         // HTTP server task
-        let host = self.host.clone();
-        let port = self.port;
-        let path = self.sse_path.clone();
+        let host = self.config.host.clone();
+        let port = self.config.port;
+        let path = self.config.sse_path.clone();
         let rx_factory = self.broadcaster.clone();
         let server_handle = tokio::spawn(async move {
             // Configure CORS to allow all origins
@@ -237,7 +269,8 @@ impl Reaction for SseReaction {
     async fn status(&self) -> ComponentStatus {
         self.base.get_status().await
     }
-    fn get_config(&self) -> &ReactionConfig {
-        &self.base.config
+
+    async fn inject_event_tx(&self, tx: ComponentEventSender) {
+        self.base.inject_event_tx(tx).await;
     }
 }

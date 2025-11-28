@@ -15,7 +15,7 @@
 //! Plugin Core Module
 //!
 //! This module provides the foundational abstractions for the Drasi plugin architecture.
-//! It defines the core traits and base implementations that all plugins must implement.
+//! It defines the core traits that all plugins must implement.
 //!
 //! # Architecture
 //!
@@ -24,43 +24,62 @@
 //! - **Reaction plugins**: Implement the `Reaction` trait to handle query results
 //! - **Bootstrap plugins**: Implement the `BootstrapProvider` trait for initial data delivery
 //!
+//! # Plugin Architecture
+//!
+//! drasi-lib has **zero awareness** of what plugins exist. It only knows about traits.
+//! Each plugin:
+//! 1. Defines its own typed configuration struct with builder pattern
+//! 2. Creates base implementations using the params structs
+//! 3. Implements the appropriate trait
+//! 4. Is passed to DrasiLib as `Arc<dyn Trait>`
+//!
 //! # Usage
 //!
 //! Plugin developers should implement the appropriate trait(s) and use the base
-//! implementations for common functionality:
+//! implementations from `sources::base` and `reactions::common::base`:
 //!
 //! ```ignore
-//! use drasi_lib::plugin_core::{Source, SourceBase};
+//! use drasi_lib::plugin_core::Source;
+//! use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 //!
 //! pub struct MySource {
 //!     base: SourceBase,
 //!     // custom fields...
 //! }
 //!
+//! impl MySource {
+//!     pub fn new(config: MyConfig, event_tx: ComponentEventSender) -> Result<Self> {
+//!         let params = SourceBaseParams::new(&config.id);
+//!         Ok(Self {
+//!             base: SourceBase::new(params, event_tx)?,
+//!         })
+//!     }
+//! }
+//!
 //! #[async_trait]
 //! impl Source for MySource {
-//!     async fn start(&self) -> Result<()> {
-//!         // implementation...
-//!     }
+//!     fn id(&self) -> &str { &self.base.id }
+//!     fn type_name(&self) -> &str { "my-source" }
 //!     // ...
 //! }
 //! ```
 
 pub mod bootstrap;
 pub mod reaction;
-pub mod source;
 pub mod registry;
+pub mod source;
 
-// Re-export all public types for convenience
+// Re-export core traits for convenience
+// Note: Base implementations are in sources::base and reactions::common::base
 
-// Source abstractions
-pub use source::{Source, SourceBase, SourceFactory};
+// Source trait (the only thing drasi-lib knows about sources)
+pub use source::Source;
 
-// Reaction abstractions
-pub use reaction::{QuerySubscriber, Reaction, ReactionBase, ReactionFactory};
+// Reaction traits
+pub use reaction::{QuerySubscriber, Reaction};
 
-// Bootstrap abstractions
-pub use bootstrap::{BootstrapFactory, BootstrapProvider};
+// Bootstrap traits
+pub use bootstrap::BootstrapProvider;
 
-// Plugin registry
+// Registry types for factory-based plugin creation
 pub use registry::{ReactionRegistry, SourceRegistry};

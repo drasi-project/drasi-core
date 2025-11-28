@@ -21,4 +21,3 @@ pub mod sse;
 
 pub use config::SseReactionConfig;
 pub use sse::SseReaction;
-pub use drasi_lib::config::ReactionConfig;

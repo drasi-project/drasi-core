@@ -15,9 +15,8 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
-use drasi_lib::config::ReactionConfig;
-use drasi_lib::reactions::common::base::ReactionBase;
-use drasi_lib::reactions::Reaction;
+use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
+use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::utils::{AdaptiveBatchConfig, AdaptiveBatcher};
 
 use drasi_plugin_http_reaction::QueryConfig;
@@ -39,6 +38,7 @@ pub struct BatchResult {
 /// Adaptive HTTP reaction that batches webhook calls
 pub struct AdaptiveHttpReaction {
     base: ReactionBase,
+    config: HttpAdaptiveReactionConfig,
     base_url: String,
     token: Option<String>,
     timeout_ms: u64,
@@ -52,76 +52,52 @@ pub struct AdaptiveHttpReaction {
 }
 
 impl AdaptiveHttpReaction {
-    pub fn new(config: ReactionConfig, event_tx: ComponentEventSender) -> Self {
-        // Extract HTTP Adaptive configuration from typed config
-        let (base_url, token, timeout_ms, query_configs, adaptive_config) = match &config.config {
-            drasi_lib::config::ReactionSpecificConfig::HttpAdaptive(http_adaptive_config_map) => {
-                // Deserialize HashMap into typed config
-                let http_adaptive_config: HttpAdaptiveReactionConfig = serde_json::from_value(
-                    serde_json::to_value(http_adaptive_config_map).unwrap_or_default()
-                ).unwrap_or_else(|_| HttpAdaptiveReactionConfig::default());
+    /// Create a new adaptive HTTP reaction
+    ///
+    /// The event channel is automatically injected when the reaction is added
+    /// to DrasiLib via `add_reaction()`.
+    pub fn new(
+        id: impl Into<String>,
+        queries: Vec<String>,
+        config: HttpAdaptiveReactionConfig,
+    ) -> Self {
+        let id = id.into();
 
-                // Convert from config adaptive fields to utils::AdaptiveBatchConfig
-                let utils_adaptive_config = AdaptiveBatchConfig {
-                    min_batch_size: http_adaptive_config.adaptive.adaptive_min_batch_size,
-                    max_batch_size: http_adaptive_config.adaptive.adaptive_max_batch_size,
-                    throughput_window: Duration::from_millis(
-                        http_adaptive_config.adaptive.adaptive_window_size as u64 * 100,
-                    ),
-                    max_wait_time: Duration::from_millis(
-                        http_adaptive_config.adaptive.adaptive_batch_timeout_ms,
-                    ),
-                    min_wait_time: Duration::from_millis(100),
-                    adaptive_enabled: true,
-                };
-
-                (
-                    http_adaptive_config.base_url.clone(),
-                    http_adaptive_config.token.clone(),
-                    http_adaptive_config.timeout_ms,
-                    http_adaptive_config.routes.clone(),
-                    utils_adaptive_config,
-                )
-            }
-            _ => {
-                // Provide defaults if wrong config type
-                warn!(
-                    "Expected HttpAdaptive config, got different type. Using defaults for reaction: {}",
-                    config.id
-                );
-                (
-                    "http://localhost".to_string(),
-                    None,
-                    10000,
-                    HashMap::new(),
-                    AdaptiveBatchConfig::default(),
-                )
-            }
+        // Convert from config adaptive fields to utils::AdaptiveBatchConfig
+        let utils_adaptive_config = AdaptiveBatchConfig {
+            min_batch_size: config.adaptive.adaptive_min_batch_size,
+            max_batch_size: config.adaptive.adaptive_max_batch_size,
+            throughput_window: Duration::from_millis(
+                config.adaptive.adaptive_window_size as u64 * 100,
+            ),
+            max_wait_time: Duration::from_millis(config.adaptive.adaptive_batch_timeout_ms),
+            min_wait_time: Duration::from_millis(100),
+            adaptive_enabled: true,
         };
 
         // Check if batch endpoints are enabled
         let batch_endpoints_enabled = true; // Default to true for adaptive HTTP
 
-        // query_configs is already the correct type (QueryConfig), no conversion needed
-
         // Create HTTP client with connection pooling
         let client = Client::builder()
-            .timeout(Duration::from_millis(timeout_ms))
+            .timeout(Duration::from_millis(config.timeout_ms))
             .pool_idle_timeout(Duration::from_secs(90))
             .pool_max_idle_per_host(10)
             .http2_prior_knowledge() // Use HTTP/2 when available
             .build()
             .unwrap_or_else(|_| Client::new());
 
+        let params = ReactionBaseParams::new(id, queries);
         Self {
-            base: ReactionBase::new(config, event_tx),
-            base_url,
-            token,
-            timeout_ms,
-            query_configs,
-            adaptive_config,
+            base: ReactionBase::new(params),
+            base_url: config.base_url.clone(),
+            token: config.token.clone(),
+            timeout_ms: config.timeout_ms,
+            query_configs: config.routes.clone(),
+            adaptive_config: utils_adaptive_config,
             client,
             batch_endpoints_enabled,
+            config,
         }
     }
 
@@ -424,11 +400,36 @@ impl AdaptiveHttpReaction {
 
 #[async_trait]
 impl Reaction for AdaptiveHttpReaction {
+    fn id(&self) -> &str {
+        &self.base.id
+    }
+
+    fn type_name(&self) -> &str {
+        "http_adaptive"
+    }
+
+    fn properties(&self) -> HashMap<String, serde_json::Value> {
+        let mut props = HashMap::new();
+        props.insert(
+            "base_url".to_string(),
+            serde_json::Value::String(self.config.base_url.clone()),
+        );
+        props.insert(
+            "timeout_ms".to_string(),
+            serde_json::Value::Number(self.config.timeout_ms.into()),
+        );
+        props
+    }
+
+    fn query_ids(&self) -> Vec<String> {
+        self.base.queries.clone()
+    }
+
     async fn start(
         &self,
-        query_subscriber: Arc<dyn drasi_lib::reactions::common::base::QuerySubscriber>,
+        query_subscriber: Arc<dyn QuerySubscriber>,
     ) -> Result<()> {
-        info!("[{}] Starting adaptive HTTP reaction", self.base.config.id);
+        info!("[{}] Starting adaptive HTTP reaction", self.base.id);
 
         // Set status to Starting
         self.base
@@ -458,15 +459,11 @@ impl Reaction for AdaptiveHttpReaction {
             .await?;
 
         // Create Arc for sharing self with the internal task
+        // Note: We clone the base by creating a new one with shared Arcs
+        let base_for_arc = self.base.clone_shared();
         let self_arc = Arc::new(Self {
-            base: ReactionBase {
-                config: self.base.config.clone(),
-                status: self.base.status.clone(),
-                event_tx: self.base.event_tx.clone(),
-                priority_queue: self.base.priority_queue.clone(),
-                subscription_tasks: self.base.subscription_tasks.clone(),
-                processing_task: self.base.processing_task.clone(),
-            },
+            base: base_for_arc,
+            config: self.config.clone(),
             base_url: self.base_url.clone(),
             token: self.token.clone(),
             timeout_ms: self.timeout_ms,
@@ -476,15 +473,8 @@ impl Reaction for AdaptiveHttpReaction {
             batch_endpoints_enabled: self.batch_endpoints_enabled,
         });
 
-        let reaction_name = self.base.config.id.clone();
-        let base = ReactionBase {
-            config: self.base.config.clone(),
-            status: self.base.status.clone(),
-            event_tx: self.base.event_tx.clone(),
-            priority_queue: self.base.priority_queue.clone(),
-            subscription_tasks: self.base.subscription_tasks.clone(),
-            processing_task: self.base.processing_task.clone(),
-        };
+        let reaction_name = self.base.id.clone();
+        let base = self.base.clone_shared();
         let adaptive_config = self.adaptive_config.clone();
 
         let processing_task_handle = tokio::spawn(Self::run_internal(
@@ -501,7 +491,7 @@ impl Reaction for AdaptiveHttpReaction {
     }
 
     async fn stop(&self) -> Result<()> {
-        info!("[{}] Stopping adaptive HTTP reaction", self.base.config.id);
+        info!("[{}] Stopping adaptive HTTP reaction", self.base.id);
 
         // Set status to Stopping
         self.base
@@ -532,7 +522,7 @@ impl Reaction for AdaptiveHttpReaction {
         self.base.get_status().await
     }
 
-    fn get_config(&self) -> &ReactionConfig {
-        &self.base.config
+    async fn inject_event_tx(&self, tx: ComponentEventSender) {
+        self.base.inject_event_tx(tx).await;
     }
 }

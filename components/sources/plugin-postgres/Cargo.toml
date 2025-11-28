@@ -45,7 +45,7 @@ bytes = "1.0"
 md5 = "0.7"
 rand = "0.8"
 byteorder = "1.5"
-rust_decimal = "1.34"
+rust_decimal = { version = "1.34", features = ["db-tokio-postgres"] }
 pbkdf2 = "0.12"
 tokio-stream = "0.1"
 prost-types = "0.12"

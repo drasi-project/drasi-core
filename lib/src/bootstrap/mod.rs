@@ -22,10 +22,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-
-use crate::config::SourceConfig;
 
 /// Request for bootstrap data from a query
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,27 +35,58 @@ pub struct BootstrapRequest {
     pub request_id: String,
 }
 
-/// Context passed to bootstrap providers containing source configuration
+/// Context passed to bootstrap providers
 /// Bootstrap happens through dedicated channels created in source.subscribe().
+///
+/// # Plugin Architecture
+///
+/// BootstrapContext no longer contains source configuration. Bootstrap providers
+/// are created by source plugins using their own typed configurations. This context
+/// provides only the minimal information needed during bootstrap execution:
+/// - Source identification
+/// - Sequence numbering for events
+/// - Optional properties for providers that need runtime data
 #[derive(Clone)]
 pub struct BootstrapContext {
     /// Unique server ID for logging and tracing
     pub server_id: String,
-    /// The parent source configuration
-    pub source_config: Arc<SourceConfig>,
     /// Source ID for labeling bootstrap events
     pub source_id: String,
     /// Sequence counter for bootstrap events
     pub sequence_counter: Arc<AtomicU64>,
+    /// Optional properties that can be set by plugins if needed
+    properties: Arc<HashMap<String, serde_json::Value>>,
 }
 
 impl BootstrapContext {
-    pub fn new(server_id: String, source_config: Arc<SourceConfig>, source_id: String) -> Self {
+    /// Create a minimal bootstrap context with just server and source IDs
+    ///
+    /// This is the preferred constructor. Bootstrap providers should have their
+    /// own configuration - they don't need access to source config.
+    pub fn new_minimal(server_id: String, source_id: String) -> Self {
         Self {
             server_id,
-            source_config,
             source_id,
             sequence_counter: Arc::new(AtomicU64::new(0)),
+            properties: Arc::new(HashMap::new()),
+        }
+    }
+
+    /// Create a bootstrap context with properties
+    ///
+    /// Use this if your bootstrap provider needs access to some properties
+    /// at runtime. The properties should be extracted from your plugin's
+    /// typed configuration.
+    pub fn with_properties(
+        server_id: String,
+        source_id: String,
+        properties: HashMap<String, serde_json::Value>,
+    ) -> Self {
+        Self {
+            server_id,
+            source_id,
+            sequence_counter: Arc::new(AtomicU64::new(0)),
+            properties: Arc::new(properties),
         }
     }
 
@@ -65,12 +95,12 @@ impl BootstrapContext {
         self.sequence_counter.fetch_add(1, Ordering::SeqCst)
     }
 
-    /// Get a property from the source configuration
+    /// Get a property from the context
     pub fn get_property(&self, key: &str) -> Option<serde_json::Value> {
-        self.source_config.get_properties().get(key).cloned()
+        self.properties.get(key).cloned()
     }
 
-    /// Get a typed property from the source configuration
+    /// Get a typed property from the context
     pub fn get_typed_property<T>(&self, key: &str) -> Result<Option<T>>
     where
         T: for<'de> Deserialize<'de>,

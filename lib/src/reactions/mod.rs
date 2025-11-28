@@ -18,4 +18,5 @@ pub mod manager;
 #[cfg(test)]
 mod tests;
 
-pub use manager::*;
+pub use common::base::{ReactionBase, ReactionBaseParams};
+pub use manager::ReactionManager;

@@ -16,38 +16,18 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::{ApplicationSource, PropertyMapBuilder};
-    use drasi_lib::config::{SourceConfig, SourceSpecificConfig};
-    use serde_json::json;
+    use crate::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
     use std::collections::HashMap;
-    use tokio::sync::mpsc;
-
-    /// Helper to convert a serde_json::Value object to HashMap<String, serde_json::Value>
-    fn to_hashmap(value: serde_json::Value) -> HashMap<String, serde_json::Value> {
-        match value {
-            serde_json::Value::Object(map) => map.into_iter().collect(),
-            _ => HashMap::new(),
-        }
-    }
 
     /// Helper to create an application source for testing
     async fn create_test_application_source(
         id: &str,
     ) -> (ApplicationSource, crate::ApplicationSourceHandle) {
-        let (event_tx, _event_rx) = mpsc::channel(100);
-
-        let config = SourceConfig {
-            id: id.to_string(),
-            auto_start: true,
-            config: SourceSpecificConfig::Application(to_hashmap(json!({
-                "properties": {}
-            }))),
-            bootstrap_provider: None,
-            dispatch_buffer_capacity: None,
-            dispatch_mode: None,
+        let config = ApplicationSourceConfig {
+            properties: HashMap::new(),
         };
 
-        ApplicationSource::new(config, event_tx).expect("Failed to create application source")
+        ApplicationSource::new(id, config).expect("Failed to create application source")
     }
 
     #[tokio::test]

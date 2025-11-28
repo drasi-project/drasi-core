@@ -12,6 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Mock Source Plugin for drasi-lib
+//!
+//! This plugin provides a mock data generator for testing and development.
+//!
+//! ## Instance-based Usage
+//!
+//! ```rust,ignore
+//! use drasi_plugin_mock::{MockSource, MockSourceConfig};
+//! use drasi_lib::channels::ComponentEventSender;
+//! use std::sync::Arc;
+//!
+//! // Create configuration
+//! let config = MockSourceConfig {
+//!     data_type: "counter".to_string(),
+//!     interval_ms: 1000,
+//! };
+//!
+//! // Create instance and add to DrasiLib
+//! let source = Arc::new(MockSource::new("my-mock", config, event_tx)?);
+//! drasi.add_source(source).await?;
+//! ```
+
 mod config;
 mod mock;
 
@@ -20,19 +42,3 @@ mod tests;
 
 pub use config::MockSourceConfig;
 pub use mock::MockSource;
-
-// Extension trait for plugin registration
-use drasi_lib::plugin_core::SourceRegistry;
-use std::sync::Arc;
-
-pub trait SourceRegistryMockExt {
-    fn register_mock(&mut self);
-}
-
-impl SourceRegistryMockExt for SourceRegistry {
-    fn register_mock(&mut self) {
-        self.register("mock".to_string(), |config, event_tx| {
-            Ok(Arc::new(MockSource::new(config, event_tx)?))
-        });
-    }
-}

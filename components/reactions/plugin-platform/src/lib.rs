@@ -24,4 +24,3 @@ pub mod types;
 
 pub use config::PlatformReactionConfig;
 pub use platform::PlatformReaction;
-pub use drasi_lib::config::ReactionConfig;

@@ -20,30 +20,85 @@ use drasi_core::models::{
 };
 use log::{debug, info};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use drasi_lib::channels::*;
-use drasi_lib::config::SourceConfig;
-use drasi_lib::sources::{base::SourceBase, Source};
+use drasi_lib::plugin_core::Source;
+use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::utils::*;
 
 /// Mock source that runs as an internal tokio task
 pub struct MockSource {
     base: SourceBase,
+    config: MockSourceConfig,
 }
 
 impl MockSource {
-    pub fn new(config: SourceConfig, event_tx: ComponentEventSender) -> Result<Self> {
+    /// Create a new MockSource with the given ID and configuration
+    ///
+    /// The event channel is automatically injected when the source is added
+    /// to DrasiLib via `add_source()`.
+    pub fn new(id: impl Into<String>, config: MockSourceConfig) -> Result<Self> {
+        let id = id.into();
+        let params = SourceBaseParams::new(id);
         Ok(Self {
-            base: SourceBase::new(config, event_tx)?,
+            base: SourceBase::new(params)?,
+            config,
+        })
+    }
+
+    /// Create a new MockSource with custom dispatch settings
+    ///
+    /// The event channel is automatically injected when the source is added
+    /// to DrasiLib via `add_source()`.
+    pub fn with_dispatch(
+        id: impl Into<String>,
+        config: MockSourceConfig,
+        dispatch_mode: Option<DispatchMode>,
+        dispatch_buffer_capacity: Option<usize>,
+    ) -> Result<Self> {
+        let id = id.into();
+        let mut params = SourceBaseParams::new(id);
+        if let Some(mode) = dispatch_mode {
+            params = params.with_dispatch_mode(mode);
+        }
+        if let Some(capacity) = dispatch_buffer_capacity {
+            params = params.with_dispatch_buffer_capacity(capacity);
+        }
+        Ok(Self {
+            base: SourceBase::new(params)?,
+            config,
         })
     }
 }
 
 #[async_trait]
 impl Source for MockSource {
+    fn id(&self) -> &str {
+        &self.base.id
+    }
+
+    fn type_name(&self) -> &str {
+        "mock"
+    }
+
+    fn properties(&self) -> HashMap<String, serde_json::Value> {
+        // Convert MockSourceConfig to HashMap
+        let mut props = HashMap::new();
+        props.insert(
+            "data_type".to_string(),
+            serde_json::Value::String(self.config.data_type.clone()),
+        );
+        props.insert(
+            "interval_ms".to_string(),
+            serde_json::Value::Number(self.config.interval_ms.into()),
+        );
+        props
+    }
+
     async fn start(&self) -> Result<()> {
-        log_component_start("Mock Source", &self.base.config.id);
+        log_component_start("Mock Source", &self.base.id);
 
         self.base.set_status(ComponentStatus::Starting).await;
         self.base
@@ -55,23 +110,15 @@ impl Source for MockSource {
 
         // Get broadcast_tx for publishing
         let base_dispatchers = self.base.dispatchers.clone();
-        let source_id = self.base.config.id.clone();
+        let source_id = self.base.id.clone();
 
         // Get configuration
-        let (data_type, interval_ms) = match &self.base.config.config {
-            drasi_lib::config::SourceSpecificConfig::Mock(mock_config_map) => {
-                // Deserialize HashMap into typed config
-                let mock_config: MockSourceConfig = serde_json::from_value(
-                    serde_json::to_value(mock_config_map).unwrap_or_default()
-                ).unwrap_or_default();
-                (mock_config.data_type.clone(), mock_config.interval_ms)
-            }
-            _ => ("generic".to_string(), 5000),
-        };
+        let data_type = self.config.data_type.clone();
+        let interval_ms = self.config.interval_ms;
 
         // Start the data generation task
         let status = Arc::clone(&self.base.status);
-        let source_name = self.base.config.id.clone();
+        let source_name = self.base.id.clone();
         let task = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
@@ -273,7 +320,7 @@ impl Source for MockSource {
     }
 
     async fn stop(&self) -> Result<()> {
-        log_component_stop("Mock Source", &self.base.config.id);
+        log_component_stop("Mock Source", &self.base.id);
 
         self.base.set_status(ComponentStatus::Stopping).await;
         self.base
@@ -304,10 +351,6 @@ impl Source for MockSource {
         self.base.get_status().await
     }
 
-    fn get_config(&self) -> &SourceConfig {
-        &self.base.config
-    }
-
     async fn subscribe(
         &self,
         query_id: String,
@@ -328,6 +371,10 @@ impl Source for MockSource {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    async fn inject_event_tx(&self, tx: ComponentEventSender) {
+        self.base.inject_event_tx(tx).await;
     }
 }
 

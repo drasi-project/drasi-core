@@ -12,116 +12,104 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Full example with all plugins registered
+//! Full example showing all available plugins in the instance-based architecture.
+//!
+//! This example demonstrates how to create instances of various plugin types
+//! and shows the available plugin ecosystem.
+//!
+//! Run with: cargo run --bin full --features full
 
-#[cfg(feature = "full")]
 use anyhow::Result;
 
-#[cfg(feature = "full")]
-use drasi_lib::plugin_core::{SourceRegistry, ReactionRegistry};
+fn main() -> Result<()> {
+    println!("=== Drasi Instance-Based Plugin Architecture - Full Plugin List ===\n");
 
-// Import all plugin registration traits
-#[cfg(feature = "full")]
-use drasi_plugin_postgres::SourceRegistryPostgresExt;
-#[cfg(feature = "full")]
-use drasi_plugin_http::SourceRegistryHttpExt;
-#[cfg(feature = "full")]
-use drasi_plugin_grpc::SourceRegistryGrpcExt;
-#[cfg(feature = "full")]
-use drasi_plugin_platform::SourceRegistryPlatformExt;
-#[cfg(feature = "full")]
-use drasi_plugin_application::SourceRegistryApplicationExt;
-#[cfg(feature = "full")]
-use drasi_plugin_mock::SourceRegistryMockExt;
+    println!("In the instance-based architecture, YOU create plugin instances.");
+    println!("There are no registries or factories - you import and instantiate directly.\n");
 
-#[cfg(feature = "full")]
-use drasi_plugin_http_reaction::ReactionRegistryHttpExt;
-#[cfg(feature = "full")]
-use drasi_plugin_http_adaptive_reaction::ReactionRegistryHttpAdaptiveExt;
-#[cfg(feature = "full")]
-use drasi_plugin_grpc_reaction::ReactionRegistryGrpcExt;
-#[cfg(feature = "full")]
-use drasi_plugin_grpc_adaptive_reaction::ReactionRegistryGrpcAdaptiveExt;
-#[cfg(feature = "full")]
-use drasi_plugin_sse_reaction::ReactionRegistrySseExt;
-#[cfg(feature = "full")]
-use drasi_plugin_platform_reaction::ReactionRegistryPlatformExt;
-#[cfg(feature = "full")]
-use drasi_plugin_profiler_reaction::ReactionRegistryProfilerExt;
-#[cfg(feature = "full")]
-use drasi_plugin_application_reaction::ReactionRegistryApplicationExt;
-#[cfg(feature = "full")]
-use drasi_plugin_log_reaction::ReactionRegistryLogExt;
+    println!("=== Available Source Plugins ===\n");
+    println!("  drasi-plugin-mock          - Mock data generator for testing");
+    println!("    Usage: MockSource::new(config, event_tx)");
+    println!();
+    println!("  drasi-plugin-postgres      - PostgreSQL WAL replication");
+    println!("    Usage: PostgresSource::new(config, event_tx)");
+    println!();
+    println!("  drasi-plugin-http          - HTTP endpoint polling");
+    println!("    Usage: HttpSource::new(config, event_tx)");
+    println!();
+    println!("  drasi-plugin-grpc          - gRPC streaming");
+    println!("    Usage: GrpcSource::new(config, event_tx)");
+    println!();
+    println!("  drasi-plugin-platform      - Redis Streams integration");
+    println!("    Usage: PlatformSource::new(config, event_tx)");
+    println!();
+    println!("  drasi-plugin-application   - Programmatic API source");
+    println!("    Usage: ApplicationSource::new(config, event_tx)");
+    println!();
 
-#[cfg(feature = "full")]
-#[tokio::main]
-async fn main() -> Result<()> {
-    println!("=== Drasi Plugin Architecture - Full Example ===");
-    println!("With ALL plugins registered\n");
+    println!("=== Available Reaction Plugins ===\n");
+    println!("  drasi-plugin-log-reaction          - Console logging");
+    println!("    Usage: LogReaction::new(config, event_tx)");
+    println!();
+    println!("  drasi-plugin-http-reaction         - HTTP webhook");
+    println!("    Usage: HttpReaction::new(config, event_tx)");
+    println!();
+    println!("  drasi-plugin-http-adaptive-reaction - Adaptive HTTP batching");
+    println!("    Usage: HttpAdaptiveReaction::new(config, event_tx)");
+    println!();
+    println!("  drasi-plugin-grpc-reaction         - gRPC streaming");
+    println!("    Usage: GrpcReaction::new(config, event_tx)");
+    println!();
+    println!("  drasi-plugin-grpc-adaptive-reaction - Adaptive gRPC batching");
+    println!("    Usage: GrpcAdaptiveReaction::new(config, event_tx)");
+    println!();
+    println!("  drasi-plugin-sse-reaction          - Server-Sent Events");
+    println!("    Usage: SseReaction::new(config, event_tx)");
+    println!();
+    println!("  drasi-plugin-platform-reaction     - Platform integration");
+    println!("    Usage: PlatformReaction::new(config, event_tx)");
+    println!();
+    println!("  drasi-plugin-profiler-reaction     - Performance profiling");
+    println!("    Usage: ProfilerReaction::new(config, event_tx)");
+    println!();
+    println!("  drasi-plugin-application-reaction  - Programmatic API reaction");
+    println!("    Usage: ApplicationReaction::new(config, event_tx)");
+    println!();
 
-    // All source plugins are available through extension traits
-    println!("Available Source Plugins:");
-    println!("• PostgreSQL - SourceConfig::postgres()");
-    println!("• HTTP - SourceConfig::http()");
-    println!("• gRPC - SourceConfig::grpc()");
-    println!("• Platform - SourceConfig::platform()");
-    println!("• Application - SourceConfig::application()");
-    println!("• Mock (core) - SourceFactory::mock()\n");
+    println!("=== Available Bootstrap Plugins ===\n");
+    println!("  drasi-plugin-postgres-bootstrap    - PostgreSQL snapshot");
+    println!("  drasi-plugin-platform-bootstrap    - Platform query API");
+    println!("  drasi-plugin-scriptfile-bootstrap  - JSONL file loading");
+    println!("  drasi-plugin-application-bootstrap - Programmatic bootstrap");
+    println!("  drasi-plugin-noop-bootstrap        - No-op (empty bootstrap)");
+    println!();
 
-    // All reaction plugins are available
-    println!("Available Reaction Plugins:");
-    println!("• HTTP - ReactionConfig::http()");
-    println!("• HTTP Adaptive - ReactionConfig::http_adaptive()");
-    println!("• gRPC - ReactionConfig::grpc()");
-    println!("• gRPC Adaptive - ReactionConfig::grpc_adaptive()");
-    println!("• SSE - ReactionConfig::sse()");
-    println!("• Platform - ReactionConfig::platform()");
-    println!("• Profiler - ReactionConfig::profiler()");
-    println!("• Application - ReactionConfig::application()");
-    println!("• Log (core) - ReactionFactory::log()\n");
+    println!("=== Instance-Based Architecture Pattern ===\n");
+    println!("```rust");
+    println!("// 1. Import the plugin type");
+    println!("use drasi_plugin_mock::MockSource;");
+    println!();
+    println!("// 2. Create configuration");
+    println!("let config = SourceConfig {{");
+    println!("    id: \"my-source\".to_string(),");
+    println!("    config: SourceSpecificConfig::Mock(props),");
+    println!("    ..Default::default()");
+    println!("}};");
+    println!();
+    println!("// 3. Create the instance");
+    println!("let source = Arc::new(MockSource::new(config, event_tx)?);");
+    println!();
+    println!("// 4. Add to DrasiLib");
+    println!("drasi.add_source(source).await?;");
+    println!("```");
+    println!();
 
-    // All bootstrap providers are available
-    println!("Available Bootstrap Providers:");
-    println!("• PostgreSQL - BootstrapProviderConfig::postgres()");
-    println!("• Platform - BootstrapProviderConfig::platform()");
-    println!("• ScriptFile - BootstrapProviderConfig::scriptfile()");
-    println!("• Application - BootstrapProviderConfig::application()\n");
-
-    // Example: Create a PostgreSQL source with fluent API
-    let postgres_config = SourceConfig::postgres()
-        .with_host("localhost")
-        .with_port(5432)
-        .with_database("mydb")
-        .with_user("postgres")
-        .with_password("password")
-        .build();
-    println!("✓ Created PostgreSQL source config with fluent API");
-
-    // Example: Create HTTP reaction with fluent API
-    let http_reaction = ReactionConfig::http()
-        .with_base_url("http://api.example.com")
-        .with_timeout_ms(5000)
-        .build();
-    println!("✓ Created HTTP reaction config with fluent API");
-
-    // Example: Create ScriptFile bootstrap provider
-    let bootstrap = BootstrapProviderConfig::scriptfile()
-        .add_file_path("/data/bootstrap1.jsonl")
-        .add_file_path("/data/bootstrap2.jsonl")
-        .build();
-    println!("✓ Created ScriptFile bootstrap config with fluent API");
-
-    println!("\n=== Full Build Features ===");
-    println!("• All plugins available with single import");
-    println!("• Convenient prelude module");
-    println!("• Type-safe fluent API for all components");
-    println!("• ~18MB binary size with all features");
+    println!("=== Benefits ===");
+    println!("• No registry boilerplate");
+    println!("• Compile-time type safety");
+    println!("• Easy dependency injection");
+    println!("• Simple testing with mocks");
+    println!("• Clear ownership semantics");
 
     Ok(())
-}
-
-#[cfg(not(feature = "full"))]
-fn main() {
-    println!("This example requires the 'full' feature.");
-    println!("Run with: cargo run --bin full --features full");
 }

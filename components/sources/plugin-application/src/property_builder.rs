@@ -37,7 +37,7 @@ use std::sync::Arc;
 /// ## Basic Usage
 ///
 /// ```
-/// use drasi_lib::PropertyMapBuilder;
+/// use drasi_plugin_application::PropertyMapBuilder;
 ///
 /// let properties = PropertyMapBuilder::new()
 ///     .with_string("name", "Alice")
@@ -50,12 +50,14 @@ use std::sync::Arc;
 /// ## With Application Source
 ///
 /// ```no_run
-/// # use drasi_lib::{DrasiServerCore, Source, PropertyMapBuilder};
+/// use drasi_plugin_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
+/// use std::collections::HashMap;
+/// use tokio::sync::mpsc;
+///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// # let core = DrasiServerCore::builder()
-/// #     .add_source(Source::application("events").build())
-/// #     .build().await?;
-/// let handle = core.source_handle("events").await?;
+/// let (event_tx, _event_rx) = mpsc::channel(100);
+/// let config = ApplicationSourceConfig { properties: HashMap::new() };
+/// let (source, handle) = ApplicationSource::new("events", config, event_tx)?;
 ///
 /// // Create a user node with multiple properties
 /// let properties = PropertyMapBuilder::new()
@@ -74,7 +76,7 @@ use std::sync::Arc;
 /// ## Null Values
 ///
 /// ```
-/// use drasi_lib::PropertyMapBuilder;
+/// use drasi_plugin_application::PropertyMapBuilder;
 ///
 /// let properties = PropertyMapBuilder::new()
 ///     .with_string("name", "Bob")
@@ -91,7 +93,7 @@ impl PropertyMapBuilder {
     /// # Examples
     ///
     /// ```
-    /// use drasi_lib::PropertyMapBuilder;
+    /// use drasi_plugin_application::PropertyMapBuilder;
     ///
     /// let builder = PropertyMapBuilder::new();
     /// let properties = builder.build();
@@ -112,7 +114,7 @@ impl PropertyMapBuilder {
     /// # Examples
     ///
     /// ```
-    /// use drasi_lib::PropertyMapBuilder;
+    /// use drasi_plugin_application::PropertyMapBuilder;
     ///
     /// let properties = PropertyMapBuilder::new()
     ///     .with_string("name", "Alice")
@@ -137,7 +139,7 @@ impl PropertyMapBuilder {
     /// # Examples
     ///
     /// ```
-    /// use drasi_lib::PropertyMapBuilder;
+    /// use drasi_plugin_application::PropertyMapBuilder;
     ///
     /// let properties = PropertyMapBuilder::new()
     ///     .with_integer("age", 30)
@@ -160,7 +162,7 @@ impl PropertyMapBuilder {
     /// # Examples
     ///
     /// ```
-    /// use drasi_lib::PropertyMapBuilder;
+    /// use drasi_plugin_application::PropertyMapBuilder;
     ///
     /// let properties = PropertyMapBuilder::new()
     ///     .with_float("rating", 4.5)
@@ -183,7 +185,7 @@ impl PropertyMapBuilder {
     /// # Examples
     ///
     /// ```
-    /// use drasi_lib::PropertyMapBuilder;
+    /// use drasi_plugin_application::PropertyMapBuilder;
     ///
     /// let properties = PropertyMapBuilder::new()
     ///     .with_bool("active", true)
@@ -208,7 +210,7 @@ impl PropertyMapBuilder {
     /// # Examples
     ///
     /// ```
-    /// use drasi_lib::PropertyMapBuilder;
+    /// use drasi_plugin_application::PropertyMapBuilder;
     ///
     /// let properties = PropertyMapBuilder::new()
     ///     .with_string("first_name", "Alice")
@@ -228,7 +230,7 @@ impl PropertyMapBuilder {
     /// # Examples
     ///
     /// ```
-    /// use drasi_lib::PropertyMapBuilder;
+    /// use drasi_plugin_application::PropertyMapBuilder;
     ///
     /// let properties = PropertyMapBuilder::new()
     ///     .with_string("name", "Alice")

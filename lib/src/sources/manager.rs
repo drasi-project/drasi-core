@@ -13,8 +13,7 @@
 // limitations under the License.
 
 use anyhow::Result;
-use async_trait::async_trait;
-use log::{error, info};
+use log::info;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -26,30 +25,9 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use crate::channels::*;
-use crate::config::{SourceConfig, SourceRuntime};
-use crate::plugin_core::SourceRegistry;
+use crate::config::SourceRuntime;
+use crate::plugin_core::Source;
 use crate::utils::*;
-
-#[async_trait]
-pub trait Source: Send + Sync {
-    async fn start(&self) -> Result<()>;
-    async fn stop(&self) -> Result<()>;
-    async fn status(&self) -> ComponentStatus;
-    fn get_config(&self) -> &SourceConfig;
-
-    /// Subscribe to this source for change events
-    /// Returns a receiver for source change events and optionally a bootstrap channel
-    async fn subscribe(
-        &self,
-        query_id: String,
-        enable_bootstrap: bool,
-        node_labels: Vec<String>,
-        relation_labels: Vec<String>,
-    ) -> Result<SubscriptionResponse>;
-
-    /// Downcast helper for testing - allows access to concrete types
-    fn as_any(&self) -> &dyn std::any::Any;
-}
 
 // Convert JSON value to ElementValue
 pub fn convert_json_to_element_value(value: &Value) -> Result<ElementValue> {
@@ -94,22 +72,16 @@ pub fn convert_json_to_element_properties(
 
 pub struct SourceManager {
     sources: Arc<RwLock<HashMap<String, Arc<dyn Source>>>>,
+    #[allow(dead_code)]
     event_tx: ComponentEventSender,
-    registry: SourceRegistry,
 }
 
 impl SourceManager {
-    /// Create a new SourceManager with default plugin registry
+    /// Create a new SourceManager
     pub fn new(event_tx: ComponentEventSender) -> Self {
-        Self::with_registry(event_tx, SourceRegistry::default())
-    }
-
-    /// Create a new SourceManager with a custom plugin registry
-    pub fn with_registry(event_tx: ComponentEventSender, registry: SourceRegistry) -> Self {
         Self {
             sources: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
-            registry,
         }
     }
 
@@ -117,27 +89,22 @@ impl SourceManager {
         self.sources.read().await.get(id).cloned()
     }
 
-    /// Add a pre-built source instance directly.
-    ///
-    /// This method allows adding a source that was constructed externally,
-    /// bypassing the registry-based creation. This is useful for:
-    /// - Testing with mock sources
-    /// - Programmatic source creation with custom configurations
-    /// - Plugin-specific builders that create instances directly
+    /// Add a source instance.
     ///
     /// # Parameters
-    /// - `source`: The pre-built source instance
-    /// - `auto_start`: Whether to auto-start the source after adding
+    /// - `source`: The source instance to add
     ///
     /// # Returns
     /// - `Ok(())` if the source was added successfully
     /// - `Err` if a source with the same ID already exists
-    pub async fn add_source_instance(
-        &self,
-        source: Arc<dyn Source>,
-        auto_start: bool,
-    ) -> Result<()> {
-        let source_id = source.get_config().id.clone();
+    ///
+    /// # Note
+    /// The source will NOT be auto-started. Call `start_source` separately
+    /// if you need to start it after adding.
+    ///
+    /// The event channel is automatically injected into the source before it is stored.
+    pub async fn add_source(&self, source: Arc<dyn Source>) -> Result<()> {
+        let source_id = source.id().to_string();
 
         // Check if source with this id already exists
         if self.sources.read().await.contains_key(&source_id) {
@@ -147,72 +114,11 @@ impl SourceManager {
             ));
         }
 
+        // Inject the event channel before storing
+        source.inject_event_tx(self.event_tx.clone()).await;
+
         self.sources.write().await.insert(source_id.clone(), source);
-        info!("Added source instance: {}", source_id);
-
-        // Auto-start the source if requested
-        if auto_start {
-            info!("Auto-starting source: {}", source_id);
-            if let Err(e) = self.start_source(source_id.clone()).await {
-                error!("Failed to auto-start source {}: {}", source_id, e);
-                // Don't fail the add operation, just log the error
-            }
-        }
-
-        Ok(())
-    }
-
-    pub async fn add_source(&self, config: SourceConfig) -> Result<()> {
-        self.add_source_internal(config, true).await
-    }
-
-    pub async fn add_source_with_options(
-        &self,
-        config: SourceConfig,
-        allow_auto_start: bool,
-    ) -> Result<()> {
-        self.add_source_internal(config, allow_auto_start).await
-    }
-
-    pub async fn add_source_without_save(
-        &self,
-        config: SourceConfig,
-        allow_auto_start: bool,
-    ) -> Result<()> {
-        self.add_source_internal(config, allow_auto_start).await
-    }
-
-    async fn add_source_internal(
-        &self,
-        config: SourceConfig,
-        allow_auto_start: bool,
-    ) -> Result<()> {
-        // Check if source with this id already exists
-        if self.sources.read().await.contains_key(&config.id) {
-            return Err(anyhow::anyhow!(
-                "Source with id '{}' already exists",
-                config.id
-            ));
-        }
-
-        // Create source using the plugin registry
-        let source: Arc<dyn Source> = self.registry.create(config.clone(), self.event_tx.clone())?;
-
-        let source_id = config.id.clone();
-        let should_auto_start = config.auto_start;
-
-        self.sources.write().await.insert(config.id.clone(), source);
-        info!("Added source: {}", config.id);
-
-        // Auto-start the source if configured and allowed
-        if should_auto_start && allow_auto_start {
-            info!("Auto-starting source: {}", source_id);
-            if let Err(e) = self.start_source(source_id.clone()).await {
-                error!("Failed to auto-start source {}: {}", source_id, e);
-                // Don't fail the add operation, just log the error
-                // The source was successfully added, just not started
-            }
-        }
+        info!("Added source: {}", source_id);
 
         Ok(())
     }
@@ -282,11 +188,6 @@ impl SourceManager {
         result
     }
 
-    pub async fn get_source_config(&self, id: &str) -> Option<SourceConfig> {
-        let sources = self.sources.read().await;
-        sources.get(id).map(|s| s.get_config().clone())
-    }
-
     pub async fn get_source(&self, id: String) -> Result<SourceRuntime> {
         let source = {
             let sources = self.sources.read().await;
@@ -295,67 +196,20 @@ impl SourceManager {
 
         if let Some(source) = source {
             let status = source.status().await;
-            let config = source.get_config();
             let runtime = SourceRuntime {
-                id: config.id.clone(),
-                source_type: config.source_type().to_string(),
+                id: source.id().to_string(),
+                source_type: source.type_name().to_string(),
                 status: status.clone(),
                 error_message: match &status {
                     ComponentStatus::Error => Some("Source error occurred".to_string()),
                     _ => None,
                 },
-                properties: config.get_properties(),
+                properties: source.properties(),
             };
             Ok(runtime)
         } else {
             Err(anyhow::anyhow!("Source not found: {}", id))
         }
-    }
-
-    pub async fn update_source(&self, id: String, config: SourceConfig) -> Result<()> {
-        let source = {
-            let sources = self.sources.read().await;
-            sources.get(&id).cloned()
-        };
-
-        if let Some(source) = source {
-            let status = source.status().await;
-            let was_running =
-                matches!(status, ComponentStatus::Running | ComponentStatus::Starting);
-
-            // If running, we need to stop it first
-            if was_running {
-                self.stop_source(id.clone()).await?;
-
-                // Re-check status after stop
-                let source = {
-                    let sources = self.sources.read().await;
-                    sources.get(&id).cloned()
-                };
-
-                if let Some(source) = source {
-                    let status = source.status().await;
-                    is_operation_valid(&status, &Operation::Update)
-                        .map_err(|e| anyhow::anyhow!(e))?;
-                }
-            } else {
-                is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
-            }
-
-            // For now, update means remove and re-add
-            self.delete_source(id.clone()).await?;
-            // Add the new configuration
-            self.add_source_internal(config, false).await?;
-
-            // If it was running, restart it
-            if was_running {
-                self.start_source(id).await?;
-            }
-        } else {
-            return Err(anyhow::anyhow!("Source not found: {}", id));
-        }
-
-        Ok(())
     }
 
     pub async fn delete_source(&self, id: String) -> Result<()> {
@@ -399,6 +253,7 @@ impl SourceManager {
         }
     }
 
+    /// Start all sources
     pub async fn start_all(&self) -> Result<()> {
         let sources: Vec<Arc<dyn Source>> = {
             let sources = self.sources.read().await;
@@ -408,19 +263,12 @@ impl SourceManager {
         let mut failed_sources = Vec::new();
 
         for source in sources {
-            let config = source.get_config();
-            if config.auto_start {
-                info!("Auto-starting source: {}", config.id);
-                if let Err(e) = source.start().await {
-                    log_component_error("Source", &config.id, &e.to_string());
-                    failed_sources.push((config.id.clone(), e.to_string()));
-                    // Continue starting other sources instead of returning early
-                }
-            } else {
-                info!(
-                    "Source '{}' has auto_start=false, skipping automatic startup",
-                    config.id
-                );
+            let source_id = source.id().to_string();
+            info!("Starting source: {}", source_id);
+            if let Err(e) = source.start().await {
+                log_component_error("Source", &source_id, &e.to_string());
+                failed_sources.push((source_id, e.to_string()));
+                // Continue starting other sources instead of returning early
             }
         }
 
@@ -448,7 +296,7 @@ impl SourceManager {
 
         for source in sources {
             if let Err(e) = source.stop().await {
-                log_component_error("Source", &source.get_config().id, &e.to_string());
+                log_component_error("Source", source.id(), &e.to_string());
             }
         }
         Ok(())

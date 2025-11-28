@@ -20,11 +20,11 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
-use drasi_lib::config::ReactionConfig;
+use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
 use drasi_lib::profiling::ProfilingMetadata;
-use drasi_lib::reactions::common::base::ReactionBase;
-use drasi_lib::reactions::Reaction;
+use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::utils::log_component_start;
+use std::collections::HashMap;
 
 pub use super::config::ProfilerReactionConfig;
 
@@ -362,28 +362,25 @@ fn percentile(sorted_values: &[f64], p: f64) -> f64 {
 /// ProfilerReaction collects and analyzes profiling data
 pub struct ProfilerReaction {
     base: ReactionBase,
+    config: ProfilerReactionConfig,
     stats: Arc<RwLock<ProfilingStats>>,
     report_interval_secs: u64,
 }
 
 impl ProfilerReaction {
-    pub fn new(config: ReactionConfig, event_tx: ComponentEventSender) -> Self {
-        let (window_size, report_interval_secs) = match &config.config {
-            drasi_lib::config::ReactionSpecificConfig::Profiler(profiler_config_map) => {
-                // Deserialize HashMap into typed config
-                let profiler_config: super::config::ProfilerReactionConfig = serde_json::from_value(
-                    serde_json::to_value(profiler_config_map).unwrap_or_default()
-                ).unwrap_or_default();
-                (
-                    profiler_config.window_size,
-                    profiler_config.report_interval_secs,
-                )
-            }
-            _ => (1000, 10),
-        };
+    /// Create a new profiler reaction
+    ///
+    /// The event channel is automatically injected when the reaction is added
+    /// to DrasiLib via `add_reaction()`.
+    pub fn new(id: impl Into<String>, queries: Vec<String>, config: ProfilerReactionConfig) -> Self {
+        let id = id.into();
+        let window_size = config.window_size;
+        let report_interval_secs = config.report_interval_secs;
 
+        let params = ReactionBaseParams::new(id, queries);
         Self {
-            base: ReactionBase::new(config, event_tx),
+            base: ReactionBase::new(params),
+            config,
             stats: Arc::new(RwLock::new(ProfilingStats::new(window_size))),
             report_interval_secs,
         }
@@ -407,11 +404,36 @@ impl ProfilerReaction {
 
 #[async_trait]
 impl Reaction for ProfilerReaction {
+    fn id(&self) -> &str {
+        &self.base.id
+    }
+
+    fn type_name(&self) -> &str {
+        "profiler"
+    }
+
+    fn properties(&self) -> HashMap<String, serde_json::Value> {
+        let mut props = HashMap::new();
+        props.insert(
+            "window_size".to_string(),
+            serde_json::Value::Number(self.config.window_size.into()),
+        );
+        props.insert(
+            "report_interval_secs".to_string(),
+            serde_json::Value::Number(self.config.report_interval_secs.into()),
+        );
+        props
+    }
+
+    fn query_ids(&self) -> Vec<String> {
+        self.base.queries.clone()
+    }
+
     async fn start(
         &self,
-        query_subscriber: Arc<dyn drasi_lib::reactions::common::base::QuerySubscriber>,
+        query_subscriber: Arc<dyn QuerySubscriber>,
     ) -> Result<()> {
-        log_component_start("Reaction", &self.base.config.id);
+        log_component_start("Reaction", &self.base.id);
 
         // Transition to Starting
         self.base
@@ -434,13 +456,13 @@ impl Reaction for ProfilerReaction {
 
         info!(
             "[{}] Profiler started - window_size: {}, report_interval: {}s",
-            self.base.config.id,
+            self.base.id,
             self.stats.read().await.window_size,
             self.report_interval_secs
         );
 
         // Spawn the processing task
-        let reaction_name = self.base.config.id.clone();
+        let reaction_name = self.base.id.clone();
         let stats = self.stats.clone();
         let report_interval = self.report_interval_secs;
         let priority_queue = self.base.priority_queue.clone();
@@ -515,8 +537,8 @@ impl Reaction for ProfilerReaction {
         self.base.get_status().await
     }
 
-    fn get_config(&self) -> &ReactionConfig {
-        &self.base.config
+    async fn inject_event_tx(&self, tx: ComponentEventSender) {
+        self.base.inject_event_tx(tx).await;
     }
 }
 

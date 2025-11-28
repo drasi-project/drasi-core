@@ -87,15 +87,12 @@ use tokio::sync::{broadcast, mpsc};
 /// ## Builder API Configuration
 ///
 /// ```no_run
-/// use drasi_lib::{DrasiLib, Source, Query, DispatchMode};
+/// use drasi_lib::{DrasiLib, Query, DispatchMode};
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// // Sources are now instance-based - create them externally and use .with_source()
 /// let core = DrasiLib::builder()
-///     .add_source(
-///         Source::postgres("orders_db")
-///             .with_dispatch_mode(DispatchMode::Broadcast)  // High fanout
-///             .build()
-///     )
+///     // .with_source(my_source_instance)
 ///     .add_query(
 ///         Query::cypher("active_orders")
 ///             .query("MATCH (o:Order) WHERE o.status = 'active' RETURN o")

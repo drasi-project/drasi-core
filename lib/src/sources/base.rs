@@ -20,22 +20,84 @@
 //! - Bootstrap subscription handling
 //! - Event dispatching with profiling
 //! - Component lifecycle management
+//!
+//! # Plugin Architecture
+//!
+//! SourceBase is designed to be used by source plugins. Each plugin:
+//! 1. Defines its own typed configuration struct
+//! 2. Creates a SourceBase with SourceBaseParams
+//! 3. Optionally provides a bootstrap provider via `set_bootstrap_provider()`
+//! 4. Implements the Source trait delegating to SourceBase methods
 
 use anyhow::Result;
 use log::{debug, error, info};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::bootstrap::{BootstrapContext, BootstrapProviderFactory, BootstrapRequest};
+use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 use crate::channels::*;
-use crate::config::SourceConfig;
 use crate::profiling;
 use drasi_core::models::SourceChange;
 
+/// Parameters for creating a SourceBase instance.
+///
+/// This struct contains only the information that SourceBase needs to function.
+/// Plugin-specific configuration should remain in the plugin crate.
+///
+/// # Example
+///
+/// ```ignore
+/// use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
+///
+/// let params = SourceBaseParams {
+///     id: "my-source".to_string(),
+///     dispatch_mode: None,  // Defaults to Channel
+///     dispatch_buffer_capacity: Some(2000),
+/// };
+///
+/// let base = SourceBase::new(params, event_tx)?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct SourceBaseParams {
+    /// Unique identifier for the source
+    pub id: String,
+    /// Dispatch mode (Broadcast or Channel) - defaults to Channel
+    pub dispatch_mode: Option<DispatchMode>,
+    /// Dispatch buffer capacity - defaults to 1000
+    pub dispatch_buffer_capacity: Option<usize>,
+}
+
+impl SourceBaseParams {
+    /// Create new params with just an ID, using defaults for everything else
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            dispatch_mode: None,
+            dispatch_buffer_capacity: None,
+        }
+    }
+
+    /// Set the dispatch mode
+    pub fn with_dispatch_mode(mut self, mode: DispatchMode) -> Self {
+        self.dispatch_mode = Some(mode);
+        self
+    }
+
+    /// Set the dispatch buffer capacity
+    pub fn with_dispatch_buffer_capacity(mut self, capacity: usize) -> Self {
+        self.dispatch_buffer_capacity = Some(capacity);
+        self
+    }
+}
+
 /// Base implementation for common source functionality
 pub struct SourceBase {
-    /// Source configuration
-    pub config: SourceConfig,
+    /// Source identifier
+    pub id: String,
+    /// Dispatch mode setting
+    dispatch_mode: DispatchMode,
+    /// Dispatch buffer capacity
+    dispatch_buffer_capacity: usize,
     /// Current component status
     pub status: Arc<RwLock<ComponentStatus>>,
     /// Dispatchers for sending source events to subscribers
@@ -45,19 +107,25 @@ pub struct SourceBase {
     /// it to all dispatchers in this vector.
     pub dispatchers:
         Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
-    /// Channel for sending component lifecycle events
-    pub event_tx: ComponentEventSender,
+    /// Channel for sending component lifecycle events (injected by DrasiLib when added)
+    event_tx: Arc<RwLock<Option<ComponentEventSender>>>,
     /// Handle to the source's main task
     pub task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     /// Sender for shutdown signal
     pub shutdown_tx: Arc<RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
+    /// Optional bootstrap provider - plugins set this if they support bootstrap
+    bootstrap_provider: Arc<RwLock<Option<Arc<dyn BootstrapProvider>>>>,
 }
 
 impl SourceBase {
-    /// Create a new SourceBase with the given configuration
-    pub fn new(config: SourceConfig, event_tx: ComponentEventSender) -> Result<Self> {
+    /// Create a new SourceBase with the given parameters
+    ///
+    /// The event channel is not required during construction - it will be
+    /// injected by DrasiLib when the source is added via `inject_event_tx()`.
+    pub fn new(params: SourceBaseParams) -> Result<Self> {
         // Determine dispatch mode (default to Channel if not specified)
-        let dispatch_mode = config.dispatch_mode.unwrap_or_default();
+        let dispatch_mode = params.dispatch_mode.unwrap_or_default();
+        let dispatch_buffer_capacity = params.dispatch_buffer_capacity.unwrap_or(1000);
 
         // Set up initial dispatchers based on dispatch mode
         let mut dispatchers: Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>> =
@@ -65,20 +133,72 @@ impl SourceBase {
 
         if dispatch_mode == DispatchMode::Broadcast {
             // For broadcast mode, create a single broadcast dispatcher
-            let capacity = config.dispatch_buffer_capacity.unwrap_or(1000);
-            let dispatcher = BroadcastChangeDispatcher::<SourceEventWrapper>::new(capacity);
+            let dispatcher =
+                BroadcastChangeDispatcher::<SourceEventWrapper>::new(dispatch_buffer_capacity);
             dispatchers.push(Box::new(dispatcher));
         }
         // For channel mode, dispatchers will be created on-demand when subscribing
 
         Ok(Self {
-            config,
+            id: params.id,
+            dispatch_mode,
+            dispatch_buffer_capacity,
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
             dispatchers: Arc::new(RwLock::new(dispatchers)),
-            event_tx,
+            event_tx: Arc::new(RwLock::new(None)), // Injected later by DrasiLib
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
+            bootstrap_provider: Arc::new(RwLock::new(None)),
         })
+    }
+
+    /// Inject the event channel (called by DrasiLib when source is added)
+    ///
+    /// This method is called automatically by DrasiLib's `add_source()` method.
+    /// Plugin developers do not need to call this directly.
+    pub async fn inject_event_tx(&self, tx: ComponentEventSender) {
+        *self.event_tx.write().await = Some(tx);
+    }
+
+    /// Get the event channel Arc for internal use by spawned tasks
+    ///
+    /// This returns the internal event_tx wrapped in Arc<RwLock<Option<...>>>
+    /// which allows background tasks to send component events.
+    ///
+    /// Returns a clone of the Arc that can be moved into spawned tasks.
+    pub fn event_tx(&self) -> Arc<RwLock<Option<ComponentEventSender>>> {
+        self.event_tx.clone()
+    }
+
+    /// Clone the SourceBase with shared Arc references
+    ///
+    /// This creates a new SourceBase that shares the same underlying
+    /// data through Arc references. Useful for passing to spawned tasks.
+    pub fn clone_shared(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            dispatch_mode: self.dispatch_mode,
+            dispatch_buffer_capacity: self.dispatch_buffer_capacity,
+            status: self.status.clone(),
+            dispatchers: self.dispatchers.clone(),
+            event_tx: self.event_tx.clone(),
+            task_handle: self.task_handle.clone(),
+            shutdown_tx: self.shutdown_tx.clone(),
+            bootstrap_provider: self.bootstrap_provider.clone(),
+        }
+    }
+
+    /// Set the bootstrap provider for this source
+    ///
+    /// Call this after creating the SourceBase if the source plugin supports bootstrapping.
+    /// The bootstrap provider is created by the plugin using its own configuration.
+    pub async fn set_bootstrap_provider(&self, provider: Arc<dyn BootstrapProvider>) {
+        *self.bootstrap_provider.write().await = Some(provider);
+    }
+
+    /// Get the source ID
+    pub fn get_id(&self) -> &str {
+        &self.id
     }
 
     /// Create a streaming receiver for a query subscription
@@ -91,9 +211,7 @@ impl SourceBase {
     pub async fn create_streaming_receiver(
         &self,
     ) -> Result<Box<dyn ChangeReceiver<SourceEventWrapper>>> {
-        let dispatch_mode = self.config.dispatch_mode.unwrap_or_default();
-
-        let receiver: Box<dyn ChangeReceiver<SourceEventWrapper>> = match dispatch_mode {
+        let receiver: Box<dyn ChangeReceiver<SourceEventWrapper>> = match self.dispatch_mode {
             DispatchMode::Broadcast => {
                 // For broadcast mode, use the single dispatcher
                 let dispatchers = self.dispatchers.read().await;
@@ -105,8 +223,7 @@ impl SourceBase {
             }
             DispatchMode::Channel => {
                 // For channel mode, create a new dispatcher for this subscription
-                let capacity = self.config.dispatch_buffer_capacity.unwrap_or(1000);
-                let dispatcher = ChannelChangeDispatcher::<SourceEventWrapper>::new(capacity);
+                let dispatcher = ChannelChangeDispatcher::<SourceEventWrapper>::new(self.dispatch_buffer_capacity);
                 let receiver = dispatcher.create_receiver().await?;
 
                 // Add the new dispatcher to our list
@@ -125,7 +242,7 @@ impl SourceBase {
     /// This is the standard subscribe implementation that all sources can use.
     /// It handles:
     /// - Creating a receiver for streaming events (based on dispatch mode)
-    /// - Setting up bootstrap if requested and a provider is configured
+    /// - Setting up bootstrap if requested and a provider has been set
     /// - Returning the appropriate SubscriptionResponse
     pub async fn subscribe_with_bootstrap(
         &self,
@@ -137,7 +254,7 @@ impl SourceBase {
     ) -> Result<SubscriptionResponse> {
         info!(
             "Query '{}' subscribing to {} source '{}' (bootstrap: {})",
-            query_id, source_type, self.config.id, enable_bootstrap
+            query_id, source_type, self.id, enable_bootstrap
         );
 
         // Create streaming receiver using helper method
@@ -155,7 +272,7 @@ impl SourceBase {
 
         Ok(SubscriptionResponse {
             query_id: query_id_for_response,
-            source_id: self.config.id.clone(),
+            source_id: self.id.clone(),
             receiver,
             bootstrap_receiver,
         })
@@ -169,21 +286,20 @@ impl SourceBase {
         relation_labels: Vec<String>,
         source_type: &str,
     ) -> Result<Option<BootstrapEventReceiver>> {
-        if let Some(provider_config) = &self.config.bootstrap_provider {
+        let provider_guard = self.bootstrap_provider.read().await;
+        if let Some(provider) = provider_guard.clone() {
+            drop(provider_guard); // Release lock before spawning task
+
             info!(
-                "Creating bootstrap provider for query '{}' on {} source '{}'",
-                query_id, source_type, self.config.id
+                "Creating bootstrap for query '{}' on {} source '{}'",
+                query_id, source_type, self.id
             );
 
-            // Create bootstrap context with Arc-wrapped source config
-            let context = BootstrapContext::new(
-                self.config.id.clone(), // server_id
-                Arc::new(self.config.clone()),
-                self.config.id.clone(),
+            // Create bootstrap context
+            let context = BootstrapContext::new_minimal(
+                self.id.clone(), // server_id
+                self.id.clone(), // source_id
             );
-
-            // Create the bootstrap provider using the factory
-            let provider = BootstrapProviderFactory::create_provider(provider_config)?;
 
             // Create bootstrap channel
             let (bootstrap_tx, bootstrap_rx) = tokio::sync::mpsc::channel(1000);
@@ -215,7 +331,7 @@ impl SourceBase {
         } else {
             info!(
                 "Bootstrap requested for query '{}' but no bootstrap provider configured for {} source '{}'",
-                query_id, source_type, self.config.id
+                query_id, source_type, self.id
             );
             Ok(None)
         }
@@ -235,7 +351,7 @@ impl SourceBase {
 
         // Create event wrapper
         let wrapper = SourceEventWrapper::with_profiling(
-            self.config.id.clone(),
+            self.id.clone(),
             SourceEvent::Change(change),
             chrono::Utc::now(),
             profiling,
@@ -251,7 +367,7 @@ impl SourceBase {
     /// It handles Arc-wrapping for zero-copy sharing and logs
     /// when there are no subscribers.
     pub async fn dispatch_event(&self, wrapper: SourceEventWrapper) -> Result<()> {
-        debug!("[{}] Dispatching event: {:?}", self.config.id, &wrapper);
+        debug!("[{}] Dispatching event: {:?}", self.id, &wrapper);
 
         // Arc-wrap for zero-copy sharing across dispatchers
         let arc_wrapper = Arc::new(wrapper);
@@ -260,7 +376,7 @@ impl SourceBase {
         let dispatchers = self.dispatchers.read().await;
         for dispatcher in dispatchers.iter() {
             if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
-                debug!("[{}] Failed to dispatch event: {}", self.config.id, e);
+                debug!("[{}] Failed to dispatch event: {}", self.id, e);
             }
         }
 
@@ -270,7 +386,7 @@ impl SourceBase {
     /// Broadcast SourceControl events
     pub async fn broadcast_control(&self, control: SourceControl) -> Result<()> {
         let wrapper = SourceEventWrapper::new(
-            self.config.id.clone(),
+            self.id.clone(),
             SourceEvent::Control(control),
             chrono::Utc::now(),
         );
@@ -336,7 +452,7 @@ impl SourceBase {
 
     /// Handle common stop functionality
     pub async fn stop_common(&self) -> Result<()> {
-        info!("Stopping source '{}'", self.config.id);
+        info!("Stopping source '{}'", self.id);
 
         // Send shutdown signal if we have one
         if let Some(tx) = self.shutdown_tx.write().await.take() {
@@ -347,22 +463,22 @@ impl SourceBase {
         if let Some(handle) = self.task_handle.write().await.take() {
             match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
                 Ok(Ok(())) => {
-                    info!("Source '{}' task completed successfully", self.config.id);
+                    info!("Source '{}' task completed successfully", self.id);
                 }
                 Ok(Err(e)) => {
-                    error!("Source '{}' task panicked: {}", self.config.id, e);
+                    error!("Source '{}' task panicked: {}", self.id, e);
                 }
                 Err(_) => {
                     error!(
                         "Source '{}' task did not complete within timeout",
-                        self.config.id
+                        self.id
                     );
                 }
             }
         }
 
         *self.status.write().await = ComponentStatus::Stopped;
-        info!("Source '{}' stopped", self.config.id);
+        info!("Source '{}' stopped", self.id);
         Ok(())
     }
 
@@ -376,6 +492,16 @@ impl SourceBase {
         *self.status.write().await = status;
     }
 
+    /// Transition to a new status and send event
+    pub async fn set_status_with_event(
+        &self,
+        status: ComponentStatus,
+        message: Option<String>,
+    ) -> Result<()> {
+        *self.status.write().await = status.clone();
+        self.send_component_event(status, message).await
+    }
+
     /// Set the task handle
     pub async fn set_task_handle(&self, handle: tokio::task::JoinHandle<()>) {
         *self.task_handle.write().await = Some(handle);
@@ -387,22 +513,29 @@ impl SourceBase {
     }
 
     /// Send a component event
+    ///
+    /// If the event channel has not been injected yet, this method silently
+    /// succeeds without sending anything. This allows sources to be used
+    /// in a standalone fashion without DrasiLib if needed.
     pub async fn send_component_event(
         &self,
         status: ComponentStatus,
         message: Option<String>,
     ) -> Result<()> {
         let event = ComponentEvent {
-            component_id: self.config.id.clone(),
+            component_id: self.id.clone(),
             component_type: ComponentType::Source,
             status,
             timestamp: chrono::Utc::now(),
             message,
         };
 
-        if let Err(e) = self.event_tx.send(event).await {
-            error!("Failed to send component event: {}", e);
+        if let Some(ref tx) = *self.event_tx.read().await {
+            if let Err(e) = tx.send(event).await {
+                error!("Failed to send component event: {}", e);
+            }
         }
+        // If event_tx is None, silently skip - injection happens before start()
         Ok(())
     }
 }

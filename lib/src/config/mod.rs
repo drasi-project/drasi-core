@@ -13,7 +13,6 @@
 // limitations under the License.
 
 pub mod common;
-pub mod enums;
 pub mod runtime;
 pub mod schema;
 
@@ -27,9 +26,6 @@ pub use common::*;
 
 // Re-export runtime types
 pub use runtime::{QueryRuntime, ReactionRuntime, RuntimeConfig, SourceRuntime};
-
-// Re-export config enums for plugin deserialization
-pub use enums::{SourceSpecificConfig, ReactionSpecificConfig};
 
 // Re-export schema types
 pub use schema::*;

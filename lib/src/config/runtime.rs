@@ -16,20 +16,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::schema::{QueryConfig, ReactionConfig, SourceConfig};
+use super::schema::QueryConfig;
 use crate::channels::ComponentStatus;
 use crate::indexes::IndexFactory;
-
-/// Helper function to convert typed config to properties HashMap
-fn serialize_to_properties<T: serde::Serialize>(config: &T) -> HashMap<String, serde_json::Value> {
-    match serde_json::to_value(config) {
-        Ok(serde_json::Value::Object(map)) => map
-            .into_iter()
-            .filter(|(k, _)| k != "source_type" && k != "reaction_type")
-            .collect(),
-        _ => HashMap::new(),
-    }
-}
 
 /// Runtime representation of a source with execution status
 ///
@@ -188,21 +177,6 @@ pub struct ReactionRuntime {
     pub properties: HashMap<String, serde_json::Value>,
 }
 
-impl From<SourceConfig> for SourceRuntime {
-    fn from(config: SourceConfig) -> Self {
-        let id = config.id.clone();
-        let source_type = config.source_type().to_string();
-        let properties = serialize_to_properties(&config.config);
-        Self {
-            id,
-            source_type,
-            status: ComponentStatus::Stopped,
-            error_message: None,
-            properties,
-        }
-    }
-}
-
 impl From<QueryConfig> for QueryRuntime {
     fn from(config: QueryConfig) -> Self {
         Self {
@@ -216,71 +190,27 @@ impl From<QueryConfig> for QueryRuntime {
     }
 }
 
-impl From<ReactionConfig> for ReactionRuntime {
-    fn from(config: ReactionConfig) -> Self {
-        let id = config.id.clone();
-        let reaction_type = config.reaction_type().to_string();
-        let queries = config.queries.clone();
-        let properties = serialize_to_properties(&config.config);
-        Self {
-            id,
-            reaction_type,
-            status: ComponentStatus::Stopped,
-            error_message: None,
-            queries,
-            properties,
-        }
-    }
-}
-
 /// Runtime configuration with applied defaults
 ///
 /// `RuntimeConfig` represents a fully-resolved configuration with all global defaults
 /// applied to individual components. It's created from [`DrasiLibConfig`](super::schema::DrasiLibConfig)
 /// and used internally by [`DrasiLib`](crate::DrasiLib) for execution.
 ///
+/// # Plugin Architecture
+///
+/// **Important**: drasi-lib has ZERO awareness of which plugins exist. Sources and
+/// reactions are passed as pre-built trait objects (`Arc<dyn Source>`, `Arc<dyn Reaction>`).
+/// Only queries are stored in RuntimeConfig.
+///
 /// # Default Application
 ///
 /// When converting from `DrasiLibConfig` to `RuntimeConfig`, global capacity
-/// settings are applied to components that don't specify their own values:
+/// settings are applied to queries that don't specify their own values:
 ///
-/// - **priority_queue_capacity**: Applied to queries and reactions (default: 10000)
-/// - **dispatch_buffer_capacity**: Applied to sources and queries (default: 1000)
-///
-/// # Conversion
-///
-/// Automatically created via `From<DrasiLibConfig>`:
-///
-/// ```no_run
-/// use drasi_lib::{DrasiLibConfig, RuntimeConfig};
-///
-/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let config = DrasiLibConfig::load_from_file("config.yaml")?;
-/// let runtime_config: RuntimeConfig = config.into();
-/// # Ok(())
-/// # }
-/// ```
+/// - **priority_queue_capacity**: Applied to queries (default: 10000)
+/// - **dispatch_buffer_capacity**: Applied to queries (default: 1000)
 ///
 /// # Examples
-///
-/// ## Creating RuntimeConfig
-///
-/// ```no_run
-/// use drasi_lib::{DrasiLib, DrasiLibConfig, RuntimeConfig};
-/// use std::sync::Arc;
-///
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// // Load and convert to runtime config
-/// let config = DrasiLibConfig::load_from_file("config.yaml")?;
-/// let runtime_config: RuntimeConfig = config.into();
-///
-/// // Use with DrasiLib (via from_config_file helper)
-/// let core = DrasiLib::from_config_file("config.yaml").await?;
-/// # Ok(())
-/// # }
-/// ```
-///
-/// ## Understanding Default Application
 ///
 /// ```yaml
 /// server_core:
@@ -289,26 +219,23 @@ impl From<ReactionConfig> for ReactionRuntime {
 /// queries:
 ///   - id: q1
 ///     query: "MATCH (n) RETURN n"
-///     sources: [s1]
+///     source_subscriptions:
+///       - source_id: s1
 ///     # priority_queue_capacity will be 50000 (inherited)
 ///
 ///   - id: q2
 ///     query: "MATCH (m) RETURN m"
-///     sources: [s1]
+///     source_subscriptions:
+///       - source_id: s1
 ///     priority_queue_capacity: 100000  # Override global
 /// ```
-///
-/// After conversion to `RuntimeConfig`:
-/// - `q1` will have `priority_queue_capacity = Some(50000)`
-/// - `q2` will have `priority_queue_capacity = Some(100000)`
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     pub server_core: super::schema::DrasiLibSettings,
     /// Index factory for creating storage backend indexes for queries
     pub index_factory: Arc<IndexFactory>,
-    pub sources: Vec<SourceConfig>,
+    /// Query configurations (sources/reactions are now instance-only)
     pub queries: Vec<QueryConfig>,
-    pub reactions: Vec<ReactionConfig>,
 }
 
 impl From<super::schema::DrasiLibConfig> for RuntimeConfig {
@@ -319,18 +246,6 @@ impl From<super::schema::DrasiLibConfig> for RuntimeConfig {
 
         // Create IndexFactory from storage backend configurations
         let index_factory = Arc::new(IndexFactory::new(config.storage_backends));
-
-        // Apply global defaults to sources that don't specify their own dispatch capacity
-        let sources = config
-            .sources
-            .into_iter()
-            .map(|mut s| {
-                if s.dispatch_buffer_capacity.is_none() {
-                    s.dispatch_buffer_capacity = Some(global_dispatch_capacity);
-                }
-                s
-            })
-            .collect();
 
         // Apply global defaults to queries
         let queries = config
@@ -347,24 +262,10 @@ impl From<super::schema::DrasiLibConfig> for RuntimeConfig {
             })
             .collect();
 
-        // Apply global default to reactions that don't specify their own capacity
-        let reactions = config
-            .reactions
-            .into_iter()
-            .map(|mut r| {
-                if r.priority_queue_capacity.is_none() {
-                    r.priority_queue_capacity = Some(global_priority_queue);
-                }
-                r
-            })
-            .collect();
-
         Self {
             server_core: config.server_core,
             index_factory,
-            sources,
             queries,
-            reactions,
         }
     }
 }

@@ -18,8 +18,7 @@ mod query_joins_tests {
     use crate::config::{QueryConfig, QueryJoinConfig, QueryJoinKeyConfig};
     use crate::queries::QueryManager;
     use crate::sources::{convert_json_to_element_value, SourceManager};
-    use crate::test_support::helpers::test_fixtures::*;
-    use crate::test_support::helpers::test_mocks::{create_test_source_registry, TestMockSource};
+    use crate::test_support::helpers::test_mocks::{create_test_mock_source, TestMockSource};
     use drasi_core::middleware::MiddlewareTypeRegistry;
     use drasi_core::models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
@@ -109,12 +108,12 @@ mod query_joins_tests {
     async fn create_test_environment() -> (
         Arc<QueryManager>,
         mpsc::Receiver<ComponentEvent>,
+        mpsc::Sender<ComponentEvent>,
         Arc<SourceManager>,
     ) {
         let (event_tx, event_rx) = mpsc::channel(100);
 
-        let registry = create_test_source_registry();
-        let source_manager = Arc::new(SourceManager::with_registry(event_tx.clone(), registry));
+        let source_manager = Arc::new(SourceManager::new(event_tx.clone()));
 
         // Create a test IndexFactory with empty backends
         let index_factory = Arc::new(crate::indexes::IndexFactory::new(vec![]));
@@ -129,16 +128,16 @@ mod query_joins_tests {
             middleware_registry,
         ));
 
-        (query_manager, event_rx, source_manager)
+        (query_manager, event_rx, event_tx, source_manager)
     }
 
     #[tokio::test]
     async fn test_basic_join_between_two_sources() {
-        let (query_manager, _event_rx, source_manager) = create_test_environment().await;
+        let (query_manager, _event_rx, event_tx, source_manager) = create_test_environment().await;
 
-        // Create two mock sources
-        let vehicles_source = create_test_source_config("vehicles", "mock");
-        let drivers_source = create_test_source_config("drivers", "mock");
+        // Create two mock sources using instance-based approach
+        let vehicles_source = create_test_mock_source("vehicles".to_string(), event_tx.clone());
+        let drivers_source = create_test_mock_source("drivers".to_string(), event_tx);
 
         source_manager.add_source(vehicles_source).await.unwrap();
         source_manager.add_source(drivers_source).await.unwrap();
@@ -238,17 +237,14 @@ mod query_joins_tests {
 
     #[tokio::test]
     async fn test_dynamic_updates_with_joins() {
-        let (query_manager, _event_rx, source_manager) = create_test_environment().await;
+        let (query_manager, _event_rx, event_tx, source_manager) = create_test_environment().await;
 
-        // Setup sources
-        source_manager
-            .add_source(create_test_source_config("orders", "mock"))
-            .await
-            .unwrap();
-        source_manager
-            .add_source(create_test_source_config("restaurants", "mock"))
-            .await
-            .unwrap();
+        // Setup sources using instance-based approach
+        let orders_source = create_test_mock_source("orders".to_string(), event_tx.clone());
+        let restaurants_source = create_test_mock_source("restaurants".to_string(), event_tx);
+
+        source_manager.add_source(orders_source).await.unwrap();
+        source_manager.add_source(restaurants_source).await.unwrap();
 
         // Create join config
         let join_config = create_query_join_config(
@@ -367,21 +363,16 @@ mod query_joins_tests {
 
     #[tokio::test]
     async fn test_multiple_joins_in_single_query() {
-        let (query_manager, _event_rx, source_manager) = create_test_environment().await;
+        let (query_manager, _event_rx, event_tx, source_manager) = create_test_environment().await;
 
-        // Create three sources
-        source_manager
-            .add_source(create_test_source_config("orders", "mock"))
-            .await
-            .unwrap();
-        source_manager
-            .add_source(create_test_source_config("drivers", "mock"))
-            .await
-            .unwrap();
-        source_manager
-            .add_source(create_test_source_config("restaurants", "mock"))
-            .await
-            .unwrap();
+        // Create three sources using instance-based approach
+        let orders_source = create_test_mock_source("orders".to_string(), event_tx.clone());
+        let drivers_source = create_test_mock_source("drivers".to_string(), event_tx.clone());
+        let restaurants_source = create_test_mock_source("restaurants".to_string(), event_tx);
+
+        source_manager.add_source(orders_source).await.unwrap();
+        source_manager.add_source(drivers_source).await.unwrap();
+        source_manager.add_source(restaurants_source).await.unwrap();
 
         // Create multiple joins
         let restaurant_join = create_query_join_config(
@@ -494,16 +485,14 @@ mod query_joins_tests {
 
     #[tokio::test]
     async fn test_join_with_non_matching_properties() {
-        let (query_manager, _event_rx, source_manager) = create_test_environment().await;
+        let (query_manager, _event_rx, event_tx, source_manager) = create_test_environment().await;
 
-        source_manager
-            .add_source(create_test_source_config("source1", "mock"))
-            .await
-            .unwrap();
-        source_manager
-            .add_source(create_test_source_config("source2", "mock"))
-            .await
-            .unwrap();
+        // Create sources using instance-based approach
+        let source1 = create_test_mock_source("source1".to_string(), event_tx.clone());
+        let source2 = create_test_mock_source("source2".to_string(), event_tx);
+
+        source_manager.add_source(source1).await.unwrap();
+        source_manager.add_source(source2).await.unwrap();
 
         let join_config = create_query_join_config(
             "TEST_JOIN",
@@ -579,16 +568,14 @@ mod query_joins_tests {
 
     #[tokio::test]
     async fn test_join_with_null_properties() {
-        let (query_manager, _event_rx, source_manager) = create_test_environment().await;
+        let (query_manager, _event_rx, event_tx, source_manager) = create_test_environment().await;
 
-        source_manager
-            .add_source(create_test_source_config("source1", "mock"))
-            .await
-            .unwrap();
-        source_manager
-            .add_source(create_test_source_config("source2", "mock"))
-            .await
-            .unwrap();
+        // Create sources using instance-based approach
+        let source1 = create_test_mock_source("source1".to_string(), event_tx.clone());
+        let source2 = create_test_mock_source("source2".to_string(), event_tx);
+
+        source_manager.add_source(source1).await.unwrap();
+        source_manager.add_source(source2).await.unwrap();
 
         let join_config = create_query_join_config(
             "NULL_TEST_JOIN",
@@ -664,16 +651,14 @@ mod query_joins_tests {
 
     #[tokio::test]
     async fn test_join_with_duplicate_keys() {
-        let (query_manager, _event_rx, source_manager) = create_test_environment().await;
+        let (query_manager, _event_rx, event_tx, source_manager) = create_test_environment().await;
 
-        source_manager
-            .add_source(create_test_source_config("products", "mock"))
-            .await
-            .unwrap();
-        source_manager
-            .add_source(create_test_source_config("categories", "mock"))
-            .await
-            .unwrap();
+        // Create sources using instance-based approach
+        let products_source = create_test_mock_source("products".to_string(), event_tx.clone());
+        let categories_source = create_test_mock_source("categories".to_string(), event_tx);
+
+        source_manager.add_source(products_source).await.unwrap();
+        source_manager.add_source(categories_source).await.unwrap();
 
         let join_config = create_query_join_config(
             "PRODUCT_CATEGORY",
@@ -755,16 +740,14 @@ mod query_joins_tests {
 
     #[tokio::test]
     async fn test_bootstrap_with_joins() {
-        let (query_manager, _event_rx, source_manager) = create_test_environment().await;
+        let (query_manager, _event_rx, event_tx, source_manager) = create_test_environment().await;
 
-        source_manager
-            .add_source(create_test_source_config("users", "mock"))
-            .await
-            .unwrap();
-        source_manager
-            .add_source(create_test_source_config("posts", "mock"))
-            .await
-            .unwrap();
+        // Create sources using instance-based approach
+        let users_source = create_test_mock_source("users".to_string(), event_tx.clone());
+        let posts_source = create_test_mock_source("posts".to_string(), event_tx);
+
+        source_manager.add_source(users_source).await.unwrap();
+        source_manager.add_source(posts_source).await.unwrap();
 
         // Create and start query with join FIRST
         let join_config = create_query_join_config(

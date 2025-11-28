@@ -21,4 +21,3 @@ pub mod profiler;
 
 pub use config::ProfilerReactionConfig;
 pub use profiler::ProfilerReaction;
-pub use drasi_lib::config::ReactionConfig;

@@ -23,4 +23,3 @@ pub mod subscription;
 pub use application::ApplicationReaction;
 pub use config::ApplicationReactionConfig;
 pub use application::ApplicationReactionHandle;
-pub use drasi_lib::config::ReactionConfig;

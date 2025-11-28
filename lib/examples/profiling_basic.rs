@@ -188,6 +188,7 @@ async fn main() {
     println!("2. Pass profiling through SourceEventWrapper, QueryResult");
     println!("3. Capture timestamps at each pipeline stage");
     println!("4. Calculate latencies by subtracting timestamps");
-    println!("\nFor production use, consider the ProfilerReaction which");
-    println!("automatically collects statistics across many events.");
+    println!("\nThis example demonstrates the low-level profiling API.");
+    println!("Use this pattern when building custom sources and reactions");
+    println!("to track end-to-end latency through the Drasi pipeline.");
 }

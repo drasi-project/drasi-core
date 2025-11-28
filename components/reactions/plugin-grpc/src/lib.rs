@@ -24,7 +24,6 @@ pub mod proto;
 
 pub use config::GrpcReactionConfig;
 pub use grpc::GrpcReaction;
-pub use drasi_lib::config::ReactionConfig;
 
 // Re-export types for plugin-grpc-adaptive
 pub use helpers::convert_json_to_proto_struct;

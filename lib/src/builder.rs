@@ -15,39 +15,41 @@
 //! Fluent builders for DrasiLib and its components.
 //!
 //! This module provides the builder pattern for constructing DrasiLib instances
-//! and their components (sources, queries, reactions) in a type-safe, ergonomic way.
+//! and their components in a type-safe, ergonomic way.
 //!
 //! # Overview
 //!
 //! - [`DrasiLibBuilder`] - Main builder for creating a DrasiLib instance
-//! - [`Source`] - Builder for source configurations
 //! - [`Query`] - Builder for query configurations
-//! - [`Reaction`] - Builder for reaction configurations
+//!
+//! # Plugin Architecture
+//!
+//! **Important**: drasi-lib has ZERO awareness of which plugins exist. Sources and
+//! reactions are created externally as fully-configured instances implementing
+//! `Source` and `Reaction` traits, then passed to DrasiLibBuilder via
+//! `with_source()` and `with_reaction()`.
 //!
 //! # Examples
 //!
-//! ## Basic Usage
+//! ## Basic Usage with Pre-built Instances
 //!
 //! ```no_run
-//! use drasi_lib::{DrasiLib, Source, Query, Reaction};
+//! use drasi_lib::{DrasiLib, Query};
+//! use std::sync::Arc;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! // Source and reaction instances are created externally by plugins
+//! // let my_source: Arc<dyn Source> = my_source_plugin::create(...);
+//! // let my_reaction: Arc<dyn Reaction> = my_reaction_plugin::create(...);
+//!
 //! let core = DrasiLib::builder()
 //!     .with_id("my-server")
-//!     .add_source(
-//!         Source::application("events")
-//!             .auto_start(true)
-//!             .build()
-//!     )
+//!     // .with_source(my_source)
+//!     // .with_reaction(my_reaction)
 //!     .add_query(
 //!         Query::cypher("my-query")
 //!             .query("MATCH (n:Person) RETURN n")
 //!             .from_source("events")
-//!             .build()
-//!     )
-//!     .add_reaction(
-//!         Reaction::log("output")
-//!             .subscribe_to("my-query")
 //!             .build()
 //!     )
 //!     .build()
@@ -57,51 +59,21 @@
 //! # Ok(())
 //! # }
 //! ```
-//!
-//! ## Instance Injection (Advanced)
-//!
-//! For advanced use cases, you can inject pre-built source and reaction instances:
-//!
-//! ```no_run
-//! use drasi_lib::{DrasiLib, Query};
-//! use std::sync::Arc;
-//!
-//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! // Assume my_custom_source implements Source trait
-//! // let my_custom_source: Arc<dyn SourceTrait> = ...;
-//!
-//! let core = DrasiLib::builder()
-//!     .with_id("advanced-server")
-//!     // .with_source(my_custom_source)  // Inject custom source instance
-//!     .add_query(
-//!         Query::cypher("query1")
-//!             .query("MATCH (n) RETURN n")
-//!             .from_source("custom-source")
-//!             .build()
-//!     )
-//!     .build()
-//!     .await?;
-//! # Ok(())
-//! # }
-//! ```
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::bootstrap::BootstrapProviderConfig;
 use crate::config::{
     DrasiLibConfig, DrasiLibSettings, QueryConfig, QueryJoinConfig, QueryLanguage,
-    ReactionConfig, ReactionSpecificConfig, SourceConfig, SourceSpecificConfig,
     SourceSubscriptionConfig,
 };
 use drasi_core::models::SourceMiddlewareConfig;
 use crate::channels::DispatchMode;
 use crate::error::{DrasiError, Result};
 use crate::indexes::StorageBackendConfig;
+use crate::plugin_core::Reaction as ReactionTrait;
+use crate::plugin_core::Source as SourceTrait;
 use crate::plugin_core::{ReactionRegistry, SourceRegistry};
-use crate::reactions::Reaction as ReactionTrait;
 use crate::server_core::DrasiLib;
-use crate::sources::Source as SourceTrait;
 
 // ============================================================================
 // DrasiLibBuilder
@@ -111,24 +83,31 @@ use crate::sources::Source as SourceTrait;
 ///
 /// Use `DrasiLib::builder()` to get started.
 ///
+/// # Plugin Architecture
+///
+/// **Important**: drasi-lib has ZERO awareness of which plugins exist. Sources and
+/// reactions are created externally as fully-configured instances implementing
+/// `Source` and `Reaction` traits, then passed via `with_source()` and `with_reaction()`.
+///
 /// # Example
 ///
 /// ```no_run
-/// use drasi_lib::{DrasiLib, Source, Query, Reaction};
+/// use drasi_lib::{DrasiLib, Query};
+/// use std::sync::Arc;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// // Source and reaction instances are created externally by plugins
+/// // let my_source: Arc<dyn Source> = ...;
+/// // let my_reaction: Arc<dyn Reaction> = ...;
+///
 /// let core = DrasiLib::builder()
 ///     .with_id("my-server")
-///     .add_source(Source::application("my-source").build())
+///     // .with_source(my_source)
+///     // .with_reaction(my_reaction)
 ///     .add_query(
 ///         Query::cypher("my-query")
 ///             .query("MATCH (n) RETURN n")
 ///             .from_source("my-source")
-///             .build()
-///     )
-///     .add_reaction(
-///         Reaction::log("my-reaction")
-///             .subscribe_to("my-query")
 ///             .build()
 ///     )
 ///     .build()
@@ -141,9 +120,7 @@ pub struct DrasiLibBuilder {
     priority_queue_capacity: Option<usize>,
     dispatch_buffer_capacity: Option<usize>,
     storage_backends: Vec<StorageBackendConfig>,
-    source_configs: Vec<SourceConfig>,
     query_configs: Vec<QueryConfig>,
-    reaction_configs: Vec<ReactionConfig>,
     source_instances: Vec<Arc<dyn SourceTrait>>,
     reaction_instances: Vec<Arc<dyn ReactionTrait>>,
     source_registry: Option<SourceRegistry>,
@@ -164,9 +141,7 @@ impl DrasiLibBuilder {
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             storage_backends: Vec::new(),
-            source_configs: Vec::new(),
             query_configs: Vec::new(),
-            reaction_configs: Vec::new(),
             source_instances: Vec::new(),
             reaction_instances: Vec::new(),
             source_registry: None,
@@ -198,15 +173,10 @@ impl DrasiLibBuilder {
         self
     }
 
-    /// Add a source configuration (will be created via registry).
-    pub fn add_source(mut self, config: SourceConfig) -> Self {
-        self.source_configs.push(config);
-        self
-    }
-
     /// Add a pre-built source instance directly.
     ///
-    /// This bypasses the registry and allows you to inject custom source implementations.
+    /// Source instances are created externally by plugins with their own typed configurations.
+    /// drasi-lib only knows about the `Source` trait - it has no knowledge of which plugins exist.
     pub fn with_source(mut self, source: Arc<dyn SourceTrait>) -> Self {
         self.source_instances.push(source);
         self
@@ -218,27 +188,52 @@ impl DrasiLibBuilder {
         self
     }
 
-    /// Add a reaction configuration (will be created via registry).
-    pub fn add_reaction(mut self, config: ReactionConfig) -> Self {
-        self.reaction_configs.push(config);
-        self
-    }
-
     /// Add a pre-built reaction instance directly.
     ///
-    /// This bypasses the registry and allows you to inject custom reaction implementations.
+    /// Reaction instances are created externally by plugins with their own typed configurations.
+    /// drasi-lib only knows about the `Reaction` trait - it has no knowledge of which plugins exist.
     pub fn with_reaction(mut self, reaction: Arc<dyn ReactionTrait>) -> Self {
         self.reaction_instances.push(reaction);
         self
     }
 
-    /// Set a custom source registry for plugin-based source creation.
+    /// Set the source registry for factory-based source creation.
+    ///
+    /// The registry maps source type names to factory functions that create source instances.
+    /// This enables dynamic source creation from generic `SourceConfig` objects.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut registry = SourceRegistry::new();
+    /// registry.register("mock", |config| { ... });
+    ///
+    /// let core = DrasiLib::builder()
+    ///     .with_source_registry(registry)
+    ///     .build()
+    ///     .await?;
+    /// ```
     pub fn with_source_registry(mut self, registry: SourceRegistry) -> Self {
         self.source_registry = Some(registry);
         self
     }
 
-    /// Set a custom reaction registry for plugin-based reaction creation.
+    /// Set the reaction registry for factory-based reaction creation.
+    ///
+    /// The registry maps reaction type names to factory functions that create reaction instances.
+    /// This enables dynamic reaction creation from generic `ReactionConfig` objects.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut registry = ReactionRegistry::new();
+    /// registry.register("log", |config| { ... });
+    ///
+    /// let core = DrasiLib::builder()
+    ///     .with_reaction_registry(registry)
+    ///     .build()
+    ///     .await?;
+    /// ```
     pub fn with_reaction_registry(mut self, registry: ReactionRegistry) -> Self {
         self.reaction_registry = Some(registry);
         self
@@ -257,9 +252,7 @@ impl DrasiLibBuilder {
                 dispatch_buffer_capacity: self.dispatch_buffer_capacity,
             },
             storage_backends: self.storage_backends,
-            sources: self.source_configs.clone(),
             queries: self.query_configs.clone(),
-            reactions: self.reaction_configs.clone(),
         };
 
         // Validate the configuration
@@ -267,23 +260,18 @@ impl DrasiLibBuilder {
             .validate()
             .map_err(|e| DrasiError::startup_validation(e.to_string()))?;
 
-        // Create runtime config and server with custom registries if provided
+        // Create runtime config and server
         let runtime_config = Arc::new(crate::config::RuntimeConfig::from(config));
-        let mut core = DrasiLib::new_with_registries(
-            runtime_config,
-            self.source_registry,
-            self.reaction_registry,
-        );
+        let mut core = DrasiLib::new(runtime_config);
 
         // Initialize the server
         core.initialize().await?;
 
         // Inject pre-built source instances
         for source in self.source_instances {
-            let source_id = source.get_config().id.clone();
-            let auto_start = source.get_config().auto_start;
+            let source_id = source.id().to_string();
             core.source_manager
-                .add_source_instance(source, auto_start)
+                .add_source(source)
                 .await
                 .map_err(|e| {
                     DrasiError::provisioning(format!(
@@ -295,9 +283,9 @@ impl DrasiLibBuilder {
 
         // Inject pre-built reaction instances
         for reaction in self.reaction_instances {
-            let reaction_id = reaction.get_config().id.clone();
+            let reaction_id = reaction.id().to_string();
             core.reaction_manager
-                .add_reaction_instance(reaction)
+                .add_reaction(reaction)
                 .await
                 .map_err(|e| {
                     DrasiError::provisioning(format!(
@@ -307,136 +295,15 @@ impl DrasiLibBuilder {
                 })?;
         }
 
+        // Inject registries for factory-based creation
+        if let Some(registry) = self.source_registry {
+            core.set_source_registry(registry).await;
+        }
+        if let Some(registry) = self.reaction_registry {
+            core.set_reaction_registry(registry).await;
+        }
+
         Ok(core)
-    }
-}
-
-// ============================================================================
-// Source Builder
-// ============================================================================
-
-/// Fluent builder for source configurations.
-///
-/// Use `Source::application()`, `Source::mock()`, etc. to get started.
-///
-/// # Example
-///
-/// ```no_run
-/// use drasi_lib::Source;
-///
-/// let source_config = Source::application("my-source")
-///     .auto_start(true)
-///     .with_property("key", "value")
-///     .build();
-/// ```
-pub struct Source {
-    id: String,
-    source_type: String,
-    properties: HashMap<String, serde_json::Value>,
-    auto_start: bool,
-    bootstrap_provider: Option<BootstrapProviderConfig>,
-    dispatch_buffer_capacity: Option<usize>,
-    dispatch_mode: Option<DispatchMode>,
-}
-
-impl Source {
-    /// Create a new source builder with the given ID and type.
-    fn new(id: impl Into<String>, source_type: impl Into<String>) -> Self {
-        Self {
-            id: id.into(),
-            source_type: source_type.into(),
-            properties: HashMap::new(),
-            auto_start: true,
-            bootstrap_provider: None,
-            dispatch_buffer_capacity: None,
-            dispatch_mode: None,
-        }
-    }
-
-    /// Create an application source builder.
-    ///
-    /// Application sources allow programmatic data injection via handles.
-    pub fn application(id: impl Into<String>) -> Self {
-        Self::new(id, "application")
-    }
-
-    /// Create a mock source builder.
-    ///
-    /// Mock sources are useful for testing and development.
-    pub fn mock(id: impl Into<String>) -> Self {
-        Self::new(id, "mock")
-    }
-
-    /// Create a PostgreSQL source builder.
-    pub fn postgres(id: impl Into<String>) -> Self {
-        Self::new(id, "postgres")
-    }
-
-    /// Create an HTTP source builder.
-    pub fn http(id: impl Into<String>) -> Self {
-        Self::new(id, "http")
-    }
-
-    /// Create a gRPC source builder.
-    pub fn grpc(id: impl Into<String>) -> Self {
-        Self::new(id, "grpc")
-    }
-
-    /// Create a platform source builder.
-    pub fn platform(id: impl Into<String>) -> Self {
-        Self::new(id, "platform")
-    }
-
-    /// Set whether the source should auto-start.
-    pub fn auto_start(mut self, auto_start: bool) -> Self {
-        self.auto_start = auto_start;
-        self
-    }
-
-    /// Set a property value.
-    pub fn with_property(mut self, key: impl Into<String>, value: impl Into<serde_json::Value>) -> Self {
-        self.properties.insert(key.into(), value.into());
-        self
-    }
-
-    /// Set the bootstrap provider configuration.
-    pub fn with_bootstrap_provider(mut self, provider: BootstrapProviderConfig) -> Self {
-        self.bootstrap_provider = Some(provider);
-        self
-    }
-
-    /// Set the dispatch buffer capacity.
-    pub fn with_dispatch_buffer_capacity(mut self, capacity: usize) -> Self {
-        self.dispatch_buffer_capacity = Some(capacity);
-        self
-    }
-
-    /// Set the dispatch mode.
-    pub fn with_dispatch_mode(mut self, mode: DispatchMode) -> Self {
-        self.dispatch_mode = Some(mode);
-        self
-    }
-
-    /// Build the source configuration.
-    pub fn build(self) -> SourceConfig {
-        let config = match self.source_type.as_str() {
-            "application" => SourceSpecificConfig::Application(self.properties),
-            "mock" => SourceSpecificConfig::Mock(self.properties),
-            "postgres" => SourceSpecificConfig::Postgres(self.properties),
-            "http" => SourceSpecificConfig::Http(self.properties),
-            "grpc" => SourceSpecificConfig::Grpc(self.properties),
-            "platform" => SourceSpecificConfig::Platform(self.properties),
-            _ => SourceSpecificConfig::Application(self.properties),
-        };
-
-        SourceConfig {
-            id: self.id,
-            auto_start: self.auto_start,
-            config,
-            bootstrap_provider: self.bootstrap_provider,
-            dispatch_buffer_capacity: self.dispatch_buffer_capacity,
-            dispatch_mode: self.dispatch_mode,
-        }
     }
 }
 
@@ -620,153 +487,12 @@ impl Query {
 }
 
 // ============================================================================
-// Reaction Builder
-// ============================================================================
-
-/// Fluent builder for reaction configurations.
-///
-/// Use `Reaction::log()`, `Reaction::application()`, etc. to get started.
-///
-/// # Example
-///
-/// ```no_run
-/// use drasi_lib::Reaction;
-///
-/// let reaction_config = Reaction::log("my-reaction")
-///     .subscribe_to("my-query")
-///     .auto_start(true)
-///     .build();
-/// ```
-pub struct Reaction {
-    id: String,
-    reaction_type: String,
-    queries: Vec<String>,
-    properties: HashMap<String, serde_json::Value>,
-    auto_start: bool,
-    priority_queue_capacity: Option<usize>,
-}
-
-impl Reaction {
-    /// Create a new reaction builder with the given ID and type.
-    fn new(id: impl Into<String>, reaction_type: impl Into<String>) -> Self {
-        Self {
-            id: id.into(),
-            reaction_type: reaction_type.into(),
-            queries: Vec::new(),
-            properties: HashMap::new(),
-            auto_start: true,
-            priority_queue_capacity: None,
-        }
-    }
-
-    /// Create an application reaction builder.
-    ///
-    /// Application reactions allow programmatic result consumption via handles.
-    pub fn application(id: impl Into<String>) -> Self {
-        Self::new(id, "application")
-    }
-
-    /// Create a log reaction builder.
-    ///
-    /// Log reactions output results to the console.
-    pub fn log(id: impl Into<String>) -> Self {
-        Self::new(id, "log")
-    }
-
-    /// Create an HTTP reaction builder.
-    pub fn http(id: impl Into<String>) -> Self {
-        Self::new(id, "http")
-    }
-
-    /// Create a gRPC reaction builder.
-    pub fn grpc(id: impl Into<String>) -> Self {
-        Self::new(id, "grpc")
-    }
-
-    /// Create an SSE (Server-Sent Events) reaction builder.
-    pub fn sse(id: impl Into<String>) -> Self {
-        Self::new(id, "sse")
-    }
-
-    /// Create a platform reaction builder.
-    pub fn platform(id: impl Into<String>) -> Self {
-        Self::new(id, "platform")
-    }
-
-    /// Subscribe to a query.
-    pub fn subscribe_to(mut self, query_id: impl Into<String>) -> Self {
-        self.queries.push(query_id.into());
-        self
-    }
-
-    /// Set whether the reaction should auto-start.
-    pub fn auto_start(mut self, auto_start: bool) -> Self {
-        self.auto_start = auto_start;
-        self
-    }
-
-    /// Set a property value.
-    pub fn with_property(mut self, key: impl Into<String>, value: impl Into<serde_json::Value>) -> Self {
-        self.properties.insert(key.into(), value.into());
-        self
-    }
-
-    /// Set the priority queue capacity.
-    pub fn with_priority_queue_capacity(mut self, capacity: usize) -> Self {
-        self.priority_queue_capacity = Some(capacity);
-        self
-    }
-
-    /// Build the reaction configuration.
-    pub fn build(self) -> ReactionConfig {
-        let config = match self.reaction_type.as_str() {
-            "application" => ReactionSpecificConfig::Application(self.properties),
-            "log" => ReactionSpecificConfig::Log(self.properties),
-            "http" => ReactionSpecificConfig::Http(self.properties),
-            "grpc" => ReactionSpecificConfig::Grpc(self.properties),
-            "sse" => ReactionSpecificConfig::Sse(self.properties),
-            "platform" => ReactionSpecificConfig::Platform(self.properties),
-            _ => ReactionSpecificConfig::Application(self.properties),
-        };
-
-        ReactionConfig {
-            id: self.id,
-            queries: self.queries,
-            auto_start: self.auto_start,
-            config,
-            priority_queue_capacity: self.priority_queue_capacity,
-        }
-    }
-}
-
-// ============================================================================
 // Tests
 // ============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_source_builder_application() {
-        let config = Source::application("test-source")
-            .auto_start(false)
-            .with_property("key", "value")
-            .build();
-
-        assert_eq!(config.id, "test-source");
-        assert!(!config.auto_start);
-        assert_eq!(config.source_type(), "application");
-    }
-
-    #[test]
-    fn test_source_builder_mock() {
-        let config = Source::mock("mock-source").build();
-
-        assert_eq!(config.id, "mock-source");
-        assert!(config.auto_start);
-        assert_eq!(config.source_type(), "mock");
-    }
 
     #[test]
     fn test_query_builder_cypher() {
@@ -805,30 +531,6 @@ mod tests {
         assert_eq!(config.source_subscriptions.len(), 2);
     }
 
-    #[test]
-    fn test_reaction_builder_log() {
-        let config = Reaction::log("test-reaction")
-            .subscribe_to("query1")
-            .auto_start(false)
-            .build();
-
-        assert_eq!(config.id, "test-reaction");
-        assert_eq!(config.reaction_type(), "log");
-        assert!(!config.auto_start);
-        assert_eq!(config.queries.len(), 1);
-        assert_eq!(config.queries[0], "query1");
-    }
-
-    #[test]
-    fn test_reaction_builder_multiple_queries() {
-        let config = Reaction::application("test-reaction")
-            .subscribe_to("query1")
-            .subscribe_to("query2")
-            .build();
-
-        assert_eq!(config.queries.len(), 2);
-    }
-
     #[tokio::test]
     async fn test_drasi_lib_builder_empty() {
         let core = DrasiLibBuilder::new().build().await.unwrap();
@@ -848,32 +550,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_drasi_lib_builder_with_components() {
-        // Use the test mock registries that have "mock" and "log" types registered
-        use crate::test_support::helpers::test_mocks::{create_test_reaction_registry, create_test_source_registry};
-
+    async fn test_drasi_lib_builder_with_query_no_source() {
+        // Test builder with query configuration that has no source subscriptions
+        // In the instance-based approach, sources are added after build()
         let core = DrasiLibBuilder::new()
             .with_id("test-server")
-            .with_source_registry(create_test_source_registry())
-            .with_reaction_registry(create_test_reaction_registry())
-            .add_source(Source::mock("source1").build())
             .add_query(
                 Query::cypher("query1")
                     .query("MATCH (n) RETURN n")
-                    .from_source("source1")
+                    // No from_source() call - query has no source subscriptions
+                    .auto_start(false)
                     .build(),
             )
-            .add_reaction(Reaction::log("reaction1").subscribe_to("query1").build())
             .build()
             .await
             .unwrap();
 
-        let sources = core.list_sources().await.unwrap();
         let queries = core.list_queries().await.unwrap();
-        let reactions = core.list_reactions().await.unwrap();
-
-        assert_eq!(sources.len(), 1);
         assert_eq!(queries.len(), 1);
-        assert_eq!(reactions.len(), 1);
     }
 }

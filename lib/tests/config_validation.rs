@@ -38,15 +38,8 @@ fn validate_config_file(path: &Path) -> Result<(), String> {
         return Err("Server ID is empty - must be provided".to_string());
     }
 
-    // Validate sources
-    for source in &config.sources {
-        if source.id.is_empty() {
-            return Err(format!("Source has empty ID"));
-        }
-        if source.source_type().is_empty() {
-            return Err(format!("Source '{}' has empty source_type", source.id));
-        }
-    }
+    // Note: Sources and reactions are now instance-based and not part of config.
+    // They are passed as pre-built Arc<dyn Source> and Arc<dyn Reaction> instances.
 
     // Validate queries
     for query in &config.queries {
@@ -58,22 +51,6 @@ fn validate_config_file(path: &Path) -> Result<(), String> {
         }
         // Note: source_subscriptions is now optional (defaults to empty vec)
         // Old config format may not have this field - that's OK for validation
-    }
-
-    // Validate reactions
-    for reaction in &config.reactions {
-        if reaction.id.is_empty() {
-            return Err(format!("Reaction has empty ID"));
-        }
-        if reaction.reaction_type().is_empty() {
-            return Err(format!(
-                "Reaction '{}' has empty reaction_type",
-                reaction.id
-            ));
-        }
-        if reaction.queries.is_empty() {
-            return Err(format!("Reaction '{}' has no queries", reaction.id));
-        }
     }
 
     println!("✓ Valid: {}", path.display());

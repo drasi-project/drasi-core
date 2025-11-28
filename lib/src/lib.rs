@@ -113,13 +113,18 @@ pub use indexes::{StorageBackendConfig, StorageBackendRef, StorageBackendSpec};
 // Plugin Core Types (for plugin development)
 // ============================================================================
 
-/// Plugin core abstractions for implementing sources, reactions, and bootstrap providers
+/// Plugin core traits for implementing sources, reactions, and bootstrap providers
 /// Note: Traits are named with 'Trait' suffix to avoid conflicts with builder API types
 pub use plugin_core::{
-    BootstrapFactory, BootstrapProvider, QuerySubscriber,
-    Reaction as ReactionTrait, ReactionBase, ReactionFactory,
-    Source as SourceTrait, SourceBase, SourceFactory,
+    BootstrapProvider, QuerySubscriber, ReactionRegistry, SourceRegistry,
+    Reaction as ReactionTrait,
+    Source as SourceTrait,
 };
+
+/// Base implementations for source and reaction plugins
+/// These are used by plugin developers, not by drasi-lib itself
+pub use sources::base::{SourceBase, SourceBaseParams};
+pub use reactions::common::base::{ReactionBase, ReactionBaseParams};
 
 // ============================================================================
 // Builder Types (for fluent configuration)
@@ -128,21 +133,15 @@ pub use plugin_core::{
 /// Fluent builder for DrasiLib instances
 pub use builder::DrasiLibBuilder;
 
-/// Fluent builder for source configurations
-pub use builder::Source;
-
 /// Fluent builder for query configurations
 pub use builder::Query;
-
-/// Fluent builder for reaction configurations
-pub use builder::Reaction;
 
 // ============================================================================
 // API Module (backward compatibility alias)
 // ============================================================================
 
 /// Re-export builders as `api` module for backward compatibility with tests.
-/// This allows `use crate::api::{Source, Query, Reaction};` to work.
+/// This allows `use crate::api::{Query};` to work.
 pub mod api {
-    pub use crate::builder::{Query, Reaction, Source};
+    pub use crate::builder::Query;
 }

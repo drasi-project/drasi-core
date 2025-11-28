@@ -31,4 +31,6 @@ pub trait Publisher: Send + Sync {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }
 
-pub use manager::*;
+pub use base::{SourceBase, SourceBaseParams};
+pub use manager::SourceManager;
+pub use manager::{convert_json_to_element_properties, convert_json_to_element_value};

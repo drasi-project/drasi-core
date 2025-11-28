@@ -18,10 +18,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_client(true)
         .compile(
             &[
-                "../../../lib/proto/drasi/v1/reaction.proto",
-                "../../../lib/proto/drasi/v1/common.proto",
+                "proto/drasi/v1/reaction.proto",
+                "proto/drasi/v1/common.proto",
             ],
-            &["../../../lib/proto"],
+            &["proto"],
         )?;
     Ok(())
 }

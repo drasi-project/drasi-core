@@ -72,31 +72,15 @@ impl LifecycleManager {
 
     /// Load configuration from RuntimeConfig and create all components
     ///
-    /// This method creates sources, queries, and reactions from the configuration
-    /// without starting them. Components are not saved during this initialization phase.
+    /// This method creates queries from configuration without starting them.
+    /// Note: Sources and reactions must be added as instances via the builder or API.
     pub async fn load_configuration(&self) -> Result<()> {
         info!("Loading configuration");
 
-        // Load sources
-        for source_config in &self.config.sources {
-            let config = source_config.clone();
-            self.source_manager
-                .add_source_without_save(config, false)
-                .await?;
-        }
-
-        // Load queries
+        // Load queries (only queries use config-based creation)
         for query_config in &self.config.queries {
             let config = query_config.clone();
             self.query_manager.add_query_without_save(config).await?;
-        }
-
-        // Load reactions
-        for reaction_config in &self.config.reactions {
-            let config = reaction_config.clone();
-            self.reaction_manager
-                .add_reaction_without_save(config)
-                .await?;
         }
 
         info!("Configuration loaded successfully");
@@ -191,33 +175,27 @@ impl LifecycleManager {
         let running_before = self.components_running_before_stop.read().await.clone();
 
         // Start sources first
+        // Sources are now instance-based, get list from source manager
         info!("Starting auto-start sources");
-        for source_config in &self.config.sources {
-            let id = &source_config.id;
-            let should_start = source_config.auto_start || running_before.sources.contains(id);
+        let sources = self.source_manager.list_sources().await;
+        for (id, _) in sources {
+            let should_start = running_before.sources.contains(&id);
 
             if should_start {
-                let status = self.source_manager.get_source_status(id.to_string()).await;
+                let status = self.source_manager.get_source_status(id.clone()).await;
                 if matches!(status, Ok(ComponentStatus::Stopped)) {
                     info!(
-                        "Starting source '{}' (auto_start={}, was_running={})",
+                        "Starting source '{}' (was_running={})",
                         id,
-                        source_config.auto_start,
-                        running_before.sources.contains(id)
+                        running_before.sources.contains(&id)
                     );
-                    self.source_manager.start_source(id.to_string()).await?;
+                    self.source_manager.start_source(id.clone()).await?;
                 } else {
                     info!(
                         "Source '{}' already started or starting, status: {:?}",
                         id, status
                     );
                 }
-            } else {
-                let status = self.source_manager.get_source_status(id.to_string()).await;
-                info!(
-                    "Source '{}' will not start (auto_start=false, was not running), status: {:?}",
-                    id, status
-                );
             }
         }
         info!("All required sources started successfully");
@@ -258,22 +236,22 @@ impl LifecycleManager {
         info!("All required queries started successfully");
 
         // Start reactions after queries
+        // Reactions are now instance-based, get list from reaction manager
         info!("Starting auto-start reactions");
-        for reaction_config in &self.config.reactions {
-            let id = &reaction_config.id;
-            let should_start = reaction_config.auto_start || running_before.reactions.contains(id);
+        let reactions = self.reaction_manager.list_reactions().await;
+        for (id, _) in reactions {
+            let should_start = running_before.reactions.contains(&id);
 
             if should_start {
                 let status = self
                     .reaction_manager
-                    .get_reaction_status(id.to_string())
+                    .get_reaction_status(id.clone())
                     .await;
                 if matches!(status, Ok(ComponentStatus::Stopped)) {
                     info!(
-                        "Starting reaction '{}' (auto_start={}, was_running={})",
+                        "Starting reaction '{}' (was_running={})",
                         id,
-                        reaction_config.auto_start,
-                        running_before.reactions.contains(id)
+                        running_before.reactions.contains(&id)
                     );
                     // Pass server core to reaction for direct query subscriptions
                     self.reaction_manager
@@ -285,12 +263,6 @@ impl LifecycleManager {
                         id, status
                     );
                 }
-            } else {
-                let status = self
-                    .reaction_manager
-                    .get_reaction_status(id.to_string())
-                    .await;
-                info!("Reaction '{}' will not start (auto_start=false, was not running), status: {:?}", id, status);
             }
         }
         info!("All required reactions started successfully");

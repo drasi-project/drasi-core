@@ -16,34 +16,37 @@
 //!
 //! This plugin implements HTTP reactions for Drasi and provides extension traits
 //! for configuring HTTP reactions in the Drasi plugin architecture.
+//!
+//! ## Instance-based Usage
+//!
+//! ```rust,ignore
+//! use drasi_plugin_http_reaction::{HttpReaction, HttpReactionConfig};
+//! use drasi_lib::channels::ComponentEventSender;
+//! use std::sync::Arc;
+//!
+//! // Create configuration
+//! let config = HttpReactionConfig {
+//!     base_url: "http://api.example.com".to_string(),
+//!     token: Some("secret-token".to_string()),
+//!     timeout_ms: 5000,
+//!     routes: Default::default(),
+//! };
+//!
+//! // Create instance and add to DrasiLib
+//! let reaction = Arc::new(HttpReaction::new(
+//!     "my-http-reaction",
+//!     vec!["query1".to_string()],
+//!     config,
+//!     event_tx,
+//! ));
+//! drasi.add_reaction(reaction).await?;
+//! ```
 
 pub mod config;
 pub mod http;
 
 pub use config::{CallSpec, HttpReactionConfig, QueryConfig};
 pub use http::HttpReaction;
-pub use drasi_lib::config::ReactionConfig;
-
-/// Extension trait for creating HTTP reactions
-///
-/// This trait is implemented on `ReactionConfig` to provide a fluent builder API
-/// for configuring HTTP reactions.
-///
-/// # Example
-///
-/// ```no_run
-/// use drasi_lib::config::ReactionConfig;
-/// use drasi_plugin_http_reaction::ReactionConfigHttpExt;
-///
-/// let config = ReactionConfig::http()
-///     .with_base_url("http://api.example.com")
-///     .with_timeout_ms(5000)
-///     .build();
-/// ```
-pub trait ReactionConfigHttpExt {
-    /// Create a new HTTP reaction configuration builder
-    fn http() -> HttpReactionBuilder;
-}
 
 /// Builder for HTTP reaction configuration
 pub struct HttpReactionBuilder {
@@ -97,12 +100,6 @@ impl HttpReactionBuilder {
     }
 }
 
-impl ReactionConfigHttpExt for ReactionConfig {
-    fn http() -> HttpReactionBuilder {
-        HttpReactionBuilder::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,16 +123,5 @@ mod tests {
         assert_eq!(config.base_url, "http://api.example.com");
         assert_eq!(config.token, Some("secret-token".to_string()));
         assert_eq!(config.timeout_ms, 10000);
-    }
-
-    #[test]
-    fn test_http_builder_fluent_api() {
-        let config = ReactionConfig::http()
-            .with_base_url("http://localhost:8080")
-            .with_timeout_ms(3000)
-            .build();
-
-        assert_eq!(config.base_url, "http://localhost:8080");
-        assert_eq!(config.timeout_ms, 3000);
     }
 }

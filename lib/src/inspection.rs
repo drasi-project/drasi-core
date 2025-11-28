@@ -120,31 +120,6 @@ impl InspectionAPI {
             .map_err(|_| DrasiError::component_not_found("source", id))
     }
 
-    /// Get the full configuration for a specific source
-    ///
-    /// This returns the complete source configuration including auto_start and bootstrap_provider,
-    /// unlike `get_source_info()` which only returns runtime information.
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use drasi_lib::DrasiLib;
-    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let config = core.get_source_config("my-source").await?;
-    /// println!("Auto-start: {}", config.auto_start);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn get_source_config(
-        &self,
-        id: &str,
-    ) -> crate::error::Result<crate::config::SourceConfig> {
-        self.state_guard.require_initialized().await?;
-        self.source_manager
-            .get_source_config(id)
-            .await
-            .ok_or_else(|| DrasiError::component_not_found("source", id))
-    }
-
     // ============================================================================
     // Query Inspection Methods
     // ============================================================================
@@ -334,68 +309,27 @@ impl InspectionAPI {
             .map_err(|_| DrasiError::component_not_found("reaction", id))
     }
 
-    /// Get the full configuration for a specific reaction
-    ///
-    /// This returns the complete reaction configuration including all fields,
-    /// unlike `get_reaction_info()` which only returns runtime information.
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use drasi_lib::DrasiLib;
-    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let config = core.get_reaction_config("my-reaction").await?;
-    /// println!("Auto-start: {}", config.auto_start);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn get_reaction_config(
-        &self,
-        id: &str,
-    ) -> crate::error::Result<crate::config::ReactionConfig> {
-        self.state_guard.require_initialized().await?;
-        self.reaction_manager
-            .get_reaction_config(id)
-            .await
-            .ok_or_else(|| DrasiError::component_not_found("reaction", id))
-    }
-
     // ============================================================================
     // Full Configuration Snapshot
     // ============================================================================
 
     /// Get a complete configuration snapshot of all components
     ///
-    /// Returns the full server configuration including all sources, queries, and reactions
-    /// with their complete configurations. This is useful for persistence, backups, or introspection.
+    /// Returns the full server configuration including all queries with their complete configurations.
+    /// Note: Sources and reactions are now instance-only and don't have stored configs.
+    /// Use `list_sources()` and `list_reactions()` to get runtime information about these components.
     ///
     /// # Example
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
     /// let config = core.get_current_config().await?;
-    /// println!("Server has {} sources, {} queries, {} reactions",
-    ///          config.sources.len(), config.queries.len(), config.reactions.len());
+    /// println!("Server has {} queries", config.queries.len());
     /// # Ok(())
     /// # }
     /// ```
     pub async fn get_current_config(&self) -> crate::error::Result<DrasiLibConfig> {
         self.state_guard.require_initialized().await?;
-
-        // Collect all source configs
-        let source_ids: Vec<String> = self
-            .source_manager
-            .list_sources()
-            .await
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-
-        let mut sources = Vec::new();
-        for id in source_ids {
-            if let Some(config) = self.source_manager.get_source_config(&id).await {
-                sources.push(config);
-            }
-        }
 
         // Collect all query configs
         let query_ids: Vec<String> = self
@@ -413,22 +347,6 @@ impl InspectionAPI {
             }
         }
 
-        // Collect all reaction configs
-        let reaction_ids: Vec<String> = self
-            .reaction_manager
-            .list_reactions()
-            .await
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-
-        let mut reactions = Vec::new();
-        for id in reaction_ids {
-            if let Some(config) = self.reaction_manager.get_reaction_config(&id).await {
-                reactions.push(config);
-            }
-        }
-
         Ok(DrasiLibConfig {
             server_core: DrasiLibSettings {
                 id: self.config.server_core.id.clone(),
@@ -436,9 +354,7 @@ impl InspectionAPI {
                 dispatch_buffer_capacity: self.config.server_core.dispatch_buffer_capacity,
             },
             storage_backends: vec![],
-            sources,
             queries,
-            reactions,
         })
     }
 }

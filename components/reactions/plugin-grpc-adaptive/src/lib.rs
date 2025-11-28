@@ -21,4 +21,3 @@ pub mod grpc_adaptive;
 
 pub use config::GrpcAdaptiveReactionConfig;
 pub use grpc_adaptive::AdaptiveGrpcReaction;
-pub use drasi_lib::config::ReactionConfig;

@@ -14,39 +14,18 @@
 
 #[cfg(test)]
 mod mock_source_tests {
-    use super::super::MockSource;
-    use drasi_lib::channels::*;
-    use drasi_lib::config::SourceConfig;
-    use drasi_lib::sources::Source;
-    use serde_json::json;
-    use std::collections::HashMap;
-    use tokio::sync::mpsc;
-
-    /// Helper to convert a serde_json::Value object to HashMap<String, serde_json::Value>
-    fn to_hashmap(value: serde_json::Value) -> HashMap<String, serde_json::Value> {
-        match value {
-            serde_json::Value::Object(map) => map.into_iter().collect(),
-            _ => HashMap::new(),
-        }
-    }
+    use crate::{MockSource, MockSourceConfig};
+    use drasi_lib::channels::ComponentStatus;
+    use drasi_lib::plugin_core::Source;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_mock_source_counter() {
-        let (event_tx, _event_rx) = mpsc::channel(100);
-
-        let config = SourceConfig {
-            id: "test-counter".to_string(),
-            auto_start: false,
-            config: drasi_lib::config::SourceSpecificConfig::Mock(to_hashmap(json!({
-                "data_type": "counter",
-                "interval_ms": 100
-            }))),
-            bootstrap_provider: None,
-            dispatch_buffer_capacity: None,
-            dispatch_mode: Some(DispatchMode::Broadcast),
+        let config = MockSourceConfig {
+            data_type: "counter".to_string(),
+            interval_ms: 100,
         };
 
-        let source = MockSource::new(config, event_tx).unwrap();
+        let source = MockSource::new("test-counter", config).unwrap();
         let mut rx = source.test_subscribe();
 
         // Start the source
@@ -75,21 +54,12 @@ mod mock_source_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_mock_source_sensor() {
-        let (event_tx, _event_rx) = mpsc::channel(100);
-
-        let config = SourceConfig {
-            id: "test-sensor".to_string(),
-            auto_start: false,
-            config: drasi_lib::config::SourceSpecificConfig::Mock(to_hashmap(json!({
-                "data_type": "sensor",
-                "interval_ms": 100
-            }))),
-            bootstrap_provider: None,
-            dispatch_buffer_capacity: None,
-            dispatch_mode: Some(DispatchMode::Broadcast),
+        let config = MockSourceConfig {
+            data_type: "sensor".to_string(),
+            interval_ms: 100,
         };
 
-        let source = MockSource::new(config, event_tx).unwrap();
+        let source = MockSource::new("test-sensor", config).unwrap();
         let mut rx = source.test_subscribe();
 
         // Start the source
@@ -116,21 +86,12 @@ mod mock_source_tests {
 
     #[tokio::test]
     async fn test_mock_source_status() {
-        let (event_tx, _event_rx) = mpsc::channel(100);
-
-        let config = SourceConfig {
-            id: "test-status".to_string(),
-            auto_start: false,
-            config: drasi_lib::config::SourceSpecificConfig::Mock(to_hashmap(json!({
-                "data_type": "counter",
-                "interval_ms": 1000
-            }))),
-            bootstrap_provider: None,
-            dispatch_buffer_capacity: None,
-            dispatch_mode: None,
+        let config = MockSourceConfig {
+            data_type: "counter".to_string(),
+            interval_ms: 1000,
         };
 
-        let source = MockSource::new(config, event_tx).unwrap();
+        let source = MockSource::new("test-status", config).unwrap();
 
         // Initial status
         assert_eq!(source.status().await, ComponentStatus::Stopped);
