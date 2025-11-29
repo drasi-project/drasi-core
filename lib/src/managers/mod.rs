@@ -12,15 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod adaptive_batcher;
-pub mod conversion;
-pub mod logging;
-pub mod state_validation;
-pub mod time;
+//! Shared utilities for component managers (SourceManager, QueryManager, ReactionManager)
 
-pub use adaptive_batcher::*;
+mod logging;
+mod state_validation;
+
 pub use logging::*;
 pub use state_validation::*;
-
-#[cfg(test)]
-mod tests;

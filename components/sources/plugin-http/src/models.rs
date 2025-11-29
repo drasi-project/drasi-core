@@ -79,7 +79,7 @@ pub fn convert_http_to_source_change(
     // Get timestamp or use current time in nanoseconds
     let get_timestamp = |ts: Option<u64>| -> u64 {
         ts.unwrap_or_else(|| {
-            drasi_lib::utils::time::get_system_time_nanos().unwrap_or_else(|e| {
+            crate::time::get_system_time_nanos().unwrap_or_else(|e| {
                 log::warn!(
                     "Failed to get system time for HTTP event: {}, using fallback",
                     e

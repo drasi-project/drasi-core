@@ -135,6 +135,7 @@ pub mod config;
 pub use config::ApplicationSourceConfig;
 
 mod property_builder;
+mod time;
 
 #[cfg(test)]
 mod tests;
@@ -183,7 +184,7 @@ impl ApplicationSourceHandle {
         properties: drasi_core::models::ElementPropertyMap,
     ) -> Result<()> {
         let effective_from =
-            drasi_lib::utils::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
+            crate::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
                 warn!(
                     "Failed to get timestamp for node insert: {}, using fallback",
                     e
@@ -214,7 +215,7 @@ impl ApplicationSourceHandle {
         properties: drasi_core::models::ElementPropertyMap,
     ) -> Result<()> {
         let effective_from =
-            drasi_lib::utils::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
+            crate::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
                 warn!(
                     "Failed to get timestamp for node update: {}, using fallback",
                     e
@@ -244,7 +245,7 @@ impl ApplicationSourceHandle {
         labels: Vec<impl Into<Arc<str>>>,
     ) -> Result<()> {
         let effective_from =
-            drasi_lib::utils::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
+            crate::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
                 warn!("Failed to get timestamp for delete: {}, using fallback", e);
                 (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
             });
@@ -271,7 +272,7 @@ impl ApplicationSourceHandle {
         end_node_id: impl Into<Arc<str>>,
     ) -> Result<()> {
         let effective_from =
-            drasi_lib::utils::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
+            crate::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
                 warn!(
                     "Failed to get timestamp for relation insert: {}, using fallback",
                     e

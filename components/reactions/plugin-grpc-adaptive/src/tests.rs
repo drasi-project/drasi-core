@@ -20,7 +20,7 @@ use drasi_lib::reactions::common::AdaptiveBatchConfig as ConfigAdaptiveBatchConf
 use drasi_lib::reactions::grpc_adaptive::GrpcAdaptiveReactionConfig;
 use drasi_lib::reactions::Reaction;
 use drasi_lib::server_core::DrasiServerCore;
-use drasi_lib::utils::AdaptiveBatchConfig;
+use crate::adaptive_batcher::AdaptiveBatchConfig;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;

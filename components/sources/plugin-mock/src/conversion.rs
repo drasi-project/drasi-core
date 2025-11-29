@@ -27,18 +27,9 @@ use serde_json::Value;
 /// # Returns
 ///
 /// Returns the converted Element value or an error with context.
-///
-/// # Examples
-///
-/// ```
-/// use serde_json::json;
-/// use drasi_lib::utils::conversion::safe_json_to_element_value;
-///
-/// let json_val = json!({"key": "value"});
-/// let element = safe_json_to_element_value(&json_val).expect("Conversion failed");
-/// ```
+#[allow(dead_code)]
 pub fn safe_json_to_element_value(json_value: &Value) -> Result<drasi_core::models::ElementValue> {
-    crate::sources::convert_json_to_element_value(json_value).with_context(|| {
+    drasi_lib::sources::convert_json_to_element_value(json_value).with_context(|| {
         format!(
             "Failed to convert JSON value to Element value: {:?}",
             json_value
@@ -59,23 +50,11 @@ pub fn safe_json_to_element_value(json_value: &Value) -> Result<drasi_core::mode
 /// # Returns
 ///
 /// Returns the converted Element value or the provided default.
-///
-/// # Examples
-///
-/// ```
-/// use serde_json::json;
-/// use drasi_core::models::ElementValue;
-/// use drasi_lib::utils::conversion::json_to_element_value_or_default;
-///
-/// let json_val = json!({"key": "value"});
-/// let default = ElementValue::Null;
-/// let element = json_to_element_value_or_default(&json_val, default);
-/// ```
 pub fn json_to_element_value_or_default(
     json_value: &Value,
     default: drasi_core::models::ElementValue,
 ) -> drasi_core::models::ElementValue {
-    match crate::sources::convert_json_to_element_value(json_value) {
+    match drasi_lib::sources::convert_json_to_element_value(json_value) {
         Ok(value) => value,
         Err(e) => {
             log::warn!(
@@ -100,22 +79,13 @@ pub fn json_to_element_value_or_default(
 ///
 /// Returns a vector of successfully converted Element values.
 /// Failed conversions are logged but do not stop the process.
-///
-/// # Examples
-///
-/// ```
-/// use serde_json::json;
-/// use drasi_lib::utils::conversion::batch_json_to_element_values;
-///
-/// let json_values = vec![json!(1), json!("string"), json!(true)];
-/// let elements = batch_json_to_element_values(json_values.iter());
-/// ```
+#[allow(dead_code)]
 pub fn batch_json_to_element_values<'a>(
     values: impl Iterator<Item = &'a Value>,
 ) -> Vec<drasi_core::models::ElementValue> {
     values
         .filter_map(
-            |json_value| match crate::sources::convert_json_to_element_value(json_value) {
+            |json_value| match drasi_lib::sources::convert_json_to_element_value(json_value) {
                 Ok(value) => Some(value),
                 Err(e) => {
                     log::error!(

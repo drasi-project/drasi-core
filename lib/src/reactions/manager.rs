@@ -20,9 +20,9 @@ use tokio::sync::RwLock;
 
 use crate::channels::*;
 use crate::config::ReactionRuntime;
-use crate::plugin_core::{QuerySubscriber, Reaction};
 use crate::lib_core::DrasiLib;
-use crate::utils::*;
+use crate::managers::{is_operation_valid, log_component_error, Operation};
+use crate::plugin_core::{QuerySubscriber, Reaction};
 
 pub struct ReactionManager {
     reactions: Arc<RwLock<HashMap<String, Arc<dyn Reaction>>>>,

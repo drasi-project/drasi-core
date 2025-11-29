@@ -36,10 +36,12 @@ use drasi_query_gql::GQLParser;
 
 use crate::channels::*;
 use crate::config::{QueryConfig, QueryLanguage, QueryRuntime};
+use crate::managers::{
+    is_operation_valid, log_component_error, log_component_start, log_component_stop, Operation,
+};
 use crate::queries::{PriorityQueue, QueryBase};
 // DataRouter no longer needed - queries subscribe directly to sources
 use crate::sources::SourceManager;
-use crate::utils::*;
 
 /// Default query configuration
 struct DefaultQueryConfig;

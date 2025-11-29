@@ -16,6 +16,7 @@
 //!
 //! This plugin implements gRPC Adaptive reactions for Drasi.
 
+mod adaptive_batcher;
 pub mod config;
 pub mod grpc_adaptive;
 

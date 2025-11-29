@@ -23,14 +23,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// # Returns
 ///
 /// Returns the timestamp in nanoseconds, or an error if the system time is invalid.
-///
-/// # Examples
-///
-/// ```
-/// use drasi_lib::utils::time::get_current_timestamp_nanos;
-///
-/// let timestamp = get_current_timestamp_nanos().expect("Failed to get timestamp");
-/// ```
 pub fn get_current_timestamp_nanos() -> Result<u64> {
     // Try to get nanosecond precision first
     match chrono::Utc::now().timestamp_nanos_opt() {
@@ -62,14 +54,6 @@ pub fn get_current_timestamp_nanos() -> Result<u64> {
 /// # Returns
 ///
 /// Returns the duration in nanoseconds, or an error if system time is before Unix epoch.
-///
-/// # Examples
-///
-/// ```
-/// use drasi_lib::utils::time::get_system_time_nanos;
-///
-/// let timestamp = get_system_time_nanos().expect("Failed to get system time");
-/// ```
 pub fn get_system_time_nanos() -> Result<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -92,15 +76,7 @@ pub fn get_system_time_nanos() -> Result<u64> {
 /// # Returns
 ///
 /// Returns a timestamp in nanoseconds, using the first successful method.
-///
-/// # Examples
-///
-/// ```
-/// use drasi_lib::utils::time::get_timestamp_with_fallback;
-///
-/// // Will use current time or 0 if all methods fail
-/// let timestamp = get_timestamp_with_fallback(Some(0));
-/// ```
+#[allow(dead_code)]
 pub fn get_timestamp_with_fallback(default_on_error: Option<u64>) -> Result<u64> {
     // Try chrono first (handles time zones correctly)
     if let Ok(timestamp) = get_current_timestamp_nanos() {

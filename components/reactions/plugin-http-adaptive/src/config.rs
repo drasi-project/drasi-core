@@ -49,7 +49,7 @@ fn default_timeout_ms() -> u64 {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,ignore
 /// use drasi_lib::config::{ReactionConfig, ReactionSpecificConfig};
 /// use drasi_lib::reactions::http_adaptive::HttpAdaptiveReactionConfig;
 /// use drasi_lib::reactions::common::AdaptiveBatchConfig;

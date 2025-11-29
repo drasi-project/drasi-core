@@ -17,6 +17,7 @@
 //! This plugin implements HTTP Adaptive reactions for Drasi and provides extension traits
 //! for configuring HTTP Adaptive reactions in the Drasi plugin architecture.
 
+mod adaptive_batcher;
 pub mod config;
 pub mod http_adaptive;
 

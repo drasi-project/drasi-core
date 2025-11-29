@@ -114,9 +114,9 @@ use tokio::sync::RwLock;
 use tonic::{transport::Server, Request, Response, Status};
 
 use drasi_lib::channels::*;
+use drasi_lib::managers::{log_component_start, log_component_stop};
 use drasi_lib::plugin_core::Source;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
-use drasi_lib::utils::*;
 
 // Include generated protobuf code
 pub mod proto {

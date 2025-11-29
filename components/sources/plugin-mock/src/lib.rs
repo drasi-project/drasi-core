@@ -112,7 +112,9 @@
 //! - `test_subscribe()` - Create a test subscription to receive events
 
 mod config;
+mod conversion;
 mod mock;
+mod time;
 
 #[cfg(test)]
 mod tests;

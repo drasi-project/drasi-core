@@ -53,9 +53,9 @@ pub mod sources;
 // Sub-modules for lib_core operations (split for maintainability)
 mod lib_core_ops;
 #[cfg_attr(not(test), doc(hidden))]
-pub mod state_guard;
+pub mod managers;
 #[cfg_attr(not(test), doc(hidden))]
-pub mod utils;
+pub mod state_guard;
 
 // Config module needs to be public for config file loading
 pub mod config;

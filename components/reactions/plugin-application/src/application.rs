@@ -25,7 +25,7 @@ use tokio::sync::{mpsc, RwLock};
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus, QueryResult};
 use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::utils::log_component_start;
+use drasi_lib::managers::log_component_start;
 use std::collections::HashMap;
 
 /// Handle for programmatic consumption of query results from an Application Reaction

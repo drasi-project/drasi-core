@@ -23,7 +23,7 @@ use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
 use drasi_lib::config::common::LogLevel;
 use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::utils::log_component_start;
+use drasi_lib::managers::log_component_start;
 
 pub struct LogReaction {
     base: ReactionBase,

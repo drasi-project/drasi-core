@@ -171,7 +171,9 @@
 pub mod config;
 pub use config::HttpSourceConfig;
 
+mod adaptive_batcher;
 mod models;
+mod time;
 
 // Export HTTP source models and conversion
 pub use models::{convert_http_to_source_change, HttpElement, HttpSourceChange};
@@ -196,7 +198,8 @@ use tokio::time::timeout;
 use drasi_lib::channels::*;
 use drasi_lib::plugin_core::Source;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
-use drasi_lib::utils::{AdaptiveBatchConfig, AdaptiveBatcher};
+
+use crate::adaptive_batcher::{AdaptiveBatchConfig, AdaptiveBatcher};
 
 /// Response for event submission
 #[derive(Debug, Serialize, Deserialize)]

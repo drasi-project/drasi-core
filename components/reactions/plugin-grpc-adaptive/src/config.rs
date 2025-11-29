@@ -53,7 +53,7 @@ fn default_initial_connection_timeout_ms() -> u64 {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,ignore
 /// use drasi_lib::config::{ReactionConfig, ReactionSpecificConfig};
 /// use drasi_lib::reactions::grpc_adaptive::GrpcAdaptiveReactionConfig;
 /// use drasi_lib::reactions::common::AdaptiveBatchConfig;

@@ -65,24 +65,6 @@ impl AdaptiveBatchConfig {
     /// - **Burst handling**: Absorbs temporary traffic spikes without triggering backpressure
     /// - **Throughput smoothing**: Reduces frequency of blocking on channel sends
     ///
-    /// # Examples
-    ///
-    /// ```
-    /// use drasi_lib::utils::AdaptiveBatchConfig;
-    /// use std::time::Duration;
-    ///
-    /// let config = AdaptiveBatchConfig {
-    ///     max_batch_size: 1000,
-    ///     min_batch_size: 10,
-    ///     max_wait_time: Duration::from_millis(100),
-    ///     min_wait_time: Duration::from_millis(1),
-    ///     throughput_window: Duration::from_secs(5),
-    ///     adaptive_enabled: true,
-    /// };
-    ///
-    /// assert_eq!(config.recommended_channel_capacity(), 5000);
-    /// ```
-    ///
     /// # Buffer Multiplier Rationale
     ///
     /// The 5x multiplier is chosen to balance memory usage and throughput:
@@ -335,12 +317,14 @@ impl<T> AdaptiveBatcher<T> {
 }
 
 /// Simple non-adaptive batcher for comparison/fallback
+#[allow(dead_code)]
 pub struct FixedBatcher<T> {
     receiver: mpsc::Receiver<T>,
     batch_size: usize,
     timeout: Duration,
 }
 
+#[allow(dead_code)]
 impl<T> FixedBatcher<T> {
     pub fn new(receiver: mpsc::Receiver<T>, batch_size: usize, timeout: Duration) -> Self {
         Self {
