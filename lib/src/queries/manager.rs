@@ -333,7 +333,7 @@ impl Query for DrasiQuery {
         );
 
         let mut bootstrap_channels = Vec::new();
-        let mut subscription_tasks = Vec::new();
+        let mut subscription_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
         for subscription in &self.base.config.source_subscriptions {
             let source_id = &subscription.source_id;
@@ -345,6 +345,11 @@ impl Query for DrasiQuery {
                         "Query '{}' failed to find source '{}' in SourceManager",
                         self.base.config.id, source_id
                     );
+                    // Cleanup already-spawned tasks before returning error
+                    for handle in subscription_tasks.drain(..) {
+                        handle.abort();
+                        let _ = handle.await;
+                    }
                     *self.base.status.write().await = ComponentStatus::Error;
                     return Err(anyhow::anyhow!("Source '{}' not found", source_id));
                 }
@@ -367,6 +372,11 @@ impl Query for DrasiQuery {
                         "Query '{}' failed to subscribe to source '{}': {}",
                         self.base.config.id, source_id, e
                     );
+                    // Cleanup already-spawned tasks before returning error
+                    for handle in subscription_tasks.drain(..) {
+                        handle.abort();
+                        let _ = handle.await;
+                    }
                     *self.base.status.write().await = ComponentStatus::Error;
                     return Err(anyhow::anyhow!(
                         "Failed to subscribe to source '{}': {}",

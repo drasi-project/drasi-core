@@ -246,6 +246,49 @@ mod manager_tests {
     }
 
     #[tokio::test]
+    async fn test_partial_subscription_failure_cleans_up_tasks() {
+        let (manager, _event_rx, event_tx, source_manager) = create_test_manager().await;
+
+        // Add only source1 - source2 will be missing to trigger failure
+        let source1 = create_test_mock_source("source1".to_string(), event_tx);
+        source_manager.add_source(source1).await.unwrap();
+
+        // Create query that subscribes to TWO sources - source2 is missing
+        let config = create_test_query_config(
+            "test-query",
+            vec!["source1".to_string(), "source2".to_string()],
+        );
+        manager.add_query(config).await.unwrap();
+
+        // Starting should fail because source2 doesn't exist
+        let result = manager.start_query("test-query".to_string()).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("source2"));
+
+        // Query should be in Error state
+        let status = manager
+            .get_query_status("test-query".to_string())
+            .await
+            .unwrap();
+        assert!(
+            matches!(status, ComponentStatus::Error),
+            "Expected Error status after failed start"
+        );
+
+        // Crucially: subscription tasks from source1 should have been cleaned up
+        let query = manager.get_query_instance("test-query").await.unwrap();
+        let concrete = query.as_any().downcast_ref::<DrasiQuery>().unwrap();
+
+        // The forwarder task for source1 was spawned before source2 subscription failed,
+        // so the rollback code should have aborted it
+        assert_eq!(
+            concrete.subscription_task_count().await,
+            0,
+            "Subscription tasks should be cleaned up after partial failure"
+        );
+    }
+
+    #[tokio::test]
     async fn test_add_gql_query() {
         let (manager, _event_rx, _event_tx, _source_manager) = create_test_manager().await;
 
