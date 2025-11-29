@@ -121,10 +121,10 @@ mod tests {
         let result = guard.require_initialized().await;
         assert!(result.is_err());
         match result {
-            Err(DrasiError::OperationFailed(message)) => {
+            Err(DrasiError::InvalidState { message }) => {
                 assert!(message.contains("initialized"));
             }
-            _ => panic!("Expected OperationFailed error"),
+            _ => panic!("Expected InvalidState error"),
         }
     }
 

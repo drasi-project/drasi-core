@@ -580,7 +580,7 @@ impl DrasiLib {
     /// ```
     pub async fn from_config_str(yaml: &str) -> crate::error::Result<Self> {
         let config: DrasiLibConfig = serde_yaml::from_str(yaml)
-            .map_err(|e| DrasiError::InvalidConfig(format!("Failed to parse YAML: {}", e)))?;
+            .map_err(|e| DrasiError::invalid_config(format!("Failed to parse YAML: {}", e)))?;
         config
             .validate()
             .map_err(|e| DrasiError::startup_validation(e.to_string()))?;

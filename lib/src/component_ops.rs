@@ -12,19 +12,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Generic component operations for source, query, and reaction managers
+//! Generic component operations for source, query, and reaction managers.
 //!
-//! This module provides generic helper functions to eliminate duplication in component
-//! lifecycle management. The error mapping logic is centralized here so that start/stop/delete
-//! operations for sources, queries, and reactions can share the same error handling code.
+//! This module provides helper functions for converting internal `anyhow::Error` results
+//! to structured `DrasiError` variants at the public API boundary.
+//!
+//! # Error Conversion Pattern
+//!
+//! Internal manager code uses `anyhow::Result<T>` for flexibility. At the public API
+//! boundary (in `lib_core_ops/*.rs`), these are converted to `DrasiError` variants
+//! using the helpers in this module.
+//!
+//! ```ignore
+//! // Internal manager returns anyhow::Result
+//! let result = self.source_manager.start_source(id).await;
+//!
+//! // Convert to DrasiError at API boundary
+//! map_component_error(result, "source", id, "start")
+//! ```
 
 use crate::error::DrasiError;
 use anyhow::Result as AnyhowResult;
 
-/// Maps anyhow::Error from manager operations to DrasiError
+// ============================================================================
+// Error mapping functions
+// ============================================================================
+
+/// Maps `anyhow::Error` from manager operations to `DrasiError`.
 ///
-/// This centralizes the error mapping logic used by start/stop operations across
-/// all component types (sources, queries, reactions).
+/// This function converts internal errors to structured `DrasiError` variants
+/// at the public API boundary. It uses the `OperationFailed` variant which
+/// includes full context about the component and operation.
 ///
 /// # Arguments
 ///
@@ -35,7 +53,14 @@ use anyhow::Result as AnyhowResult;
 ///
 /// # Returns
 ///
-/// Returns the original result on success, or maps anyhow::Error to appropriate DrasiError
+/// Returns the original value on success, or a structured `DrasiError` on failure.
+///
+/// # Example
+///
+/// ```ignore
+/// let result = self.source_manager.start_source(id.to_string()).await;
+/// map_component_error(result, "source", id, "start")
+/// ```
 pub fn map_component_error<T>(
     result: AnyhowResult<T>,
     component_type: &str,
@@ -43,46 +68,93 @@ pub fn map_component_error<T>(
     operation: &str,
 ) -> crate::error::Result<T> {
     result.map_err(|e| {
-        let error_msg = e.to_string();
-        if error_msg.contains("not found") {
-            DrasiError::component_not_found(component_type, component_id)
-        } else {
-            DrasiError::component_error(format!(
-                "Failed to {} {} '{}': {}",
-                operation, component_type, component_id, e
-            ))
-        }
+        DrasiError::operation_failed(component_type, component_id, operation, e.to_string())
     })
 }
 
-/// Maps anyhow::Error to DrasiError for state-related errors
+/// Maps `anyhow::Error` to `DrasiError` for state-related errors.
 ///
 /// This is used for operations where state validation is the primary concern
-/// (e.g., query/reaction operations that check if dependencies are ready).
+/// (e.g., checking if dependencies are ready). It uses the `InvalidState` variant.
 ///
 /// # Arguments
 ///
 /// * `result` - The result from a manager operation
-/// * `component_type` - The type of component ("source", "query", "reaction")
-/// * `component_id` - The ID of the component
+/// * `_component_type` - The type of component (reserved for future use)
+/// * `_component_id` - The ID of the component (reserved for future use)
 ///
 /// # Returns
 ///
-/// Returns the original result on success, or maps anyhow::Error to appropriate DrasiError
+/// Returns the original value on success, or an `InvalidState` error on failure.
 pub fn map_state_error<T>(
     result: AnyhowResult<T>,
-    component_type: &str,
-    component_id: &str,
+    _component_type: &str,
+    _component_id: &str,
 ) -> crate::error::Result<T> {
-    result.map_err(|e| {
-        let error_msg = e.to_string();
-        if error_msg.contains("not found") {
-            DrasiError::component_not_found(component_type, component_id)
-        } else {
-            DrasiError::invalid_state(error_msg)
-        }
-    })
+    result.map_err(|e| DrasiError::invalid_state(e.to_string()))
 }
+
+// ============================================================================
+// Component-specific error constructors
+// ============================================================================
+
+/// Create a "source not found" error.
+#[inline]
+pub fn source_not_found(id: &str) -> DrasiError {
+    DrasiError::component_not_found("source", id)
+}
+
+/// Create a "query not found" error.
+#[inline]
+pub fn query_not_found(id: &str) -> DrasiError {
+    DrasiError::component_not_found("query", id)
+}
+
+/// Create a "reaction not found" error.
+#[inline]
+pub fn reaction_not_found(id: &str) -> DrasiError {
+    DrasiError::component_not_found("reaction", id)
+}
+
+/// Create a "source already exists" error.
+#[inline]
+pub fn source_already_exists(id: &str) -> DrasiError {
+    DrasiError::already_exists("source", id)
+}
+
+/// Create a "query already exists" error.
+#[inline]
+pub fn query_already_exists(id: &str) -> DrasiError {
+    DrasiError::already_exists("query", id)
+}
+
+/// Create a "reaction already exists" error.
+#[inline]
+pub fn reaction_already_exists(id: &str) -> DrasiError {
+    DrasiError::already_exists("reaction", id)
+}
+
+/// Create an operation failed error for a source.
+#[inline]
+pub fn source_operation_failed(id: &str, operation: &str, reason: impl Into<String>) -> DrasiError {
+    DrasiError::operation_failed("source", id, operation, reason)
+}
+
+/// Create an operation failed error for a query.
+#[inline]
+pub fn query_operation_failed(id: &str, operation: &str, reason: impl Into<String>) -> DrasiError {
+    DrasiError::operation_failed("query", id, operation, reason)
+}
+
+/// Create an operation failed error for a reaction.
+#[inline]
+pub fn reaction_operation_failed(id: &str, operation: &str, reason: impl Into<String>) -> DrasiError {
+    DrasiError::operation_failed("reaction", id, operation, reason)
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -98,21 +170,26 @@ mod tests {
     }
 
     #[test]
-    fn test_map_component_error_not_found() {
-        let result: AnyhowResult<()> = Err(anyhow!("Source not found: test-id"));
-        let mapped = map_component_error(result, "source", "test-id", "start");
-        assert!(mapped.is_err());
-        let err = mapped.unwrap_err();
-        assert!(err.to_string().contains("not found"));
-    }
-
-    #[test]
-    fn test_map_component_error_generic() {
+    fn test_map_component_error_failure() {
         let result: AnyhowResult<()> = Err(anyhow!("Connection timeout"));
         let mapped = map_component_error(result, "query", "test-query", "stop");
         assert!(mapped.is_err());
+
         let err = mapped.unwrap_err();
-        assert!(err.to_string().contains("Failed to stop query"));
+        match err {
+            DrasiError::OperationFailed {
+                component_type,
+                component_id,
+                operation,
+                reason,
+            } => {
+                assert_eq!(component_type, "query");
+                assert_eq!(component_id, "test-query");
+                assert_eq!(operation, "stop");
+                assert!(reason.contains("Connection timeout"));
+            }
+            _ => panic!("Expected OperationFailed variant"),
+        }
     }
 
     #[test]
@@ -124,20 +201,77 @@ mod tests {
     }
 
     #[test]
-    fn test_map_state_error_not_found() {
-        let result: AnyhowResult<()> = Err(anyhow!("Component not found"));
-        let mapped = map_state_error(result, "query", "missing-query");
-        assert!(mapped.is_err());
-        let err = mapped.unwrap_err();
-        assert!(err.to_string().contains("not found"));
-    }
-
-    #[test]
-    fn test_map_state_error_invalid_state() {
+    fn test_map_state_error_failure() {
         let result: AnyhowResult<()> = Err(anyhow!("Component is already running"));
         let mapped = map_state_error(result, "source", "running-source");
         assert!(mapped.is_err());
+
         let err = mapped.unwrap_err();
-        assert!(err.to_string().contains("already running"));
+        match err {
+            DrasiError::InvalidState { message } => {
+                assert!(message.contains("already running"));
+            }
+            _ => panic!("Expected InvalidState variant"),
+        }
+    }
+
+    #[test]
+    fn test_source_not_found() {
+        let err = source_not_found("my-source");
+        match err {
+            DrasiError::ComponentNotFound {
+                component_type,
+                component_id,
+            } => {
+                assert_eq!(component_type, "source");
+                assert_eq!(component_id, "my-source");
+            }
+            _ => panic!("Expected ComponentNotFound variant"),
+        }
+    }
+
+    #[test]
+    fn test_query_not_found() {
+        let err = query_not_found("my-query");
+        assert_eq!(err.to_string(), "query 'my-query' not found");
+    }
+
+    #[test]
+    fn test_reaction_not_found() {
+        let err = reaction_not_found("my-reaction");
+        assert_eq!(err.to_string(), "reaction 'my-reaction' not found");
+    }
+
+    #[test]
+    fn test_source_already_exists() {
+        let err = source_already_exists("existing-source");
+        assert_eq!(err.to_string(), "source 'existing-source' already exists");
+    }
+
+    #[test]
+    fn test_source_operation_failed() {
+        let err = source_operation_failed("my-source", "start", "Connection refused");
+        assert_eq!(
+            err.to_string(),
+            "Failed to start source 'my-source': Connection refused"
+        );
+    }
+
+    #[test]
+    fn test_query_operation_failed() {
+        let err = query_operation_failed("my-query", "stop", "Timeout");
+        assert_eq!(
+            err.to_string(),
+            "Failed to stop query 'my-query': Timeout"
+        );
+    }
+
+    #[test]
+    fn test_reaction_operation_failed() {
+        let err = reaction_operation_failed("my-reaction", "delete", "In use");
+        assert_eq!(
+            err.to_string(),
+            "Failed to delete reaction 'my-reaction': In use"
+        );
     }
 }
