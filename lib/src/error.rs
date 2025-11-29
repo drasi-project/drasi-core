@@ -308,8 +308,6 @@ mod tests {
 
     #[test]
     fn test_internal_error_transparent() {
-        use std::error::Error;
-
         // Create an anyhow error with a source chain
         let io_error = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
         let anyhow_err = anyhow::Error::new(io_error).context("Failed to read config");
