@@ -39,10 +39,10 @@ impl ReactionManager {
         }
     }
 
-    /// Add a reaction instance.
+    /// Add a reaction instance, taking ownership and wrapping it in an Arc internally.
     ///
     /// # Parameters
-    /// - `reaction`: The reaction instance to add
+    /// - `reaction`: The reaction instance to add (ownership is transferred)
     ///
     /// # Returns
     /// - `Ok(())` if the reaction was added successfully
@@ -53,7 +53,14 @@ impl ReactionManager {
     /// if you need to start it after adding.
     ///
     /// The event channel is automatically injected into the reaction before it is stored.
-    pub async fn add_reaction(&self, reaction: Arc<dyn Reaction>) -> Result<()> {
+    ///
+    /// # Example
+    /// ```ignore
+    /// let reaction = MyReaction::new("my-reaction", vec!["query1".into()]);
+    /// manager.add_reaction(reaction).await?;  // Ownership transferred
+    /// ```
+    pub async fn add_reaction(&self, reaction: impl Reaction + 'static) -> Result<()> {
+        let reaction: Arc<dyn Reaction> = Arc::new(reaction);
         let reaction_id = reaction.id().to_string();
 
         // Inject the event channel before storing

@@ -188,12 +188,18 @@ impl SourceBase {
         }
     }
 
-    /// Set the bootstrap provider for this source
+    /// Set the bootstrap provider for this source, taking ownership.
     ///
     /// Call this after creating the SourceBase if the source plugin supports bootstrapping.
     /// The bootstrap provider is created by the plugin using its own configuration.
-    pub async fn set_bootstrap_provider(&self, provider: Arc<dyn BootstrapProvider>) {
-        *self.bootstrap_provider.write().await = Some(provider);
+    ///
+    /// # Example
+    /// ```ignore
+    /// let provider = MyBootstrapProvider::new(config);
+    /// source_base.set_bootstrap_provider(provider).await;  // Ownership transferred
+    /// ```
+    pub async fn set_bootstrap_provider(&self, provider: impl BootstrapProvider + 'static) {
+        *self.bootstrap_provider.write().await = Some(Arc::new(provider));
     }
 
     /// Get the source ID

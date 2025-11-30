@@ -55,7 +55,7 @@ mod tests {
         let mut config = DrasiLibConfig::default();
 
         // Note: Sources and reactions are now instance-based and not part of config.
-        // They are passed as pre-built Arc<dyn Source> and Arc<dyn Reaction> instances.
+        // They are passed as owned instances via add_source() and add_reaction().
 
         // Add queries with different dispatch modes
         config.queries.push(QueryConfig {

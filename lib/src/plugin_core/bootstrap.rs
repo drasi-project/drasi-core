@@ -49,9 +49,9 @@
 //!     }
 //! }
 //!
-//! // Source plugin creates the provider:
-//! let provider = Arc::new(MyBootstrapProvider::new(config));
-//! source_base.set_bootstrap_provider(provider).await;
+//! // Source plugin creates the provider and transfers ownership:
+//! let provider = MyBootstrapProvider::new(config);
+//! source_base.set_bootstrap_provider(provider).await;  // Ownership transferred
 //! ```
 
 // Re-export the existing BootstrapProvider trait from the bootstrap module

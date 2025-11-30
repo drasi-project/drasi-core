@@ -25,7 +25,6 @@
 
 use anyhow::Result;
 use drasi_lib::{DrasiLib, api::Query};
-use std::sync::Arc;
 
 // Import the plugin types and their configs directly
 use drasi_plugin_mock::{MockSource, MockSourceConfig};
@@ -67,7 +66,8 @@ async fn main() -> Result<()> {
     // Step 3: Create the MockSource instance
     // YOU create it - not a registry or factory
     // Note: event_tx is no longer passed - DrasiLib injects it automatically when adding
-    let mock_source = Arc::new(MockSource::new("mock-source", mock_source_config)?);
+    // Ownership is transferred to DrasiLib when you call add_source()
+    let mock_source = MockSource::new("mock-source", mock_source_config)?;
     println!("✓ MockSource instance created\n");
 
     // Step 4: Add the source to DrasiLib
@@ -84,11 +84,12 @@ async fn main() -> Result<()> {
 
     // Step 6: Create the LogReaction instance
     // Note: event_tx is no longer passed - DrasiLib injects it automatically when adding
-    let log_reaction = Arc::new(LogReaction::new(
+    // Ownership is transferred to DrasiLib when you call add_reaction()
+    let log_reaction = LogReaction::new(
         "log-reaction",
         vec!["counter-query".to_string()],
         log_reaction_config,
-    ));
+    );
     println!("✓ LogReaction instance created\n");
 
     // Step 7: Add the reaction to DrasiLib

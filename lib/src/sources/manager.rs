@@ -89,10 +89,10 @@ impl SourceManager {
         self.sources.read().await.get(id).cloned()
     }
 
-    /// Add a source instance.
+    /// Add a source instance, taking ownership and wrapping it in an Arc internally.
     ///
     /// # Parameters
-    /// - `source`: The source instance to add
+    /// - `source`: The source instance to add (ownership is transferred)
     ///
     /// # Returns
     /// - `Ok(())` if the source was added successfully
@@ -103,7 +103,14 @@ impl SourceManager {
     /// if you need to start it after adding.
     ///
     /// The event channel is automatically injected into the source before it is stored.
-    pub async fn add_source(&self, source: Arc<dyn Source>) -> Result<()> {
+    ///
+    /// # Example
+    /// ```ignore
+    /// let source = MySource::new("my-source", config)?;
+    /// manager.add_source(source).await?;  // Ownership transferred
+    /// ```
+    pub async fn add_source(&self, source: impl Source + 'static) -> Result<()> {
+        let source: Arc<dyn Source> = Arc::new(source);
         let source_id = source.id().to_string();
 
         // Inject the event channel before storing

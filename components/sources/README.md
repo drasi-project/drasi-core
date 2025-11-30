@@ -370,16 +370,6 @@ let params = SourceBaseParams::new("my-source")
     .with_dispatch_buffer_capacity(1000);
 ```
 
-Or in YAML:
-
-```yaml
-sources:
-  - id: my-source
-    source_type: my_type
-    dispatch_mode: channel  # or broadcast
-    dispatch_buffer_capacity: 2000
-```
-
 ## Bootstrap Providers
 
 Bootstrap provides initial data to newly subscribing queries. The bootstrap system is completely separated from streaming logic.
@@ -426,7 +416,7 @@ pub struct BootstrapEvent {
 }
 ```
 
-### Available Bootstrap Providers
+### Available Bootstrap Provider Types
 
 | Type | Description | Configuration |
 |------|-------------|---------------|
@@ -448,26 +438,23 @@ impl MySource {
 
 ### Mix-and-Match
 
-Any source can use any bootstrap provider:
+Any source can use any bootstrap provider. For example, you can create an HTTP source that bootstraps from PostgreSQL:
 
-```yaml
-sources:
-  # HTTP streaming with PostgreSQL bootstrap
-  - id: http_with_postgres_bootstrap
-    source_type: http
-    bootstrap_provider:
-      type: postgres
-    properties:
-      host: localhost
-      database: mydb
-      # ...
+```rust
+// Create the source
+let http_source = Arc::new(HttpSource::new("my-http-source", http_config)?);
 
-  # Mock source with file bootstrap for testing
-  - id: test_source
-    source_type: mock
-    bootstrap_provider:
-      type: scriptfile
-      file_paths: ["/data/test.jsonl"]
+// Create a PostgreSQL bootstrap provider
+let bootstrap_provider = Arc::new(PostgresBootstrapProvider::new(postgres_config)?);
+
+// Set the bootstrap provider on the source
+http_source.set_bootstrap_provider(bootstrap_provider).await;
+
+// Add to DrasiLib
+let core = DrasiLib::builder()
+    .with_source(http_source)
+    .build()
+    .await?;
 ```
 
 ## Component Lifecycle
@@ -802,31 +789,13 @@ impl MySource {
 
 ## Configuration Patterns
 
-### YAML Configuration
+### Programmatic Configuration (Required)
 
-```yaml
-sources:
-  - id: my-source-1
-    source_type: my-source
-    auto_start: true
-    dispatch_mode: channel
-    dispatch_buffer_capacity: 2000
-    bootstrap_provider:
-      type: scriptfile
-      file_paths:
-        - "/data/initial.jsonl"
-    properties:
-      host: localhost
-      port: 8080
-      interval_ms: 500
-```
-
-### Programmatic Configuration
+Sources are always configured programmatically and passed to DrasiLib. The `with_source()` method takes ownership and wraps internally in Arc:
 
 ```rust
 use drasi_lib::DrasiLib;
 use my_source_plugin::{MySource, MySourceConfig};
-use std::sync::Arc;
 
 let config = MySourceConfig {
     host: "localhost".to_string(),
@@ -835,9 +804,56 @@ let config = MySourceConfig {
     ..Default::default()
 };
 
-let source = Arc::new(MySource::new("my-source-1", config)?);
+let source = MySource::new("my-source-1", config)?;
 
-let mut core = DrasiLib::builder()
+let core = DrasiLib::builder()
+    .with_source(source)  // Ownership transferred, wrapped in Arc internally
+    .build()
+    .await?;
+```
+
+### With Bootstrap Provider
+
+Bootstrap providers are set before adding to DrasiLib. Note: If you need to set a bootstrap provider, you must create the source first, set the provider, then add it:
+
+```rust
+use drasi_lib::DrasiLib;
+use my_source_plugin::{MySource, MySourceConfig};
+use scriptfile_bootstrap::ScriptFileBootstrapProvider;
+
+let config = MySourceConfig {
+    host: "localhost".to_string(),
+    port: 8080,
+    interval_ms: 500,
+    ..Default::default()
+};
+
+let source = MySource::new("my-source-1", config)?;
+
+// Create and set bootstrap provider (ownership transferred)
+let bootstrap = ScriptFileBootstrapProvider::new(vec![
+    "/data/initial.jsonl".to_string(),
+])?;
+source.base.set_bootstrap_provider(bootstrap).await;
+
+let core = DrasiLib::builder()
+    .with_source(source)  // Ownership transferred
+    .build()
+    .await?;
+```
+
+### With Custom Dispatch Settings
+
+```rust
+let source = MySource::with_dispatch(
+    "my-source-1",
+    config,
+    Some(DispatchMode::Broadcast),  // Use broadcast for high fanout
+    Some(10000),                     // Large buffer
+)?;
+
+// with_source takes ownership
+let core = DrasiLib::builder()
     .with_source(source)
     .build()
     .await?;
@@ -927,15 +943,14 @@ mod tests {
 ```rust
 use drasi_lib::DrasiLib;
 use my_source_plugin::{MySource, MySourceConfig};
-use std::sync::Arc;
 
 #[tokio::test]
 async fn test_source_with_drasi() {
     let config = MySourceConfig::default();
-    let source = Arc::new(MySource::new("test-source", config).unwrap());
+    let source = MySource::new("test-source", config).unwrap();
 
-    let mut core = DrasiLib::builder()
-        .with_source(source.clone())
+    let core = DrasiLib::builder()
+        .with_source(source)  // Ownership transferred
         .build()
         .await
         .unwrap();
@@ -955,12 +970,12 @@ async fn test_source_with_drasi() {
 
 | File | Description |
 |------|-------------|
-| `drasi-core/lib/src/plugin_core/source.rs` | `Source` trait definition |
-| `drasi-core/lib/src/sources/base.rs` | `SourceBase` implementation |
-| `drasi-core/lib/src/channels/events.rs` | Event types (`SourceChange`, `SourceEvent`, etc.) |
-| `drasi-core/lib/src/channels/dispatcher.rs` | Dispatcher traits and implementations |
-| `drasi-core/lib/src/bootstrap/mod.rs` | Bootstrap provider traits and types |
-| `drasi-core/lib/src/profiling.rs` | Profiling metadata types |
+| `lib/src/plugin_core/source.rs` | `Source` trait definition |
+| `lib/src/sources/base.rs` | `SourceBase` implementation |
+| `lib/src/channels/events.rs` | Event types (`SourceChange`, `SourceEvent`, etc.) |
+| `lib/src/channels/dispatcher.rs` | Dispatcher traits and implementations |
+| `lib/src/bootstrap/mod.rs` | Bootstrap provider traits and types |
+| `lib/src/profiling/mod.rs` | Profiling metadata types |
 
 ## Implementation Checklist
 
@@ -989,5 +1004,5 @@ When creating a new source plugin:
 ## Additional Resources
 
 - See individual plugin directories for implementation examples
-- Check `drasi-core/lib/CLAUDE.md` for library architecture details
-- Review `drasi-core/CLAUDE.md` for query engine information
+- Check `lib/CLAUDE.md` for library architecture details
+- Review the parent `drasi-core/CLAUDE.md` for query engine information

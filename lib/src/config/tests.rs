@@ -113,7 +113,7 @@ mod schema_tests {
     #[test]
     fn test_server_config_with_queries() {
         // Note: Sources and reactions are now instance-based and not part of config.
-        // They are passed as pre-built Arc<dyn Source> and Arc<dyn Reaction> instances.
+        // They are passed as owned instances via add_source() and add_reaction().
 
         let mut config = DrasiLibConfig::default();
 

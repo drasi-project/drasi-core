@@ -24,23 +24,25 @@ use crate::component_ops::map_state_error;
 use crate::config::ReactionRuntime;
 use crate::error::{DrasiError, Result};
 use crate::lib_core::DrasiLib;
+use crate::plugin_core::Reaction;
 
 impl DrasiLib {
-    /// Add a reaction instance to a running server
+    /// Add a reaction instance to a running server, taking ownership.
+    ///
+    /// The reaction instance is wrapped in an Arc internally - callers transfer
+    /// ownership rather than pre-wrapping in Arc.
     ///
     /// # Example
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// // Reactions must be created as instances by the caller
-    /// // core.add_reaction(my_reaction_instance).await?;
+    /// // Create the reaction and transfer ownership
+    /// // let reaction = MyReaction::new("my-reaction", vec!["query1".into()]);
+    /// // core.add_reaction(reaction).await?;  // Ownership transferred
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn add_reaction(
-        &self,
-        reaction: Arc<dyn crate::plugin_core::Reaction>,
-    ) -> Result<()> {
+    pub async fn add_reaction(&self, reaction: impl Reaction + 'static) -> Result<()> {
         self.state_guard.require_initialized().await?;
 
         self.reaction_manager

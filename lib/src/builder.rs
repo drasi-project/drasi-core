@@ -35,17 +35,17 @@
 //!
 //! ```no_run
 //! use drasi_lib::{DrasiLib, Query};
-//! use std::sync::Arc;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Source and reaction instances are created externally by plugins
-//! // let my_source: Arc<dyn Source> = my_source_plugin::create(...);
-//! // let my_reaction: Arc<dyn Reaction> = my_reaction_plugin::create(...);
+//! // Ownership is transferred to DrasiLib when added
+//! // let my_source = my_source_plugin::create(...);
+//! // let my_reaction = my_reaction_plugin::create(...);
 //!
 //! let core = DrasiLib::builder()
 //!     .with_id("my-server")
-//!     // .with_source(my_source)
-//!     // .with_reaction(my_reaction)
+//!     // .with_source(my_source)      // Ownership transferred
+//!     // .with_reaction(my_reaction)  // Ownership transferred
 //!     .add_query(
 //!         Query::cypher("my-query")
 //!             .query("MATCH (n:Person) RETURN n")
@@ -92,17 +92,17 @@ use crate::lib_core::DrasiLib;
 ///
 /// ```no_run
 /// use drasi_lib::{DrasiLib, Query};
-/// use std::sync::Arc;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// // Source and reaction instances are created externally by plugins
-/// // let my_source: Arc<dyn Source> = ...;
-/// // let my_reaction: Arc<dyn Reaction> = ...;
+/// // Ownership is transferred to DrasiLib when added
+/// // let my_source = my_source_plugin::create(...);
+/// // let my_reaction = my_reaction_plugin::create(...);
 ///
 /// let core = DrasiLib::builder()
 ///     .with_id("my-server")
-///     // .with_source(my_source)
-///     // .with_reaction(my_reaction)
+///     // .with_source(my_source)      // Ownership transferred
+///     // .with_reaction(my_reaction)  // Ownership transferred
 ///     .add_query(
 ///         Query::cypher("my-query")
 ///             .query("MATCH (n) RETURN n")
@@ -120,8 +120,8 @@ pub struct DrasiLibBuilder {
     dispatch_buffer_capacity: Option<usize>,
     storage_backends: Vec<StorageBackendConfig>,
     query_configs: Vec<QueryConfig>,
-    source_instances: Vec<Arc<dyn SourceTrait>>,
-    reaction_instances: Vec<Arc<dyn ReactionTrait>>,
+    source_instances: Vec<Box<dyn SourceTrait>>,
+    reaction_instances: Vec<Box<dyn ReactionTrait>>,
 }
 
 impl Default for DrasiLibBuilder {
@@ -168,12 +168,21 @@ impl DrasiLibBuilder {
         self
     }
 
-    /// Add a pre-built source instance directly.
+    /// Add a source instance, taking ownership.
     ///
     /// Source instances are created externally by plugins with their own typed configurations.
     /// drasi-lib only knows about the `Source` trait - it has no knowledge of which plugins exist.
-    pub fn with_source(mut self, source: Arc<dyn SourceTrait>) -> Self {
-        self.source_instances.push(source);
+    ///
+    /// # Example
+    /// ```ignore
+    /// let source = MySource::new("my-source", config)?;
+    /// let core = DrasiLib::builder()
+    ///     .with_source(source)  // Ownership transferred
+    ///     .build()
+    ///     .await?;
+    /// ```
+    pub fn with_source(mut self, source: impl SourceTrait + 'static) -> Self {
+        self.source_instances.push(Box::new(source));
         self
     }
 
@@ -183,12 +192,21 @@ impl DrasiLibBuilder {
         self
     }
 
-    /// Add a pre-built reaction instance directly.
+    /// Add a reaction instance, taking ownership.
     ///
     /// Reaction instances are created externally by plugins with their own typed configurations.
     /// drasi-lib only knows about the `Reaction` trait - it has no knowledge of which plugins exist.
-    pub fn with_reaction(mut self, reaction: Arc<dyn ReactionTrait>) -> Self {
-        self.reaction_instances.push(reaction);
+    ///
+    /// # Example
+    /// ```ignore
+    /// let reaction = MyReaction::new("my-reaction", vec!["query1".into()]);
+    /// let core = DrasiLib::builder()
+    ///     .with_reaction(reaction)  // Ownership transferred
+    ///     .build()
+    ///     .await?;
+    /// ```
+    pub fn with_reaction(mut self, reaction: impl ReactionTrait + 'static) -> Self {
+        self.reaction_instances.push(Box::new(reaction));
         self
     }
 

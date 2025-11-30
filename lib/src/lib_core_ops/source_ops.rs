@@ -17,35 +17,30 @@
 //! This module provides all source-related operations including adding, removing,
 //! starting, and stopping sources.
 
-use std::sync::Arc;
-
 use crate::channels::ComponentStatus;
 use crate::component_ops::map_component_error;
 use crate::config::SourceRuntime;
 use crate::error::{DrasiError, Result};
 use crate::lib_core::DrasiLib;
+use crate::plugin_core::Source;
 
 impl DrasiLib {
-    /// Add a source instance to a running server
+    /// Add a source instance to a running server, taking ownership.
     ///
-    /// Sources are now instance-based. The caller must create the source instance
-    /// and pass it as `Arc<dyn Source>`.
+    /// The source instance is wrapped in an Arc internally - callers transfer
+    /// ownership rather than pre-wrapping in Arc.
     ///
     /// # Example
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
-    /// # use std::sync::Arc;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// // Sources must be created as instances by the caller
-    /// // let source = Arc::new(MySource::new("new-source"));
-    /// // core.add_source(source).await?;
+    /// // Create the source and transfer ownership
+    /// // let source = MySource::new("new-source", config)?;
+    /// // core.add_source(source).await?;  // Ownership transferred
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn add_source(
-        &self,
-        source: Arc<dyn crate::plugin_core::Source>,
-    ) -> Result<()> {
+    pub async fn add_source(&self, source: impl Source + 'static) -> Result<()> {
         self.state_guard.require_initialized().await?;
 
         self.source_manager

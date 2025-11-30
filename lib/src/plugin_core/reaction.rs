@@ -23,7 +23,7 @@
 //! 1. Defines its own typed configuration struct with builder pattern
 //! 2. Creates a `ReactionBase` instance using `ReactionBaseParams`
 //! 3. Implements the `Reaction` trait
-//! 4. Is passed to `DrasiLib` as `Arc<dyn Reaction>`
+//! 4. Is passed to `DrasiLib` via `add_reaction()` which takes ownership
 //!
 //! drasi-lib has no knowledge of which plugins exist - it only knows about this trait.
 //!
@@ -149,3 +149,42 @@ pub trait Reaction: Send + Sync {
     /// Implementation should delegate to `self.base.inject_event_tx(tx).await`.
     async fn inject_event_tx(&self, tx: ComponentEventSender);
 }
+
+/// Blanket implementation of Reaction for Box<dyn Reaction>
+///
+/// This allows boxed trait objects to be used with methods expecting `impl Reaction`.
+#[async_trait]
+impl Reaction for Box<dyn Reaction + 'static> {
+    fn id(&self) -> &str {
+        (**self).id()
+    }
+
+    fn type_name(&self) -> &str {
+        (**self).type_name()
+    }
+
+    fn properties(&self) -> std::collections::HashMap<String, serde_json::Value> {
+        (**self).properties()
+    }
+
+    fn query_ids(&self) -> Vec<String> {
+        (**self).query_ids()
+    }
+
+    async fn start(&self, query_subscriber: Arc<dyn QuerySubscriber>) -> Result<()> {
+        (**self).start(query_subscriber).await
+    }
+
+    async fn stop(&self) -> Result<()> {
+        (**self).stop().await
+    }
+
+    async fn status(&self) -> ComponentStatus {
+        (**self).status().await
+    }
+
+    async fn inject_event_tx(&self, tx: ComponentEventSender) {
+        (**self).inject_event_tx(tx).await
+    }
+}
+

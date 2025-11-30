@@ -23,7 +23,7 @@
 //! 1. Defines its own typed configuration struct with builder pattern
 //! 2. Creates a `SourceBase` instance using `SourceBaseParams`
 //! 3. Implements the `Source` trait
-//! 4. Is passed to `DrasiLib` as `Arc<dyn Source>`
+//! 4. Is passed to `DrasiLib` via `add_source()` which takes ownership
 //!
 //! drasi-lib has no knowledge of which plugins exist - it only knows about this trait.
 //!
@@ -159,3 +159,58 @@ pub trait Source: Send + Sync {
     /// Implementation should delegate to `self.base.inject_event_tx(tx).await`.
     async fn inject_event_tx(&self, tx: ComponentEventSender);
 }
+
+/// Blanket implementation of Source for Box<dyn Source>
+///
+/// This allows boxed trait objects to be used with methods expecting `impl Source`.
+#[async_trait]
+impl Source for Box<dyn Source + 'static> {
+    fn id(&self) -> &str {
+        (**self).id()
+    }
+
+    fn type_name(&self) -> &str {
+        (**self).type_name()
+    }
+
+    fn properties(&self) -> std::collections::HashMap<String, serde_json::Value> {
+        (**self).properties()
+    }
+
+    fn dispatch_mode(&self) -> DispatchMode {
+        (**self).dispatch_mode()
+    }
+
+    async fn start(&self) -> Result<()> {
+        (**self).start().await
+    }
+
+    async fn stop(&self) -> Result<()> {
+        (**self).stop().await
+    }
+
+    async fn status(&self) -> ComponentStatus {
+        (**self).status().await
+    }
+
+    async fn subscribe(
+        &self,
+        query_id: String,
+        enable_bootstrap: bool,
+        node_labels: Vec<String>,
+        relation_labels: Vec<String>,
+    ) -> Result<SubscriptionResponse> {
+        (**self)
+            .subscribe(query_id, enable_bootstrap, node_labels, relation_labels)
+            .await
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        (**self).as_any()
+    }
+
+    async fn inject_event_tx(&self, tx: ComponentEventSender) {
+        (**self).inject_event_tx(tx).await
+    }
+}
+

@@ -166,8 +166,8 @@ impl Source for TestMockSource {
 }
 
 /// Helper to create a TestMockSource instance
-pub fn create_test_mock_source(id: String, event_tx: ComponentEventSender) -> Arc<dyn Source> {
-    Arc::new(TestMockSource::new(id, event_tx).unwrap())
+pub fn create_test_mock_source(id: String, event_tx: ComponentEventSender) -> TestMockSource {
+    TestMockSource::new(id, event_tx).unwrap()
 }
 
 #[cfg(test)]

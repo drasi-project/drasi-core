@@ -121,7 +121,7 @@ pub struct SourceSubscriptionConfig {
 /// # Plugin Architecture
 ///
 /// **Important**: drasi-lib has ZERO awareness of which plugins exist. Sources and
-/// reactions are passed as pre-built trait objects (`Arc<dyn Source>`, `Arc<dyn Reaction>`).
+/// reactions are passed as owned instances via `add_source()` and `add_reaction()`.
 /// Only queries can be configured via YAML/JSON files.
 ///
 /// # Configuration File Structure

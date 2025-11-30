@@ -128,8 +128,8 @@ mod manager_tests {
         id: String,
         queries: Vec<String>,
         event_tx: ComponentEventSender,
-    ) -> Arc<dyn crate::plugin_core::Reaction> {
-        Arc::new(TestMockReaction::new(id, queries, event_tx))
+    ) -> TestMockReaction {
+        TestMockReaction::new(id, queries, event_tx)
     }
 
     async fn create_test_manager() -> (Arc<ReactionManager>, mpsc::Receiver<ComponentEvent>, mpsc::Sender<ComponentEvent>) {
