@@ -13,32 +13,26 @@
 # limitations under the License.
 
 [package]
-name = "drasi-plugin-grpc-reaction"
+name = "drasi-reaction-profiler"
 version = "0.2.0"
 edition = "2021"
 authors = ["Drasi Project"]
-description = "gRPC reaction plugin for Drasi"
+description = "Profiler reaction plugin for Drasi"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
-keywords = ["drasi", "plugin", "reaction", "grpc"]
-categories = ["network-programming"]
+keywords = ["drasi", "plugin", "reaction", "profiler"]
+categories = ["development-tools"]
 
 [dependencies]
 drasi-lib = { path = "../../../lib" }
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
-tonic = "0.11"
-prost = "0.12"
 tokio = { version = "1.0", features = ["full"] }
-tokio-stream = { version = "0.1", features = ["sync"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-rand = "0.8"
 chrono = "0.4"
 uuid = { version = "1.0", features = ["v4"] }
+tokio-stream = "0.1"
 prost-types = "0.12"
 ordered-float = "3.0"
-
-[build-dependencies]
-tonic-build = "0.11"

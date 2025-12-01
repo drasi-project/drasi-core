@@ -13,14 +13,14 @@
 # limitations under the License.
 
 [package]
-name = "drasi-plugin-profiler-reaction"
+name = "drasi-reaction-application"
 version = "0.2.0"
 edition = "2021"
 authors = ["Drasi Project"]
-description = "Profiler reaction plugin for Drasi"
+description = "Application reaction plugin for Drasi"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
-keywords = ["drasi", "plugin", "reaction", "profiler"]
+keywords = ["drasi", "plugin", "reaction", "application"]
 categories = ["development-tools"]
 
 [dependencies]
@@ -31,8 +31,8 @@ log = "0.4"
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+uuid = { version = "1.0", features = ["v4", "serde"] }
 chrono = "0.4"
-uuid = { version = "1.0", features = ["v4"] }
 tokio-stream = "0.1"
 prost-types = "0.12"
 ordered-float = "3.0"

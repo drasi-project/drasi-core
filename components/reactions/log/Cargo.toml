@@ -1,5 +1,5 @@
 [package]
-name = "drasi-plugin-log-reaction"
+name = "drasi-reaction-log"
 version = "0.2.0"
 edition = "2021"
 authors = ["Drasi Project"]

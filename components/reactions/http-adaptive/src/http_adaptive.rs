@@ -20,7 +20,7 @@ use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 
 use crate::adaptive_batcher::{AdaptiveBatchConfig, AdaptiveBatcher};
 
-use drasi_plugin_http_reaction::QueryConfig;
+use drasi_reaction_http::QueryConfig;
 
 pub use super::config::HttpAdaptiveReactionConfig;
 

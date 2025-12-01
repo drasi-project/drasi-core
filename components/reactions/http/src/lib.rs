@@ -20,7 +20,7 @@
 //! ## Instance-based Usage
 //!
 //! ```rust,ignore
-//! use drasi_plugin_http_reaction::{HttpReaction, HttpReactionConfig};
+//! use drasi_reaction_http::{HttpReaction, HttpReactionConfig};
 //! use drasi_lib::channels::ComponentEventSender;
 //! use std::sync::Arc;
 //!

@@ -13,14 +13,14 @@
 # limitations under the License.
 
 [package]
-name = "drasi-plugin-platform-reaction"
+name = "drasi-reaction-grpc"
 version = "0.2.0"
 edition = "2021"
 authors = ["Drasi Project"]
-description = "Platform reaction plugin for Drasi"
+description = "gRPC reaction plugin for Drasi"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
-keywords = ["drasi", "plugin", "reaction", "platform"]
+keywords = ["drasi", "plugin", "reaction", "grpc"]
 categories = ["network-programming"]
 
 [dependencies]
@@ -28,13 +28,17 @@ drasi-lib = { path = "../../../lib" }
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
+tonic = "0.11"
+prost = "0.12"
 tokio = { version = "1.0", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-redis = { version = "0.25", features = ["tokio-comp", "streams"] }
-uuid = { version = "1.0", features = ["v4", "serde"] }
+rand = "0.8"
 chrono = "0.4"
-tokio-stream = "0.1"
+uuid = { version = "1.0", features = ["v4"] }
 prost-types = "0.12"
 ordered-float = "3.0"
-drasi-core = { path = "../../../core" }
+
+[build-dependencies]
+tonic-build = "0.11"

@@ -28,15 +28,15 @@ members = [
   "components/bootstrappers/plugin-noop",
 
   # Reaction Plugins
-  "components/reactions/plugin-http",
-  "components/reactions/plugin-http-adaptive",
-  "components/reactions/plugin-grpc",
-  "components/reactions/plugin-grpc-adaptive",
-  "components/reactions/plugin-sse",
-  "components/reactions/plugin-platform",
-  "components/reactions/plugin-profiler",
-  "components/reactions/plugin-application",
-  "components/reactions/plugin-log",
+  "components/reactions/http",
+  "components/reactions/http-adaptive",
+  "components/reactions/grpc",
+  "components/reactions/grpc-adaptive",
+  "components/reactions/sse",
+  "components/reactions/platform",
+  "components/reactions/profiler",
+  "components/reactions/application",
+  "components/reactions/log",
 
   # Internal
   "shared-tests",

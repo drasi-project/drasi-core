@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use drasi_lib::reactions::common::AdaptiveBatchConfig;
-use drasi_plugin_http_reaction::QueryConfig;
+use drasi_reaction_http::QueryConfig;
 
 fn default_base_url() -> String {
     "http://localhost".to_string()

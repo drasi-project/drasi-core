@@ -38,7 +38,7 @@ tokio = { version = "1", features = ["full"] }
 ```rust
 use drasi_lib::{DrasiLib, Query};
 use drasi_source_mock::{MockSource, MockSourceConfig};
-use drasi_plugin_log_reaction::{LogReaction, LogReactionConfig};
+use drasi_reaction_log::{LogReaction, LogReactionConfig};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

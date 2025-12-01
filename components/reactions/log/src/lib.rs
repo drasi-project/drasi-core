@@ -19,7 +19,7 @@
 //! ## Instance-based Usage
 //!
 //! ```rust,ignore
-//! use drasi_plugin_log_reaction::LogReaction;
+//! use drasi_reaction_log::LogReaction;
 //! use drasi_lib::config::{ReactionConfig, ReactionSpecificConfig};
 //! use std::sync::Arc;
 //!

@@ -17,7 +17,7 @@ use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use crate::adaptive_batcher::{AdaptiveBatchConfig, AdaptiveBatcher};
 
 // Use the proto module and helpers from the grpc-reaction plugin
-use drasi_plugin_grpc_reaction::{
+use drasi_reaction_grpc::{
     convert_json_to_proto_struct, ProcessResultsRequest, ProtoQueryResult, ProtoQueryResultItem,
     ReactionServiceClient,
 };

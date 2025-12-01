@@ -24,7 +24,7 @@ drasi-lib = { path = "../../lib" }
 drasi-source-mock = { path = "../../components/sources/mock" }
 
 # Reaction plugins
-drasi-plugin-log-reaction = { path = "../../components/reactions/plugin-log" }
+drasi-reaction-log = { path = "../../components/reactions/log" }
 
 # Optional source plugins (for selective/full examples)
 drasi-source-postgres = { path = "../../components/sources/postgres", optional = true }
@@ -34,14 +34,14 @@ drasi-source-platform = { path = "../../components/sources/platform", optional =
 drasi-source-application = { path = "../../components/sources/application", optional = true }
 
 # Optional reaction plugins
-drasi-plugin-http-reaction = { path = "../../components/reactions/plugin-http", optional = true }
-drasi-plugin-http-adaptive-reaction = { path = "../../components/reactions/plugin-http-adaptive", optional = true }
-drasi-plugin-grpc-reaction = { path = "../../components/reactions/plugin-grpc", optional = true }
-drasi-plugin-grpc-adaptive-reaction = { path = "../../components/reactions/plugin-grpc-adaptive", optional = true }
-drasi-plugin-sse-reaction = { path = "../../components/reactions/plugin-sse", optional = true }
-drasi-plugin-platform-reaction = { path = "../../components/reactions/plugin-platform", optional = true }
-drasi-plugin-profiler-reaction = { path = "../../components/reactions/plugin-profiler", optional = true }
-drasi-plugin-application-reaction = { path = "../../components/reactions/plugin-application", optional = true }
+drasi-reaction-http = { path = "../../components/reactions/http", optional = true }
+drasi-reaction-http-adaptive = { path = "../../components/reactions/http-adaptive", optional = true }
+drasi-reaction-grpc = { path = "../../components/reactions/grpc", optional = true }
+drasi-reaction-grpc-adaptive = { path = "../../components/reactions/grpc-adaptive", optional = true }
+drasi-reaction-sse = { path = "../../components/reactions/sse", optional = true }
+drasi-reaction-platform = { path = "../../components/reactions/platform", optional = true }
+drasi-reaction-profiler = { path = "../../components/reactions/profiler", optional = true }
+drasi-reaction-application = { path = "../../components/reactions/application", optional = true }
 
 # Bootstrap plugins
 drasi-plugin-postgres-bootstrap = { path = "../../components/bootstrappers/plugin-postgres", optional = true }
@@ -61,12 +61,12 @@ default = []
 full = [
     "drasi-source-postgres", "drasi-source-http", "drasi-source-grpc",
     "drasi-source-platform", "drasi-source-application",
-    "drasi-plugin-http-reaction", "drasi-plugin-http-adaptive-reaction",
-    "drasi-plugin-grpc-reaction", "drasi-plugin-grpc-adaptive-reaction",
-    "drasi-plugin-sse-reaction", "drasi-plugin-platform-reaction",
-    "drasi-plugin-profiler-reaction", "drasi-plugin-application-reaction",
+    "drasi-reaction-http", "drasi-reaction-http-adaptive",
+    "drasi-reaction-grpc", "drasi-reaction-grpc-adaptive",
+    "drasi-reaction-sse", "drasi-reaction-platform",
+    "drasi-reaction-profiler", "drasi-reaction-application",
     "drasi-plugin-postgres-bootstrap", "drasi-plugin-platform-bootstrap",
     "drasi-plugin-scriptfile-bootstrap", "drasi-plugin-application-bootstrap",
     "drasi-plugin-noop-bootstrap"
 ]
-selective = ["drasi-source-postgres", "drasi-plugin-http-reaction", "drasi-plugin-scriptfile-bootstrap"]
+selective = ["drasi-source-postgres", "drasi-reaction-http", "drasi-plugin-scriptfile-bootstrap"]
