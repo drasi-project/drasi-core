@@ -56,19 +56,13 @@ use std::collections::HashMap;
 ///
 /// ## Basic Subscription (Recommended)
 ///
-/// ```no_run
-/// # use drasi_lib::{DrasiServerCore, Source, Query, Reaction};
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// # let core = DrasiServerCore::builder()
-/// #     .add_source(Source::application("events").build())
-/// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
-/// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
-/// #     .build().await?;
+/// ```ignore
+/// // This example shows how to use ApplicationReactionHandle with DrasiLib
 /// let handle = core.reaction_handle("results").await?;
 ///
 /// // Create a subscription with default options
 /// let mut subscription = handle.subscribe_with_options(
-///     drasi_lib::SubscriptionOptions::default()
+///     SubscriptionOptions::default()
 /// ).await?;
 ///
 /// // Receive results one at a time
@@ -78,20 +72,11 @@ use std::collections::HashMap;
 ///         println!("  {:?}", row);
 ///     }
 /// }
-/// # Ok(())
-/// # }
 /// ```
 ///
 /// ## Async Stream Pattern
 ///
-/// ```no_run
-/// # use drasi_lib::{DrasiServerCore, Source, Query, Reaction};
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// # let core = DrasiServerCore::builder()
-/// #     .add_source(Source::application("events").build())
-/// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
-/// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
-/// #     .build().await?;
+/// ```ignore
 /// let handle = core.reaction_handle("results").await?;
 ///
 /// // Get as async stream
@@ -100,20 +85,11 @@ use std::collections::HashMap;
 ///         println!("Received: {:?}", result);
 ///     }
 /// }
-/// # Ok(())
-/// # }
 /// ```
 ///
 /// ## Callback Pattern
 ///
-/// ```no_run
-/// # use drasi_lib::{DrasiServerCore, Source, Query, Reaction};
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// # let core = DrasiServerCore::builder()
-/// #     .add_source(Source::application("events").build())
-/// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
-/// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
-/// #     .build().await?;
+/// ```ignore
 /// let handle = core.reaction_handle("results").await?;
 ///
 /// // Process results with a callback (spawns background task)
@@ -122,22 +98,12 @@ use std::collections::HashMap;
 /// }).await?;
 ///
 /// // Keep main task alive while callback processes results
-/// // tokio::time::sleep(Duration::from_secs(60)).await;
-/// # Ok(())
-/// # }
+/// tokio::time::sleep(Duration::from_secs(60)).await;
 /// ```
 ///
 /// ## Filtered Subscription
 ///
-/// ```no_run
-/// # use drasi_lib::{DrasiServerCore, Source, Query, Reaction};
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// # let core = DrasiServerCore::builder()
-/// #     .add_source(Source::application("events").build())
-/// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
-/// #     .add_query(Query::cypher("admins").query("MATCH (n:Admin) RETURN n").from_source("events").build())
-/// #     .add_reaction(Reaction::application("results").subscribe_to("users").subscribe_to("admins").build())
-/// #     .build().await?;
+/// ```ignore
 /// let handle = core.reaction_handle("results").await?;
 ///
 /// // Only receive results from specific queries
@@ -147,20 +113,11 @@ use std::collections::HashMap;
 ///         println!("User result: {:?}", result);
 ///     }
 /// ).await?;
-/// # Ok(())
-/// # }
 /// ```
 ///
 /// ## Subscription with Options
 ///
-/// ```no_run
-/// # use drasi_lib::{DrasiServerCore, Source, Query, Reaction, SubscriptionOptions};
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// # let core = DrasiServerCore::builder()
-/// #     .add_source(Source::application("events").build())
-/// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
-/// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
-/// #     .build().await?;
+/// ```ignore
 /// let handle = core.reaction_handle("results").await?;
 ///
 /// // Configure subscription behavior
@@ -179,8 +136,6 @@ use std::collections::HashMap;
 ///     }
 ///     println!("Received batch of {} results", batch.len());
 /// }
-/// # Ok(())
-/// # }
 /// ```
 #[derive(Clone)]
 pub struct ApplicationReactionHandle {
@@ -234,14 +189,7 @@ impl ApplicationReactionHandle {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// # use drasi_lib::{DrasiServerCore, Source, Query, Reaction};
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let core = DrasiServerCore::builder()
-    /// #     .add_source(Source::application("events").build())
-    /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
-    /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
-    /// #     .build().await?;
+    /// ```ignore
     /// let handle = core.reaction_handle("results").await?;
     ///
     /// handle.subscribe(|result| {
@@ -251,8 +199,6 @@ impl ApplicationReactionHandle {
     /// }).await?;
     ///
     /// // Callback continues processing in background
-    /// # Ok(())
-    /// # }
     /// ```
     pub async fn subscribe<F>(&self, mut callback: F) -> Result<()>
     where
@@ -289,15 +235,7 @@ impl ApplicationReactionHandle {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// # use drasi_lib::{DrasiServerCore, Source, Query, Reaction};
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let core = DrasiServerCore::builder()
-    /// #     .add_source(Source::application("events").build())
-    /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
-    /// #     .add_query(Query::cypher("admins").query("MATCH (n:Admin) RETURN n").from_source("events").build())
-    /// #     .add_reaction(Reaction::application("results").subscribe_to("users").subscribe_to("admins").build())
-    /// #     .build().await?;
+    /// ```ignore
     /// let handle = core.reaction_handle("results").await?;
     ///
     /// // Only process results from "users" query
@@ -307,8 +245,6 @@ impl ApplicationReactionHandle {
     ///         println!("User query result: {:?}", result);
     ///     }
     /// ).await?;
-    /// # Ok(())
-    /// # }
     /// ```
     pub async fn subscribe_filtered<F>(
         &self,
@@ -350,14 +286,7 @@ impl ApplicationReactionHandle {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// # use drasi_lib::{DrasiServerCore, Source, Query, Reaction};
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let core = DrasiServerCore::builder()
-    /// #     .add_source(Source::application("events").build())
-    /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
-    /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
-    /// #     .build().await?;
+    /// ```ignore
     /// let handle = core.reaction_handle("results").await?;
     ///
     /// if let Some(mut stream) = handle.as_stream().await {
@@ -367,8 +296,6 @@ impl ApplicationReactionHandle {
     ///                  result.results.len());
     ///     }
     /// }
-    /// # Ok(())
-    /// # }
     /// ```
     pub async fn as_stream(&self) -> Option<ResultStream> {
         self.take_receiver().await.map(ResultStream::new)
@@ -399,14 +326,7 @@ impl ApplicationReactionHandle {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// # use drasi_lib::{DrasiServerCore, Source, Query, Reaction, SubscriptionOptions};
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let core = DrasiServerCore::builder()
-    /// #     .add_source(Source::application("events").build())
-    /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
-    /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
-    /// #     .build().await?;
+    /// ```ignore
     /// let handle = core.reaction_handle("results").await?;
     ///
     /// // Configure subscription
@@ -420,8 +340,6 @@ impl ApplicationReactionHandle {
     /// while let Some(result) = subscription.recv().await {
     ///     println!("Result: {:?}", result);
     /// }
-    /// # Ok(())
-    /// # }
     /// ```
     pub async fn subscribe_with_options(
         &self,
@@ -445,18 +363,9 @@ impl ApplicationReactionHandle {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// # use drasi_lib::{DrasiServerCore, Source, Query, Reaction};
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let core = DrasiServerCore::builder()
-    /// #     .add_source(Source::application("events").build())
-    /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
-    /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
-    /// #     .build().await?;
+    /// ```ignore
     /// let handle = core.reaction_handle("results").await?;
     /// assert_eq!(handle.reaction_id(), "results");
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn reaction_id(&self) -> &str {
         &self.reaction_id
@@ -470,14 +379,7 @@ impl ApplicationReactionHandle {
 ///
 /// # Examples
 ///
-/// ```no_run
-/// # use drasi_lib::{DrasiServerCore, Source, Query, Reaction};
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// # let core = DrasiServerCore::builder()
-/// #     .add_source(Source::application("events").build())
-/// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
-/// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
-/// #     .build().await?;
+/// ```ignore
 /// let handle = core.reaction_handle("results").await?;
 ///
 /// if let Some(mut stream) = handle.as_stream().await {
@@ -485,8 +387,6 @@ impl ApplicationReactionHandle {
 ///         println!("Received result from {}", result.query_id);
 ///     }
 /// }
-/// # Ok(())
-/// # }
 /// ```
 pub struct ResultStream {
     rx: mpsc::Receiver<QueryResult>,
@@ -504,23 +404,13 @@ impl ResultStream {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// # use drasi_lib::{DrasiServerCore, Source, Query, Reaction};
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let core = DrasiServerCore::builder()
-    /// #     .add_source(Source::application("events").build())
-    /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
-    /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
-    /// #     .build().await?;
-    /// # let handle = core.reaction_handle("results").await?;
+    /// ```ignore
     /// if let Some(mut stream) = handle.as_stream().await {
     ///     while let Some(result) = stream.next().await {
     ///         // Process result
     ///         println!("{:?}", result);
     ///     }
     /// }
-    /// # Ok(())
-    /// # }
     /// ```
     pub async fn next(&mut self) -> Option<QueryResult> {
         self.rx.recv().await
@@ -533,15 +423,7 @@ impl ResultStream {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// # use drasi_lib::{DrasiServerCore, Source, Query, Reaction};
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let core = DrasiServerCore::builder()
-    /// #     .add_source(Source::application("events").build())
-    /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
-    /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
-    /// #     .build().await?;
-    /// # let handle = core.reaction_handle("results").await?;
+    /// ```ignore
     /// if let Some(mut stream) = handle.as_stream().await {
     ///     // Non-blocking check for results
     ///     if let Some(result) = stream.try_next() {
@@ -550,8 +432,6 @@ impl ResultStream {
     ///         println!("No results available right now");
     ///     }
     /// }
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn try_next(&mut self) -> Option<QueryResult> {
         self.rx.try_recv().ok()

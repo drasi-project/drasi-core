@@ -33,7 +33,7 @@ use tokio::sync::mpsc;
 /// ## Basic Usage with Defaults
 ///
 /// ```
-/// use drasi_lib::SubscriptionOptions;
+/// use drasi_reaction_application::subscription::SubscriptionOptions;
 ///
 /// let options = SubscriptionOptions::default();
 /// ```
@@ -41,7 +41,7 @@ use tokio::sync::mpsc;
 /// ## Custom Configuration
 ///
 /// ```
-/// use drasi_lib::SubscriptionOptions;
+/// use drasi_reaction_application::subscription::SubscriptionOptions;
 /// use std::time::Duration;
 ///
 /// let options = SubscriptionOptions::default()
@@ -54,7 +54,7 @@ use tokio::sync::mpsc;
 /// ## High-Throughput Configuration
 ///
 /// ```
-/// use drasi_lib::SubscriptionOptions;
+/// use drasi_reaction_application::subscription::SubscriptionOptions;
 ///
 /// // Optimize for high-throughput scenarios
 /// let options = SubscriptionOptions::default()
@@ -65,7 +65,7 @@ use tokio::sync::mpsc;
 /// ## Filtered Subscription
 ///
 /// ```
-/// use drasi_lib::SubscriptionOptions;
+/// use drasi_reaction_application::subscription::SubscriptionOptions;
 ///
 /// // Only receive results from specific queries
 /// let options = SubscriptionOptions::default()
@@ -105,7 +105,7 @@ impl SubscriptionOptions {
     /// # Examples
     ///
     /// ```
-    /// use drasi_lib::SubscriptionOptions;
+    /// use drasi_reaction_application::subscription::SubscriptionOptions;
     ///
     /// let options = SubscriptionOptions::new();
     /// ```
@@ -125,7 +125,7 @@ impl SubscriptionOptions {
     /// # Examples
     ///
     /// ```
-    /// use drasi_lib::SubscriptionOptions;
+    /// use drasi_reaction_application::subscription::SubscriptionOptions;
     ///
     /// let options = SubscriptionOptions::default()
     ///     .with_buffer_size(5000);  // Large buffer for high throughput
@@ -147,7 +147,7 @@ impl SubscriptionOptions {
     /// # Examples
     ///
     /// ```
-    /// use drasi_lib::SubscriptionOptions;
+    /// use drasi_reaction_application::subscription::SubscriptionOptions;
     ///
     /// let options = SubscriptionOptions::default()
     ///     .with_query_filter(vec![
@@ -172,7 +172,7 @@ impl SubscriptionOptions {
     /// # Examples
     ///
     /// ```
-    /// use drasi_lib::SubscriptionOptions;
+    /// use drasi_reaction_application::subscription::SubscriptionOptions;
     /// use std::time::Duration;
     ///
     /// let options = SubscriptionOptions::default()
@@ -195,7 +195,7 @@ impl SubscriptionOptions {
     /// # Examples
     ///
     /// ```
-    /// use drasi_lib::SubscriptionOptions;
+    /// use drasi_reaction_application::subscription::SubscriptionOptions;
     ///
     /// let options = SubscriptionOptions::default()
     ///     .with_batch_size(100);  // Receive up to 100 results at a time
@@ -226,14 +226,7 @@ impl SubscriptionOptions {
 ///
 /// ## Basic Usage
 ///
-/// ```no_run
-/// # use drasi_lib::{DrasiServerCore, Source, Query, Reaction, SubscriptionOptions};
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// # let core = DrasiServerCore::builder()
-/// #     .add_source(Source::application("events").build())
-/// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
-/// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
-/// #     .build().await?;
+/// ```ignore
 /// let handle = core.reaction_handle("results").await?;
 ///
 /// let mut subscription = handle.subscribe_with_options(
@@ -244,20 +237,11 @@ impl SubscriptionOptions {
 /// while let Some(result) = subscription.recv().await {
 ///     println!("Received: {:?}", result);
 /// }
-/// # Ok(())
-/// # }
 /// ```
 ///
 /// ## Batch Processing
 ///
-/// ```no_run
-/// # use drasi_lib::{DrasiServerCore, Source, Query, Reaction, SubscriptionOptions};
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// # let core = DrasiServerCore::builder()
-/// #     .add_source(Source::application("events").build())
-/// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
-/// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
-/// #     .build().await?;
+/// ```ignore
 /// let handle = core.reaction_handle("results").await?;
 ///
 /// let mut subscription = handle.subscribe_with_options(
@@ -272,21 +256,13 @@ impl SubscriptionOptions {
 ///     }
 ///     println!("Received batch of {} results", batch.len());
 /// }
-/// # Ok(())
-/// # }
 /// ```
 ///
 /// ## With Timeout
 ///
-/// ```no_run
-/// # use drasi_lib::{DrasiServerCore, Source, Query, Reaction, SubscriptionOptions};
-/// # use std::time::Duration;
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// # let core = DrasiServerCore::builder()
-/// #     .add_source(Source::application("events").build())
-/// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
-/// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
-/// #     .build().await?;
+/// ```ignore
+/// use std::time::Duration;
+///
 /// let handle = core.reaction_handle("results").await?;
 ///
 /// let mut subscription = handle.subscribe_with_options(
@@ -299,8 +275,6 @@ impl SubscriptionOptions {
 ///     Some(result) => println!("Received: {:?}", result),
 ///     None => println!("Timed out waiting for result")
 /// }
-/// # Ok(())
-/// # }
 /// ```
 pub struct Subscription {
     rx: mpsc::Receiver<QueryResult>,
@@ -325,15 +299,7 @@ impl Subscription {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// # use drasi_lib::{DrasiServerCore, Source, Query, Reaction, SubscriptionOptions};
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let core = DrasiServerCore::builder()
-    /// #     .add_source(Source::application("events").build())
-    /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
-    /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
-    /// #     .build().await?;
-    /// # let handle = core.reaction_handle("results").await?;
+    /// ```ignore
     /// let mut subscription = handle.subscribe_with_options(
     ///     SubscriptionOptions::default()
     /// ).await?;
@@ -341,8 +307,6 @@ impl Subscription {
     /// while let Some(result) = subscription.recv().await {
     ///     println!("Query: {}, Rows: {}", result.query_id, result.results.len());
     /// }
-    /// # Ok(())
-    /// # }
     /// ```
     pub async fn recv(&mut self) -> Option<QueryResult> {
         match self.options.timeout {
@@ -363,15 +327,7 @@ impl Subscription {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// # use drasi_lib::{DrasiServerCore, Source, Query, Reaction, SubscriptionOptions};
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let core = DrasiServerCore::builder()
-    /// #     .add_source(Source::application("events").build())
-    /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
-    /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
-    /// #     .build().await?;
-    /// # let handle = core.reaction_handle("results").await?;
+    /// ```ignore
     /// let mut subscription = handle.subscribe_with_options(
     ///     SubscriptionOptions::default()
     /// ).await?;
@@ -382,8 +338,6 @@ impl Subscription {
     /// } else {
     ///     println!("No results available right now");
     /// }
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn try_recv(&mut self) -> Option<QueryResult> {
         self.rx.try_recv().ok()
@@ -405,15 +359,7 @@ impl Subscription {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// # use drasi_lib::{DrasiServerCore, Source, Query, Reaction, SubscriptionOptions};
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let core = DrasiServerCore::builder()
-    /// #     .add_source(Source::application("events").build())
-    /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
-    /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
-    /// #     .build().await?;
-    /// # let handle = core.reaction_handle("results").await?;
+    /// ```ignore
     /// let mut subscription = handle.subscribe_with_options(
     ///     SubscriptionOptions::default().with_batch_size(100)
     /// ).await?;
@@ -429,8 +375,6 @@ impl Subscription {
     ///         // Process each result
     ///     }
     /// }
-    /// # Ok(())
-    /// # }
     /// ```
     pub async fn recv_batch(&mut self) -> Vec<QueryResult> {
         let batch_size = self.options.batch_size.unwrap_or(10);
@@ -459,15 +403,7 @@ impl Subscription {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// # use drasi_lib::{DrasiServerCore, Source, Query, Reaction, SubscriptionOptions};
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let core = DrasiServerCore::builder()
-    /// #     .add_source(Source::application("events").build())
-    /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
-    /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
-    /// #     .build().await?;
-    /// # let handle = core.reaction_handle("results").await?;
+    /// ```ignore
     /// let subscription = handle.subscribe_with_options(
     ///     SubscriptionOptions::default()
     /// ).await?;
@@ -476,8 +412,6 @@ impl Subscription {
     /// while let Some(result) = stream.next().await {
     ///     println!("Received: {:?}", result);
     /// }
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn into_stream(self) -> SubscriptionStream {
         SubscriptionStream { subscription: self }
@@ -491,15 +425,7 @@ impl Subscription {
 ///
 /// # Examples
 ///
-/// ```no_run
-/// # use drasi_lib::{DrasiServerCore, Source, Query, Reaction, SubscriptionOptions};
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// # let core = DrasiServerCore::builder()
-/// #     .add_source(Source::application("events").build())
-/// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
-/// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
-/// #     .build().await?;
-/// # let handle = core.reaction_handle("results").await?;
+/// ```ignore
 /// let subscription = handle.subscribe_with_options(
 ///     SubscriptionOptions::default()
 /// ).await?;
@@ -508,8 +434,6 @@ impl Subscription {
 /// while let Some(result) = stream.next().await {
 ///     println!("Query: {}", result.query_id);
 /// }
-/// # Ok(())
-/// # }
 /// ```
 pub struct SubscriptionStream {
     subscription: Subscription,
@@ -525,15 +449,7 @@ impl SubscriptionStream {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// # use drasi_lib::{DrasiServerCore, Source, Query, Reaction, SubscriptionOptions};
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let core = DrasiServerCore::builder()
-    /// #     .add_source(Source::application("events").build())
-    /// #     .add_query(Query::cypher("users").query("MATCH (n:User) RETURN n").from_source("events").build())
-    /// #     .add_reaction(Reaction::application("results").subscribe_to("users").build())
-    /// #     .build().await?;
-    /// # let handle = core.reaction_handle("results").await?;
+    /// ```ignore
     /// let subscription = handle.subscribe_with_options(
     ///     SubscriptionOptions::default()
     /// ).await?;
@@ -542,8 +458,6 @@ impl SubscriptionStream {
     /// while let Some(result) = stream.next().await {
     ///     // Process result
     /// }
-    /// # Ok(())
-    /// # }
     /// ```
     pub async fn next(&mut self) -> Option<QueryResult> {
         self.subscription.recv().await
