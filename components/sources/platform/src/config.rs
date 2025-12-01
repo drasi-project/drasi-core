@@ -39,7 +39,7 @@ fn default_block_ms() -> u64 {
 /// # Example
 ///
 /// ```rust
-/// use drasi_plugin_platform::PlatformSourceConfig;
+/// use drasi_source_platform::PlatformSourceConfig;
 ///
 /// let config = PlatformSourceConfig {
 ///     redis_url: "redis://localhost:6379".to_string(),

@@ -13,28 +13,36 @@
 # limitations under the License.
 
 [package]
-name = "drasi-plugin-application"
+name = "drasi-source-http"
 version = "0.2.0"
 edition = "2021"
 authors = ["Drasi Project"]
-description = "Application source plugin for Drasi"
+description = "HTTP source plugin for Drasi"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
-keywords = ["drasi", "plugin", "application"]
-categories = ["database"]
+keywords = ["drasi", "plugin", "http"]
+categories = ["network-programming"]
 
 [dependencies]
 drasi-lib = { path = "../../../lib" }
-drasi-core = { path = "../../../core" }
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+drasi-core = { path = "../../../core" }
+axum = "0.7"
+tower = "0.4"
+tower-http = "0.5"
+reqwest = { version = "0.11", features = ["json"] }
+tower-service = "0.3"
+hyper = "1.0"
 chrono = "0.4"
 uuid = { version = "1.0", features = ["v4"] }
 tokio-stream = "0.1"
 prost-types = "0.12"
 ordered-float = "3.0"
-drasi-plugin-application-bootstrap = { path = "../../bootstrappers/plugin-application" }
+
+[dev-dependencies]
+serde_yaml = "0.9"

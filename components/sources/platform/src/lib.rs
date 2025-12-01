@@ -144,7 +144,7 @@
 //! # Usage Example
 //!
 //! ```rust,ignore
-//! use drasi_plugin_platform::{PlatformSource, PlatformSourceBuilder};
+//! use drasi_source_platform::{PlatformSource, PlatformSourceBuilder};
 //! use std::sync::Arc;
 //!
 //! let config = PlatformSourceBuilder::new()
@@ -251,7 +251,7 @@ pub struct PlatformSource {
 /// # Example
 ///
 /// ```rust
-/// use drasi_plugin_platform::PlatformSourceBuilder;
+/// use drasi_source_platform::PlatformSourceBuilder;
 ///
 /// let config = PlatformSourceBuilder::new()
 ///     .with_redis_url("redis://localhost:6379")
@@ -375,7 +375,7 @@ impl PlatformSource {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use drasi_plugin_platform::{PlatformSource, PlatformSourceBuilder};
+    /// use drasi_source_platform::{PlatformSource, PlatformSourceBuilder};
     ///
     /// let config = PlatformSourceBuilder::new()
     ///     .with_redis_url("redis://localhost:6379")

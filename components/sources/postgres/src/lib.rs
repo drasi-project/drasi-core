@@ -152,7 +152,7 @@
 //! # Usage Example
 //!
 //! ```rust,ignore
-//! use drasi_plugin_postgres::{PostgresReplicationSource, PostgresSourceBuilder};
+//! use drasi_source_postgres::{PostgresReplicationSource, PostgresSourceBuilder};
 //! use std::sync::Arc;
 //!
 //! let config = PostgresSourceBuilder::new()
@@ -227,7 +227,7 @@ impl PostgresReplicationSource {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use drasi_plugin_postgres::{PostgresReplicationSource, PostgresSourceBuilder};
+    /// use drasi_source_postgres::{PostgresReplicationSource, PostgresSourceBuilder};
     ///
     /// let config = PostgresSourceBuilder::new()
     ///     .with_host("db.example.com")
@@ -453,7 +453,7 @@ async fn run_replication(
 /// # Example
 ///
 /// ```rust
-/// use drasi_plugin_postgres::PostgresSourceBuilder;
+/// use drasi_source_postgres::PostgresSourceBuilder;
 ///
 /// let config = PostgresSourceBuilder::new()
 ///     .with_host("db.example.com")

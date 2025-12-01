@@ -67,7 +67,7 @@ impl MockSource {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use drasi_plugin_mock::{MockSource, MockSourceBuilder};
+    /// use drasi_source_mock::{MockSource, MockSourceBuilder};
     ///
     /// let config = MockSourceBuilder::new()
     ///     .with_data_type("sensor")
@@ -454,7 +454,7 @@ impl MockSource {
 /// # Example
 ///
 /// ```rust
-/// use drasi_plugin_mock::MockSourceBuilder;
+/// use drasi_source_mock::MockSourceBuilder;
 ///
 /// let config = MockSourceBuilder::new()
 ///     .with_data_type("sensor")

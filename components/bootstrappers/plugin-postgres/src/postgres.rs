@@ -28,7 +28,7 @@ use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest
 use drasi_lib::channels::SourceChangeEvent;
 use drasi_lib::config::common::{SslMode, TableKeyConfig};
 
-pub use drasi_plugin_postgres::PostgresSourceConfig;
+pub use drasi_source_postgres::PostgresSourceConfig;
 
 /// Bootstrap provider for PostgreSQL sources
 ///

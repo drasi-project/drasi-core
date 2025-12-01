@@ -40,7 +40,7 @@
 //! Use the [`PropertyMapBuilder`] to construct property maps fluently:
 //!
 //! ```rust,ignore
-//! use drasi_plugin_application::PropertyMapBuilder;
+//! use drasi_source_application::PropertyMapBuilder;
 //!
 //! let props = PropertyMapBuilder::new()
 //!     .string("name", "Alice")
@@ -75,7 +75,7 @@
 //! # Usage Example
 //!
 //! ```rust,ignore
-//! use drasi_plugin_application::{
+//! use drasi_source_application::{
 //!     ApplicationSource, ApplicationSourceConfig, ApplicationSourceHandle,
 //!     PropertyMapBuilder
 //! };
@@ -369,7 +369,7 @@ impl ApplicationSource {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use drasi_plugin_application::{ApplicationSource, ApplicationSourceConfig};
+    /// use drasi_source_application::{ApplicationSource, ApplicationSourceConfig};
     ///
     /// let config = ApplicationSourceConfig::default();
     /// let (source, handle) = ApplicationSource::new("my-source", config)?;

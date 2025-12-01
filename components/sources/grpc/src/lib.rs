@@ -79,7 +79,7 @@
 //! # Usage Example
 //!
 //! ```rust,ignore
-//! use drasi_plugin_grpc::{GrpcSource, GrpcSourceConfig};
+//! use drasi_source_grpc::{GrpcSource, GrpcSourceConfig};
 //! use std::sync::Arc;
 //!
 //! let config = GrpcSourceConfig {
@@ -168,7 +168,7 @@ impl GrpcSource {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use drasi_plugin_grpc::{GrpcSource, GrpcSourceConfig};
+    /// use drasi_source_grpc::{GrpcSource, GrpcSourceConfig};
     ///
     /// let config = GrpcSourceConfig {
     ///     host: "0.0.0.0".to_string(),
@@ -780,7 +780,7 @@ fn proto_value_to_json(value: &prost_types::Value) -> serde_json::Value {
 /// # Example
 ///
 /// ```rust
-/// use drasi_plugin_grpc::GrpcSourceBuilder;
+/// use drasi_source_grpc::GrpcSourceBuilder;
 ///
 /// let config = GrpcSourceBuilder::new()
 ///     .with_host("0.0.0.0")

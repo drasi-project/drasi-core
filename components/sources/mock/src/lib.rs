@@ -90,7 +90,7 @@
 //! # Usage Example
 //!
 //! ```rust,ignore
-//! use drasi_plugin_mock::{MockSource, MockSourceConfig};
+//! use drasi_source_mock::{MockSource, MockSourceConfig};
 //! use std::sync::Arc;
 //!
 //! // Create configuration for sensor data at 1-second intervals

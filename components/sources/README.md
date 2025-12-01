@@ -30,12 +30,12 @@ Sources are responsible for:
 
 | Plugin | Description | Directory |
 |--------|-------------|-----------|
-| `plugin-application` | Programmatic/in-memory sources for embedded use | `plugin-application/` |
-| `plugin-grpc` | gRPC streaming data sources | `plugin-grpc/` |
-| `plugin-http` | HTTP endpoint polling with adaptive batching | `plugin-http/` |
-| `plugin-mock` | Test data generator for development | `plugin-mock/` |
-| `plugin-platform` | Redis Streams consumer for platform integration | `plugin-platform/` |
-| `plugin-postgres` | PostgreSQL WAL-based replication | `plugin-postgres/` |
+| `drasi-source-application` | Programmatic/in-memory sources for embedded use | `application/` |
+| `drasi-source-grpc` | gRPC streaming data sources | `grpc/` |
+| `drasi-source-http` | HTTP endpoint polling with adaptive batching | `http/` |
+| `drasi-source-mock` | Test data generator for development | `mock/` |
+| `drasi-source-platform` | Redis Streams consumer for platform integration | `platform/` |
+| `drasi-source-postgres` | PostgreSQL WAL-based replication | `postgres/` |
 
 ## Architecture
 
@@ -499,7 +499,7 @@ self.base.set_status_with_event(
 ### Step 1: Project Structure
 
 ```
-plugin-my-source/
+my-source/
 ├── Cargo.toml
 └── src/
     ├── lib.rs      # Source implementation
@@ -510,7 +510,7 @@ plugin-my-source/
 
 ```toml
 [package]
-name = "drasi-plugin-my-source"
+name = "drasi-source-my-source"
 version = "0.1.0"
 edition = "2021"
 

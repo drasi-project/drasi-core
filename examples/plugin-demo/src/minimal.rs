@@ -27,7 +27,7 @@ use anyhow::Result;
 use drasi_lib::{DrasiLib, api::Query};
 
 // Import the plugin types and their configs directly
-use drasi_plugin_mock::{MockSource, MockSourceConfig};
+use drasi_source_mock::{MockSource, MockSourceConfig};
 use drasi_plugin_log_reaction::{LogReaction, LogReactionConfig};
 use drasi_lib::config::common::LogLevel;
 

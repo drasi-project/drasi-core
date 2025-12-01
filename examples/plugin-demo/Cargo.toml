@@ -21,17 +21,17 @@ path = "src/selective.rs"
 drasi-lib = { path = "../../lib" }
 
 # Source plugins - these are always available (no features needed for basic demo)
-drasi-plugin-mock = { path = "../../components/sources/plugin-mock" }
+drasi-source-mock = { path = "../../components/sources/mock" }
 
 # Reaction plugins
 drasi-plugin-log-reaction = { path = "../../components/reactions/plugin-log" }
 
 # Optional source plugins (for selective/full examples)
-drasi-plugin-postgres = { path = "../../components/sources/plugin-postgres", optional = true }
-drasi-plugin-http = { path = "../../components/sources/plugin-http", optional = true }
-drasi-plugin-grpc = { path = "../../components/sources/plugin-grpc", optional = true }
-drasi-plugin-platform = { path = "../../components/sources/plugin-platform", optional = true }
-drasi-plugin-application = { path = "../../components/sources/plugin-application", optional = true }
+drasi-source-postgres = { path = "../../components/sources/postgres", optional = true }
+drasi-source-http = { path = "../../components/sources/http", optional = true }
+drasi-source-grpc = { path = "../../components/sources/grpc", optional = true }
+drasi-source-platform = { path = "../../components/sources/platform", optional = true }
+drasi-source-application = { path = "../../components/sources/application", optional = true }
 
 # Optional reaction plugins
 drasi-plugin-http-reaction = { path = "../../components/reactions/plugin-http", optional = true }
@@ -59,8 +59,8 @@ serde_json = "1.0"
 [features]
 default = []
 full = [
-    "drasi-plugin-postgres", "drasi-plugin-http", "drasi-plugin-grpc",
-    "drasi-plugin-platform", "drasi-plugin-application",
+    "drasi-source-postgres", "drasi-source-http", "drasi-source-grpc",
+    "drasi-source-platform", "drasi-source-application",
     "drasi-plugin-http-reaction", "drasi-plugin-http-adaptive-reaction",
     "drasi-plugin-grpc-reaction", "drasi-plugin-grpc-adaptive-reaction",
     "drasi-plugin-sse-reaction", "drasi-plugin-platform-reaction",
@@ -69,4 +69,4 @@ full = [
     "drasi-plugin-scriptfile-bootstrap", "drasi-plugin-application-bootstrap",
     "drasi-plugin-noop-bootstrap"
 ]
-selective = ["drasi-plugin-postgres", "drasi-plugin-http-reaction", "drasi-plugin-scriptfile-bootstrap"]
+selective = ["drasi-source-postgres", "drasi-plugin-http-reaction", "drasi-plugin-scriptfile-bootstrap"]

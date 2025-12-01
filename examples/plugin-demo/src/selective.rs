@@ -25,7 +25,7 @@ fn main() -> Result<()> {
     println!("=== Drasi Instance-Based Plugin Architecture - Selective Example ===\n");
 
     println!("This example shows how to use specific plugins:");
-    println!("• PostgreSQL source (drasi-plugin-postgres)");
+    println!("• PostgreSQL source (drasi-source-postgres)");
     println!("• HTTP reaction (drasi-plugin-http-reaction)");
     println!("• ScriptFile bootstrap (drasi-plugin-scriptfile-bootstrap)\n");
 
@@ -35,7 +35,7 @@ fn main() -> Result<()> {
     println!("use drasi_lib::{{DrasiLib, api::Query}};");
     println!();
     println!("// Import only the plugins you need");
-    println!("use drasi_plugin_postgres::{{PostgresSource, PostgresSourceConfig}};");
+    println!("use drasi_source_postgres::{{PostgresSource, PostgresSourceConfig}};");
     println!("use drasi_plugin_http_reaction::{{HttpReaction, HttpReactionConfig}};");
     println!();
     println!("#[tokio::main]");
@@ -97,7 +97,7 @@ fn main() -> Result<()> {
     println!("```toml");
     println!("[dependencies]");
     println!("drasi-lib = {{ path = \"../../lib\" }}");
-    println!("drasi-plugin-postgres = {{ path = \"../../components/sources/plugin-postgres\" }}");
+    println!("drasi-source-postgres = {{ path = \"../../components/sources/postgres\" }}");
     println!("drasi-plugin-http-reaction = {{ path = \"../../components/reactions/plugin-http\" }}");
     println!("drasi-plugin-scriptfile-bootstrap = {{ ");
     println!("    path = \"../../components/bootstrappers/plugin-scriptfile\" ");

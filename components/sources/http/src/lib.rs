@@ -140,7 +140,7 @@
 //! ## Rust
 //!
 //! ```rust,ignore
-//! use drasi_plugin_http::{HttpSource, HttpSourceBuilder};
+//! use drasi_source_http::{HttpSource, HttpSourceBuilder};
 //!
 //! let config = HttpSourceBuilder::new()
 //!     .with_host("0.0.0.0")
@@ -269,7 +269,7 @@ impl HttpSource {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use drasi_plugin_http::{HttpSource, HttpSourceBuilder};
+    /// use drasi_source_http::{HttpSource, HttpSourceBuilder};
     ///
     /// let config = HttpSourceBuilder::new()
     ///     .with_host("0.0.0.0")
@@ -848,7 +848,7 @@ impl Source for HttpSource {
 /// # Example
 ///
 /// ```rust
-/// use drasi_plugin_http::HttpSourceBuilder;
+/// use drasi_source_http::HttpSourceBuilder;
 ///
 /// let config = HttpSourceBuilder::new()
 ///     .with_host("0.0.0.0")

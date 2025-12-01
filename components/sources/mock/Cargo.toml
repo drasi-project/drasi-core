@@ -1,5 +1,5 @@
 [package]
-name = "drasi-plugin-mock"
+name = "drasi-source-mock"
 version = "0.2.0"
 edition = "2021"
 authors = ["Drasi Project"]

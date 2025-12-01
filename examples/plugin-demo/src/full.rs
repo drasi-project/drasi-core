@@ -28,22 +28,22 @@ fn main() -> Result<()> {
     println!("There are no registries or factories - you import and instantiate directly.\n");
 
     println!("=== Available Source Plugins ===\n");
-    println!("  drasi-plugin-mock          - Mock data generator for testing");
+    println!("  drasi-source-mock          - Mock data generator for testing");
     println!("    Usage: MockSource::new(config, event_tx)");
     println!();
-    println!("  drasi-plugin-postgres      - PostgreSQL WAL replication");
+    println!("  drasi-source-postgres      - PostgreSQL WAL replication");
     println!("    Usage: PostgresSource::new(config, event_tx)");
     println!();
-    println!("  drasi-plugin-http          - HTTP endpoint polling");
+    println!("  drasi-source-http          - HTTP endpoint polling");
     println!("    Usage: HttpSource::new(config, event_tx)");
     println!();
-    println!("  drasi-plugin-grpc          - gRPC streaming");
+    println!("  drasi-source-grpc          - gRPC streaming");
     println!("    Usage: GrpcSource::new(config, event_tx)");
     println!();
-    println!("  drasi-plugin-platform      - Redis Streams integration");
+    println!("  drasi-source-platform      - Redis Streams integration");
     println!("    Usage: PlatformSource::new(config, event_tx)");
     println!();
-    println!("  drasi-plugin-application   - Programmatic API source");
+    println!("  drasi-source-application   - Programmatic API source");
     println!("    Usage: ApplicationSource::new(config, event_tx)");
     println!();
 
@@ -87,7 +87,7 @@ fn main() -> Result<()> {
     println!("=== Instance-Based Architecture Pattern ===\n");
     println!("```rust");
     println!("// 1. Import the plugin type");
-    println!("use drasi_plugin_mock::MockSource;");
+    println!("use drasi_source_mock::MockSource;");
     println!();
     println!("// 2. Create configuration");
     println!("let config = MockSourceConfig {{");
