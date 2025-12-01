@@ -44,11 +44,11 @@ drasi-reaction-profiler = { path = "../../components/reactions/profiler", option
 drasi-reaction-application = { path = "../../components/reactions/application", optional = true }
 
 # Bootstrap plugins
-drasi-plugin-postgres-bootstrap = { path = "../../components/bootstrappers/plugin-postgres", optional = true }
-drasi-plugin-platform-bootstrap = { path = "../../components/bootstrappers/plugin-platform", optional = true }
-drasi-plugin-scriptfile-bootstrap = { path = "../../components/bootstrappers/plugin-scriptfile", optional = true }
-drasi-plugin-application-bootstrap = { path = "../../components/bootstrappers/plugin-application", optional = true }
-drasi-plugin-noop-bootstrap = { path = "../../components/bootstrappers/plugin-noop", optional = true }
+drasi-bootstrap-postgres = { path = "../../components/bootstrappers/postgres", optional = true }
+drasi-bootstrap-platform = { path = "../../components/bootstrappers/platform", optional = true }
+drasi-bootstrap-scriptfile = { path = "../../components/bootstrappers/scriptfile", optional = true }
+drasi-bootstrap-application = { path = "../../components/bootstrappers/application", optional = true }
+drasi-bootstrap-noop = { path = "../../components/bootstrappers/noop", optional = true }
 
 # Async runtime and utilities
 tokio = { version = "1", features = ["full"] }
@@ -65,8 +65,8 @@ full = [
     "drasi-reaction-grpc", "drasi-reaction-grpc-adaptive",
     "drasi-reaction-sse", "drasi-reaction-platform",
     "drasi-reaction-profiler", "drasi-reaction-application",
-    "drasi-plugin-postgres-bootstrap", "drasi-plugin-platform-bootstrap",
-    "drasi-plugin-scriptfile-bootstrap", "drasi-plugin-application-bootstrap",
-    "drasi-plugin-noop-bootstrap"
+    "drasi-bootstrap-postgres", "drasi-bootstrap-platform",
+    "drasi-bootstrap-scriptfile", "drasi-bootstrap-application",
+    "drasi-bootstrap-noop"
 ]
-selective = ["drasi-source-postgres", "drasi-reaction-http", "drasi-plugin-scriptfile-bootstrap"]
+selective = ["drasi-source-postgres", "drasi-reaction-http", "drasi-bootstrap-scriptfile"]

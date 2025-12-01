@@ -21,11 +21,11 @@ members = [
   "components/sources/mock",
 
   # Bootstrap Plugins
-  "components/bootstrappers/plugin-postgres",
-  "components/bootstrappers/plugin-platform",
-  "components/bootstrappers/plugin-scriptfile",
-  "components/bootstrappers/plugin-application",
-  "components/bootstrappers/plugin-noop",
+  "components/bootstrappers/postgres",
+  "components/bootstrappers/platform",
+  "components/bootstrappers/scriptfile",
+  "components/bootstrappers/application",
+  "components/bootstrappers/noop",
 
   # Reaction Plugins
   "components/reactions/http",

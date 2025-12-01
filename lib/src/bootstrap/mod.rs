@@ -268,43 +268,43 @@ impl BootstrapProviderFactory {
     /// Currently only supports the noop provider. Other providers are implemented
     /// in dedicated plugin crates and should be instantiated directly:
     ///
-    /// - PostgreSQL: Use `drasi_plugin_postgres_bootstrap::PostgresBootstrapProvider::new()`
-    /// - Platform: Use `drasi_plugin_platform_bootstrap::PlatformBootstrapProvider::new(...)`
-    /// - ScriptFile: Use `drasi_plugin_scriptfile_bootstrap::ScriptFileBootstrapProvider::new(...)`
-    /// - Application: Use `drasi_plugin_application_bootstrap::ApplicationBootstrapProvider::new()`
+    /// - PostgreSQL: Use `drasi_bootstrap_postgres::PostgresBootstrapProvider::new()`
+    /// - Platform: Use `drasi_bootstrap_platform::PlatformBootstrapProvider::new(...)`
+    /// - ScriptFile: Use `drasi_bootstrap_scriptfile::ScriptFileBootstrapProvider::new(...)`
+    /// - Application: Use `drasi_bootstrap_application::ApplicationBootstrapProvider::new()`
     pub fn create_provider(config: &BootstrapProviderConfig) -> Result<Box<dyn BootstrapProvider>> {
         match config {
             BootstrapProviderConfig::Postgres(_) => {
                 Err(anyhow::anyhow!(
-                    "PostgreSQL bootstrap provider is available in the drasi-plugin-postgres-bootstrap crate. \
-                     Use drasi_plugin_postgres_bootstrap::PostgresBootstrapProvider::new() to create it."
+                    "PostgreSQL bootstrap provider is available in the drasi-bootstrap-postgres crate. \
+                     Use drasi_bootstrap_postgres::PostgresBootstrapProvider::new() to create it."
                 ))
             }
             BootstrapProviderConfig::Application(_) => {
                 Err(anyhow::anyhow!(
-                    "Application bootstrap provider is available in the drasi-plugin-application-bootstrap crate. \
-                     Use drasi_plugin_application_bootstrap::ApplicationBootstrapProvider::new() to create it."
+                    "Application bootstrap provider is available in the drasi-bootstrap-application crate. \
+                     Use drasi_bootstrap_application::ApplicationBootstrapProvider::new() to create it."
                 ))
             }
             BootstrapProviderConfig::ScriptFile(config) => {
                 Err(anyhow::anyhow!(
-                    "ScriptFile bootstrap provider is available in the drasi-plugin-scriptfile-bootstrap crate. \
-                     Use drasi_plugin_scriptfile_bootstrap::ScriptFileBootstrapProvider::new({:?}) to create it.",
+                    "ScriptFile bootstrap provider is available in the drasi-bootstrap-scriptfile crate. \
+                     Use drasi_bootstrap_scriptfile::ScriptFileBootstrapProvider::new({:?}) to create it.",
                     config.file_paths
                 ))
             }
             BootstrapProviderConfig::Platform(config) => {
                 Err(anyhow::anyhow!(
-                    "Platform bootstrap provider is available in the drasi-plugin-platform-bootstrap crate. \
-                     Use drasi_plugin_platform_bootstrap::PlatformBootstrapProvider::new(...) to create it. \
+                    "Platform bootstrap provider is available in the drasi-bootstrap-platform crate. \
+                     Use drasi_bootstrap_platform::PlatformBootstrapProvider::new(...) to create it. \
                      Config: {:?}",
                     config
                 ))
             }
             BootstrapProviderConfig::Noop => {
                 Err(anyhow::anyhow!(
-                    "No-op bootstrap provider is available in the drasi-plugin-noop-bootstrap crate. \
-                     Use drasi_plugin_noop_bootstrap::NoOpBootstrapProvider::new() to create it."
+                    "No-op bootstrap provider is available in the drasi-bootstrap-noop crate. \
+                     Use drasi_bootstrap_noop::NoOpBootstrapProvider::new() to create it."
                 ))
             }
         }

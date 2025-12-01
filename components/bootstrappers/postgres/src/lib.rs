@@ -20,7 +20,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use drasi_plugin_postgres_bootstrap::{PostgresBootstrapProvider, PostgresSourceConfig};
+//! use drasi_bootstrap_postgres::{PostgresBootstrapProvider, PostgresSourceConfig};
 //! use drasi_lib::config::common::SslMode;
 //!
 //! // Create the bootstrap provider with typed configuration

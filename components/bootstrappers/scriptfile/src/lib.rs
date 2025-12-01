@@ -33,7 +33,7 @@ pub use script_file::ScriptFileBootstrapProvider;
 ///
 /// ```no_run
 /// use drasi_lib::bootstrap::BootstrapProviderConfig;
-/// use drasi_plugin_scriptfile_bootstrap::BootstrapProviderConfigScriptFileExt;
+/// use drasi_bootstrap_scriptfile::BootstrapProviderConfigScriptFileExt;
 ///
 /// let config = BootstrapProviderConfig::scriptfile()
 ///     .add_file_path("/path/to/data.jsonl")

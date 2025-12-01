@@ -32,7 +32,7 @@ pub use platform::PlatformBootstrapProvider;
 ///
 /// ```no_run
 /// use drasi_lib::bootstrap::BootstrapProviderConfig;
-/// use drasi_plugin_platform_bootstrap::BootstrapProviderConfigPlatformExt;
+/// use drasi_bootstrap_platform::BootstrapProviderConfigPlatformExt;
 ///
 /// let config = BootstrapProviderConfig::platform()
 ///     .with_query_api_url("http://remote-drasi:8080")

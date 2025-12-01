@@ -1,5 +1,5 @@
 [package]
-name = "drasi-plugin-noop-bootstrap"
+name = "drasi-bootstrap-noop"
 version = "0.2.0"
 edition = "2021"
 authors = ["Drasi Project"]

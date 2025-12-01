@@ -31,7 +31,7 @@ pub use application::ApplicationBootstrapProvider;
 ///
 /// ```no_run
 /// use drasi_lib::bootstrap::BootstrapProviderConfig;
-/// use drasi_plugin_application_bootstrap::BootstrapProviderConfigApplicationExt;
+/// use drasi_bootstrap_application::BootstrapProviderConfigApplicationExt;
 ///
 /// let config = BootstrapProviderConfig::application().build();
 /// ```

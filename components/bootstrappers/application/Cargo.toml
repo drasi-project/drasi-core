@@ -13,15 +13,15 @@
 # limitations under the License.
 
 [package]
-name = "drasi-plugin-postgres-bootstrap"
+name = "drasi-bootstrap-application"
 version = "0.2.0"
 edition = "2021"
 authors = ["Drasi Project"]
-description = "PostgreSQL bootstrap plugin for Drasi"
+description = "Application bootstrap plugin for Drasi"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
-keywords = ["drasi", "plugin", "bootstrap", "postgres"]
-categories = ["database"]
+keywords = ["drasi", "plugin", "bootstrap", "application"]
+categories = ["development-tools"]
 
 [dependencies]
 drasi-lib = { path = "../../../lib" }
@@ -29,16 +29,14 @@ drasi-core = { path = "../../../core" }
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
-tokio-postgres = "0.7"
+tokio = { version = "1.0", features = ["sync"] }
 chrono = "0.4"
 uuid = { version = "1.0", features = ["v4"] }
-ordered-float = "3.0"
-rust_decimal = "1.33"
 tokio-stream = "0.1"
 prost-types = "0.12"
+ordered-float = "3.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+tokio-postgres = "0.7"
 postgres-types = "0.2"
 redis = { version = "0.25", features = ["tokio-comp"] }
-tokio = { version = "1.0", features = ["full"] }
-drasi-source-postgres = { path = "../../sources/postgres" }

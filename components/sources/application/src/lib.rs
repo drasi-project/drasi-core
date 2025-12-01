@@ -603,7 +603,7 @@ impl Source for ApplicationSource {
                     BootstrapProviderConfig::Application { .. }
                 ) {
                     Box::new(
-                        drasi_plugin_application_bootstrap::ApplicationBootstrapProvider::with_shared_data(
+                        drasi_bootstrap_application::ApplicationBootstrapProvider::with_shared_data(
                             self.get_bootstrap_data()
                         )
                     )

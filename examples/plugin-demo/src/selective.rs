@@ -27,7 +27,7 @@ fn main() -> Result<()> {
     println!("This example shows how to use specific plugins:");
     println!("• PostgreSQL source (drasi-source-postgres)");
     println!("• HTTP reaction (drasi-reaction-http)");
-    println!("• ScriptFile bootstrap (drasi-plugin-scriptfile-bootstrap)\n");
+    println!("• ScriptFile bootstrap (drasi-bootstrap-scriptfile)\n");
 
     println!("=== Example Code ===\n");
 
@@ -99,8 +99,8 @@ fn main() -> Result<()> {
     println!("drasi-lib = {{ path = \"../../lib\" }}");
     println!("drasi-source-postgres = {{ path = \"../../components/sources/postgres\" }}");
     println!("drasi-reaction-http = {{ path = \"../../components/reactions/http\" }}");
-    println!("drasi-plugin-scriptfile-bootstrap = {{ ");
-    println!("    path = \"../../components/bootstrappers/plugin-scriptfile\" ");
+    println!("drasi-bootstrap-scriptfile = {{ ");
+    println!("    path = \"../../components/bootstrappers/scriptfile\" ");
     println!("}}");
     println!("```");
 

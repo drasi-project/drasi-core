@@ -13,15 +13,15 @@
 # limitations under the License.
 
 [package]
-name = "drasi-plugin-scriptfile-bootstrap"
+name = "drasi-bootstrap-platform"
 version = "0.2.0"
 edition = "2021"
 authors = ["Drasi Project"]
-description = "ScriptFile bootstrap plugin for Drasi"
+description = "Platform bootstrap plugin for Drasi"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
-keywords = ["drasi", "plugin", "bootstrap", "script"]
-categories = ["filesystem"]
+keywords = ["drasi", "plugin", "bootstrap", "platform"]
+categories = ["network-programming"]
 
 [dependencies]
 drasi-lib = { path = "../../../lib" }
@@ -29,6 +29,8 @@ drasi-core = { path = "../../../core" }
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
+reqwest = { version = "0.11", features = ["json", "stream"] }
+futures = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = "0.4"

@@ -77,11 +77,11 @@ fn main() -> Result<()> {
     println!();
 
     println!("=== Available Bootstrap Plugins ===\n");
-    println!("  drasi-plugin-postgres-bootstrap    - PostgreSQL snapshot");
-    println!("  drasi-plugin-platform-bootstrap    - Platform query API");
-    println!("  drasi-plugin-scriptfile-bootstrap  - JSONL file loading");
-    println!("  drasi-plugin-application-bootstrap - Programmatic bootstrap");
-    println!("  drasi-plugin-noop-bootstrap        - No-op (empty bootstrap)");
+    println!("  drasi-bootstrap-postgres    - PostgreSQL snapshot");
+    println!("  drasi-bootstrap-platform    - Platform query API");
+    println!("  drasi-bootstrap-scriptfile  - JSONL file loading");
+    println!("  drasi-bootstrap-application - Programmatic bootstrap");
+    println!("  drasi-bootstrap-noop        - No-op (empty bootstrap)");
     println!();
 
     println!("=== Instance-Based Architecture Pattern ===\n");
