@@ -41,8 +41,7 @@ members = [
   # Internal
   "shared-tests",
   "query-perf",
-  "examples",
-  "examples/plugin-demo",
+  "examples"
   ]
 
 resolver = "2"
