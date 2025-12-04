@@ -242,40 +242,6 @@ Query::cypher("complex-query")
     .build()
 ```
 
-## Alternative: Configuration Files
-
-While the builder API is the primary approach, DrasiLib can also load query configurations from YAML files. Note that **sources and reactions must still be added programmatically**.
-
-```rust
-// Load queries from YAML, add sources/reactions programmatically
-let core = DrasiLib::from_config_file("config.yaml").await?;
-
-let source = MySource::new("sensors", config)?;
-let reaction = MyReaction::new("alerts", vec!["query1".into()]);
-
-core.add_source(source).await?;
-core.add_reaction(reaction).await?;
-
-core.start().await?;
-```
-
-Example `config.yaml`:
-
-```yaml
-server_core:
-  id: my-app
-  priority_queue_capacity: 10000
-  dispatch_buffer_capacity: 1000
-
-queries:
-  - id: high-temp
-    query: "MATCH (s:Sensor) WHERE s.temperature > 75 RETURN s"
-    source_subscriptions:
-      - source_id: sensors
-    enable_bootstrap: true
-    auto_start: true
-```
-
 ## Runtime Management
 
 After building, use these methods to manage the DrasiLib instance:

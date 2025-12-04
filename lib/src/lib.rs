@@ -57,7 +57,7 @@ pub mod managers;
 #[cfg_attr(not(test), doc(hidden))]
 pub mod state_guard;
 
-// Config module needs to be public for config file loading
+// Config module needs to be public for configuration types
 pub mod config;
 
 // Indexes module for storage backend configuration
@@ -71,7 +71,7 @@ pub mod profiling;
 // Clean Public API - Everything Users Need
 // ============================================================================
 
-/// Main server type - use `DrasiLib::builder()` or `DrasiLib::from_config_file()`
+/// Main server type - use `DrasiLib::builder()` to create instances
 ///
 /// # Examples
 ///
@@ -79,8 +79,10 @@ pub mod profiling;
 /// use drasi_lib::DrasiLib;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// // From config file
-/// let core = DrasiLib::from_config_file("config.yaml").await?;
+/// let core = DrasiLib::builder()
+///     .with_id("my-server")
+///     .build()
+///     .await?;
 /// core.start().await?;
 /// # Ok(())
 /// # }
@@ -97,10 +99,10 @@ pub use channels::ComponentStatus;
 pub use channels::DispatchMode;
 
 // ============================================================================
-// Configuration Types (for file-based config)
+// Configuration Types
 // ============================================================================
 
-/// Configuration types for YAML/JSON config files
+/// Configuration types
 pub use config::{
     DrasiLibConfig, DrasiLibSettings, QueryConfig, QueryLanguage, QueryRuntime,
     ReactionConfig, ReactionRuntime, RuntimeConfig, SourceConfig, SourceRuntime,

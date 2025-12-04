@@ -80,7 +80,7 @@ pub enum ComponentType {
 /// use drasi_lib::{DrasiLib, ComponentStatus};
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let core = DrasiLib::from_config_file("config.yaml").await?;
+/// let core = DrasiLib::builder().with_id("my-server").build().await?;
 /// core.start().await?;
 ///
 /// // Check source status
@@ -110,7 +110,7 @@ pub enum ComponentType {
 /// use tokio::time::{sleep, Duration};
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let core = DrasiLib::from_config_file("config.yaml").await?;
+/// let core = DrasiLib::builder().with_id("my-server").build().await?;
 /// core.start_source("orders_db").await?;
 ///
 /// // Poll until source is running
@@ -133,7 +133,7 @@ pub enum ComponentType {
 /// use drasi_lib::{DrasiLib, ComponentStatus};
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let core = DrasiLib::from_config_file("config.yaml").await?;
+/// let core = DrasiLib::builder().with_id("my-server").build().await?;
 /// core.start().await?;
 ///
 /// // Check all sources

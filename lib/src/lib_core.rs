@@ -14,13 +14,11 @@
 
 use anyhow::{anyhow, Result};
 use log::{info, warn};
-use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::channels::*;
 use crate::config::{DrasiLibConfig, RuntimeConfig};
-use crate::error::DrasiError;
 use crate::inspection::InspectionAPI;
 use crate::lifecycle::{ComponentsRunningState, LifecycleManager};
 use crate::queries::QueryManager;
@@ -44,8 +42,8 @@ use drasi_core::middleware::MiddlewareTypeRegistry;
 /// # Lifecycle States
 ///
 /// The server progresses through these states:
-/// 1. **Created** (via `new()`, `builder()`, `from_config_file()`, or `from_config_str()`)
-/// 2. **Initialized** (one-time setup, automatic with builder/config loaders)
+/// 1. **Created** (via `builder()`)
+/// 2. **Initialized** (one-time setup, automatic with builder)
 /// 3. **Running** (after `start()`)
 /// 4. **Stopped** (after `stop()`, can be restarted)
 ///
@@ -65,16 +63,12 @@ use drasi_core::middleware::MiddlewareTypeRegistry;
 /// ## Builder Pattern
 ///
 /// ```ignore
-/// use drasi_lib::{DrasiLib, Source, Query, Reaction};
+/// use drasi_lib::{DrasiLib, Query};
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let core = DrasiLib::builder()
 ///     .with_id("my-server")
-///     .add_source(
-///         Source::mock("events")
-///             .auto_start(true)
-///             .build()
-///     )
+///     .with_source(my_source)  // Pre-built source instance
 ///     .add_query(
 ///         Query::cypher("my-query")
 ///             .query("MATCH (n:Person) RETURN n.name, n.age")
@@ -82,12 +76,7 @@ use drasi_core::middleware::MiddlewareTypeRegistry;
 ///             .auto_start(true)
 ///             .build()
 ///     )
-///     .add_reaction(
-///         Reaction::log("results")
-///             .subscribe_to("my-query")
-///             .auto_start(true)
-///             .build()
-///     )
+///     .with_reaction(my_reaction)  // Pre-built reaction instance
 ///     .build()
 ///     .await?;
 ///
@@ -104,27 +93,10 @@ use drasi_core::middleware::MiddlewareTypeRegistry;
 /// # }
 /// ```
 ///
-/// ## Configuration File
-///
-/// ```no_run
-/// use drasi_lib::DrasiLib;
-///
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// // Load from YAML configuration
-/// let core = DrasiLib::from_config_file("config.yaml").await?;
-/// core.start().await?;
-///
-/// // ... use the server ...
-///
-/// core.stop().await?;
-/// # Ok(())
-/// # }
-/// ```
-///
 /// ## Dynamic Runtime Configuration
 ///
 /// ```ignore
-/// use drasi_lib::{DrasiLib, Source, Query};
+/// use drasi_lib::{DrasiLib, Query};
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let core = DrasiLib::builder()
@@ -135,11 +107,7 @@ use drasi_core::middleware::MiddlewareTypeRegistry;
 /// core.start().await?;
 ///
 /// // Add components at runtime
-/// core.create_source(
-///     Source::mock("new-source")
-///         .auto_start(true)
-///         .build()
-/// ).await?;
+/// core.add_source(new_source_instance).await?;
 ///
 /// core.create_query(
 ///     Query::cypher("new-query")
@@ -229,7 +197,7 @@ impl DrasiLib {
     }
 
     /// Internal constructor - creates uninitialized server
-    /// Use `builder()`, `from_config_file()`, or `from_config_str()` instead
+    /// Use `builder()` instead
     pub(crate) fn new(config: Arc<RuntimeConfig>) -> Self {
         let (channels, receivers) = EventChannels::new();
 
@@ -535,62 +503,6 @@ impl DrasiLib {
         crate::builder::DrasiLibBuilder::new()
     }
 
-    /// Load configuration from a YAML or JSON file and create a ready-to-start server
-    ///
-    /// # Example
-    /// ```no_run
-    /// use drasi_lib::DrasiLib;
-    ///
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let core = DrasiLib::from_config_file("config.yaml").await?;
-    /// core.start().await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn from_config_file(path: impl AsRef<Path>) -> crate::error::Result<Self> {
-        let config = DrasiLibConfig::load_from_file(path)?;
-        config
-            .validate()
-            .map_err(|e| DrasiError::startup_validation(e.to_string()))?;
-
-        let runtime_config = Arc::new(RuntimeConfig::from(config));
-        let mut core = Self::new(runtime_config);
-        core.initialize().await?;
-
-        Ok(core)
-    }
-
-    /// Load configuration from a YAML or JSON string and create a ready-to-start server
-    ///
-    /// # Example
-    /// ```no_run
-    /// use drasi_lib::DrasiLib;
-    ///
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let yaml = r#"
-    /// server_core:
-    ///   id: my-server
-    /// sources: []
-    /// queries: []
-    /// reactions: []
-    /// "#;
-    /// let core = DrasiLib::from_config_str(yaml).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn from_config_str(yaml: &str) -> crate::error::Result<Self> {
-        let config: DrasiLibConfig = serde_yaml::from_str(yaml)
-            .map_err(|e| DrasiError::invalid_config(format!("Failed to parse YAML: {}", e)))?;
-        config
-            .validate()
-            .map_err(|e| DrasiError::startup_validation(e.to_string()))?;
-
-        let runtime_config = Arc::new(RuntimeConfig::from(config));
-        let mut core = Self::new(runtime_config);
-        core.initialize().await?;
-
-        Ok(core)
-    }
 
     // ============================================================================
     // Server Status
@@ -685,15 +597,9 @@ mod tests {
     use super::*;
 
     async fn create_test_server() -> DrasiLib {
-        let config_yaml = r#"
-server_core:
-  id: test-server
-
-sources: []
-queries: []
-reactions: []
-"#;
-        DrasiLib::from_config_str(config_yaml)
+        DrasiLib::builder()
+            .with_id("test-server")
+            .build()
             .await
             .expect("Failed to build server")
     }

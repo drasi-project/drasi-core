@@ -14,8 +14,6 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::Path;
 
 use crate::channels::DispatchMode;
 use crate::indexes::{StorageBackendConfig, StorageBackendRef};
@@ -115,18 +113,18 @@ pub struct SourceSubscriptionConfig {
 
 /// Root configuration for Drasi Server Core
 ///
-/// `DrasiLibConfig` is the top-level configuration structure for loading Drasi
-/// configurations from YAML or JSON files. It defines server settings and queries.
+/// `DrasiLibConfig` is the top-level configuration structure for DrasiLib.
+/// It defines server settings, queries, and storage backends.
 ///
 /// # Plugin Architecture
 ///
 /// **Important**: drasi-lib has ZERO awareness of which plugins exist. Sources and
-/// reactions are passed as owned instances via `add_source()` and `add_reaction()`.
-/// Only queries can be configured via YAML/JSON files.
+/// reactions are passed as owned instances via `with_source()` and `with_reaction()`
+/// on the builder. Only queries can be configured via the builder.
 ///
-/// # Configuration File Structure
+/// # Configuration Structure
 ///
-/// A typical configuration file has these sections:
+/// A typical configuration has these sections:
 ///
 /// 1. **server_core**: Global server settings (optional)
 /// 2. **storage_backends**: Storage backend definitions (optional)
@@ -136,37 +134,26 @@ pub struct SourceSubscriptionConfig {
 ///
 /// This struct is `Clone` and can be safely shared across threads.
 ///
-/// # Loading Configuration
+/// # Usage
 ///
-/// Use [`DrasiLibConfig::load_from_file()`] to load from YAML or JSON:
+/// Use `DrasiLib::builder()` to create instances:
 ///
 /// ```no_run
-/// use drasi_lib::DrasiLibConfig;
+/// use drasi_lib::{DrasiLib, Query};
 ///
-/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let config = DrasiLibConfig::load_from_file("config.yaml")?;
-/// config.validate()?;  // Validate references between components
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let core = DrasiLib::builder()
+///     .with_id("my-server")
+///     .add_query(
+///         Query::cypher("my-query")
+///             .query("MATCH (n) RETURN n")
+///             .from_source("my-source")
+///             .build()
+///     )
+///     .build()
+///     .await?;
 /// # Ok(())
 /// # }
-/// ```
-///
-/// # Complete Configuration Example
-///
-/// ```yaml
-/// server_core:
-///   id: production-server
-///   priority_queue_capacity: 50000
-///   dispatch_buffer_capacity: 5000
-///
-/// queries:
-///   - id: active_orders
-///     query: "MATCH (o:Order) WHERE o.status = 'active' RETURN o"
-///     queryLanguage: Cypher
-///     source_subscriptions:
-///       - source_id: orders_db
-///     auto_start: true
-///     enableBootstrap: true
-///     bootstrapBufferSize: 10000
 /// ```
 ///
 /// # Validation
@@ -499,138 +486,6 @@ pub struct QueryJoinKeyConfig {
 }
 
 impl DrasiLibConfig {
-    /// Load configuration from a YAML or JSON file
-    ///
-    /// Attempts to parse the file as YAML first, then falls back to JSON if YAML parsing fails.
-    /// Returns a detailed error if both formats fail.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path to configuration file (.yaml, .yml, or .json)
-    ///
-    /// # Returns
-    ///
-    /// Parsed configuration on success, or error describing parse failures.
-    ///
-    /// # Errors
-    ///
-    /// Returns error if:
-    /// - File cannot be read
-    /// - Content is not valid YAML or JSON
-    /// - Configuration structure doesn't match expected schema
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use drasi_lib::DrasiLibConfig;
-    ///
-    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// // Load from YAML
-    /// let config = DrasiLibConfig::load_from_file("config.yaml")?;
-    ///
-    /// // Load from JSON
-    /// let config_json = DrasiLibConfig::load_from_file("config.json")?;
-    ///
-    /// // Validate the configuration
-    /// config.validate()?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let path_ref = path.as_ref();
-        let content = fs::read_to_string(path_ref).map_err(|e| {
-            anyhow::anyhow!("Failed to read config file {}: {}", path_ref.display(), e)
-        })?;
-
-        // Try YAML first, then JSON
-        match serde_yaml::from_str::<DrasiLibConfig>(&content) {
-            Ok(config) => Ok(config),
-            Err(yaml_err) => {
-                // If YAML fails, try JSON
-                match serde_json::from_str::<DrasiLibConfig>(&content) {
-                    Ok(config) => Ok(config),
-                    Err(json_err) => {
-                        // Both failed, return detailed error
-                        Err(anyhow::anyhow!(
-                            "Failed to parse config file '{}':\n  YAML error: {}\n  JSON error: {}",
-                            path_ref.display(),
-                            yaml_err,
-                            json_err
-                        ))
-                    }
-                }
-            }
-        }
-    }
-
-    /// Load and validate configuration from a file in one step
-    ///
-    /// This is a convenience method that loads the configuration and automatically
-    /// validates it. Use this instead of calling `load_from_file()` and `validate()`
-    /// separately to ensure configuration is always validated before use.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Configuration file path (YAML or JSON)
-    ///
-    /// # Errors
-    ///
-    /// Returns error if:
-    /// - File cannot be read
-    /// - Content cannot be parsed as YAML or JSON
-    /// - Configuration validation fails (duplicate IDs, invalid references, etc.)
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use drasi_lib::DrasiLibConfig;
-    ///
-    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// // Load and validate in one step - recommended approach
-    /// let config = DrasiLibConfig::load_and_validate("config.yaml")?;
-    ///
-    /// // Now safe to use - configuration is guaranteed to be valid
-    /// println!("Loaded {} queries", config.queries.len());
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn load_and_validate<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let config = Self::load_from_file(path)?;
-        config.validate()?;
-        Ok(config)
-    }
-
-    /// Save configuration to a YAML file
-    ///
-    /// Serializes the configuration to YAML format and writes to the specified file path.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Destination file path
-    ///
-    /// # Errors
-    ///
-    /// Returns error if:
-    /// - Configuration cannot be serialized to YAML
-    /// - File cannot be written
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use drasi_lib::DrasiLibConfig;
-    ///
-    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let config = DrasiLibConfig::load_from_file("config.yaml")?;
-    /// config.save_to_file("config_backup.yaml")?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let content = serde_yaml::to_string(self)?;
-        fs::write(path, content)?;
-        Ok(())
-    }
-
     /// Validate configuration consistency and references
     ///
     /// Performs comprehensive validation checks:
@@ -643,23 +498,6 @@ impl DrasiLibConfig {
     /// # Errors
     ///
     /// Returns error if validation fails with a description of the problem.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use drasi_lib::DrasiLibConfig;
-    ///
-    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let config = DrasiLibConfig::load_from_file("config.yaml")?;
-    ///
-    /// // Validate before using
-    /// match config.validate() {
-    ///     Ok(()) => println!("Configuration is valid"),
-    ///     Err(e) => eprintln!("Invalid configuration: {}", e),
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
     pub fn validate(&self) -> Result<()> {
         // Validate unique query ids
         let mut query_ids = std::collections::HashSet::new();

@@ -43,7 +43,7 @@ use crate::indexes::IndexFactory;
 /// use drasi_lib::{DrasiLib, ComponentStatus};
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let core = DrasiLib::from_config_file("config.yaml").await?;
+/// let core = DrasiLib::builder().with_id("my-server").build().await?;
 /// core.start().await?;
 ///
 /// // Get runtime information for a source
@@ -90,7 +90,7 @@ pub struct SourceRuntime {
 /// use drasi_lib::{DrasiLib, ComponentStatus};
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let core = DrasiLib::from_config_file("config.yaml").await?;
+/// let core = DrasiLib::builder().with_id("my-server").build().await?;
 /// core.start().await?;
 ///
 /// // Get runtime information for a query
@@ -142,7 +142,7 @@ pub struct QueryRuntime {
 /// use drasi_lib::{DrasiLib, ComponentStatus};
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let core = DrasiLib::from_config_file("config.yaml").await?;
+/// let core = DrasiLib::builder().with_id("my-server").build().await?;
 /// core.start().await?;
 ///
 /// // Get runtime information for a reaction
