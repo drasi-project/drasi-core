@@ -30,13 +30,12 @@ mod construction {
     use drasi_lib::plugin_core::Source;
 
     #[test]
-    fn test_new_with_valid_config() {
-        let config = MockSourceBuilder::new()
+    fn test_builder_with_valid_config() {
+        let source = MockSourceBuilder::new("test-source")
             .with_data_type("counter")
             .with_interval_ms(1000)
             .build();
 
-        let source = MockSource::new("test-source", config);
         assert!(source.is_ok());
     }
 
@@ -53,7 +52,7 @@ mod construction {
 
     #[test]
     fn test_with_dispatch_creates_source() {
-        let config = MockSourceBuilder::new().build();
+        let config = MockSourceConfig::default();
         let source = MockSource::with_dispatch(
             "dispatch-source",
             config,
@@ -70,29 +69,27 @@ mod construction {
 // ============================================================================
 
 mod properties {
-    use crate::{MockSource, MockSourceBuilder};
+    use crate::MockSourceBuilder;
     use drasi_lib::plugin_core::Source;
 
     #[test]
     fn test_id_returns_correct_value() {
-        let config = MockSourceBuilder::new().build();
-        let source = MockSource::new("my-mock-source", config).unwrap();
+        let source = MockSourceBuilder::new("my-mock-source").build().unwrap();
         assert_eq!(source.id(), "my-mock-source");
     }
 
     #[test]
     fn test_type_name_returns_mock() {
-        let config = MockSourceBuilder::new().build();
-        let source = MockSource::new("test", config).unwrap();
+        let source = MockSourceBuilder::new("test").build().unwrap();
         assert_eq!(source.type_name(), "mock");
     }
 
     #[test]
     fn test_properties_contains_data_type() {
-        let config = MockSourceBuilder::new()
+        let source = MockSourceBuilder::new("test")
             .with_data_type("sensor")
-            .build();
-        let source = MockSource::new("test", config).unwrap();
+            .build()
+            .unwrap();
         let props = source.properties();
 
         assert_eq!(
@@ -103,10 +100,10 @@ mod properties {
 
     #[test]
     fn test_properties_contains_interval_ms() {
-        let config = MockSourceBuilder::new()
+        let source = MockSourceBuilder::new("test")
             .with_interval_ms(2000)
-            .build();
-        let source = MockSource::new("test", config).unwrap();
+            .build()
+            .unwrap();
         let props = source.properties();
 
         assert_eq!(
@@ -165,47 +162,65 @@ mod lifecycle {
 
 mod builder {
     use crate::MockSourceBuilder;
+    use drasi_lib::plugin_core::Source;
 
     #[test]
     fn test_builder_defaults() {
-        let config = MockSourceBuilder::new().build();
+        let source = MockSourceBuilder::new("test").build().unwrap();
+        let props = source.properties();
 
-        assert_eq!(config.data_type, "generic");
-        assert_eq!(config.interval_ms, 5000);
+        assert_eq!(
+            props.get("data_type"),
+            Some(&serde_json::Value::String("generic".to_string()))
+        );
+        assert_eq!(
+            props.get("interval_ms"),
+            Some(&serde_json::Value::Number(5000.into()))
+        );
     }
 
     #[test]
     fn test_builder_with_all_options() {
-        let config = MockSourceBuilder::new()
+        let source = MockSourceBuilder::new("test")
             .with_data_type("sensor")
             .with_interval_ms(1000)
-            .build();
+            .build()
+            .unwrap();
+        let props = source.properties();
 
-        assert_eq!(config.data_type, "sensor");
-        assert_eq!(config.interval_ms, 1000);
+        assert_eq!(
+            props.get("data_type"),
+            Some(&serde_json::Value::String("sensor".to_string()))
+        );
+        assert_eq!(
+            props.get("interval_ms"),
+            Some(&serde_json::Value::Number(1000.into()))
+        );
     }
 
     #[test]
     fn test_builder_chaining() {
-        let config = MockSourceBuilder::new()
+        let source = MockSourceBuilder::new("test")
             .with_data_type("counter")
             .with_data_type("sensor") // Override
-            .build();
+            .build()
+            .unwrap();
+        let props = source.properties();
 
-        assert_eq!(config.data_type, "sensor");
+        assert_eq!(
+            props.get("data_type"),
+            Some(&serde_json::Value::String("sensor".to_string()))
+        );
     }
 
     #[test]
-    fn test_builder_default_trait() {
-        let builder1 = MockSourceBuilder::new();
-        let builder2 = MockSourceBuilder::default();
+    fn test_builder_id() {
+        let source = MockSourceBuilder::new("my-mock-source")
+            .with_data_type("counter")
+            .build()
+            .unwrap();
 
-        let config1 = builder1.build();
-        let config2 = builder2.build();
-
-        // Default trait starts with empty values, so we check new() gives better defaults
-        assert_eq!(config1.data_type, "generic");
-        assert_eq!(config2.data_type, ""); // Default trait gives empty string
+        assert_eq!(source.id(), "my-mock-source");
     }
 }
 

@@ -847,24 +847,26 @@ impl Source for HttpSource {
     }
 }
 
-/// Builder for HTTP source configuration.
+/// Builder for HttpSource instances.
 ///
-/// Provides a fluent API for constructing HTTP source configurations
-/// with sensible defaults and adaptive batching settings.
+/// Provides a fluent API for constructing HTTP sources with sensible defaults
+/// and adaptive batching settings. The builder takes the source ID at construction
+/// and returns a fully constructed `HttpSource` from `build()`.
 ///
 /// # Example
 ///
-/// ```rust
-/// use drasi_source_http::HttpSourceBuilder;
+/// ```rust,ignore
+/// use drasi_source_http::HttpSource;
 ///
-/// let config = HttpSourceBuilder::new()
+/// let source = HttpSource::builder("my-source")
 ///     .with_host("0.0.0.0")
 ///     .with_port(8080)
 ///     .with_adaptive_enabled(true)
-///     .with_adaptive_max_batch_size(500)
-///     .build();
+///     .with_bootstrap_provider(my_provider)
+///     .build()?;
 /// ```
 pub struct HttpSourceBuilder {
+    id: String,
     host: String,
     port: u16,
     endpoint: Option<String>,
@@ -875,18 +877,20 @@ pub struct HttpSourceBuilder {
     adaptive_min_wait_ms: Option<u64>,
     adaptive_window_secs: Option<u64>,
     adaptive_enabled: Option<bool>,
-}
-
-impl Default for HttpSourceBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
+    dispatch_mode: Option<DispatchMode>,
+    dispatch_buffer_capacity: Option<usize>,
+    bootstrap_provider: Option<Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>>,
 }
 
 impl HttpSourceBuilder {
-    /// Create a new HTTP source builder with default values
-    pub fn new() -> Self {
+    /// Create a new HTTP source builder with the given source ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Unique identifier for the source instance
+    pub fn new(id: impl Into<String>) -> Self {
         Self {
+            id: id.into(),
             host: String::new(),
             port: 8080,
             endpoint: None,
@@ -897,6 +901,9 @@ impl HttpSourceBuilder {
             adaptive_min_wait_ms: None,
             adaptive_window_secs: None,
             adaptive_enabled: None,
+            dispatch_mode: None,
+            dispatch_buffer_capacity: None,
+            bootstrap_provider: None,
         }
     }
 
@@ -960,9 +967,34 @@ impl HttpSourceBuilder {
         self
     }
 
-    /// Build the HTTP source configuration
-    pub fn build(self) -> HttpSourceConfig {
-        HttpSourceConfig {
+    /// Set the dispatch mode for event routing.
+    pub fn with_dispatch_mode(mut self, mode: DispatchMode) -> Self {
+        self.dispatch_mode = Some(mode);
+        self
+    }
+
+    /// Set the dispatch buffer capacity.
+    pub fn with_dispatch_buffer_capacity(mut self, capacity: usize) -> Self {
+        self.dispatch_buffer_capacity = Some(capacity);
+        self
+    }
+
+    /// Set the bootstrap provider for initial data delivery.
+    pub fn with_bootstrap_provider(
+        mut self,
+        provider: impl drasi_lib::bootstrap::BootstrapProvider + 'static,
+    ) -> Self {
+        self.bootstrap_provider = Some(Box::new(provider));
+        self
+    }
+
+    /// Build the HttpSource instance.
+    ///
+    /// # Returns
+    ///
+    /// A fully constructed `HttpSource`, or an error if construction fails.
+    pub fn build(self) -> Result<HttpSource> {
+        let config = HttpSourceConfig {
             host: self.host,
             port: self.port,
             endpoint: self.endpoint,
@@ -973,7 +1005,69 @@ impl HttpSourceBuilder {
             adaptive_min_wait_ms: self.adaptive_min_wait_ms,
             adaptive_window_secs: self.adaptive_window_secs,
             adaptive_enabled: self.adaptive_enabled,
+        };
+
+        // Build SourceBaseParams with all settings
+        let mut params = SourceBaseParams::new(&self.id);
+        if let Some(mode) = self.dispatch_mode {
+            params = params.with_dispatch_mode(mode);
         }
+        if let Some(capacity) = self.dispatch_buffer_capacity {
+            params = params.with_dispatch_buffer_capacity(capacity);
+        }
+        if let Some(provider) = self.bootstrap_provider {
+            params = params.with_bootstrap_provider(provider);
+        }
+
+        // Configure adaptive batching
+        let mut adaptive_config = AdaptiveBatchConfig::default();
+        if let Some(max_batch) = config.adaptive_max_batch_size {
+            adaptive_config.max_batch_size = max_batch;
+        }
+        if let Some(min_batch) = config.adaptive_min_batch_size {
+            adaptive_config.min_batch_size = min_batch;
+        }
+        if let Some(max_wait_ms) = config.adaptive_max_wait_ms {
+            adaptive_config.max_wait_time = Duration::from_millis(max_wait_ms);
+        }
+        if let Some(min_wait_ms) = config.adaptive_min_wait_ms {
+            adaptive_config.min_wait_time = Duration::from_millis(min_wait_ms);
+        }
+        if let Some(window_secs) = config.adaptive_window_secs {
+            adaptive_config.throughput_window = Duration::from_secs(window_secs);
+        }
+        if let Some(enabled) = config.adaptive_enabled {
+            adaptive_config.adaptive_enabled = enabled;
+        }
+
+        Ok(HttpSource {
+            base: SourceBase::new(params)?,
+            config,
+            adaptive_config,
+        })
+    }
+}
+
+impl HttpSource {
+    /// Create a builder for HttpSource with the given ID.
+    ///
+    /// This is the recommended way to construct an HttpSource.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Unique identifier for the source instance
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let source = HttpSource::builder("my-source")
+    ///     .with_host("0.0.0.0")
+    ///     .with_port(8080)
+    ///     .with_bootstrap_provider(my_provider)
+    ///     .build()?;
+    /// ```
+    pub fn builder(id: impl Into<String>) -> HttpSourceBuilder {
+        HttpSourceBuilder::new(id)
     }
 }
 
@@ -985,31 +1079,39 @@ mod tests {
         use super::*;
 
         #[test]
-        fn test_new_with_valid_config() {
-            let config = HttpSourceBuilder::new()
+        fn test_builder_with_valid_config() {
+            let source = HttpSourceBuilder::new("test-source")
                 .with_host("localhost")
                 .with_port(8080)
                 .build();
-            let source = HttpSource::new("test-source", config);
             assert!(source.is_ok());
         }
 
         #[test]
-        fn test_new_with_custom_config() {
-            let config = HttpSourceBuilder::new()
+        fn test_builder_with_custom_config() {
+            let source = HttpSourceBuilder::new("http-source")
                 .with_host("0.0.0.0")
                 .with_port(9000)
                 .with_endpoint("/events")
-                .build();
-            let source = HttpSource::new("http-source", config).unwrap();
+                .build()
+                .unwrap();
             assert_eq!(source.id(), "http-source");
         }
 
         #[test]
         fn test_with_dispatch_creates_source() {
-            let config = HttpSourceBuilder::new()
-                .with_host("localhost")
-                .build();
+            let config = HttpSourceConfig {
+                host: "localhost".to_string(),
+                port: 8080,
+                endpoint: None,
+                timeout_ms: 10000,
+                adaptive_max_batch_size: None,
+                adaptive_min_batch_size: None,
+                adaptive_max_wait_ms: None,
+                adaptive_min_wait_ms: None,
+                adaptive_window_secs: None,
+                adaptive_enabled: None,
+            };
             let source = HttpSource::with_dispatch(
                 "dispatch-source",
                 config,
@@ -1026,29 +1128,29 @@ mod tests {
 
         #[test]
         fn test_id_returns_correct_value() {
-            let config = HttpSourceBuilder::new()
+            let source = HttpSourceBuilder::new("my-http-source")
                 .with_host("localhost")
-                .build();
-            let source = HttpSource::new("my-http-source", config).unwrap();
+                .build()
+                .unwrap();
             assert_eq!(source.id(), "my-http-source");
         }
 
         #[test]
         fn test_type_name_returns_http() {
-            let config = HttpSourceBuilder::new()
+            let source = HttpSourceBuilder::new("test")
                 .with_host("localhost")
-                .build();
-            let source = HttpSource::new("test", config).unwrap();
+                .build()
+                .unwrap();
             assert_eq!(source.type_name(), "http");
         }
 
         #[test]
         fn test_properties_contains_host_and_port() {
-            let config = HttpSourceBuilder::new()
+            let source = HttpSourceBuilder::new("test")
                 .with_host("192.168.1.1")
                 .with_port(9000)
-                .build();
-            let source = HttpSource::new("test", config).unwrap();
+                .build()
+                .unwrap();
             let props = source.properties();
 
             assert_eq!(
@@ -1063,11 +1165,11 @@ mod tests {
 
         #[test]
         fn test_properties_includes_endpoint_when_set() {
-            let config = HttpSourceBuilder::new()
+            let source = HttpSourceBuilder::new("test")
                 .with_host("localhost")
                 .with_endpoint("/api/v1")
-                .build();
-            let source = HttpSource::new("test", config).unwrap();
+                .build()
+                .unwrap();
             let props = source.properties();
 
             assert_eq!(
@@ -1078,10 +1180,10 @@ mod tests {
 
         #[test]
         fn test_properties_excludes_endpoint_when_none() {
-            let config = HttpSourceBuilder::new()
+            let source = HttpSourceBuilder::new("test")
                 .with_host("localhost")
-                .build();
-            let source = HttpSource::new("test", config).unwrap();
+                .build()
+                .unwrap();
             let props = source.properties();
 
             assert!(props.get("endpoint").is_none());
@@ -1093,10 +1195,10 @@ mod tests {
 
         #[tokio::test]
         async fn test_initial_status_is_stopped() {
-            let config = HttpSourceBuilder::new()
+            let source = HttpSourceBuilder::new("test")
                 .with_host("localhost")
-                .build();
-            let source = HttpSource::new("test", config).unwrap();
+                .build()
+                .unwrap();
             assert_eq!(source.status().await, ComponentStatus::Stopped);
         }
     }
@@ -1106,30 +1208,31 @@ mod tests {
 
         #[test]
         fn test_http_builder_defaults() {
-            let config = HttpSourceBuilder::new().build();
-            assert_eq!(config.port, 8080);
-            assert_eq!(config.timeout_ms, 10000);
-            assert_eq!(config.endpoint, None);
+            let source = HttpSourceBuilder::new("test").build().unwrap();
+            assert_eq!(source.config.port, 8080);
+            assert_eq!(source.config.timeout_ms, 10000);
+            assert_eq!(source.config.endpoint, None);
         }
 
         #[test]
         fn test_http_builder_custom_values() {
-            let config = HttpSourceBuilder::new()
+            let source = HttpSourceBuilder::new("test")
                 .with_host("api.example.com")
                 .with_port(9000)
                 .with_endpoint("/webhook")
                 .with_timeout_ms(5000)
-                .build();
+                .build()
+                .unwrap();
 
-            assert_eq!(config.host, "api.example.com");
-            assert_eq!(config.port, 9000);
-            assert_eq!(config.endpoint, Some("/webhook".to_string()));
-            assert_eq!(config.timeout_ms, 5000);
+            assert_eq!(source.config.host, "api.example.com");
+            assert_eq!(source.config.port, 9000);
+            assert_eq!(source.config.endpoint, Some("/webhook".to_string()));
+            assert_eq!(source.config.timeout_ms, 5000);
         }
 
         #[test]
         fn test_http_builder_adaptive_batching() {
-            let config = HttpSourceBuilder::new()
+            let source = HttpSourceBuilder::new("test")
                 .with_host("localhost")
                 .with_adaptive_max_batch_size(1000)
                 .with_adaptive_min_batch_size(10)
@@ -1137,26 +1240,25 @@ mod tests {
                 .with_adaptive_min_wait_ms(50)
                 .with_adaptive_window_secs(60)
                 .with_adaptive_enabled(true)
-                .build();
+                .build()
+                .unwrap();
 
-            assert_eq!(config.adaptive_max_batch_size, Some(1000));
-            assert_eq!(config.adaptive_min_batch_size, Some(10));
-            assert_eq!(config.adaptive_max_wait_ms, Some(500));
-            assert_eq!(config.adaptive_min_wait_ms, Some(50));
-            assert_eq!(config.adaptive_window_secs, Some(60));
-            assert_eq!(config.adaptive_enabled, Some(true));
+            assert_eq!(source.config.adaptive_max_batch_size, Some(1000));
+            assert_eq!(source.config.adaptive_min_batch_size, Some(10));
+            assert_eq!(source.config.adaptive_max_wait_ms, Some(500));
+            assert_eq!(source.config.adaptive_min_wait_ms, Some(50));
+            assert_eq!(source.config.adaptive_window_secs, Some(60));
+            assert_eq!(source.config.adaptive_enabled, Some(true));
         }
 
         #[test]
-        fn test_builder_default_trait() {
-            let builder1 = HttpSourceBuilder::new();
-            let builder2 = HttpSourceBuilder::default();
+        fn test_builder_id() {
+            let source = HttpSource::builder("my-http-source")
+                .with_host("localhost")
+                .build()
+                .unwrap();
 
-            let config1 = builder1.build();
-            let config2 = builder2.build();
-
-            assert_eq!(config1.port, config2.port);
-            assert_eq!(config1.timeout_ms, config2.timeout_ms);
+            assert_eq!(source.base.id, "my-http-source");
         }
     }
 
@@ -1277,13 +1379,12 @@ mod tests {
 
         #[test]
         fn test_adaptive_config_from_http_config() {
-            let config = HttpSourceBuilder::new()
+            let source = HttpSourceBuilder::new("test")
                 .with_host("localhost")
                 .with_adaptive_max_batch_size(500)
                 .with_adaptive_enabled(true)
-                .build();
-
-            let source = HttpSource::new("test", config).unwrap();
+                .build()
+                .unwrap();
 
             // The adaptive config should be initialized from the http config
             assert_eq!(source.adaptive_config.max_batch_size, 500);
@@ -1292,11 +1393,10 @@ mod tests {
 
         #[test]
         fn test_adaptive_config_uses_defaults_when_not_specified() {
-            let config = HttpSourceBuilder::new()
+            let source = HttpSourceBuilder::new("test")
                 .with_host("localhost")
-                .build();
-
-            let source = HttpSource::new("test", config).unwrap();
+                .build()
+                .unwrap();
 
             // Should use AdaptiveBatchConfig defaults
             let default_config = AdaptiveBatchConfig::default();

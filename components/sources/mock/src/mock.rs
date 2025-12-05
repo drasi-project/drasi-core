@@ -453,33 +453,46 @@ impl MockSource {
     }
 }
 
-/// Builder for mock source configuration.
+/// Builder for MockSource instances.
 ///
-/// Provides a fluent API for constructing mock source configurations
-/// with sensible defaults.
+/// Provides a fluent API for constructing mock sources with sensible defaults.
+/// The builder takes the source ID at construction and returns a fully
+/// constructed `MockSource` from `build()`.
 ///
 /// # Example
 ///
-/// ```rust
-/// use drasi_source_mock::MockSourceBuilder;
+/// ```rust,ignore
+/// use drasi_source_mock::MockSource;
 ///
-/// let config = MockSourceBuilder::new()
+/// let source = MockSource::builder("my-source")
 ///     .with_data_type("sensor")
 ///     .with_interval_ms(1000)
-///     .build();
+///     .with_bootstrap_provider(my_provider)
+///     .build()?;
 /// ```
-#[derive(Debug, Clone, Default)]
 pub struct MockSourceBuilder {
+    id: String,
     data_type: String,
     interval_ms: u64,
+    dispatch_mode: Option<DispatchMode>,
+    dispatch_buffer_capacity: Option<usize>,
+    bootstrap_provider: Option<Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>>,
 }
 
 impl MockSourceBuilder {
-    /// Create a new builder with default values.
-    pub fn new() -> Self {
+    /// Create a new builder with the given source ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Unique identifier for the source instance
+    pub fn new(id: impl Into<String>) -> Self {
         Self {
+            id: id.into(),
             data_type: "generic".to_string(),
             interval_ms: 5000,
+            dispatch_mode: None,
+            dispatch_buffer_capacity: None,
+            bootstrap_provider: None,
         }
     }
 
@@ -503,15 +516,87 @@ impl MockSourceBuilder {
         self
     }
 
-    /// Build the configuration.
+    /// Set the dispatch mode for event routing.
+    ///
+    /// # Arguments
+    ///
+    /// * `mode` - `Channel` (default, with backpressure) or `Broadcast`
+    pub fn with_dispatch_mode(mut self, mode: DispatchMode) -> Self {
+        self.dispatch_mode = Some(mode);
+        self
+    }
+
+    /// Set the dispatch buffer capacity.
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` - Buffer size for dispatch channels (default: 1000)
+    pub fn with_dispatch_buffer_capacity(mut self, capacity: usize) -> Self {
+        self.dispatch_buffer_capacity = Some(capacity);
+        self
+    }
+
+    /// Set the bootstrap provider for initial data delivery.
+    ///
+    /// # Arguments
+    ///
+    /// * `provider` - Bootstrap provider implementation
+    pub fn with_bootstrap_provider(
+        mut self,
+        provider: impl drasi_lib::bootstrap::BootstrapProvider + 'static,
+    ) -> Self {
+        self.bootstrap_provider = Some(Box::new(provider));
+        self
+    }
+
+    /// Build the MockSource instance.
     ///
     /// # Returns
     ///
-    /// A [`MockSourceConfig`] with the specified values.
-    pub fn build(self) -> MockSourceConfig {
-        MockSourceConfig {
+    /// A fully constructed `MockSource`, or an error if construction fails.
+    pub fn build(self) -> Result<MockSource> {
+        let config = MockSourceConfig {
             data_type: self.data_type,
             interval_ms: self.interval_ms,
+        };
+
+        // Build SourceBaseParams with all settings
+        let mut params = SourceBaseParams::new(&self.id);
+        if let Some(mode) = self.dispatch_mode {
+            params = params.with_dispatch_mode(mode);
         }
+        if let Some(capacity) = self.dispatch_buffer_capacity {
+            params = params.with_dispatch_buffer_capacity(capacity);
+        }
+        if let Some(provider) = self.bootstrap_provider {
+            params = params.with_bootstrap_provider(provider);
+        }
+
+        Ok(MockSource {
+            base: SourceBase::new(params)?,
+            config,
+        })
+    }
+}
+
+impl MockSource {
+    /// Create a builder for MockSource with the given ID.
+    ///
+    /// This is the recommended way to construct a MockSource.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Unique identifier for the source instance
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let source = MockSource::builder("my-source")
+    ///     .with_data_type("sensor")
+    ///     .with_interval_ms(1000)
+    ///     .build()?;
+    /// ```
+    pub fn builder(id: impl Into<String>) -> MockSourceBuilder {
+        MockSourceBuilder::new(id)
     }
 }

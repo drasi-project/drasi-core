@@ -113,7 +113,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tonic::{transport::Server, Request, Response, Status};
 
-use drasi_lib::channels::*;
+use drasi_lib::channels::{DispatchMode, *};
 use drasi_lib::managers::{log_component_start, log_component_stop};
 use drasi_lib::plugin_core::Source;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
@@ -147,6 +147,23 @@ pub struct GrpcSource {
 }
 
 impl GrpcSource {
+    /// Create a builder for GrpcSource
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use drasi_source_grpc::GrpcSource;
+    ///
+    /// let source = GrpcSource::builder("my-grpc-source")
+    ///     .with_host("0.0.0.0")
+    ///     .with_port(50051)
+    ///     .with_bootstrap_provider(my_provider)
+    ///     .build()?;
+    /// ```
+    pub fn builder(id: impl Into<String>) -> GrpcSourceBuilder {
+        GrpcSourceBuilder::new(id)
+    }
+
     /// Create a new gRPC source.
     ///
     /// The event channel is automatically injected when the source is added
@@ -779,38 +796,44 @@ fn proto_value_to_json(value: &prost_types::Value) -> serde_json::Value {
     }
 }
 
-/// Builder for gRPC source configuration.
+/// Builder for gRPC sources.
 ///
-/// Provides a fluent API for constructing gRPC source configurations
+/// Provides a fluent API for constructing gRPC sources
 /// with sensible defaults.
 ///
 /// # Example
 ///
-/// ```rust
-/// use drasi_source_grpc::GrpcSourceBuilder;
+/// ```rust,ignore
+/// use drasi_source_grpc::GrpcSource;
 ///
-/// let config = GrpcSourceBuilder::new()
+/// let source = GrpcSource::builder("my-grpc-source")
 ///     .with_host("0.0.0.0")
 ///     .with_port(50051)
-///     .build();
+///     .build()?;
 /// ```
 pub struct GrpcSourceBuilder {
+    id: String,
     host: String,
     port: u16,
-}
-
-impl Default for GrpcSourceBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
+    endpoint: Option<String>,
+    timeout_ms: u64,
+    dispatch_mode: Option<DispatchMode>,
+    dispatch_buffer_capacity: Option<usize>,
+    bootstrap_provider: Option<Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>>,
 }
 
 impl GrpcSourceBuilder {
-    /// Create a new gRPC source builder with default values
-    pub fn new() -> Self {
+    /// Create a new gRPC source builder with the given ID and default values
+    pub fn new(id: impl Into<String>) -> Self {
         Self {
+            id: id.into(),
             host: "0.0.0.0".to_string(),
             port: 50051,
+            endpoint: None,
+            timeout_ms: 5000,
+            dispatch_mode: None,
+            dispatch_buffer_capacity: None,
+            bootstrap_provider: None,
         }
     }
 
@@ -826,13 +849,66 @@ impl GrpcSourceBuilder {
         self
     }
 
-    /// Build the gRPC source configuration
-    pub fn build(self) -> GrpcSourceConfig {
-        GrpcSourceConfig {
+    /// Set the optional service endpoint
+    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = Some(endpoint.into());
+        self
+    }
+
+    /// Set the request timeout in milliseconds
+    pub fn with_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.timeout_ms = timeout_ms;
+        self
+    }
+
+    /// Set the dispatch mode for this source
+    pub fn with_dispatch_mode(mut self, mode: DispatchMode) -> Self {
+        self.dispatch_mode = Some(mode);
+        self
+    }
+
+    /// Set the dispatch buffer capacity for this source
+    pub fn with_dispatch_buffer_capacity(mut self, capacity: usize) -> Self {
+        self.dispatch_buffer_capacity = Some(capacity);
+        self
+    }
+
+    /// Set the bootstrap provider for this source
+    pub fn with_bootstrap_provider(
+        mut self,
+        provider: impl drasi_lib::bootstrap::BootstrapProvider + 'static,
+    ) -> Self {
+        self.bootstrap_provider = Some(Box::new(provider));
+        self
+    }
+
+    /// Build the gRPC source
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the source cannot be constructed.
+    pub fn build(self) -> Result<GrpcSource> {
+        let config = GrpcSourceConfig {
             host: self.host,
             port: self.port,
-            endpoint: None,
-            timeout_ms: 5000,
+            endpoint: self.endpoint,
+            timeout_ms: self.timeout_ms,
+        };
+
+        let mut params = SourceBaseParams::new(&self.id);
+        if let Some(mode) = self.dispatch_mode {
+            params = params.with_dispatch_mode(mode);
         }
+        if let Some(capacity) = self.dispatch_buffer_capacity {
+            params = params.with_dispatch_buffer_capacity(capacity);
+        }
+        if let Some(provider) = self.bootstrap_provider {
+            params = params.with_bootstrap_provider(provider);
+        }
+
+        Ok(GrpcSource {
+            base: SourceBase::new(params)?,
+            config,
+        })
     }
 }

@@ -138,48 +138,48 @@ mod builder {
 
     #[test]
     fn test_builder_defaults() {
-        let config = GrpcSourceBuilder::new().build();
-        assert_eq!(config.host, "0.0.0.0");
-        assert_eq!(config.port, 50051);
-        assert_eq!(config.endpoint, None);
-        assert_eq!(config.timeout_ms, 5000);
+        let source = GrpcSourceBuilder::new("test-grpc").build().unwrap();
+        assert_eq!(source.config.host, "0.0.0.0");
+        assert_eq!(source.config.port, 50051);
+        assert_eq!(source.config.endpoint, None);
+        assert_eq!(source.config.timeout_ms, 5000);
     }
 
     #[test]
     fn test_builder_with_host() {
-        let config = GrpcSourceBuilder::new()
+        let source = GrpcSourceBuilder::new("test-grpc")
             .with_host("192.168.1.100")
-            .build();
-        assert_eq!(config.host, "192.168.1.100");
+            .build()
+            .unwrap();
+        assert_eq!(source.config.host, "192.168.1.100");
     }
 
     #[test]
     fn test_builder_with_port() {
-        let config = GrpcSourceBuilder::new().with_port(9999).build();
-        assert_eq!(config.port, 9999);
+        let source = GrpcSourceBuilder::new("test-grpc").with_port(9999).build().unwrap();
+        assert_eq!(source.config.port, 9999);
     }
 
     #[test]
     fn test_builder_chaining() {
-        let config = GrpcSourceBuilder::new()
+        let source = GrpcSourceBuilder::new("test-grpc")
             .with_host("grpc.example.com")
             .with_port(443)
-            .build();
+            .build()
+            .unwrap();
 
-        assert_eq!(config.host, "grpc.example.com");
-        assert_eq!(config.port, 443);
+        assert_eq!(source.config.host, "grpc.example.com");
+        assert_eq!(source.config.port, 443);
     }
 
     #[test]
-    fn test_builder_default_trait() {
-        let builder1 = GrpcSourceBuilder::new();
-        let builder2 = GrpcSourceBuilder::default();
+    fn test_builder_id() {
+        let source = GrpcSource::builder("my-grpc-source")
+            .with_host("localhost")
+            .build()
+            .unwrap();
 
-        let config1 = builder1.build();
-        let config2 = builder2.build();
-
-        assert_eq!(config1.host, config2.host);
-        assert_eq!(config1.port, config2.port);
+        assert_eq!(source.base.id, "my-grpc-source");
     }
 }
 

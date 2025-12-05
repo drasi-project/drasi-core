@@ -172,7 +172,7 @@ use tokio::task::JoinHandle;
 
 use drasi_lib::channels::{
     ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, ControlOperation,
-    SourceControl, SourceEvent, SourceEventWrapper, SubscriptionResponse,
+    DispatchMode, SourceControl, SourceEvent, SourceEventWrapper, SubscriptionResponse,
 };
 use drasi_lib::plugin_core::Source;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
@@ -243,37 +243,51 @@ pub struct PlatformSource {
     config: PlatformSourceConfig,
 }
 
-/// Builder for creating [`PlatformSourceConfig`] instances.
+/// Builder for creating [`PlatformSource`] instances.
 ///
-/// Provides a fluent API for constructing platform source configurations
+/// Provides a fluent API for constructing platform sources
 /// with sensible defaults.
 ///
 /// # Example
 ///
-/// ```rust
-/// use drasi_source_platform::PlatformSourceBuilder;
+/// ```rust,ignore
+/// use drasi_source_platform::PlatformSource;
 ///
-/// let config = PlatformSourceBuilder::new()
+/// let source = PlatformSource::builder("my-platform-source")
 ///     .with_redis_url("redis://localhost:6379")
 ///     .with_stream_key("my-app-changes")
 ///     .with_consumer_group("my-consumers")
 ///     .with_batch_size(50)
-///     .build();
+///     .build()?;
 /// ```
-#[derive(Debug, Clone, Default)]
 pub struct PlatformSourceBuilder {
+    id: String,
     redis_url: String,
     stream_key: String,
     consumer_group: Option<String>,
     consumer_name: Option<String>,
     batch_size: Option<usize>,
     block_ms: Option<u64>,
+    dispatch_mode: Option<DispatchMode>,
+    dispatch_buffer_capacity: Option<usize>,
+    bootstrap_provider: Option<Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>>,
 }
 
 impl PlatformSourceBuilder {
-    /// Create a new builder with default values.
-    pub fn new() -> Self {
-        Self::default()
+    /// Create a new builder with the given ID and default values.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            redis_url: String::new(),
+            stream_key: String::new(),
+            consumer_group: None,
+            consumer_name: None,
+            batch_size: None,
+            block_ms: None,
+            dispatch_mode: None,
+            dispatch_buffer_capacity: None,
+            bootstrap_provider: None,
+        }
     }
 
     /// Set the Redis connection URL.
@@ -336,24 +350,78 @@ impl PlatformSourceBuilder {
         self
     }
 
-    /// Build the configuration.
+    /// Set the dispatch mode for this source
+    pub fn with_dispatch_mode(mut self, mode: DispatchMode) -> Self {
+        self.dispatch_mode = Some(mode);
+        self
+    }
+
+    /// Set the dispatch buffer capacity for this source
+    pub fn with_dispatch_buffer_capacity(mut self, capacity: usize) -> Self {
+        self.dispatch_buffer_capacity = Some(capacity);
+        self
+    }
+
+    /// Set the bootstrap provider for this source
+    pub fn with_bootstrap_provider(
+        mut self,
+        provider: impl drasi_lib::bootstrap::BootstrapProvider + 'static,
+    ) -> Self {
+        self.bootstrap_provider = Some(Box::new(provider));
+        self
+    }
+
+    /// Build the platform source.
     ///
-    /// # Returns
+    /// # Errors
     ///
-    /// A [`PlatformSourceConfig`] with the specified values.
-    pub fn build(self) -> PlatformSourceConfig {
-        PlatformSourceConfig {
+    /// Returns an error if the source cannot be constructed.
+    pub fn build(self) -> Result<PlatformSource> {
+        let config = PlatformSourceConfig {
             redis_url: self.redis_url,
             stream_key: self.stream_key,
             consumer_group: self.consumer_group.unwrap_or_else(|| "drasi-core".to_string()),
             consumer_name: self.consumer_name,
             batch_size: self.batch_size.unwrap_or(100),
             block_ms: self.block_ms.unwrap_or(5000),
+        };
+
+        let mut params = SourceBaseParams::new(&self.id);
+        if let Some(mode) = self.dispatch_mode {
+            params = params.with_dispatch_mode(mode);
         }
+        if let Some(capacity) = self.dispatch_buffer_capacity {
+            params = params.with_dispatch_buffer_capacity(capacity);
+        }
+        if let Some(provider) = self.bootstrap_provider {
+            params = params.with_bootstrap_provider(provider);
+        }
+
+        Ok(PlatformSource {
+            base: SourceBase::new(params)?,
+            config,
+        })
     }
 }
 
 impl PlatformSource {
+    /// Create a builder for PlatformSource
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use drasi_source_platform::PlatformSource;
+    ///
+    /// let source = PlatformSource::builder("my-platform-source")
+    ///     .with_redis_url("redis://localhost:6379")
+    ///     .with_stream_key("my-changes")
+    ///     .with_bootstrap_provider(my_provider)
+    ///     .build()?;
+    /// ```
+    pub fn builder(id: impl Into<String>) -> PlatformSourceBuilder {
+        PlatformSourceBuilder::new(id)
+    }
+
     /// Create a new platform source.
     ///
     /// The event channel is automatically injected when the source is added
@@ -377,12 +445,10 @@ impl PlatformSource {
     /// ```rust,ignore
     /// use drasi_source_platform::{PlatformSource, PlatformSourceBuilder};
     ///
-    /// let config = PlatformSourceBuilder::new()
+    /// let config = PlatformSourceBuilder::new("my-platform-source")
     ///     .with_redis_url("redis://localhost:6379")
     ///     .with_stream_key("my-changes")
-    ///     .build();
-    ///
-    /// let source = PlatformSource::new("my-platform-source", config)?;
+    ///     .build()?;
     /// ```
     pub fn new(id: impl Into<String>, config: PlatformSourceConfig) -> Result<Self> {
         let id = id.into();

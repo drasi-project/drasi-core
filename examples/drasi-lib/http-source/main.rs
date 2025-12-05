@@ -48,8 +48,7 @@ use axum::{
     Json, Router,
 };
 use drasi_lib::{DrasiLib, Query};
-use drasi_lib::plugin_core::Source as SourceTrait;
-use drasi_source_http::{HttpSource, HttpSourceBuilder};
+use drasi_source_http::HttpSource;
 use drasi_bootstrap_scriptfile::ScriptFileBootstrapProvider;
 use drasi_reaction_log::LogReaction;
 
@@ -65,26 +64,7 @@ async fn main() -> Result<()> {
     println!("========================================\n");
 
     // =========================================================================
-    // Step 1: Create HTTP Source
-    // =========================================================================
-    // The HTTP source exposes endpoints to receive stock price updates.
-    // Events are sent to: POST /sources/stock-prices/events
-
-    // Adaptive batching optimizes throughput for high-volume scenarios
-    let http_config = HttpSourceBuilder::new()
-        .with_host("0.0.0.0")
-        .with_port(9000)
-        .with_adaptive_enabled(true)
-        .with_adaptive_max_batch_size(100)
-        .with_adaptive_min_batch_size(1)
-        .with_adaptive_max_wait_ms(50)
-        .with_adaptive_min_wait_ms(10)
-        .build();
-
-    let http_source = HttpSource::new("stock-prices", http_config)?;
-
-    // =========================================================================
-    // Step 2: Create Bootstrap Provider
+    // Step 1: Create Bootstrap Provider
     // =========================================================================
     // The ScriptFile bootstrap provider loads initial stock data from a JSONL
     // file. This data is used to populate the query when it first starts.
@@ -98,8 +78,24 @@ async fn main() -> Result<()> {
         bootstrap_path.to_string_lossy().to_string()
     ]);
 
-    // Attach bootstrap provider to the HTTP source
-    http_source.set_bootstrap_provider(Box::new(bootstrap_provider)).await;
+    // =========================================================================
+    // Step 2: Create HTTP Source
+    // =========================================================================
+    // The HTTP source exposes endpoints to receive stock price updates.
+    // Events are sent to: POST /sources/stock-prices/events
+
+    // Adaptive batching optimizes throughput for high-volume scenarios
+    // The bootstrap provider is attached directly in the builder
+    let http_source = HttpSource::builder("stock-prices")
+        .with_host("0.0.0.0")
+        .with_port(9000)
+        .with_adaptive_enabled(true)
+        .with_adaptive_max_batch_size(100)
+        .with_adaptive_min_batch_size(1)
+        .with_adaptive_max_wait_ms(50)
+        .with_adaptive_min_wait_ms(10)
+        .with_bootstrap_provider(bootstrap_provider)
+        .build()?;
 
     // =========================================================================
     // Step 3: Define Query

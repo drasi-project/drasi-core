@@ -49,15 +49,13 @@ use drasi_core::models::SourceChange;
 /// ```ignore
 /// use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 ///
-/// let params = SourceBaseParams {
-///     id: "my-source".to_string(),
-///     dispatch_mode: None,  // Defaults to Channel
-///     dispatch_buffer_capacity: Some(2000),
-/// };
+/// let params = SourceBaseParams::new("my-source")
+///     .with_dispatch_mode(DispatchMode::Channel)
+///     .with_dispatch_buffer_capacity(2000)
+///     .with_bootstrap_provider(my_provider);
 ///
-/// let base = SourceBase::new(params, event_tx)?;
+/// let base = SourceBase::new(params)?;
 /// ```
-#[derive(Debug, Clone)]
 pub struct SourceBaseParams {
     /// Unique identifier for the source
     pub id: String,
@@ -65,6 +63,19 @@ pub struct SourceBaseParams {
     pub dispatch_mode: Option<DispatchMode>,
     /// Dispatch buffer capacity - defaults to 1000
     pub dispatch_buffer_capacity: Option<usize>,
+    /// Optional bootstrap provider to set during construction
+    pub bootstrap_provider: Option<Box<dyn BootstrapProvider + 'static>>,
+}
+
+impl std::fmt::Debug for SourceBaseParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SourceBaseParams")
+            .field("id", &self.id)
+            .field("dispatch_mode", &self.dispatch_mode)
+            .field("dispatch_buffer_capacity", &self.dispatch_buffer_capacity)
+            .field("bootstrap_provider", &self.bootstrap_provider.as_ref().map(|_| "<provider>"))
+            .finish()
+    }
 }
 
 impl SourceBaseParams {
@@ -74,6 +85,7 @@ impl SourceBaseParams {
             id: id.into(),
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
+            bootstrap_provider: None,
         }
     }
 
@@ -86,6 +98,15 @@ impl SourceBaseParams {
     /// Set the dispatch buffer capacity
     pub fn with_dispatch_buffer_capacity(mut self, capacity: usize) -> Self {
         self.dispatch_buffer_capacity = Some(capacity);
+        self
+    }
+
+    /// Set the bootstrap provider
+    ///
+    /// This provider will be used during source subscription to deliver
+    /// initial data to queries that request bootstrap.
+    pub fn with_bootstrap_provider(mut self, provider: impl BootstrapProvider + 'static) -> Self {
+        self.bootstrap_provider = Some(Box::new(provider));
         self
     }
 }
@@ -122,6 +143,9 @@ impl SourceBase {
     ///
     /// The event channel is not required during construction - it will be
     /// injected by DrasiLib when the source is added via `inject_event_tx()`.
+    ///
+    /// If a bootstrap provider is specified in params, it will be set during
+    /// construction (no async needed since nothing is shared yet).
     pub fn new(params: SourceBaseParams) -> Result<Self> {
         // Determine dispatch mode (default to Channel if not specified)
         let dispatch_mode = params.dispatch_mode.unwrap_or_default();
@@ -139,6 +163,11 @@ impl SourceBase {
         }
         // For channel mode, dispatchers will be created on-demand when subscribing
 
+        // Initialize bootstrap provider if provided (no async needed at construction time)
+        let bootstrap_provider = params
+            .bootstrap_provider
+            .map(|p| Arc::from(p) as Arc<dyn BootstrapProvider>);
+
         Ok(Self {
             id: params.id,
             dispatch_mode,
@@ -148,7 +177,7 @@ impl SourceBase {
             event_tx: Arc::new(RwLock::new(None)), // Injected later by DrasiLib
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
-            bootstrap_provider: Arc::new(RwLock::new(None)),
+            bootstrap_provider: Arc::new(RwLock::new(bootstrap_provider)),
         })
     }
 

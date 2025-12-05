@@ -35,28 +35,27 @@ mod construction {
     use super::*;
 
     #[test]
-    fn test_new_with_valid_config() {
-        let config = PlatformSourceBuilder::new()
+    fn test_builder_with_valid_config() {
+        let source = PlatformSourceBuilder::new("test-source")
             .with_redis_url("redis://localhost:6379")
             .with_stream_key("test-stream")
             .build();
 
-        let source = PlatformSource::new("test-source", config);
         assert!(source.is_ok());
     }
 
     #[test]
-    fn test_new_with_custom_config() {
-        let config = PlatformSourceBuilder::new()
+    fn test_builder_with_custom_config() {
+        let source = PlatformSourceBuilder::new("custom-source")
             .with_redis_url("redis://127.0.0.1:6380")
             .with_stream_key("custom-stream")
             .with_consumer_group("custom-group")
             .with_consumer_name("consumer-1")
             .with_batch_size(50)
             .with_block_ms(10000)
-            .build();
+            .build()
+            .unwrap();
 
-        let source = PlatformSource::new("custom-source", config).unwrap();
         assert_eq!(source.id(), "custom-source");
     }
 }
@@ -71,35 +70,34 @@ mod properties {
 
     #[test]
     fn test_id_returns_correct_value() {
-        let config = PlatformSourceBuilder::new()
+        let source = PlatformSourceBuilder::new("my-platform-source")
             .with_redis_url("redis://localhost:6379")
             .with_stream_key("test-stream")
-            .build();
+            .build()
+            .unwrap();
 
-        let source = PlatformSource::new("my-platform-source", config).unwrap();
         assert_eq!(source.id(), "my-platform-source");
     }
 
     #[test]
     fn test_type_name_returns_platform() {
-        let config = PlatformSourceBuilder::new()
+        let source = PlatformSourceBuilder::new("test")
             .with_redis_url("redis://localhost:6379")
             .with_stream_key("test-stream")
-            .build();
+            .build()
+            .unwrap();
 
-        let source = PlatformSource::new("test", config).unwrap();
         assert_eq!(source.type_name(), "platform");
     }
 
     #[test]
     fn test_properties_contains_redis_url_and_stream_key() {
-        let config = PlatformSourceBuilder::new()
+        let source = PlatformSourceBuilder::new("test")
             .with_redis_url("redis://192.168.1.1:6379")
             .with_stream_key("my-stream")
             .with_consumer_group("my-group")
-            .build();
-
-        let source = PlatformSource::new("test", config).unwrap();
+            .build()
+            .unwrap();
         let props = source.properties();
 
         assert_eq!(
@@ -118,13 +116,12 @@ mod properties {
 
     #[test]
     fn test_properties_includes_batch_size() {
-        let config = PlatformSourceBuilder::new()
+        let source = PlatformSourceBuilder::new("test")
             .with_redis_url("redis://localhost:6379")
             .with_stream_key("test-stream")
             .with_batch_size(200)
-            .build();
-
-        let source = PlatformSource::new("test", config).unwrap();
+            .build()
+            .unwrap();
         let props = source.properties();
 
         assert_eq!(
@@ -145,12 +142,12 @@ mod lifecycle {
 
     #[tokio::test]
     async fn test_initial_status_is_stopped() {
-        let config = PlatformSourceBuilder::new()
+        let source = PlatformSourceBuilder::new("test")
             .with_redis_url("redis://localhost:6379")
             .with_stream_key("test-stream")
-            .build();
+            .build()
+            .unwrap();
 
-        let source = PlatformSource::new("test", config).unwrap();
         assert_eq!(source.status().await, ComponentStatus::Stopped);
     }
 }
@@ -164,65 +161,61 @@ mod builder {
 
     #[test]
     fn test_builder_defaults() {
-        let config = PlatformSourceBuilder::new()
+        let source = PlatformSourceBuilder::new("test")
             .with_redis_url("redis://localhost:6379")
             .with_stream_key("test-stream")
-            .build();
+            .build()
+            .unwrap();
 
-        assert_eq!(config.redis_url, "redis://localhost:6379");
-        assert_eq!(config.stream_key, "test-stream");
-        assert_eq!(config.consumer_group, "drasi-core");
-        assert_eq!(config.consumer_name, None);
-        assert_eq!(config.batch_size, 100);
-        assert_eq!(config.block_ms, 5000);
+        assert_eq!(source.config.redis_url, "redis://localhost:6379");
+        assert_eq!(source.config.stream_key, "test-stream");
+        assert_eq!(source.config.consumer_group, "drasi-core");
+        assert_eq!(source.config.consumer_name, None);
+        assert_eq!(source.config.batch_size, 100);
+        assert_eq!(source.config.block_ms, 5000);
     }
 
     #[test]
     fn test_builder_with_all_options() {
-        let config = PlatformSourceBuilder::new()
+        let source = PlatformSourceBuilder::new("test")
             .with_redis_url("redis://custom:6379")
             .with_stream_key("custom-stream")
             .with_consumer_group("custom-group")
             .with_consumer_name("consumer-1")
             .with_batch_size(50)
             .with_block_ms(10000)
-            .build();
+            .build()
+            .unwrap();
 
-        assert_eq!(config.redis_url, "redis://custom:6379");
-        assert_eq!(config.stream_key, "custom-stream");
-        assert_eq!(config.consumer_group, "custom-group");
-        assert_eq!(config.consumer_name, Some("consumer-1".to_string()));
-        assert_eq!(config.batch_size, 50);
-        assert_eq!(config.block_ms, 10000);
+        assert_eq!(source.config.redis_url, "redis://custom:6379");
+        assert_eq!(source.config.stream_key, "custom-stream");
+        assert_eq!(source.config.consumer_group, "custom-group");
+        assert_eq!(source.config.consumer_name, Some("consumer-1".to_string()));
+        assert_eq!(source.config.batch_size, 50);
+        assert_eq!(source.config.block_ms, 10000);
     }
 
     #[test]
     fn test_builder_chaining() {
-        let config = PlatformSourceBuilder::new()
+        let source = PlatformSourceBuilder::new("test")
             .with_redis_url("redis://localhost:6379")
             .with_stream_key("stream1")
             .with_stream_key("stream2") // Override
-            .build();
+            .build()
+            .unwrap();
 
-        assert_eq!(config.stream_key, "stream2");
+        assert_eq!(source.config.stream_key, "stream2");
     }
 
     #[test]
-    fn test_builder_default_trait() {
-        let builder1 = PlatformSourceBuilder::new();
-        let builder2 = PlatformSourceBuilder::default();
-
-        let config1 = builder1
+    fn test_builder_id() {
+        let source = PlatformSource::builder("my-platform-source")
             .with_redis_url("redis://localhost:6379")
-            .with_stream_key("test")
-            .build();
-        let config2 = builder2
-            .with_redis_url("redis://localhost:6379")
-            .with_stream_key("test")
-            .build();
+            .with_stream_key("test-stream")
+            .build()
+            .unwrap();
 
-        assert_eq!(config1.consumer_group, config2.consumer_group);
-        assert_eq!(config1.batch_size, config2.batch_size);
+        assert_eq!(source.base.id, "my-platform-source");
     }
 }
 
