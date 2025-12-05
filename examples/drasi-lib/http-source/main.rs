@@ -51,7 +51,7 @@ use drasi_lib::{DrasiLib, Query};
 use drasi_lib::plugin_core::Source as SourceTrait;
 use drasi_source_http::{HttpSource, HttpSourceConfig};
 use drasi_bootstrap_scriptfile::ScriptFileBootstrapProvider;
-use drasi_reaction_log::{LogReaction, LogReactionConfig};
+use drasi_reaction_log::LogReaction;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -128,11 +128,9 @@ async fn main() -> Result<()> {
     // =========================================================================
     // The LogReaction prints query results directly to the console.
 
-    let log_reaction = LogReaction::new(
-        "console-logger",
-        vec!["all-prices".to_string()],
-        LogReactionConfig::default(),
-    );
+    let log_reaction = LogReaction::builder("console-logger")
+        .from_query("all-prices")
+        .build();
 
     // =========================================================================
     // Step 5: Build DrasiLib

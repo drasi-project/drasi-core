@@ -87,6 +87,61 @@ impl LogReaction {
     fn log_result(&self, message: &str) {
         println!("[{}] {}", self.base.id, message);
     }
+
+    /// Create a builder for LogReaction
+    pub fn builder(id: impl Into<String>) -> LogReactionBuilder {
+        LogReactionBuilder::new(id)
+    }
+}
+
+/// Builder for LogReaction
+pub struct LogReactionBuilder {
+    id: String,
+    queries: Vec<String>,
+    config: LogReactionConfig,
+    priority_queue_capacity: Option<usize>,
+}
+
+impl LogReactionBuilder {
+    /// Create a new builder with the given reaction ID
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            queries: Vec::new(),
+            config: LogReactionConfig::default(),
+            priority_queue_capacity: None,
+        }
+    }
+
+    /// Connect this reaction to receive results from a query
+    pub fn from_query(mut self, query_id: impl Into<String>) -> Self {
+        self.queries.push(query_id.into());
+        self
+    }
+
+    /// Set the configuration
+    pub fn with_config(mut self, config: LogReactionConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Set custom priority queue capacity
+    pub fn with_priority_queue_capacity(mut self, capacity: usize) -> Self {
+        self.priority_queue_capacity = Some(capacity);
+        self
+    }
+
+    /// Build the LogReaction
+    pub fn build(self) -> LogReaction {
+        let mut params = ReactionBaseParams::new(self.id, self.queries);
+        if let Some(capacity) = self.priority_queue_capacity {
+            params = params.with_priority_queue_capacity(capacity);
+        }
+        LogReaction {
+            base: ReactionBase::new(params),
+            config: self.config,
+        }
+    }
 }
 
 #[async_trait]

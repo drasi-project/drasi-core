@@ -43,4 +43,4 @@ mod log;
 mod tests;
 
 pub use config::LogReactionConfig;
-pub use log::LogReaction;
+pub use log::{LogReaction, LogReactionBuilder};
