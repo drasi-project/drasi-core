@@ -1,0 +1,7 @@
+{"kind": "Header", "start_time": "2024-01-15T09:30:00-05:00", "description": "Initial stock prices for DrasiLib example"}
+{"kind": "Node", "id": "price_AAPL", "labels": ["stock_prices"], "properties": {"symbol": "AAPL", "price": 175.50, "previous_close": 173.00, "volume": 5000000}}
+{"kind": "Node", "id": "price_MSFT", "labels": ["stock_prices"], "properties": {"symbol": "MSFT", "price": 380.25, "previous_close": 382.00, "volume": 2500000}}
+{"kind": "Node", "id": "price_GOOGL", "labels": ["stock_prices"], "properties": {"symbol": "GOOGL", "price": 142.80, "previous_close": 140.50, "volume": 1200000}}
+{"kind": "Node", "id": "price_TSLA", "labels": ["stock_prices"], "properties": {"symbol": "TSLA", "price": 245.00, "previous_close": 250.00, "volume": 8000000}}
+{"kind": "Node", "id": "price_NVDA", "labels": ["stock_prices"], "properties": {"symbol": "NVDA", "price": 520.75, "previous_close": 515.00, "volume": 3500000}}
+{"kind": "Finish", "description": "Bootstrap complete - 5 stocks loaded"}
