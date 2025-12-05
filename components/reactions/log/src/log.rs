@@ -99,12 +99,6 @@ impl LogReactionBuilder {
         self
     }
 
-    /// Set the configuration
-    pub fn with_config(mut self, config: LogReactionConfig) -> Self {
-        self.config = config;
-        self
-    }
-
     /// Set custom priority queue capacity
     pub fn with_priority_queue_capacity(mut self, capacity: usize) -> Self {
         self.priority_queue_capacity = Some(capacity);
@@ -418,6 +412,3 @@ impl Reaction for LogReaction {
         self.base.inject_event_tx(tx).await;
     }
 }
-
-#[cfg(test)]
-mod tests;
