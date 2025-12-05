@@ -49,7 +49,7 @@ use axum::{
 };
 use drasi_lib::{DrasiLib, Query};
 use drasi_lib::plugin_core::Source as SourceTrait;
-use drasi_source_http::{HttpSource, HttpSourceConfig};
+use drasi_source_http::{HttpSource, HttpSourceBuilder};
 use drasi_bootstrap_scriptfile::ScriptFileBootstrapProvider;
 use drasi_reaction_log::LogReaction;
 
@@ -70,19 +70,16 @@ async fn main() -> Result<()> {
     // The HTTP source exposes endpoints to receive stock price updates.
     // Events are sent to: POST /sources/stock-prices/events
 
-    let http_config = HttpSourceConfig {
-        host: "0.0.0.0".to_string(),
-        port: 9000,
-        endpoint: None,
-        timeout_ms: 10000,
-        // Adaptive batching optimizes throughput for high-volume scenarios
-        adaptive_enabled: Some(true),
-        adaptive_max_batch_size: Some(100),
-        adaptive_min_batch_size: Some(1),
-        adaptive_max_wait_ms: Some(50),
-        adaptive_min_wait_ms: Some(10),
-        adaptive_window_secs: None,
-    };
+    // Adaptive batching optimizes throughput for high-volume scenarios
+    let http_config = HttpSourceBuilder::new()
+        .with_host("0.0.0.0")
+        .with_port(9000)
+        .with_adaptive_enabled(true)
+        .with_adaptive_max_batch_size(100)
+        .with_adaptive_min_batch_size(1)
+        .with_adaptive_max_wait_ms(50)
+        .with_adaptive_min_wait_ms(10)
+        .build();
 
     let http_source = HttpSource::new("stock-prices", http_config)?;
 
