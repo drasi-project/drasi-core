@@ -14,21 +14,8 @@
 
 //! Configuration types for log reaction.
 
-use drasi_lib::config::common::LogLevel;
 use serde::{Deserialize, Serialize};
 
 /// Log reaction configuration
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct LogReactionConfig {
-    /// Log level
-    #[serde(default)]
-    pub log_level: LogLevel,
-}
-
-impl Default for LogReactionConfig {
-    fn default() -> Self {
-        Self {
-            log_level: LogLevel::default(),
-        }
-    }
-}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct LogReactionConfig {}

@@ -15,12 +15,11 @@
 use super::config::LogReactionConfig;
 use anyhow::Result;
 use async_trait::async_trait;
-use log::{debug, error, info, trace, warn};
+use log::debug;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
-use drasi_lib::config::common::LogLevel;
 use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::managers::log_component_start;
@@ -86,13 +85,7 @@ impl LogReaction {
     }
 
     fn log_result(&self, message: &str) {
-        match self.config.log_level {
-            LogLevel::Trace => trace!("[{}] {}", self.base.id, message),
-            LogLevel::Debug => debug!("[{}] {}", self.base.id, message),
-            LogLevel::Info => info!("[{}] {}", self.base.id, message),
-            LogLevel::Warn => warn!("[{}] {}", self.base.id, message),
-            LogLevel::Error => error!("[{}] {}", self.base.id, message),
-        }
+        println!("[{}] {}", self.base.id, message);
     }
 }
 
@@ -107,12 +100,7 @@ impl Reaction for LogReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "log_level".to_string(),
-            serde_json::to_value(&self.config.log_level).unwrap_or(serde_json::Value::Null),
-        );
-        props
+        HashMap::new()
     }
 
     fn query_ids(&self) -> Vec<String> {
@@ -152,18 +140,8 @@ impl Reaction for LogReaction {
         // Spawn processing task to dequeue and process results in timestamp order
         let priority_queue = self.base.priority_queue.clone();
         let reaction_name = self.base.id.clone();
-        let log_level = self.config.log_level;
-        let config_name = self.base.id.clone();
 
         let processing_task = tokio::spawn(async move {
-            let log_fn = |message: &str| match log_level {
-                LogLevel::Trace => trace!("[{}] {}", config_name, message),
-                LogLevel::Debug => debug!("[{}] {}", config_name, message),
-                LogLevel::Info => info!("[{}] {}", config_name, message),
-                LogLevel::Warn => warn!("[{}] {}", config_name, message),
-                LogLevel::Error => error!("[{}] {}", config_name, message),
-            };
-
             loop {
                 // Dequeue next result in timestamp order (blocking)
                 let query_result_arc = priority_queue.dequeue().await;
@@ -182,19 +160,22 @@ impl Reaction for LogReaction {
                     continue;
                 }
 
-                log_fn(&format!(
-                    "Query '{}' results ({} items):",
+                println!(
+                    "[{}] Query '{}' ({} items):",
+                    reaction_name,
                     query_result.query_id,
                     query_result.results.len()
-                ));
+                );
 
                 for result in &query_result.results {
                     if let Some(result_type) = result.get("type").and_then(|v| v.as_str()) {
-                        match result_type {
+                        // Normalize result_type to lowercase for matching
+                        let result_type_lower = result_type.to_lowercase();
+                        match result_type_lower.as_str() {
                             "add" | "remove" => {
                                 if let Some(data) = result.get("data") {
-                                    let formatted = Self::format_result_static(data, result_type);
-                                    log_fn(&formatted);
+                                    let formatted = Self::format_result_static(data, &result_type_lower);
+                                    println!("[{}]   {}", reaction_name, formatted);
                                 }
                             }
                             "update" => {
@@ -202,18 +183,24 @@ impl Reaction for LogReaction {
                                     (result.get("before"), result.get("after"))
                                 {
                                     let before_formatted =
-                                        Self::format_result_static(before, "update_before");
+                                        Self::format_result_static(before, "before");
                                     let after_formatted =
-                                        Self::format_result_static(after, "update_after");
-                                    log_fn(&format!(
-                                        "[UPDATE] {} -> {}",
-                                        before_formatted.trim_start_matches("[UPDATE_BEFORE] "),
-                                        after_formatted.trim_start_matches("[UPDATE_AFTER] ")
-                                    ));
+                                        Self::format_result_static(after, "after");
+                                    println!(
+                                        "[{}]   [UPDATE] {} -> {}",
+                                        reaction_name,
+                                        before_formatted.trim_start_matches("[BEFORE] "),
+                                        after_formatted.trim_start_matches("[AFTER] ")
+                                    );
                                 }
                             }
                             _ => {
-                                log_fn(&format!("[{}] {}", result_type.to_uppercase(), result));
+                                println!(
+                                    "[{}]   [{}] {}",
+                                    reaction_name,
+                                    result_type.to_uppercase(),
+                                    result
+                                );
                             }
                         }
                     }
