@@ -86,7 +86,14 @@ pub struct PlatformReaction {
     batch_max_wait_ms: u64,
 }
 
+use super::PlatformReactionBuilder;
+
 impl PlatformReaction {
+    /// Create a builder for PlatformReaction
+    pub fn builder(id: impl Into<String>) -> PlatformReactionBuilder {
+        PlatformReactionBuilder::new(id)
+    }
+
     /// Create a new Platform Reaction
     ///
     /// The event channel is automatically injected when the reaction is added
@@ -96,7 +103,28 @@ impl PlatformReaction {
         queries: Vec<String>,
         config: PlatformReactionConfig,
     ) -> Result<Self> {
-        let id = id.into();
+        Self::create_internal(id.into(), queries, config, None, true)
+    }
+
+    /// Create from builder (internal method)
+    pub(crate) fn from_builder(
+        id: String,
+        queries: Vec<String>,
+        config: PlatformReactionConfig,
+        priority_queue_capacity: Option<usize>,
+        auto_start: bool,
+    ) -> Result<Self> {
+        Self::create_internal(id, queries, config, priority_queue_capacity, auto_start)
+    }
+
+    /// Internal constructor
+    fn create_internal(
+        id: String,
+        queries: Vec<String>,
+        config: PlatformReactionConfig,
+        priority_queue_capacity: Option<usize>,
+        auto_start: bool,
+    ) -> Result<Self> {
 
         // Extract configuration values
         let redis_url = config.redis_url.clone();
@@ -141,7 +169,10 @@ impl PlatformReaction {
         // Create CloudEvent config
         let cloud_event_config = CloudEventConfig::with_values(pubsub_name, source_name);
 
-        let params = ReactionBaseParams::new(id, queries);
+        let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
+        if let Some(capacity) = priority_queue_capacity {
+            params = params.with_priority_queue_capacity(capacity);
+        }
         Ok(Self {
             base: ReactionBase::new(params),
             config,

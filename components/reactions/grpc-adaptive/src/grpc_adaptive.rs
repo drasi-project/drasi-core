@@ -39,7 +39,14 @@ pub struct AdaptiveGrpcReaction {
     adaptive_config: AdaptiveBatchConfig,
 }
 
+use super::GrpcAdaptiveReactionBuilder;
+
 impl AdaptiveGrpcReaction {
+    /// Create a builder for AdaptiveGrpcReaction
+    pub fn builder(id: impl Into<String>) -> GrpcAdaptiveReactionBuilder {
+        GrpcAdaptiveReactionBuilder::new(id)
+    }
+
     /// Create a new adaptive gRPC reaction
     ///
     /// The event channel is automatically injected when the reaction is added
@@ -49,8 +56,28 @@ impl AdaptiveGrpcReaction {
         queries: Vec<String>,
         config: GrpcAdaptiveReactionConfig,
     ) -> Self {
-        let id = id.into();
+        Self::create_internal(id.into(), queries, config, None, true)
+    }
 
+    /// Create from builder (internal method)
+    pub(crate) fn from_builder(
+        id: String,
+        queries: Vec<String>,
+        config: GrpcAdaptiveReactionConfig,
+        priority_queue_capacity: Option<usize>,
+        auto_start: bool,
+    ) -> Self {
+        Self::create_internal(id, queries, config, priority_queue_capacity, auto_start)
+    }
+
+    /// Internal constructor
+    fn create_internal(
+        id: String,
+        queries: Vec<String>,
+        config: GrpcAdaptiveReactionConfig,
+        priority_queue_capacity: Option<usize>,
+        auto_start: bool,
+    ) -> Self {
         // Convert from config adaptive fields to utils::AdaptiveBatchConfig
         let utils_adaptive_config = AdaptiveBatchConfig {
             min_batch_size: config.adaptive.adaptive_min_batch_size,
@@ -63,7 +90,11 @@ impl AdaptiveGrpcReaction {
             adaptive_enabled: true,
         };
 
-        let params = ReactionBaseParams::new(id, queries);
+        let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
+        if let Some(capacity) = priority_queue_capacity {
+            params = params.with_priority_queue_capacity(capacity);
+        }
+
         Self {
             base: ReactionBase::new(params),
             endpoint: config.endpoint.clone(),

@@ -359,6 +359,8 @@ fn percentile(sorted_values: &[f64], p: f64) -> f64 {
     sorted_values[index]
 }
 
+use super::ProfilerReactionBuilder;
+
 /// ProfilerReaction collects and analyzes profiling data
 pub struct ProfilerReaction {
     base: ReactionBase,
@@ -368,16 +370,45 @@ pub struct ProfilerReaction {
 }
 
 impl ProfilerReaction {
+    /// Create a builder for ProfilerReaction
+    pub fn builder(id: impl Into<String>) -> ProfilerReactionBuilder {
+        ProfilerReactionBuilder::new(id)
+    }
+
     /// Create a new profiler reaction
     ///
     /// The event channel is automatically injected when the reaction is added
     /// to DrasiLib via `add_reaction()`.
     pub fn new(id: impl Into<String>, queries: Vec<String>, config: ProfilerReactionConfig) -> Self {
-        let id = id.into();
+        Self::create_internal(id.into(), queries, config, None, true)
+    }
+
+    /// Create from builder (internal method)
+    pub(crate) fn from_builder(
+        id: String,
+        queries: Vec<String>,
+        config: ProfilerReactionConfig,
+        priority_queue_capacity: Option<usize>,
+        auto_start: bool,
+    ) -> Self {
+        Self::create_internal(id, queries, config, priority_queue_capacity, auto_start)
+    }
+
+    /// Internal constructor
+    fn create_internal(
+        id: String,
+        queries: Vec<String>,
+        config: ProfilerReactionConfig,
+        priority_queue_capacity: Option<usize>,
+        auto_start: bool,
+    ) -> Self {
         let window_size = config.window_size;
         let report_interval_secs = config.report_interval_secs;
 
-        let params = ReactionBaseParams::new(id, queries);
+        let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
+        if let Some(capacity) = priority_queue_capacity {
+            params = params.with_priority_queue_capacity(capacity);
+        }
         Self {
             base: ReactionBase::new(params),
             config,

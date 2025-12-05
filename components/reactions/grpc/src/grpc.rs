@@ -27,6 +27,7 @@ use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::managers::log_component_start;
 
 pub use super::config::GrpcReactionConfig;
+use super::GrpcReactionBuilder;
 
 // Use modules declared in lib.rs
 use crate::connection::{create_client, create_client_with_retry, ConnectionState};
@@ -42,6 +43,11 @@ pub struct GrpcReaction {
 }
 
 impl GrpcReaction {
+    /// Create a builder for GrpcReaction
+    pub fn builder(id: impl Into<String>) -> GrpcReactionBuilder {
+        GrpcReactionBuilder::new(id)
+    }
+
     /// Create a new gRPC reaction
     ///
     /// The event channel is automatically injected when the reaction is added
@@ -68,6 +74,24 @@ impl GrpcReaction {
         let id = id.into();
         let params = ReactionBaseParams::new(id, queries)
             .with_priority_queue_capacity(priority_queue_capacity);
+        Self {
+            base: ReactionBase::new(params),
+            config,
+        }
+    }
+
+    /// Create from builder (internal method)
+    pub(crate) fn from_builder(
+        id: String,
+        queries: Vec<String>,
+        config: GrpcReactionConfig,
+        priority_queue_capacity: Option<usize>,
+        auto_start: bool,
+    ) -> Self {
+        let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
+        if let Some(capacity) = priority_queue_capacity {
+            params = params.with_priority_queue_capacity(capacity);
+        }
         Self {
             base: ReactionBase::new(params),
             config,

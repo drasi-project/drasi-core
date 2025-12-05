@@ -23,6 +23,7 @@ use crate::adaptive_batcher::{AdaptiveBatchConfig, AdaptiveBatcher};
 use drasi_reaction_http::QueryConfig;
 
 pub use super::config::HttpAdaptiveReactionConfig;
+use super::HttpAdaptiveReactionBuilder;
 
 #[cfg(test)]
 mod tests;
@@ -53,6 +54,11 @@ pub struct AdaptiveHttpReaction {
 }
 
 impl AdaptiveHttpReaction {
+    /// Create a builder for AdaptiveHttpReaction
+    pub fn builder(id: impl Into<String>) -> HttpAdaptiveReactionBuilder {
+        HttpAdaptiveReactionBuilder::new(id)
+    }
+
     /// Create a new adaptive HTTP reaction
     ///
     /// The event channel is automatically injected when the reaction is added
@@ -62,8 +68,28 @@ impl AdaptiveHttpReaction {
         queries: Vec<String>,
         config: HttpAdaptiveReactionConfig,
     ) -> Self {
-        let id = id.into();
+        Self::create_internal(id.into(), queries, config, None, true)
+    }
 
+    /// Create from builder (internal method)
+    pub(crate) fn from_builder(
+        id: String,
+        queries: Vec<String>,
+        config: HttpAdaptiveReactionConfig,
+        priority_queue_capacity: Option<usize>,
+        auto_start: bool,
+    ) -> Self {
+        Self::create_internal(id, queries, config, priority_queue_capacity, auto_start)
+    }
+
+    /// Internal constructor
+    fn create_internal(
+        id: String,
+        queries: Vec<String>,
+        config: HttpAdaptiveReactionConfig,
+        priority_queue_capacity: Option<usize>,
+        auto_start: bool,
+    ) -> Self {
         // Convert from config adaptive fields to utils::AdaptiveBatchConfig
         let utils_adaptive_config = AdaptiveBatchConfig {
             min_batch_size: config.adaptive.adaptive_min_batch_size,
@@ -88,7 +114,11 @@ impl AdaptiveHttpReaction {
             .build()
             .unwrap_or_else(|_| Client::new());
 
-        let params = ReactionBaseParams::new(id, queries);
+        let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
+        if let Some(capacity) = priority_queue_capacity {
+            params = params.with_priority_queue_capacity(capacity);
+        }
+
         Self {
             base: ReactionBase::new(params),
             base_url: config.base_url.clone(),

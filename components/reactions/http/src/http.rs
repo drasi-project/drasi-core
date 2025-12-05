@@ -31,12 +31,19 @@ use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::managers::log_component_start;
 
+use super::HttpReactionBuilder;
+
 pub struct HttpReaction {
     base: ReactionBase,
     config: HttpReactionConfig,
 }
 
 impl HttpReaction {
+    /// Create a builder for HttpReaction
+    pub fn builder(id: impl Into<String>) -> HttpReactionBuilder {
+        HttpReactionBuilder::new(id)
+    }
+
     /// Create a new HTTP reaction
     ///
     /// The event channel is automatically injected when the reaction is added
@@ -63,6 +70,24 @@ impl HttpReaction {
         let id = id.into();
         let params = ReactionBaseParams::new(id, queries)
             .with_priority_queue_capacity(priority_queue_capacity);
+        Self {
+            base: ReactionBase::new(params),
+            config,
+        }
+    }
+
+    /// Create from builder (internal method)
+    pub(crate) fn from_builder(
+        id: String,
+        queries: Vec<String>,
+        config: HttpReactionConfig,
+        priority_queue_capacity: Option<usize>,
+        auto_start: bool,
+    ) -> Self {
+        let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
+        if let Some(capacity) = priority_queue_capacity {
+            params = params.with_priority_queue_capacity(capacity);
+        }
         Self {
             base: ReactionBase::new(params),
             config,

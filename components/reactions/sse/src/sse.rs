@@ -31,6 +31,7 @@ use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::managers::log_component_start;
 
 pub use super::config::SseReactionConfig;
+use super::SseReactionBuilder;
 
 /// SSE reaction exposes query results to browser clients via Server-Sent Events.
 pub struct SseReaction {
@@ -41,20 +42,17 @@ pub struct SseReaction {
 }
 
 impl SseReaction {
+    /// Create a builder for SseReaction
+    pub fn builder(id: impl Into<String>) -> SseReactionBuilder {
+        SseReactionBuilder::new(id)
+    }
+
     /// Create a new SSE reaction
     ///
     /// The event channel is automatically injected when the reaction is added
     /// to DrasiLib via `add_reaction()`.
     pub fn new(id: impl Into<String>, queries: Vec<String>, config: SseReactionConfig) -> Self {
-        let id = id.into();
-        let params = ReactionBaseParams::new(id, queries);
-        let (tx, _rx) = broadcast::channel(1024);
-        Self {
-            base: ReactionBase::new(params),
-            config,
-            broadcaster: tx,
-            task_handles: Arc::new(tokio::sync::Mutex::new(Vec::new())),
-        }
+        Self::create_internal(id.into(), queries, config, None, true)
     }
 
     /// Create a new SSE reaction with custom priority queue capacity
@@ -67,9 +65,32 @@ impl SseReaction {
         config: SseReactionConfig,
         priority_queue_capacity: usize,
     ) -> Self {
-        let id = id.into();
-        let params = ReactionBaseParams::new(id, queries)
-            .with_priority_queue_capacity(priority_queue_capacity);
+        Self::create_internal(id.into(), queries, config, Some(priority_queue_capacity), true)
+    }
+
+    /// Create from builder (internal method)
+    pub(crate) fn from_builder(
+        id: String,
+        queries: Vec<String>,
+        config: SseReactionConfig,
+        priority_queue_capacity: Option<usize>,
+        auto_start: bool,
+    ) -> Self {
+        Self::create_internal(id, queries, config, priority_queue_capacity, auto_start)
+    }
+
+    /// Internal constructor
+    fn create_internal(
+        id: String,
+        queries: Vec<String>,
+        config: SseReactionConfig,
+        priority_queue_capacity: Option<usize>,
+        auto_start: bool,
+    ) -> Self {
+        let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
+        if let Some(capacity) = priority_queue_capacity {
+            params = params.with_priority_queue_capacity(capacity);
+        }
         let (tx, _rx) = broadcast::channel(1024);
         Self {
             base: ReactionBase::new(params),

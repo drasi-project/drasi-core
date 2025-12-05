@@ -80,6 +80,7 @@ pub struct LogReactionBuilder {
     queries: Vec<String>,
     config: LogReactionConfig,
     priority_queue_capacity: Option<usize>,
+    auto_start: bool,
 }
 
 impl LogReactionBuilder {
@@ -90,10 +91,23 @@ impl LogReactionBuilder {
             queries: Vec::new(),
             config: LogReactionConfig::default(),
             priority_queue_capacity: None,
+            auto_start: true,
         }
     }
 
-    /// Connect this reaction to receive results from a query
+    /// Set the query IDs to subscribe to
+    pub fn with_queries(mut self, queries: Vec<String>) -> Self {
+        self.queries = queries;
+        self
+    }
+
+    /// Add a query ID to subscribe to
+    pub fn with_query(mut self, query_id: impl Into<String>) -> Self {
+        self.queries.push(query_id.into());
+        self
+    }
+
+    /// Connect this reaction to receive results from a query (alias for with_query)
     pub fn from_query(mut self, query_id: impl Into<String>) -> Self {
         self.queries.push(query_id.into());
         self
@@ -102,6 +116,12 @@ impl LogReactionBuilder {
     /// Set custom priority queue capacity
     pub fn with_priority_queue_capacity(mut self, capacity: usize) -> Self {
         self.priority_queue_capacity = Some(capacity);
+        self
+    }
+
+    /// Set whether the reaction should auto-start
+    pub fn with_auto_start(mut self, auto_start: bool) -> Self {
+        self.auto_start = auto_start;
         self
     }
 
@@ -137,7 +157,8 @@ impl LogReactionBuilder {
 
     /// Build the LogReaction
     pub fn build(self) -> LogReaction {
-        let mut params = ReactionBaseParams::new(self.id, self.queries);
+        let mut params =
+            ReactionBaseParams::new(self.id, self.queries).with_auto_start(self.auto_start);
         if let Some(capacity) = self.priority_queue_capacity {
             params = params.with_priority_queue_capacity(capacity);
         }

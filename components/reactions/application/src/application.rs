@@ -438,6 +438,8 @@ impl ResultStream {
     }
 }
 
+use super::ApplicationReactionBuilder;
+
 /// A reaction that sends query results to the host application
 pub struct ApplicationReaction {
     base: ReactionBase,
@@ -445,6 +447,11 @@ pub struct ApplicationReaction {
 }
 
 impl ApplicationReaction {
+    /// Create a builder for ApplicationReaction
+    pub fn builder(id: impl Into<String>) -> ApplicationReactionBuilder {
+        ApplicationReactionBuilder::new(id)
+    }
+
     /// Create a new application reaction
     ///
     /// The event channel is automatically injected when the reaction is added
@@ -453,7 +460,26 @@ impl ApplicationReaction {
         id: impl Into<String>,
         queries: Vec<String>,
     ) -> (Self, ApplicationReactionHandle) {
-        let id = id.into();
+        Self::create_internal(id.into(), queries, None, true)
+    }
+
+    /// Create from builder (internal method)
+    pub(crate) fn from_builder(
+        id: String,
+        queries: Vec<String>,
+        priority_queue_capacity: Option<usize>,
+        auto_start: bool,
+    ) -> (Self, ApplicationReactionHandle) {
+        Self::create_internal(id, queries, priority_queue_capacity, auto_start)
+    }
+
+    /// Internal constructor
+    fn create_internal(
+        id: String,
+        queries: Vec<String>,
+        priority_queue_capacity: Option<usize>,
+        auto_start: bool,
+    ) -> (Self, ApplicationReactionHandle) {
         let (app_tx, app_rx) = mpsc::channel(1000);
 
         let handle = ApplicationReactionHandle {
@@ -461,7 +487,10 @@ impl ApplicationReaction {
             reaction_id: id.clone(),
         };
 
-        let params = ReactionBaseParams::new(id, queries);
+        let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
+        if let Some(capacity) = priority_queue_capacity {
+            params = params.with_priority_queue_capacity(capacity);
+        }
         let reaction = Self {
             base: ReactionBase::new(params),
             app_tx,
