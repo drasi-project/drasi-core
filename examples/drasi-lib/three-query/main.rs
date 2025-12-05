@@ -157,11 +157,17 @@ async fn main() -> Result<()> {
     // Step 4: Create Log Reaction
     // =========================================================================
     // The LogReaction prints query results directly to the console.
+    // Templates use Handlebars syntax to format each event type.
+    // Since this reaction subscribes to multiple queries, we include query_name
+    // to identify which query produced each result.
 
     let log_reaction = LogReaction::builder("console-logger")
         .from_query("all-prices")
         .from_query("gainers")
         .from_query("high-volume")
+        .with_added_template("[{{query_name}}] + {{after.symbol}}: ${{after.price}}")
+        .with_updated_template("[{{query_name}}] ~ {{after.symbol}}: ${{before.price}} -> ${{after.price}}")
+        .with_deleted_template("[{{query_name}}] - {{before.symbol}} removed")
         .build();
 
     // =========================================================================

@@ -15,7 +15,9 @@
 use super::config::LogReactionConfig;
 use anyhow::Result;
 use async_trait::async_trait;
+use handlebars::Handlebars;
 use log::debug;
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -59,28 +61,6 @@ impl LogReaction {
         Self {
             base: ReactionBase::new(params),
             config,
-        }
-    }
-
-    fn format_result_static(result: &serde_json::Value, result_type: &str) -> String {
-        if let Some(obj) = result.as_object() {
-            let fields: Vec<String> = obj
-                .iter()
-                .map(|(k, v)| format!("{}: {}", k, Self::format_value_static(v)))
-                .collect();
-            format!("[{}] {}", result_type.to_uppercase(), fields.join(", "))
-        } else {
-            format!("[{}] {}", result_type.to_uppercase(), result)
-        }
-    }
-
-    fn format_value_static(value: &serde_json::Value) -> String {
-        match value {
-            serde_json::Value::String(s) => s.clone(),
-            serde_json::Value::Number(n) => n.to_string(),
-            serde_json::Value::Bool(b) => b.to_string(),
-            serde_json::Value::Null => "null".to_string(),
-            _ => value.to_string(),
         }
     }
 
@@ -128,6 +108,36 @@ impl LogReactionBuilder {
     /// Set custom priority queue capacity
     pub fn with_priority_queue_capacity(mut self, capacity: usize) -> Self {
         self.priority_queue_capacity = Some(capacity);
+        self
+    }
+
+    /// Set Handlebars template for ADD events
+    ///
+    /// Available variables: `after`, `query_name`, `operation`
+    ///
+    /// Example: `"[NEW] Item {{after.id}}: {{after.name}}"`
+    pub fn with_added_template(mut self, template: impl Into<String>) -> Self {
+        self.config.added_template = Some(template.into());
+        self
+    }
+
+    /// Set Handlebars template for UPDATE events
+    ///
+    /// Available variables: `before`, `after`, `data`, `query_name`, `operation`
+    ///
+    /// Example: `"[CHG] {{after.id}}: {{before.value}} -> {{after.value}}"`
+    pub fn with_updated_template(mut self, template: impl Into<String>) -> Self {
+        self.config.updated_template = Some(template.into());
+        self
+    }
+
+    /// Set Handlebars template for DELETE events
+    ///
+    /// Available variables: `before`, `query_name`, `operation`
+    ///
+    /// Example: `"[DEL] Item {{before.id}} removed"`
+    pub fn with_deleted_template(mut self, template: impl Into<String>) -> Self {
+        self.config.deleted_template = Some(template.into());
         self
     }
 
@@ -195,8 +205,30 @@ impl Reaction for LogReaction {
         // Spawn processing task to dequeue and process results in timestamp order
         let priority_queue = self.base.priority_queue.clone();
         let reaction_name = self.base.id.clone();
+        let config = self.config.clone();
 
         let processing_task = tokio::spawn(async move {
+            // Set up Handlebars with json helper
+            let mut handlebars = Handlebars::new();
+            handlebars.register_helper(
+                "json",
+                Box::new(
+                    |h: &handlebars::Helper,
+                     _: &Handlebars,
+                     _: &handlebars::Context,
+                     _: &mut handlebars::RenderContext,
+                     out: &mut dyn handlebars::Output|
+                     -> handlebars::HelperResult {
+                        if let Some(value) = h.param(0) {
+                            let json_str = serde_json::to_string(&value.value())
+                                .unwrap_or_else(|_| "null".to_string());
+                            out.write(&json_str)?;
+                        }
+                        Ok(())
+                    },
+                ),
+            );
+
             loop {
                 // Dequeue next result in timestamp order (blocking)
                 let query_result_arc = priority_queue.dequeue().await;
@@ -226,27 +258,104 @@ impl Reaction for LogReaction {
                     if let Some(result_type) = result.get("type").and_then(|v| v.as_str()) {
                         // Normalize result_type to lowercase for matching
                         let result_type_lower = result_type.to_lowercase();
+
+                        // Build context for template rendering
+                        let mut context = Map::new();
+                        context.insert(
+                            "query_name".to_string(),
+                            Value::String(query_result.query_id.clone()),
+                        );
+                        context.insert(
+                            "operation".to_string(),
+                            Value::String(result_type.to_uppercase()),
+                        );
+
                         match result_type_lower.as_str() {
-                            "add" | "remove" => {
+                            "add" => {
                                 if let Some(data) = result.get("data") {
-                                    let formatted = Self::format_result_static(data, &result_type_lower);
-                                    println!("[{}]   {}", reaction_name, formatted);
+                                    context.insert("after".to_string(), data.clone());
+
+                                    if let Some(ref template) = config.added_template {
+                                        // Use template
+                                        match handlebars.render_template(template, &context) {
+                                            Ok(rendered) => {
+                                                println!("[{}]   {}", reaction_name, rendered);
+                                            }
+                                            Err(e) => {
+                                                debug!(
+                                                    "[{}] Template render error: {}",
+                                                    reaction_name, e
+                                                );
+                                                // Fall back to JSON output
+                                                println!("[{}]   [ADD] {}", reaction_name, data);
+                                            }
+                                        }
+                                    } else {
+                                        // Default: show full JSON
+                                        println!("[{}]   [ADD] {}", reaction_name, data);
+                                    }
+                                }
+                            }
+                            "remove" | "delete" => {
+                                if let Some(data) = result.get("data") {
+                                    context.insert("before".to_string(), data.clone());
+
+                                    if let Some(ref template) = config.deleted_template {
+                                        // Use template
+                                        match handlebars.render_template(template, &context) {
+                                            Ok(rendered) => {
+                                                println!("[{}]   {}", reaction_name, rendered);
+                                            }
+                                            Err(e) => {
+                                                debug!(
+                                                    "[{}] Template render error: {}",
+                                                    reaction_name, e
+                                                );
+                                                // Fall back to JSON output
+                                                println!("[{}]   [DELETE] {}", reaction_name, data);
+                                            }
+                                        }
+                                    } else {
+                                        // Default: show full JSON
+                                        println!("[{}]   [DELETE] {}", reaction_name, data);
+                                    }
                                 }
                             }
                             "update" => {
                                 if let (Some(before), Some(after)) =
                                     (result.get("before"), result.get("after"))
                                 {
-                                    let before_formatted =
-                                        Self::format_result_static(before, "before");
-                                    let after_formatted =
-                                        Self::format_result_static(after, "after");
-                                    println!(
-                                        "[{}]   [UPDATE] {} -> {}",
-                                        reaction_name,
-                                        before_formatted.trim_start_matches("[BEFORE] "),
-                                        after_formatted.trim_start_matches("[AFTER] ")
-                                    );
+                                    context.insert("before".to_string(), before.clone());
+                                    context.insert("after".to_string(), after.clone());
+                                    if let Some(data) = result.get("data") {
+                                        context.insert("data".to_string(), data.clone());
+                                    }
+
+                                    if let Some(ref template) = config.updated_template {
+                                        // Use template
+                                        match handlebars.render_template(template, &context) {
+                                            Ok(rendered) => {
+                                                println!("[{}]   {}", reaction_name, rendered);
+                                            }
+                                            Err(e) => {
+                                                debug!(
+                                                    "[{}] Template render error: {}",
+                                                    reaction_name, e
+                                                );
+                                                // Fall back to JSON output
+                                                println!(
+                                                    "[{}]   [UPDATE] {} -> {}",
+                                                    reaction_name, before, after
+                                                );
+                                            }
+                                        }
+                                    } else {
+                                        // Default: show full JSON
+                                        println!(
+                                            "[{}]   [UPDATE] {} -> {}",
+                                            reaction_name, before, after
+                                        );
+                                    }
                                 }
                             }
                             _ => {

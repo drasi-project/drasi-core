@@ -127,9 +127,13 @@ async fn main() -> Result<()> {
     // Step 4: Create Log Reaction
     // =========================================================================
     // The LogReaction prints query results directly to the console.
+    // Templates use Handlebars syntax to format each event type.
 
     let log_reaction = LogReaction::builder("console-logger")
         .from_query("all-prices")
+        .with_added_template("[+] {{after.symbol}}: ${{after.price}} (prev: ${{after.previous_close}}, vol: {{after.volume}})")
+        .with_updated_template("[~] {{after.symbol}}: ${{before.price}} -> ${{after.price}} (vol: {{after.volume}})")
+        .with_deleted_template("[-] {{before.symbol}} removed")
         .build();
 
     // =========================================================================
