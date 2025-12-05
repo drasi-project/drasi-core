@@ -17,8 +17,6 @@
 //! This module provides all reaction-related operations including adding, removing,
 //! starting, and stopping reactions.
 
-use std::sync::Arc;
-
 use crate::channels::ComponentStatus;
 use crate::component_ops::map_state_error;
 use crate::config::ReactionRuntime;
@@ -94,6 +92,7 @@ impl DrasiLib {
     /// Start a stopped reaction
     ///
     /// This will create the necessary subscriptions to query result streams.
+    /// The QuerySubscriber was already injected when the reaction was added via `add_reaction()`.
     ///
     /// # Example
     /// ```no_run
@@ -106,12 +105,9 @@ impl DrasiLib {
     pub async fn start_reaction(&self, id: &str) -> Result<()> {
         self.state_guard.require_initialized().await?;
 
-        // Start the reaction with QuerySubscriber for query subscriptions
-        let subscriber: Arc<dyn crate::plugin_core::QuerySubscriber> = self.as_arc();
+        // Start the reaction (QuerySubscriber was injected when reaction was added)
         map_state_error(
-            self.reaction_manager
-                .start_reaction(id.to_string(), subscriber)
-                .await,
+            self.reaction_manager.start_reaction(id.to_string()).await,
             "reaction",
             id,
         )

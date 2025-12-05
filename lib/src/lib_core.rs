@@ -276,6 +276,13 @@ impl DrasiLib {
 
         info!("Initializing Drasi Server Core");
 
+        // Inject QuerySubscriber into ReactionManager
+        // This allows reactions to access queries when they start
+        let query_subscriber: Arc<dyn crate::plugin_core::QuerySubscriber> = self.as_arc();
+        self.reaction_manager
+            .inject_query_subscriber(query_subscriber)
+            .await;
+
         // Load configuration
         let lifecycle = self.lifecycle.read().await;
         lifecycle.load_configuration().await?;
@@ -342,7 +349,7 @@ impl DrasiLib {
 
         // Start all configured components
         let lifecycle = self.lifecycle.read().await;
-        lifecycle.start_components(self.as_arc()).await?;
+        lifecycle.start_components().await?;
 
         *running = true;
         info!("Drasi Server Core started successfully");

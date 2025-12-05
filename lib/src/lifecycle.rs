@@ -166,10 +166,7 @@ impl LifecycleManager {
     ///
     /// Components are started in dependency order: Sources → Queries → Reactions
     /// After successful start, the saved running state is cleared.
-    pub async fn start_components(
-        &self,
-        server_core: Arc<crate::lib_core::DrasiLib>,
-    ) -> Result<()> {
+    pub async fn start_components(&self) -> Result<()> {
         info!("Starting all auto-start components in sequence: Sources → Queries → Reactions");
 
         let running_before = self.components_running_before_stop.read().await.clone();
@@ -248,34 +245,9 @@ impl LifecycleManager {
 
         // Start reactions after queries
         // Reactions are now instance-based, get list from reaction manager
+        // ReactionManager.start_all() handles auto_start logic internally
         info!("Starting auto-start reactions");
-        let reactions = self.reaction_manager.list_reactions().await;
-        for (id, _) in reactions {
-            let should_start = running_before.reactions.contains(&id);
-
-            if should_start {
-                let status = self
-                    .reaction_manager
-                    .get_reaction_status(id.clone())
-                    .await;
-                if matches!(status, Ok(ComponentStatus::Stopped)) {
-                    info!(
-                        "Starting reaction '{}' (was_running={})",
-                        id,
-                        running_before.reactions.contains(&id)
-                    );
-                    // Pass server core to reaction for direct query subscriptions
-                    self.reaction_manager
-                        .start_reaction(id.clone(), server_core.clone())
-                        .await?;
-                } else {
-                    info!(
-                        "Reaction '{}' already started or starting, status: {:?}",
-                        id, status
-                    );
-                }
-            }
-        }
+        self.reaction_manager.start_all().await?;
         info!("All required reactions started successfully");
 
         // Clear the saved state after successful start

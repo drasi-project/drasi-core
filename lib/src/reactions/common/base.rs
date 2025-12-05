@@ -50,13 +50,11 @@ use crate::plugin_core::QuerySubscriber;
 /// ```ignore
 /// use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 ///
-/// let params = ReactionBaseParams {
-///     id: "my-reaction".to_string(),
-///     queries: vec!["query1".to_string(), "query2".to_string()],
-///     priority_queue_capacity: Some(5000),
-/// };
+/// let params = ReactionBaseParams::new("my-reaction", vec!["query1".to_string()])
+///     .with_priority_queue_capacity(5000)
+///     .with_auto_start(true);
 ///
-/// let base = ReactionBase::new(params, event_tx);
+/// let base = ReactionBase::new(params);
 /// ```
 #[derive(Debug, Clone)]
 pub struct ReactionBaseParams {
@@ -66,6 +64,8 @@ pub struct ReactionBaseParams {
     pub queries: Vec<String>,
     /// Priority queue capacity - defaults to 10000
     pub priority_queue_capacity: Option<usize>,
+    /// Whether this reaction should auto-start - defaults to true
+    pub auto_start: bool,
 }
 
 impl ReactionBaseParams {
@@ -75,12 +75,19 @@ impl ReactionBaseParams {
             id: id.into(),
             queries,
             priority_queue_capacity: None,
+            auto_start: true, // Default to true like queries
         }
     }
 
     /// Set the priority queue capacity
     pub fn with_priority_queue_capacity(mut self, capacity: usize) -> Self {
         self.priority_queue_capacity = Some(capacity);
+        self
+    }
+
+    /// Set whether this reaction should auto-start
+    pub fn with_auto_start(mut self, auto_start: bool) -> Self {
+        self.auto_start = auto_start;
         self
     }
 }
@@ -91,10 +98,14 @@ pub struct ReactionBase {
     pub id: String,
     /// List of query IDs to subscribe to
     pub queries: Vec<String>,
+    /// Whether this reaction should auto-start
+    pub auto_start: bool,
     /// Current component status
     pub status: Arc<RwLock<ComponentStatus>>,
     /// Channel for sending component lifecycle events (injected by DrasiLib when added)
     event_tx: Arc<RwLock<Option<ComponentEventSender>>>,
+    /// Query subscriber for accessing queries (injected by DrasiLib when added)
+    query_subscriber: Arc<RwLock<Option<Arc<dyn QuerySubscriber>>>>,
     /// Priority queue for timestamp-ordered result processing
     pub priority_queue: PriorityQueue<QueryResult>,
     /// Handles to subscription forwarder tasks
@@ -106,15 +117,17 @@ pub struct ReactionBase {
 impl ReactionBase {
     /// Create a new ReactionBase with the given parameters
     ///
-    /// The event channel is not required during construction - it will be
-    /// injected by DrasiLib when the reaction is added via `inject_event_tx()`.
+    /// Dependencies (event channel and query subscriber) are not required during
+    /// construction - they will be injected by DrasiLib when the reaction is added.
     pub fn new(params: ReactionBaseParams) -> Self {
         Self {
             priority_queue: PriorityQueue::new(params.priority_queue_capacity.unwrap_or(10000)),
             id: params.id,
             queries: params.queries,
+            auto_start: params.auto_start,
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            event_tx: Arc::new(RwLock::new(None)), // Injected later by DrasiLib
+            event_tx: Arc::new(RwLock::new(None)),           // Injected later by DrasiLib
+            query_subscriber: Arc::new(RwLock::new(None)),   // Injected later by DrasiLib
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
             processing_task: Arc::new(RwLock::new(None)),
         }
@@ -126,6 +139,19 @@ impl ReactionBase {
     /// Plugin developers do not need to call this directly.
     pub async fn inject_event_tx(&self, tx: ComponentEventSender) {
         *self.event_tx.write().await = Some(tx);
+    }
+
+    /// Inject the query subscriber (called by DrasiLib when reaction is added)
+    ///
+    /// This method is called automatically by DrasiLib's `add_reaction()` method.
+    /// Plugin developers do not need to call this directly.
+    pub async fn inject_query_subscriber(&self, qs: Arc<dyn QuerySubscriber>) {
+        *self.query_subscriber.write().await = Some(qs);
+    }
+
+    /// Get whether this reaction should auto-start
+    pub fn get_auto_start(&self) -> bool {
+        self.auto_start
     }
 
     /// Get the event channel Arc for internal use by spawned tasks
@@ -146,8 +172,10 @@ impl ReactionBase {
         Self {
             id: self.id.clone(),
             queries: self.queries.clone(),
+            auto_start: self.auto_start,
             status: self.status.clone(),
             event_tx: self.event_tx.clone(),
+            query_subscriber: self.query_subscriber.clone(),
             priority_queue: self.priority_queue.clone(),
             subscription_tasks: self.subscription_tasks.clone(),
             processing_task: self.processing_task.clone(),
@@ -209,20 +237,28 @@ impl ReactionBase {
     /// Subscribe to all configured queries and spawn forwarder tasks
     ///
     /// This method handles the common pattern of:
-    /// 1. Getting query instances via QuerySubscriber
+    /// 1. Getting query instances via the injected QuerySubscriber
     /// 2. Subscribing to each configured query
     /// 3. Spawning forwarder tasks to enqueue results to priority queue
     ///
-    /// # Arguments
-    /// * `query_subscriber` - Trait object providing access to query instances
+    /// # Prerequisites
+    /// * `inject_query_subscriber()` must have been called (done automatically by DrasiLib)
     ///
     /// # Returns
     /// * `Ok(())` if all subscriptions succeeded
-    /// * `Err(...)` if any subscription failed
-    pub async fn subscribe_to_queries(
-        &self,
-        query_subscriber: Arc<dyn QuerySubscriber>,
-    ) -> Result<()> {
+    /// * `Err(...)` if QuerySubscriber not injected or any subscription failed
+    pub async fn subscribe_to_queries(&self) -> Result<()> {
+        // Get the injected query subscriber (clone the Arc to release the lock)
+        let query_subscriber = {
+            let qs_guard = self.query_subscriber.read().await;
+            qs_guard.as_ref().cloned().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "QuerySubscriber not injected - was reaction '{}' added to DrasiLib?",
+                    self.id
+                )
+            })?
+        };
+
         // Subscribe to all configured queries and spawn forwarder tasks
         for query_id in &self.queries {
             // Get the query instance via QuerySubscriber
@@ -350,11 +386,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_reaction_base_creation() {
-        let params = ReactionBaseParams {
-            id: "test-reaction".to_string(),
-            queries: vec!["query1".to_string()],
-            priority_queue_capacity: Some(5000),
-        };
+        let params = ReactionBaseParams::new("test-reaction", vec!["query1".to_string()])
+            .with_priority_queue_capacity(5000);
 
         let base = ReactionBase::new(params);
         assert_eq!(base.id, "test-reaction");
@@ -364,11 +397,7 @@ mod tests {
     #[tokio::test]
     async fn test_status_transitions() {
         let (event_tx, mut event_rx) = mpsc::channel(100);
-        let params = ReactionBaseParams {
-            id: "test-reaction".to_string(),
-            queries: vec![],
-            priority_queue_capacity: None,
-        };
+        let params = ReactionBaseParams::new("test-reaction", vec![]);
 
         let base = ReactionBase::new(params);
         // Inject event_tx to test event sending
@@ -389,11 +418,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_priority_queue_operations() {
-        let params = ReactionBaseParams {
-            id: "test-reaction".to_string(),
-            queries: vec![],
-            priority_queue_capacity: Some(10),
-        };
+        let params = ReactionBaseParams::new("test-reaction", vec![])
+            .with_priority_queue_capacity(10);
 
         let base = ReactionBase::new(params);
 
@@ -417,11 +443,7 @@ mod tests {
     #[tokio::test]
     async fn test_event_without_injection() {
         // Test that send_component_event works even without event_tx injection
-        let params = ReactionBaseParams {
-            id: "test-reaction".to_string(),
-            queries: vec![],
-            priority_queue_capacity: None,
-        };
+        let params = ReactionBaseParams::new("test-reaction", vec![]);
 
         let base = ReactionBase::new(params);
 

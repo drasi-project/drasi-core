@@ -237,10 +237,11 @@ impl Reaction for HttpReaction {
         self.base.queries.clone()
     }
 
-    async fn start(
-        &self,
-        query_subscriber: Arc<dyn QuerySubscriber>,
-    ) -> Result<()> {
+    async fn inject_query_subscriber(&self, query_subscriber: Arc<dyn QuerySubscriber>) {
+        self.base.inject_query_subscriber(query_subscriber).await;
+    }
+
+    async fn start(&self) -> Result<()> {
         log_component_start("HTTP Reaction", &self.base.id);
 
         info!(
@@ -257,7 +258,8 @@ impl Reaction for HttpReaction {
             .await?;
 
         // Subscribe to all configured queries using ReactionBase
-        self.base.subscribe_to_queries(query_subscriber).await?;
+        // QuerySubscriber was injected via inject_query_subscriber() when reaction was added
+        self.base.subscribe_to_queries().await?;
 
         // Transition to Running
         self.base

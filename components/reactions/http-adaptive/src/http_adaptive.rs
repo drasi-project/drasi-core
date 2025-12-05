@@ -426,10 +426,11 @@ impl Reaction for AdaptiveHttpReaction {
         self.base.queries.clone()
     }
 
-    async fn start(
-        &self,
-        query_subscriber: Arc<dyn QuerySubscriber>,
-    ) -> Result<()> {
+    async fn inject_query_subscriber(&self, query_subscriber: Arc<dyn QuerySubscriber>) {
+        self.base.inject_query_subscriber(query_subscriber).await;
+    }
+
+    async fn start(&self) -> Result<()> {
         info!("[{}] Starting adaptive HTTP reaction", self.base.id);
 
         // Set status to Starting
@@ -441,7 +442,8 @@ impl Reaction for AdaptiveHttpReaction {
             .await?;
 
         // Subscribe to queries
-        self.base.subscribe_to_queries(query_subscriber).await?;
+        // QuerySubscriber was injected via inject_query_subscriber() when reaction was added
+        self.base.subscribe_to_queries().await?;
 
         // Set status to Running
         self.base

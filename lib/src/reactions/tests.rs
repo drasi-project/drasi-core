@@ -59,10 +59,14 @@ mod manager_tests {
             self.queries.clone()
         }
 
-        async fn start(
+        async fn inject_query_subscriber(
             &self,
             _query_subscriber: Arc<dyn crate::plugin_core::QuerySubscriber>,
-        ) -> anyhow::Result<()> {
+        ) {
+            // No-op for test mock - real reactions would store this
+        }
+
+        async fn start(&self) -> anyhow::Result<()> {
             *self.status.write().await = ComponentStatus::Starting;
 
             let event = ComponentEvent {

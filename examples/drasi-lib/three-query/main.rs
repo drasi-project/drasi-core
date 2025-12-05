@@ -194,12 +194,9 @@ async fn main() -> Result<()> {
     // Starting the core initializes all components:
     // 1. Sources start listening for events
     // 2. Queries subscribe to sources and run bootstrap
-    // 3. Reactions need to be started explicitly
+    // 3. Reactions auto-start by default (like queries)
 
     core.start().await?;
-
-    // Start the log reaction to begin receiving query results
-    core.start_reaction("console-logger").await?;
 
     // =========================================================================
     // Step 7: Start Results API Server

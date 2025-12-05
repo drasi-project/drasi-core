@@ -27,11 +27,14 @@
 //!
 //! drasi-lib has no knowledge of which plugins exist - it only knows about this trait.
 //!
-//! # Event Channel Injection
+//! # Dependency Injection
 //!
-//! Reactions do not need to receive an event channel during construction.
-//! DrasiLib automatically injects the event channel when the reaction is added
-//! via `add_reaction()`. This simplifies the plugin constructor API.
+//! Reactions receive dependencies through injection methods rather than constructor parameters:
+//! - `inject_event_tx()` - Event channel for component lifecycle events
+//! - `inject_query_subscriber()` - Query subscriber for accessing queries
+//!
+//! Both are automatically called by DrasiLib when the reaction is added via `add_reaction()`.
+//! This simplifies the plugin constructor API and enables auto-start functionality.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -56,10 +59,18 @@ pub trait QuerySubscriber: Send + Sync {
 /// drasi-lib only interacts with reactions through this trait - it has no
 /// knowledge of specific plugin types or their configurations.
 ///
+/// # Lifecycle
+///
+/// Reactions follow this lifecycle:
+/// 1. Created by plugin code with configuration
+/// 2. Added to DrasiLib via `add_reaction()` - dependencies injected automatically
+/// 3. Started via `start()` (auto-start or manual based on `auto_start()`)
+/// 4. Stopped via `stop()` when no longer needed
+///
 /// # Subscription Model
 ///
 /// Reactions manage their own subscriptions to queries using the broadcast channel pattern:
-/// - Each reaction receives a reference to a QuerySubscriber on startup
+/// - QuerySubscriber is injected via `inject_query_subscriber()` at add time
 /// - Reactions access queries via `query_subscriber.get_query_instance()`
 /// - For each query, reactions call `query.subscribe(reaction_id)`
 /// - Each subscription provides a broadcast receiver for that query's results
@@ -77,7 +88,7 @@ pub trait QuerySubscriber: Send + Sync {
 /// }
 ///
 /// impl MyReaction {
-///     // No event_tx needed - it's injected automatically by DrasiLib
+///     // No event_tx or query_subscriber needed - injected automatically by DrasiLib
 ///     pub fn new(config: MyReactionConfig) -> Self {
 ///         let params = ReactionBaseParams::new(&config.id, config.queries.clone())
 ///             .with_priority_queue_capacity(config.queue_capacity);
@@ -106,6 +117,16 @@ pub trait QuerySubscriber: Send + Sync {
 ///         self.base.inject_event_tx(tx).await;
 ///     }
 ///
+///     async fn inject_query_subscriber(&self, qs: Arc<dyn QuerySubscriber>) {
+///         self.base.inject_query_subscriber(qs).await;
+///     }
+///
+///     async fn start(&self) -> Result<()> {
+///         self.base.subscribe_to_queries().await?;
+///         // ... start processing
+///         Ok(())
+///     }
+///
 ///     // ... implement other methods
 /// }
 /// ```
@@ -127,13 +148,32 @@ pub trait Reaction: Send + Sync {
     /// Get the list of query IDs this reaction subscribes to
     fn query_ids(&self) -> Vec<String>;
 
-    /// Start the reaction with access to query subscriptions
+    /// Whether this reaction should auto-start when DrasiLib starts
+    ///
+    /// Default is `true` to match query behavior. Override to return `false`
+    /// if this reaction should only be started manually via `start_reaction()`.
+    fn auto_start(&self) -> bool {
+        true
+    }
+
+    /// Inject the query subscriber for accessing queries
+    ///
+    /// This method is called automatically by DrasiLib when the reaction is added
+    /// via `add_reaction()`. Plugin developers do not need to call this directly.
+    ///
+    /// Implementation should delegate to `self.base.inject_query_subscriber(qs).await`.
+    async fn inject_query_subscriber(&self, query_subscriber: Arc<dyn QuerySubscriber>);
+
+    /// Start the reaction
     ///
     /// The reaction should:
-    /// 1. Subscribe to all configured queries via query_subscriber
+    /// 1. Subscribe to all configured queries (using injected QuerySubscriber)
     /// 2. Start its processing loop
     /// 3. Update its status to Running
-    async fn start(&self, query_subscriber: Arc<dyn QuerySubscriber>) -> Result<()>;
+    ///
+    /// Note: QuerySubscriber is already available via `inject_query_subscriber()` which
+    /// is called when the reaction is added to DrasiLib.
+    async fn start(&self) -> Result<()>;
 
     /// Stop the reaction, cleaning up all subscriptions and tasks
     async fn stop(&self) -> Result<()>;
@@ -171,8 +211,16 @@ impl Reaction for Box<dyn Reaction + 'static> {
         (**self).query_ids()
     }
 
-    async fn start(&self, query_subscriber: Arc<dyn QuerySubscriber>) -> Result<()> {
-        (**self).start(query_subscriber).await
+    fn auto_start(&self) -> bool {
+        (**self).auto_start()
+    }
+
+    async fn inject_query_subscriber(&self, query_subscriber: Arc<dyn QuerySubscriber>) {
+        (**self).inject_query_subscriber(query_subscriber).await
+    }
+
+    async fn start(&self) -> Result<()> {
+        (**self).start().await
     }
 
     async fn stop(&self) -> Result<()> {

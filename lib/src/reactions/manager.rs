@@ -20,14 +20,14 @@ use tokio::sync::RwLock;
 
 use crate::channels::*;
 use crate::config::ReactionRuntime;
-use crate::lib_core::DrasiLib;
 use crate::managers::{is_operation_valid, log_component_error, Operation};
 use crate::plugin_core::{QuerySubscriber, Reaction};
 
 pub struct ReactionManager {
     reactions: Arc<RwLock<HashMap<String, Arc<dyn Reaction>>>>,
-    #[allow(dead_code)]
     event_tx: ComponentEventSender,
+    /// Query subscriber for reactions to access queries (injected after DrasiLib is constructed)
+    query_subscriber: Arc<RwLock<Option<Arc<dyn QuerySubscriber>>>>,
 }
 
 impl ReactionManager {
@@ -36,7 +36,15 @@ impl ReactionManager {
         Self {
             reactions: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
+            query_subscriber: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Inject the query subscriber (called after DrasiLib is fully constructed)
+    ///
+    /// This allows reactions to look up queries when they start.
+    pub async fn inject_query_subscriber(&self, qs: Arc<dyn QuerySubscriber>) {
+        *self.query_subscriber.write().await = Some(qs);
     }
 
     /// Add a reaction instance, taking ownership and wrapping it in an Arc internally.
@@ -52,7 +60,8 @@ impl ReactionManager {
     /// The reaction will NOT be auto-started. Call `start_reaction` separately
     /// if you need to start it after adding.
     ///
-    /// The event channel is automatically injected into the reaction before it is stored.
+    /// Dependencies (event channel and query subscriber) are automatically injected
+    /// into the reaction before it is stored.
     ///
     /// # Example
     /// ```ignore
@@ -63,8 +72,13 @@ impl ReactionManager {
         let reaction: Arc<dyn Reaction> = Arc::new(reaction);
         let reaction_id = reaction.id().to_string();
 
-        // Inject the event channel before storing
+        // Inject dependencies before storing
         reaction.inject_event_tx(self.event_tx.clone()).await;
+
+        // Inject query subscriber if available
+        if let Some(qs) = self.query_subscriber.read().await.as_ref() {
+            reaction.inject_query_subscriber(qs.clone()).await;
+        }
 
         // Use a single write lock to atomically check and insert
         // This eliminates the TOCTOU race condition from separate read-then-write
@@ -83,16 +97,14 @@ impl ReactionManager {
         Ok(())
     }
 
-    /// Start a reaction with access to the server core for query subscriptions.
+    /// Start a reaction.
+    ///
+    /// The reaction must have been added via `add_reaction()` first, which injects
+    /// the necessary dependencies (event channel and query subscriber).
     ///
     /// # Parameters
     /// - `id`: The reaction ID to start
-    /// - `query_subscriber`: Trait object providing access to query instances for subscriptions
-    pub async fn start_reaction(
-        &self,
-        id: String,
-        query_subscriber: Arc<dyn QuerySubscriber>,
-    ) -> Result<()> {
+    pub async fn start_reaction(&self, id: String) -> Result<()> {
         let reaction = {
             let reactions = self.reactions.read().await;
             reactions.get(&id).cloned()
@@ -101,7 +113,7 @@ impl ReactionManager {
         if let Some(reaction) = reaction {
             let status = reaction.status().await;
             is_operation_valid(&status, &Operation::Start).map_err(|e| anyhow::anyhow!(e))?;
-            reaction.start(query_subscriber).await?;
+            reaction.start().await?;
         } else {
             return Err(anyhow::anyhow!("Reaction not found: {}", id));
         }
@@ -223,13 +235,13 @@ impl ReactionManager {
         result
     }
 
-    /// Start all reactions.
+    /// Start all reactions that have `auto_start` enabled.
     ///
-    /// # Parameters
-    /// - `server_core`: Arc reference to DrasiLib for query subscriptions
+    /// Reactions must have been added via `add_reaction()` first, which injects
+    /// the necessary dependencies (event channel and query subscriber).
     ///
-    /// Reactions will manage their own subscriptions to queries using the broadcast channel pattern.
-    pub async fn start_all(&self, server_core: Arc<DrasiLib>) -> Result<()> {
+    /// Only reactions with `auto_start() == true` will be started.
+    pub async fn start_all(&self) -> Result<()> {
         let reactions: Vec<Arc<dyn Reaction>> = {
             let reactions = self.reactions.read().await;
             reactions.values().cloned().collect()
@@ -238,10 +250,18 @@ impl ReactionManager {
         let mut failed_reactions = Vec::new();
 
         for reaction in reactions {
+            // Only start reactions with auto_start enabled
+            if !reaction.auto_start() {
+                info!(
+                    "Skipping reaction '{}' (auto_start=false)",
+                    reaction.id()
+                );
+                continue;
+            }
+
             let reaction_id = reaction.id().to_string();
             info!("Starting reaction: {}", reaction_id);
-            let subscriber: Arc<dyn QuerySubscriber> = server_core.clone();
-            if let Err(e) = reaction.start(subscriber).await {
+            if let Err(e) = reaction.start().await {
                 error!("Failed to start reaction {}: {}", reaction_id, e);
                 failed_reactions.push((reaction_id, e.to_string()));
                 // Continue starting other reactions instead of returning early
