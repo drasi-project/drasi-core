@@ -180,9 +180,9 @@ async fn main() -> Result<()> {
         DrasiLib::builder()
             .with_id("stock-monitor")
             .with_source(http_source)
-            .add_query(all_prices)
-            .add_query(gainers)
-            .add_query(high_volume)
+            .with_query(all_prices)
+            .with_query(gainers)
+            .with_query(high_volume)
             .with_reaction(log_reaction)
             .build()
             .await?

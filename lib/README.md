@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
         .with_id("my-app")
         .with_source(source)      // Ownership transferred
         .with_reaction(reaction)  // Ownership transferred
-        .add_query(
+        .with_query(
             Query::cypher("high-temp")
                 .query("MATCH (s:Sensor) WHERE s.temperature > 75 RETURN s")
                 .from_source("sensors")
@@ -124,13 +124,13 @@ DrasiLib::builder()
     .with_reaction(reaction)  // reaction is moved here
 ```
 
-#### `add_query(config: QueryConfig)`
+#### `with_query(config: QueryConfig)`
 
 Add a query configuration. Use the `Query` builder to create configurations:
 
 ```rust
 DrasiLib::builder()
-    .add_query(
+    .with_query(
         Query::cypher("my-query")
             .query("MATCH (n:Person) RETURN n")
             .from_source("my-source")
@@ -173,7 +173,7 @@ Build the DrasiLib instance. This validates configuration, creates all component
 let core = DrasiLib::builder()
     .with_id("my-app")
     .with_source(source)
-    .add_query(query)
+    .with_query(query)
     .build()
     .await?;
 
@@ -329,7 +329,7 @@ Ensure you've added the instance to DrasiLib before referencing it in queries:
 let source = MySource::new("my-source", config)?;
 let core = DrasiLib::builder()
     .with_source(source)  // Must add source before queries reference it
-    .add_query(
+    .with_query(
         Query::cypher("my-query")
             .from_source("my-source")  // References the source above
             .build()

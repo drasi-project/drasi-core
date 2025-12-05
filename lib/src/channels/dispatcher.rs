@@ -93,7 +93,7 @@ use tokio::sync::{broadcast, mpsc};
 /// // Sources are now instance-based - create them externally and use .with_source()
 /// let core = DrasiLib::builder()
 ///     // .with_source(my_source_instance)
-///     .add_query(
+///     .with_query(
 ///         Query::cypher("active_orders")
 ///             .query("MATCH (o:Order) WHERE o.status = 'active' RETURN o")
 ///             .from_source("orders_db")

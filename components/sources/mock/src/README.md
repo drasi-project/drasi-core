@@ -485,7 +485,7 @@ async fn test_with_mock_source() {
                 .with_property("interval_ms", json!(1000))
                 .build()
         )
-        .add_query(
+        .with_query(
             Query::new("test-query")
                 .cypher("MATCH (c:Counter) WHERE c.value > 5 RETURN c")
                 .add_source("test-source")

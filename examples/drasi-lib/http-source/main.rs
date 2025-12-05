@@ -146,7 +146,7 @@ async fn main() -> Result<()> {
         DrasiLib::builder()
             .with_id("http-source-example")
             .with_source(http_source)
-            .add_query(all_prices)
+            .with_query(all_prices)
             .with_reaction(log_reaction)
             .build()
             .await?

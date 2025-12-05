@@ -46,7 +46,7 @@
 //!     .with_id("my-server")
 //!     // .with_source(my_source)      // Ownership transferred
 //!     // .with_reaction(my_reaction)  // Ownership transferred
-//!     .add_query(
+//!     .with_query(
 //!         Query::cypher("my-query")
 //!             .query("MATCH (n:Person) RETURN n")
 //!             .from_source("events")
@@ -103,7 +103,7 @@ use crate::lib_core::DrasiLib;
 ///     .with_id("my-server")
 ///     // .with_source(my_source)      // Ownership transferred
 ///     // .with_reaction(my_reaction)  // Ownership transferred
-///     .add_query(
+///     .with_query(
 ///         Query::cypher("my-query")
 ///             .query("MATCH (n) RETURN n")
 ///             .from_source("my-source")
@@ -187,7 +187,7 @@ impl DrasiLibBuilder {
     }
 
     /// Add a query configuration.
-    pub fn add_query(mut self, config: QueryConfig) -> Self {
+    pub fn with_query(mut self, config: QueryConfig) -> Self {
         self.query_configs.push(config);
         self
     }
@@ -523,7 +523,7 @@ mod tests {
         // In the instance-based approach, sources are added after build()
         let core = DrasiLibBuilder::new()
             .with_id("test-server")
-            .add_query(
+            .with_query(
                 Query::cypher("query1")
                     .query("MATCH (n) RETURN n")
                     // No from_source() call - query has no source subscriptions
@@ -563,7 +563,7 @@ mod tests {
         // after the builder creates the core. Here we just test query config addition.
         let core = DrasiLib::builder()
             .with_id("complex-server")
-            .add_query(
+            .with_query(
                 Query::cypher("query1")
                     .query("MATCH (n) RETURN n")
                     .from_source("source1")

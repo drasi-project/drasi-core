@@ -144,7 +144,7 @@ pub struct SourceSubscriptionConfig {
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let core = DrasiLib::builder()
 ///     .with_id("my-server")
-///     .add_query(
+///     .with_query(
 ///         Query::cypher("my-query")
 ///             .query("MATCH (n) RETURN n")
 ///             .from_source("my-source")

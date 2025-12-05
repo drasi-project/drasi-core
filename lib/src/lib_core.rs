@@ -69,7 +69,7 @@ use drasi_core::middleware::MiddlewareTypeRegistry;
 /// let core = DrasiLib::builder()
 ///     .with_id("my-server")
 ///     .with_source(my_source)  // Pre-built source instance
-///     .add_query(
+///     .with_query(
 ///         Query::cypher("my-query")
 ///             .query("MATCH (n:Person) RETURN n.name, n.age")
 ///             .from_source("events")
@@ -491,7 +491,7 @@ impl DrasiLib {
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let core = DrasiLib::builder()
     ///     .with_id("my-server")
-    ///     .add_query(
+    ///     .with_query(
     ///         Query::cypher("my-query")
     ///             .query("MATCH (n) RETURN n")
     ///             .from_source("events")
