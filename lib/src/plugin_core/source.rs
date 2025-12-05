@@ -158,6 +158,21 @@ pub trait Source: Send + Sync {
     ///
     /// Implementation should delegate to `self.base.inject_event_tx(tx).await`.
     async fn inject_event_tx(&self, tx: ComponentEventSender);
+
+    /// Set the bootstrap provider for this source
+    ///
+    /// This method allows setting a bootstrap provider after source construction.
+    /// It is optional - sources without a bootstrap provider will report that
+    /// bootstrap is not available.
+    ///
+    /// Implementation should delegate to `self.base.set_bootstrap_provider(provider).await`.
+    async fn set_bootstrap_provider(
+        &self,
+        _provider: Box<dyn crate::bootstrap::BootstrapProvider + 'static>,
+    ) {
+        // Default implementation does nothing - sources that support bootstrap
+        // should override this to delegate to their SourceBase
+    }
 }
 
 /// Blanket implementation of Source for Box<dyn Source>
@@ -211,6 +226,13 @@ impl Source for Box<dyn Source + 'static> {
 
     async fn inject_event_tx(&self, tx: ComponentEventSender) {
         (**self).inject_event_tx(tx).await
+    }
+
+    async fn set_bootstrap_provider(
+        &self,
+        provider: Box<dyn crate::bootstrap::BootstrapProvider + 'static>,
+    ) {
+        (**self).set_bootstrap_provider(provider).await
     }
 }
 

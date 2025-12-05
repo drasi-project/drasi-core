@@ -178,15 +178,26 @@ impl LifecycleManager {
         // Sources are now instance-based, get list from source manager
         info!("Starting auto-start sources");
         let sources = self.source_manager.list_sources().await;
+
+        // On first startup (running_before is empty), start all sources
+        // On restart, only start sources that were running before
+        let is_first_startup = running_before.sources.is_empty()
+            && running_before.queries.is_empty()
+            && running_before.reactions.is_empty();
+
         for (id, _) in sources {
-            let should_start = running_before.sources.contains(&id);
+            // Start source if:
+            // 1. This is first startup (all sources should start), OR
+            // 2. Source was running before the last stop
+            let should_start = is_first_startup || running_before.sources.contains(&id);
 
             if should_start {
                 let status = self.source_manager.get_source_status(id.clone()).await;
                 if matches!(status, Ok(ComponentStatus::Stopped)) {
                     info!(
-                        "Starting source '{}' (was_running={})",
+                        "Starting source '{}' (first_startup={}, was_running={})",
                         id,
+                        is_first_startup,
                         running_before.sources.contains(&id)
                     );
                     self.source_manager.start_source(id.clone()).await?;

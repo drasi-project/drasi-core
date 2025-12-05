@@ -1094,6 +1094,13 @@ impl Source for PlatformSource {
     async fn inject_event_tx(&self, tx: ComponentEventSender) {
         self.base.inject_event_tx(tx).await;
     }
+
+    async fn set_bootstrap_provider(
+        &self,
+        provider: Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>,
+    ) {
+        self.base.set_bootstrap_provider(provider).await;
+    }
 }
 
 impl PlatformSource {

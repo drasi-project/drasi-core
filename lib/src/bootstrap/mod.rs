@@ -129,6 +129,20 @@ pub trait BootstrapProvider: Send + Sync {
     ) -> Result<usize>;
 }
 
+/// Blanket implementation of BootstrapProvider for boxed trait objects.
+/// This allows Box<dyn BootstrapProvider> to be used where BootstrapProvider is expected.
+#[async_trait]
+impl BootstrapProvider for Box<dyn BootstrapProvider> {
+    async fn bootstrap(
+        &self,
+        request: BootstrapRequest,
+        context: &BootstrapContext,
+        event_tx: BootstrapEventSender,
+    ) -> Result<usize> {
+        (**self).bootstrap(request, context, event_tx).await
+    }
+}
+
 // Typed configuration structs for each bootstrap provider type
 
 /// PostgreSQL bootstrap provider configuration
