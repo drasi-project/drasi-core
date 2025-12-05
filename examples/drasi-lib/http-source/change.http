@@ -1,0 +1,144 @@
+### ============================================================================
+### DrasiLib HTTP Source Example - REST Client
+### ============================================================================
+### Use with VS Code REST Client extension or similar tools.
+###
+### The HTTP source listens on port 9000 and accepts events at:
+###   POST /sources/stock-prices/events       (single event)
+###   POST /sources/stock-prices/events/batch (multiple events)
+###
+### Each event can be: insert, update, or delete
+### ============================================================================
+
+### Health check - verify the HTTP source is running
+GET http://localhost:9000/health
+
+###
+
+### ============================================================================
+### INSERT OPERATIONS
+### ============================================================================
+
+### Insert a new stock (NVDA)
+POST http://localhost:9000/sources/stock-prices/events
+Content-Type: application/json
+
+{
+  "operation": "insert",
+  "element": {
+    "type": "node",
+    "id": "price_NVDA",
+    "labels": ["stock_prices"],
+    "properties": {
+      "symbol": "NVDA",
+      "price": 520.75,
+      "previous_close": 515.00,
+      "volume": 3500000
+    }
+  }
+}
+
+###
+
+### ============================================================================
+### UPDATE OPERATIONS
+### ============================================================================
+
+### Update AAPL price
+POST http://localhost:9000/sources/stock-prices/events
+Content-Type: application/json
+
+{
+  "operation": "update",
+  "element": {
+    "type": "node",
+    "id": "price_AAPL",
+    "labels": ["stock_prices"],
+    "properties": {
+      "symbol": "AAPL",
+      "price": 178.50,
+      "previous_close": 173.00,
+      "volume": 6500000
+    }
+  }
+}
+
+###
+
+### Update MSFT price
+POST http://localhost:9000/sources/stock-prices/events
+Content-Type: application/json
+
+{
+  "operation": "update",
+  "element": {
+    "type": "node",
+    "id": "price_MSFT",
+    "labels": ["stock_prices"],
+    "properties": {
+      "symbol": "MSFT",
+      "price": 385.00,
+      "previous_close": 382.00,
+      "volume": 2800000
+    }
+  }
+}
+
+###
+
+### ============================================================================
+### DELETE OPERATIONS
+### ============================================================================
+
+### Delete GOOGL from the system
+POST http://localhost:9000/sources/stock-prices/events
+Content-Type: application/json
+
+{
+  "operation": "delete",
+  "id": "price_GOOGL",
+  "labels": ["stock_prices"]
+}
+
+###
+
+### ============================================================================
+### BATCH OPERATIONS
+### ============================================================================
+
+### Batch update - update multiple stocks in a single request
+POST http://localhost:9000/sources/stock-prices/events/batch
+Content-Type: application/json
+
+{
+  "events": [
+    {
+      "operation": "update",
+      "element": {
+        "type": "node",
+        "id": "price_AAPL",
+        "labels": ["stock_prices"],
+        "properties": {
+          "symbol": "AAPL",
+          "price": 180.00,
+          "previous_close": 173.00,
+          "volume": 7500000
+        }
+      }
+    },
+    {
+      "operation": "update",
+      "element": {
+        "type": "node",
+        "id": "price_MSFT",
+        "labels": ["stock_prices"],
+        "properties": {
+          "symbol": "MSFT",
+          "price": 388.00,
+          "previous_close": 382.00,
+          "volume": 3100000
+        }
+      }
+    }
+  ]
+}

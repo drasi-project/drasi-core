@@ -1,0 +1,26 @@
+[package]
+name = "http-source-example"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "DrasiLib example demonstrating HTTP source with a single query"
+
+# Keep this crate independent from the parent workspace
+[workspace]
+
+[dependencies]
+drasi-lib = { path = "../../../lib" }
+drasi-source-http = { path = "../../../components/sources/http" }
+drasi-reaction-log = { path = "../../../components/reactions/log" }
+drasi-bootstrap-scriptfile = { path = "../../../components/bootstrappers/scriptfile" }
+
+tokio = { version = "1.6", features = ["full"] }
+anyhow = "1.0"
+axum = "0.7"
+env_logger = "0.10.0"
+log = "0.4"
+serde_json = "1.0"
+
+[[bin]]
+name = "http-source-example"
+path = "main.rs"

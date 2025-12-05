@@ -1,0 +1,13 @@
+### ============================================================================
+### DrasiLib HTTP Source Example - Query Results
+### ============================================================================
+### Use with VS Code REST Client extension or similar tools.
+###
+### The Results API listens on port 8080 and provides query results at:
+###   GET /queries/{query-id}/results
+###
+### ============================================================================
+
+### Get all stock prices
+### Returns all stocks with their current price, previous close, and volume
+GET http://localhost:8080/queries/all-prices/results
