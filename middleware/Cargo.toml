@@ -21,4 +21,4 @@ ordered-float = "3.7.0"
 hex = "0.4.3"
 urlencoding = "2.1.2"
 jq-rs ="0.4.1"
-tokio = { version = "1.29.1", features = ["full"] }
+tokio = { version = "1.29.1", features = ["rt-multi-thread", "sync", "time", "macros"] }
