@@ -259,6 +259,10 @@ impl Source for GrpcSource {
         props
     }
 
+    fn auto_start(&self) -> bool {
+        self.base.get_auto_start()
+    }
+
     async fn start(&self) -> Result<()> {
         log_component_start("gRPC Source", &self.base.id);
 
@@ -820,6 +824,7 @@ pub struct GrpcSourceBuilder {
     dispatch_mode: Option<DispatchMode>,
     dispatch_buffer_capacity: Option<usize>,
     bootstrap_provider: Option<Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>>,
+    auto_start: bool,
 }
 
 impl GrpcSourceBuilder {
@@ -834,6 +839,7 @@ impl GrpcSourceBuilder {
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
             bootstrap_provider: None,
+            auto_start: true,
         }
     }
 
@@ -882,6 +888,24 @@ impl GrpcSourceBuilder {
         self
     }
 
+    /// Set whether this source should auto-start when DrasiLib starts.
+    ///
+    /// Default is `true`. Set to `false` if this source should only be
+    /// started manually via `start_source()`.
+    pub fn with_auto_start(mut self, auto_start: bool) -> Self {
+        self.auto_start = auto_start;
+        self
+    }
+
+    /// Set the full configuration at once
+    pub fn with_config(mut self, config: GrpcSourceConfig) -> Self {
+        self.host = config.host;
+        self.port = config.port;
+        self.endpoint = config.endpoint;
+        self.timeout_ms = config.timeout_ms;
+        self
+    }
+
     /// Build the gRPC source
     ///
     /// # Errors
@@ -895,7 +919,8 @@ impl GrpcSourceBuilder {
             timeout_ms: self.timeout_ms,
         };
 
-        let mut params = SourceBaseParams::new(&self.id);
+        let mut params = SourceBaseParams::new(&self.id)
+            .with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {
             params = params.with_dispatch_mode(mode);
         }

@@ -30,23 +30,38 @@ impl DrasiLib {
     /// The source instance is wrapped in an Arc internally - callers transfer
     /// ownership rather than pre-wrapping in Arc.
     ///
+    /// If the server is running and the source has `auto_start=true`, the source
+    /// will be started immediately after being added.
+    ///
     /// # Example
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
     /// // Create the source and transfer ownership
     /// // let source = MySource::new("new-source", config)?;
-    /// // core.add_source(source).await?;  // Ownership transferred
+    /// // core.add_source(source).await?;  // Ownership transferred, auto-started if server running
     /// # Ok(())
     /// # }
     /// ```
     pub async fn add_source(&self, source: impl Source + 'static) -> Result<()> {
         self.state_guard.require_initialized().await?;
 
+        // Capture auto_start and id before transferring ownership
+        let should_auto_start = source.auto_start();
+        let source_id = source.id().to_string();
+
         self.source_manager
             .add_source(source)
             .await
             .map_err(|e| DrasiError::provisioning(format!("Failed to add source: {}", e)))?;
+
+        // If server is running and source wants auto-start, start it
+        if self.is_running().await && should_auto_start {
+            self.source_manager
+                .start_source(source_id)
+                .await
+                .map_err(|e| DrasiError::provisioning(format!("Failed to start source: {}", e)))?;
+        }
 
         Ok(())
     }

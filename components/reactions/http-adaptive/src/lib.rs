@@ -145,6 +145,16 @@ impl HttpAdaptiveReactionBuilder {
         self
     }
 
+    /// Set the full configuration at once
+    pub fn with_config(mut self, config: HttpAdaptiveReactionConfig) -> Self {
+        self.base_url = config.base_url;
+        self.token = config.token;
+        self.timeout_ms = config.timeout_ms;
+        self.routes = config.routes;
+        self.adaptive = config.adaptive;
+        self
+    }
+
     /// Build the HTTP Adaptive reaction
     pub fn build(self) -> anyhow::Result<AdaptiveHttpReaction> {
         let config = HttpAdaptiveReactionConfig {

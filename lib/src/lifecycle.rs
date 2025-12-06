@@ -14,23 +14,13 @@
 
 use anyhow::Result;
 use log::info;
-use std::collections::HashSet;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use crate::channels::{ComponentStatus, EventReceivers};
 use crate::config::RuntimeConfig;
 use crate::queries::QueryManager;
 use crate::reactions::ReactionManager;
 use crate::sources::SourceManager;
-
-/// Tracks which components were running before the server was stopped
-#[derive(Default, Clone)]
-pub(crate) struct ComponentsRunningState {
-    pub sources: HashSet<String>,
-    pub queries: HashSet<String>,
-    pub reactions: HashSet<String>,
-}
 
 /// Manages the lifecycle orchestration for DrasiLib components
 ///
@@ -39,13 +29,11 @@ pub(crate) struct ComponentsRunningState {
 /// - Starting event processors for component events
 /// - Starting components in dependency order (Sources → Queries → Reactions)
 /// - Stopping components in reverse order (Reactions → Queries → Sources)
-/// - Saving and restoring running component state across restarts
 pub(crate) struct LifecycleManager {
     config: Arc<RuntimeConfig>,
     source_manager: Arc<SourceManager>,
     query_manager: Arc<QueryManager>,
     reaction_manager: Arc<ReactionManager>,
-    components_running_before_stop: Arc<RwLock<ComponentsRunningState>>,
     // Event receivers - taken and consumed during initialization
     event_receivers: Option<EventReceivers>,
 }
@@ -57,7 +45,6 @@ impl LifecycleManager {
         source_manager: Arc<SourceManager>,
         query_manager: Arc<QueryManager>,
         reaction_manager: Arc<ReactionManager>,
-        components_running_before_stop: Arc<RwLock<ComponentsRunningState>>,
         event_receivers: Option<EventReceivers>,
     ) -> Self {
         Self {
@@ -65,7 +52,6 @@ impl LifecycleManager {
             source_manager,
             query_manager,
             reaction_manager,
-            components_running_before_stop,
             event_receivers,
         }
     }
@@ -84,52 +70,6 @@ impl LifecycleManager {
         }
 
         info!("Configuration loaded successfully");
-        Ok(())
-    }
-
-    /// Save the current state of running components
-    ///
-    /// This is called before stopping the server to track which components
-    /// were running, so they can be automatically restarted on the next start().
-    pub async fn save_running_components_state(&self) -> Result<()> {
-        let mut state = self.components_running_before_stop.write().await;
-        state.sources.clear();
-        state.queries.clear();
-        state.reactions.clear();
-
-        // Save running sources
-        for (name, _) in self.source_manager.list_sources().await {
-            let status = self.source_manager.get_source_status(name.clone()).await?;
-            if matches!(status, ComponentStatus::Running) {
-                state.sources.insert(name);
-            }
-        }
-
-        // Save running queries
-        for (name, _) in self.query_manager.list_queries().await {
-            let status = self.query_manager.get_query_status(name.clone()).await?;
-            if matches!(status, ComponentStatus::Running) {
-                state.queries.insert(name);
-            }
-        }
-
-        // Save running reactions
-        for (name, _) in self.reaction_manager.list_reactions().await {
-            let status = self
-                .reaction_manager
-                .get_reaction_status(name.clone())
-                .await?;
-            if matches!(status, ComponentStatus::Running) {
-                state.reactions.insert(name);
-            }
-        }
-
-        info!(
-            "Saved running components state: {} sources, {} queries, {} reactions",
-            state.sources.len(),
-            state.queries.len(),
-            state.reactions.len()
-        );
         Ok(())
     }
 
@@ -162,69 +102,30 @@ impl LifecycleManager {
         }
     }
 
-    /// Start all auto-start components and previously running components
+    /// Start all components with auto_start enabled
     ///
     /// Components are started in dependency order: Sources → Queries → Reactions
-    /// After successful start, the saved running state is cleared.
+    /// Only components with auto_start=true will be started.
     pub async fn start_components(&self) -> Result<()> {
         info!("Starting all auto-start components in sequence: Sources → Queries → Reactions");
 
-        let running_before = self.components_running_before_stop.read().await.clone();
-
-        // Start sources first
-        // Sources are now instance-based, get list from source manager
+        // Start sources first (SourceManager.start_all() checks auto_start internally)
         info!("Starting auto-start sources");
-        let sources = self.source_manager.list_sources().await;
-
-        // On first startup (running_before is empty), start all sources
-        // On restart, only start sources that were running before
-        let is_first_startup = running_before.sources.is_empty()
-            && running_before.queries.is_empty()
-            && running_before.reactions.is_empty();
-
-        for (id, _) in sources {
-            // Start source if:
-            // 1. This is first startup (all sources should start), OR
-            // 2. Source was running before the last stop
-            let should_start = is_first_startup || running_before.sources.contains(&id);
-
-            if should_start {
-                let status = self.source_manager.get_source_status(id.clone()).await;
-                if matches!(status, Ok(ComponentStatus::Stopped)) {
-                    info!(
-                        "Starting source '{}' (first_startup={}, was_running={})",
-                        id,
-                        is_first_startup,
-                        running_before.sources.contains(&id)
-                    );
-                    self.source_manager.start_source(id.clone()).await?;
-                } else {
-                    info!(
-                        "Source '{}' already started or starting, status: {:?}",
-                        id, status
-                    );
-                }
-            }
-        }
-        info!("All required sources started successfully");
+        self.source_manager.start_all().await?;
+        info!("All auto-start sources started successfully");
 
         // Start queries after sources
         info!("Starting auto-start queries");
         for query_config in &self.config.queries {
             let id = &query_config.id;
-            let should_start = query_config.auto_start || running_before.queries.contains(id);
 
-            if should_start {
+            if query_config.auto_start {
                 let status = self.query_manager.get_query_status(id.to_string()).await;
                 if matches!(status, Ok(ComponentStatus::Stopped)) {
                     info!(
-                        "Starting query '{}' (auto_start={}, was_running={})",
-                        id,
-                        query_config.auto_start,
-                        running_before.queries.contains(id)
+                        "Starting query '{}' (auto_start={})",
+                        id, query_config.auto_start
                     );
-                    // Query will subscribe directly to sources when started
-                    info!("Starting query '{}'", id);
                     self.query_manager.start_query(id.clone()).await?;
                     info!("Query '{}' started successfully", id);
                 } else {
@@ -236,38 +137,20 @@ impl LifecycleManager {
             } else {
                 let status = self.query_manager.get_query_status(id.to_string()).await;
                 info!(
-                    "Query '{}' will not start (auto_start=false, was not running), status: {:?}",
+                    "Skipping query '{}' (auto_start=false), status: {:?}",
                     id, status
                 );
             }
         }
-        info!("All required queries started successfully");
+        info!("All auto-start queries started successfully");
 
         // Start reactions after queries
-        // Reactions are now instance-based, get list from reaction manager
         // ReactionManager.start_all() handles auto_start logic internally
         info!("Starting auto-start reactions");
         self.reaction_manager.start_all().await?;
-        info!("All required reactions started successfully");
+        info!("All auto-start reactions started successfully");
 
-        // Clear the saved state after successful start
-        self.components_running_before_stop
-            .write()
-            .await
-            .sources
-            .clear();
-        self.components_running_before_stop
-            .write()
-            .await
-            .queries
-            .clear();
-        self.components_running_before_stop
-            .write()
-            .await
-            .reactions
-            .clear();
-
-        info!("All required components started in sequence: Sources → Queries → Reactions");
+        info!("All auto-start components started in sequence: Sources → Queries → Reactions");
         info!("[STARTUP-COMPLETE] DrasiLib.start() is now returning - all components and subscriptions should be active");
         Ok(())
     }

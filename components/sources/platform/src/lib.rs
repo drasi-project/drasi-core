@@ -271,6 +271,7 @@ pub struct PlatformSourceBuilder {
     dispatch_mode: Option<DispatchMode>,
     dispatch_buffer_capacity: Option<usize>,
     bootstrap_provider: Option<Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>>,
+    auto_start: bool,
 }
 
 impl PlatformSourceBuilder {
@@ -287,6 +288,7 @@ impl PlatformSourceBuilder {
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
             bootstrap_provider: None,
+            auto_start: true,
         }
     }
 
@@ -371,6 +373,26 @@ impl PlatformSourceBuilder {
         self
     }
 
+    /// Set whether this source should auto-start when DrasiLib starts.
+    ///
+    /// Default is `true`. Set to `false` if this source should only be
+    /// started manually via `start_source()`.
+    pub fn with_auto_start(mut self, auto_start: bool) -> Self {
+        self.auto_start = auto_start;
+        self
+    }
+
+    /// Set the full configuration at once
+    pub fn with_config(mut self, config: PlatformSourceConfig) -> Self {
+        self.redis_url = config.redis_url;
+        self.stream_key = config.stream_key;
+        self.consumer_group = Some(config.consumer_group);
+        self.consumer_name = config.consumer_name;
+        self.batch_size = Some(config.batch_size);
+        self.block_ms = Some(config.block_ms);
+        self
+    }
+
     /// Build the platform source.
     ///
     /// # Errors
@@ -386,7 +408,8 @@ impl PlatformSourceBuilder {
             block_ms: self.block_ms.unwrap_or(5000),
         };
 
-        let mut params = SourceBaseParams::new(&self.id);
+        let mut params = SourceBaseParams::new(&self.id)
+            .with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {
             params = params.with_dispatch_mode(mode);
         }
@@ -1076,6 +1099,10 @@ impl Source for PlatformSource {
             serde_json::Value::Number(self.config.block_ms.into()),
         );
         props
+    }
+
+    fn auto_start(&self) -> bool {
+        self.base.get_auto_start()
     }
 
     async fn start(&self) -> Result<()> {

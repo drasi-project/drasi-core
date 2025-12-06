@@ -111,6 +111,14 @@ pub trait Source: Send + Sync {
         DispatchMode::Channel
     }
 
+    /// Whether this source should auto-start when DrasiLib starts
+    ///
+    /// Default is `true`. Override to return `false` if this source
+    /// should only be started manually via `start_source()`.
+    fn auto_start(&self) -> bool {
+        true
+    }
+
     /// Start the source
     ///
     /// This begins data ingestion and event generation.
@@ -194,6 +202,10 @@ impl Source for Box<dyn Source + 'static> {
 
     fn dispatch_mode(&self) -> DispatchMode {
         (**self).dispatch_mode()
+    }
+
+    fn auto_start(&self) -> bool {
+        (**self).auto_start()
     }
 
     async fn start(&self) -> Result<()> {

@@ -262,6 +262,10 @@ impl Reaction for HttpReaction {
         self.base.queries.clone()
     }
 
+    fn auto_start(&self) -> bool {
+        self.base.get_auto_start()
+    }
+
     async fn inject_query_subscriber(&self, query_subscriber: Arc<dyn QuerySubscriber>) {
         self.base.inject_query_subscriber(query_subscriber).await;
     }

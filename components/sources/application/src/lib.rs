@@ -529,6 +529,10 @@ impl Source for ApplicationSource {
         self.config.properties.clone()
     }
 
+    fn auto_start(&self) -> bool {
+        self.base.get_auto_start()
+    }
+
     async fn start(&self) -> Result<()> {
         info!("Starting ApplicationSource '{}'", self.base.id);
 

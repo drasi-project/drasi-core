@@ -144,6 +144,19 @@ impl PlatformReactionBuilder {
         self
     }
 
+    /// Set the full configuration at once
+    pub fn with_config(mut self, config: PlatformReactionConfig) -> Self {
+        self.redis_url = config.redis_url;
+        self.pubsub_name = config.pubsub_name;
+        self.source_name = config.source_name;
+        self.max_stream_length = config.max_stream_length;
+        self.emit_control_events = config.emit_control_events;
+        self.batch_enabled = config.batch_enabled;
+        self.batch_max_size = config.batch_max_size;
+        self.batch_max_wait_ms = config.batch_max_wait_ms;
+        self
+    }
+
     /// Build the Platform reaction
     pub fn build(self) -> anyhow::Result<PlatformReaction> {
         let config = PlatformReactionConfig {

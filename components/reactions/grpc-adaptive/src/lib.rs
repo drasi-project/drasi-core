@@ -131,6 +131,18 @@ impl GrpcAdaptiveReactionBuilder {
         self
     }
 
+    /// Set the full configuration at once
+    pub fn with_config(mut self, config: GrpcAdaptiveReactionConfig) -> Self {
+        self.endpoint = config.endpoint;
+        self.timeout_ms = config.timeout_ms;
+        self.max_retries = config.max_retries;
+        self.connection_retry_attempts = config.connection_retry_attempts;
+        self.initial_connection_timeout_ms = config.initial_connection_timeout_ms;
+        self.metadata = config.metadata;
+        self.adaptive = config.adaptive;
+        self
+    }
+
     /// Build the gRPC Adaptive reaction
     pub fn build(self) -> anyhow::Result<AdaptiveGrpcReaction> {
         let config = GrpcAdaptiveReactionConfig {

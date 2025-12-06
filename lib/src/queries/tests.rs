@@ -25,6 +25,11 @@ mod manager_tests {
 
     /// Creates a test query configuration
     fn create_test_query_config(id: &str, sources: Vec<String>) -> QueryConfig {
+        create_test_query_config_with_auto_start(id, sources, true)
+    }
+
+    /// Creates a test query configuration with configurable auto_start
+    fn create_test_query_config_with_auto_start(id: &str, sources: Vec<String>, auto_start: bool) -> QueryConfig {
         QueryConfig {
             id: id.to_string(),
             query: "MATCH (n) RETURN n".to_string(),
@@ -37,7 +42,7 @@ mod manager_tests {
                     pipeline: vec![],
                 })
                 .collect(),
-            auto_start: true,
+            auto_start,
             joins: None,
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
@@ -433,6 +438,108 @@ mod manager_tests {
             .await
             .unwrap();
         assert!(matches!(status, ComponentStatus::Stopped));
+    }
+
+    // ============================================================================
+    // Auto-start tests
+    // ============================================================================
+
+    /// Test that query config auto_start defaults to true
+    #[tokio::test]
+    async fn test_query_auto_start_defaults_to_true() {
+        // Create query using default helper (should have auto_start=true)
+        let config = create_test_query_config("default-query", vec![]);
+        assert!(config.auto_start, "Default auto_start should be true");
+    }
+
+    /// Test that query with auto_start=false can be added and remains stopped
+    #[tokio::test]
+    async fn test_query_auto_start_false_not_started_on_add() {
+        let (manager, _event_rx, _event_tx, _source_manager) = create_test_manager().await;
+
+        // Add query with auto_start=false (no sources needed since we won't start it)
+        let config = create_test_query_config_with_auto_start("no-auto-start-query", vec![], false);
+        manager.add_query(config).await.unwrap();
+
+        // Query should be in stopped state
+        let status = manager
+            .get_query_status("no-auto-start-query".to_string())
+            .await
+            .unwrap();
+        assert!(
+            matches!(status, ComponentStatus::Stopped),
+            "Query with auto_start=false should remain stopped after add"
+        );
+    }
+
+    /// Test that query with auto_start=false can be manually started
+    #[tokio::test]
+    async fn test_query_auto_start_false_can_be_manually_started() {
+        let (manager, _event_rx, event_tx, source_manager) = create_test_manager().await;
+
+        // Add a source
+        let source = create_test_mock_source("source1".to_string(), event_tx);
+        source_manager.add_source(source).await.unwrap();
+
+        // Add query with auto_start=false
+        let config = create_test_query_config_with_auto_start(
+            "manual-query",
+            vec!["source1".to_string()],
+            false,
+        );
+        manager.add_query(config).await.unwrap();
+
+        // Query should be in stopped state initially
+        let status = manager
+            .get_query_status("manual-query".to_string())
+            .await
+            .unwrap();
+        assert!(
+            matches!(status, ComponentStatus::Stopped),
+            "Query with auto_start=false should be stopped initially"
+        );
+
+        // Manually start the query
+        manager.start_query("manual-query".to_string()).await.unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Query should now be running
+        let status = manager
+            .get_query_status("manual-query".to_string())
+            .await
+            .unwrap();
+        assert!(
+            matches!(status, ComponentStatus::Running),
+            "Query with auto_start=false should be manually startable"
+        );
+    }
+
+    /// Test that get_query_config preserves auto_start value
+    #[tokio::test]
+    async fn test_query_config_preserves_auto_start() {
+        let (manager, _event_rx, _event_tx, _source_manager) = create_test_manager().await;
+
+        // Add query with auto_start=false
+        let config = create_test_query_config_with_auto_start("test-query", vec![], false);
+        manager.add_query(config).await.unwrap();
+
+        // Retrieve config and verify auto_start is preserved
+        let retrieved = manager.get_query_config("test-query").await.unwrap();
+        assert!(
+            !retrieved.auto_start,
+            "Retrieved config should preserve auto_start=false"
+        );
+
+        // Add another query with auto_start=true
+        let config2 = create_test_query_config_with_auto_start("test-query-2", vec![], true);
+        manager.add_query(config2).await.unwrap();
+
+        let retrieved2 = manager.get_query_config("test-query-2").await.unwrap();
+        assert!(
+            retrieved2.auto_start,
+            "Retrieved config should preserve auto_start=true"
+        );
     }
 }
 

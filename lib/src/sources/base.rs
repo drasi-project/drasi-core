@@ -65,6 +65,8 @@ pub struct SourceBaseParams {
     pub dispatch_buffer_capacity: Option<usize>,
     /// Optional bootstrap provider to set during construction
     pub bootstrap_provider: Option<Box<dyn BootstrapProvider + 'static>>,
+    /// Whether this source should auto-start - defaults to true
+    pub auto_start: bool,
 }
 
 impl std::fmt::Debug for SourceBaseParams {
@@ -74,6 +76,7 @@ impl std::fmt::Debug for SourceBaseParams {
             .field("dispatch_mode", &self.dispatch_mode)
             .field("dispatch_buffer_capacity", &self.dispatch_buffer_capacity)
             .field("bootstrap_provider", &self.bootstrap_provider.as_ref().map(|_| "<provider>"))
+            .field("auto_start", &self.auto_start)
             .finish()
     }
 }
@@ -86,6 +89,7 @@ impl SourceBaseParams {
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
             bootstrap_provider: None,
+            auto_start: true,
         }
     }
 
@@ -109,6 +113,15 @@ impl SourceBaseParams {
         self.bootstrap_provider = Some(Box::new(provider));
         self
     }
+
+    /// Set whether this source should auto-start
+    ///
+    /// Default is `true`. Set to `false` if this source should only be
+    /// started manually via `start_source()`.
+    pub fn with_auto_start(mut self, auto_start: bool) -> Self {
+        self.auto_start = auto_start;
+        self
+    }
 }
 
 /// Base implementation for common source functionality
@@ -119,6 +132,8 @@ pub struct SourceBase {
     dispatch_mode: DispatchMode,
     /// Dispatch buffer capacity
     dispatch_buffer_capacity: usize,
+    /// Whether this source should auto-start
+    pub auto_start: bool,
     /// Current component status
     pub status: Arc<RwLock<ComponentStatus>>,
     /// Dispatchers for sending source events to subscribers
@@ -172,6 +187,7 @@ impl SourceBase {
             id: params.id,
             dispatch_mode,
             dispatch_buffer_capacity,
+            auto_start: params.auto_start,
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
             dispatchers: Arc::new(RwLock::new(dispatchers)),
             event_tx: Arc::new(RwLock::new(None)), // Injected later by DrasiLib
@@ -179,6 +195,11 @@ impl SourceBase {
             shutdown_tx: Arc::new(RwLock::new(None)),
             bootstrap_provider: Arc::new(RwLock::new(bootstrap_provider)),
         })
+    }
+
+    /// Get whether this source should auto-start
+    pub fn get_auto_start(&self) -> bool {
+        self.auto_start
     }
 
     /// Inject the event channel (called by DrasiLib when source is added)
@@ -208,6 +229,7 @@ impl SourceBase {
             id: self.id.clone(),
             dispatch_mode: self.dispatch_mode,
             dispatch_buffer_capacity: self.dispatch_buffer_capacity,
+            auto_start: self.auto_start,
             status: self.status.clone(),
             dispatchers: self.dispatchers.clone(),
             event_tx: self.event_tx.clone(),

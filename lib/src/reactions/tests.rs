@@ -26,6 +26,7 @@ mod manager_tests {
     struct TestMockReaction {
         id: String,
         queries: Vec<String>,
+        auto_start: bool,
         status: Arc<RwLock<ComponentStatus>>,
         event_tx: ComponentEventSender,
     }
@@ -35,6 +36,17 @@ mod manager_tests {
             Self {
                 id,
                 queries,
+                auto_start: true,
+                status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
+                event_tx,
+            }
+        }
+
+        fn with_auto_start(id: String, queries: Vec<String>, event_tx: ComponentEventSender, auto_start: bool) -> Self {
+            Self {
+                id,
+                queries,
+                auto_start,
                 status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
                 event_tx,
             }
@@ -57,6 +69,10 @@ mod manager_tests {
 
         fn query_ids(&self) -> Vec<String> {
             self.queries.clone()
+        }
+
+        fn auto_start(&self) -> bool {
+            self.auto_start
         }
 
         async fn inject_query_subscriber(
@@ -361,5 +377,119 @@ mod manager_tests {
         // Verify all 10 reactions exist
         let reactions = manager.list_reactions().await;
         assert_eq!(reactions.len(), 10);
+    }
+
+    // ============================================================================
+    // Auto-start tests
+    // ============================================================================
+
+    /// Test that start_all only starts reactions with auto_start=true
+    #[tokio::test]
+    async fn test_start_all_respects_auto_start() {
+        let (manager, _event_rx, event_tx) = create_test_manager().await;
+
+        // Add reaction with auto_start=true
+        let reaction1 = TestMockReaction::with_auto_start(
+            "auto-start-reaction".to_string(),
+            vec![],
+            event_tx.clone(),
+            true,
+        );
+        manager.add_reaction(reaction1).await.unwrap();
+
+        // Add reaction with auto_start=false
+        let reaction2 = TestMockReaction::with_auto_start(
+            "no-auto-start-reaction".to_string(),
+            vec![],
+            event_tx.clone(),
+            false,
+        );
+        manager.add_reaction(reaction2).await.unwrap();
+
+        // Start all reactions
+        manager.start_all().await.unwrap();
+
+        // Wait a bit for status to update
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Check statuses
+        let status1 = manager.get_reaction_status("auto-start-reaction".to_string()).await.unwrap();
+        let status2 = manager.get_reaction_status("no-auto-start-reaction".to_string()).await.unwrap();
+
+        assert!(
+            matches!(status1, ComponentStatus::Running),
+            "Reaction with auto_start=true should be running"
+        );
+        assert!(
+            matches!(status2, ComponentStatus::Stopped),
+            "Reaction with auto_start=false should still be stopped"
+        );
+    }
+
+    /// Test that reaction auto_start defaults to true
+    #[tokio::test]
+    async fn test_reaction_auto_start_defaults_to_true() {
+        let (manager, _event_rx, event_tx) = create_test_manager().await;
+
+        // Create reaction using default constructor (should have auto_start=true)
+        let reaction = create_test_mock_reaction(
+            "default-reaction".to_string(),
+            vec![],
+            event_tx,
+        );
+
+        // Verify auto_start is true
+        use crate::plugin_core::Reaction;
+        assert!(reaction.auto_start(), "Default auto_start should be true");
+
+        manager.add_reaction(reaction).await.unwrap();
+
+        // Start all should start this reaction
+        manager.start_all().await.unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        let status = manager.get_reaction_status("default-reaction".to_string()).await.unwrap();
+        assert!(
+            matches!(status, ComponentStatus::Running),
+            "Default reaction should be started by start_all"
+        );
+    }
+
+    /// Test that reaction with auto_start=false can be manually started
+    #[tokio::test]
+    async fn test_reaction_auto_start_false_can_be_manually_started() {
+        let (manager, _event_rx, event_tx) = create_test_manager().await;
+
+        // Add reaction with auto_start=false
+        let reaction = TestMockReaction::with_auto_start(
+            "manual-reaction".to_string(),
+            vec![],
+            event_tx,
+            false,
+        );
+        manager.add_reaction(reaction).await.unwrap();
+
+        // start_all should not start it
+        manager.start_all().await.unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let status = manager.get_reaction_status("manual-reaction".to_string()).await.unwrap();
+        assert!(
+            matches!(status, ComponentStatus::Stopped),
+            "Reaction with auto_start=false should not be started by start_all"
+        );
+
+        // Manually start the reaction
+        manager.start_reaction("manual-reaction".to_string()).await.unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let status = manager.get_reaction_status("manual-reaction".to_string()).await.unwrap();
+        assert!(
+            matches!(status, ComponentStatus::Running),
+            "Reaction with auto_start=false should be manually startable"
+        );
     }
 }

@@ -153,6 +153,19 @@ impl GrpcReactionBuilder {
         self
     }
 
+    /// Set the full configuration at once
+    pub fn with_config(mut self, config: GrpcReactionConfig) -> Self {
+        self.endpoint = config.endpoint;
+        self.timeout_ms = config.timeout_ms;
+        self.batch_size = config.batch_size;
+        self.batch_flush_timeout_ms = config.batch_flush_timeout_ms;
+        self.max_retries = config.max_retries;
+        self.connection_retry_attempts = config.connection_retry_attempts;
+        self.initial_connection_timeout_ms = config.initial_connection_timeout_ms;
+        self.metadata = config.metadata;
+        self
+    }
+
     /// Build the gRPC reaction
     pub fn build(self) -> anyhow::Result<GrpcReaction> {
         let config = GrpcReactionConfig {

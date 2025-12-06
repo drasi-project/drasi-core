@@ -139,6 +139,15 @@ impl HttpReactionBuilder {
         self
     }
 
+    /// Set the full configuration at once
+    pub fn with_config(mut self, config: HttpReactionConfig) -> Self {
+        self.base_url = config.base_url;
+        self.token = config.token;
+        self.timeout_ms = config.timeout_ms;
+        self.routes = config.routes;
+        self
+    }
+
     /// Build the HTTP reaction
     pub fn build(self) -> anyhow::Result<HttpReaction> {
         let config = HttpReactionConfig {

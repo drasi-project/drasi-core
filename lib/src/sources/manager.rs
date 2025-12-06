@@ -263,7 +263,12 @@ impl SourceManager {
         }
     }
 
-    /// Start all sources
+    /// Start all sources that have `auto_start` enabled.
+    ///
+    /// Sources must have been added via `add_source()` first, which injects
+    /// the necessary event channel.
+    ///
+    /// Only sources with `auto_start() == true` will be started.
     pub async fn start_all(&self) -> Result<()> {
         let sources: Vec<Arc<dyn Source>> = {
             let sources = self.sources.read().await;
@@ -273,6 +278,15 @@ impl SourceManager {
         let mut failed_sources = Vec::new();
 
         for source in sources {
+            // Only start sources with auto_start enabled
+            if !source.auto_start() {
+                info!(
+                    "Skipping source '{}' (auto_start=false)",
+                    source.id()
+                );
+                continue;
+            }
+
             let source_id = source.id().to_string();
             info!("Starting source: {}", source_id);
             if let Err(e) = source.start().await {

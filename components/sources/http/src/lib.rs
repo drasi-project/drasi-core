@@ -654,6 +654,10 @@ impl Source for HttpSource {
         props
     }
 
+    fn auto_start(&self) -> bool {
+        self.base.get_auto_start()
+    }
+
     async fn start(&self) -> Result<()> {
         info!("[{}] Starting adaptive HTTP source", self.base.id);
 
@@ -880,6 +884,7 @@ pub struct HttpSourceBuilder {
     dispatch_mode: Option<DispatchMode>,
     dispatch_buffer_capacity: Option<usize>,
     bootstrap_provider: Option<Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>>,
+    auto_start: bool,
 }
 
 impl HttpSourceBuilder {
@@ -904,6 +909,7 @@ impl HttpSourceBuilder {
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
             bootstrap_provider: None,
+            auto_start: true,
         }
     }
 
@@ -988,6 +994,30 @@ impl HttpSourceBuilder {
         self
     }
 
+    /// Set whether this source should auto-start when DrasiLib starts.
+    ///
+    /// Default is `true`. Set to `false` if this source should only be
+    /// started manually via `start_source()`.
+    pub fn with_auto_start(mut self, auto_start: bool) -> Self {
+        self.auto_start = auto_start;
+        self
+    }
+
+    /// Set the full configuration at once
+    pub fn with_config(mut self, config: HttpSourceConfig) -> Self {
+        self.host = config.host;
+        self.port = config.port;
+        self.endpoint = config.endpoint;
+        self.timeout_ms = config.timeout_ms;
+        self.adaptive_max_batch_size = config.adaptive_max_batch_size;
+        self.adaptive_min_batch_size = config.adaptive_min_batch_size;
+        self.adaptive_max_wait_ms = config.adaptive_max_wait_ms;
+        self.adaptive_min_wait_ms = config.adaptive_min_wait_ms;
+        self.adaptive_window_secs = config.adaptive_window_secs;
+        self.adaptive_enabled = config.adaptive_enabled;
+        self
+    }
+
     /// Build the HttpSource instance.
     ///
     /// # Returns
@@ -1008,7 +1038,8 @@ impl HttpSourceBuilder {
         };
 
         // Build SourceBaseParams with all settings
-        let mut params = SourceBaseParams::new(&self.id);
+        let mut params = SourceBaseParams::new(&self.id)
+            .with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {
             params = params.with_dispatch_mode(mode);
         }

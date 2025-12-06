@@ -93,6 +93,13 @@ impl ProfilerReactionBuilder {
         self
     }
 
+    /// Set the full configuration at once
+    pub fn with_config(mut self, config: ProfilerReactionConfig) -> Self {
+        self.window_size = config.window_size;
+        self.report_interval_secs = config.report_interval_secs;
+        self
+    }
+
     /// Build the Profiler reaction
     pub fn build(self) -> anyhow::Result<ProfilerReaction> {
         let config = ProfilerReactionConfig {

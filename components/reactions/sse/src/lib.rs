@@ -109,6 +109,15 @@ impl SseReactionBuilder {
         self
     }
 
+    /// Set the full configuration at once
+    pub fn with_config(mut self, config: SseReactionConfig) -> Self {
+        self.host = config.host;
+        self.port = config.port;
+        self.sse_path = config.sse_path;
+        self.heartbeat_interval_ms = config.heartbeat_interval_ms;
+        self
+    }
+
     /// Build the SSE reaction
     pub fn build(self) -> anyhow::Result<SseReaction> {
         let config = SseReactionConfig {

@@ -334,6 +334,10 @@ impl Source for PostgresReplicationSource {
         props
     }
 
+    fn auto_start(&self) -> bool {
+        self.base.get_auto_start()
+    }
+
     async fn start(&self) -> Result<()> {
         if self.base.get_status().await == ComponentStatus::Running {
             return Ok(());
@@ -507,6 +511,7 @@ pub struct PostgresSourceBuilder {
     dispatch_mode: Option<DispatchMode>,
     dispatch_buffer_capacity: Option<usize>,
     bootstrap_provider: Option<Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>>,
+    auto_start: bool,
 }
 
 impl PostgresSourceBuilder {
@@ -527,6 +532,7 @@ impl PostgresSourceBuilder {
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
             bootstrap_provider: None,
+            auto_start: true,
         }
     }
 
@@ -623,6 +629,30 @@ impl PostgresSourceBuilder {
         self
     }
 
+    /// Set whether this source should auto-start when DrasiLib starts.
+    ///
+    /// Default is `true`. Set to `false` if this source should only be
+    /// started manually via `start_source()`.
+    pub fn with_auto_start(mut self, auto_start: bool) -> Self {
+        self.auto_start = auto_start;
+        self
+    }
+
+    /// Set the full configuration at once
+    pub fn with_config(mut self, config: PostgresSourceConfig) -> Self {
+        self.host = config.host;
+        self.port = config.port;
+        self.database = config.database;
+        self.user = config.user;
+        self.password = config.password;
+        self.tables = config.tables;
+        self.slot_name = config.slot_name;
+        self.publication_name = config.publication_name;
+        self.ssl_mode = config.ssl_mode;
+        self.table_keys = config.table_keys;
+        self
+    }
+
     /// Build the PostgreSQL replication source
     ///
     /// # Errors
@@ -642,7 +672,8 @@ impl PostgresSourceBuilder {
             table_keys: self.table_keys,
         };
 
-        let mut params = SourceBaseParams::new(&self.id);
+        let mut params = SourceBaseParams::new(&self.id)
+            .with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {
             params = params.with_dispatch_mode(mode);
         }

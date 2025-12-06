@@ -20,7 +20,7 @@ use tokio::sync::RwLock;
 use crate::channels::*;
 use crate::config::{DrasiLibConfig, RuntimeConfig};
 use crate::inspection::InspectionAPI;
-use crate::lifecycle::{ComponentsRunningState, LifecycleManager};
+use crate::lifecycle::LifecycleManager;
 use crate::queries::QueryManager;
 use crate::reactions::ReactionManager;
 use crate::sources::SourceManager;
@@ -130,21 +130,22 @@ use drasi_core::middleware::MiddlewareTypeRegistry;
 ///
 /// ## Restart Behavior
 ///
-/// When you call `stop()` and then `start()` again, the server remembers which components
-/// were running and will restart them automatically:
+/// When you call `stop()` and then `start()` again, only components with `auto_start=true`
+/// will be started. Components that were manually started (with `auto_start=false`) will
+/// remain stopped:
 ///
 /// ```no_run
 /// # use drasi_lib::DrasiLib;
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// # let core = DrasiLib::builder().build().await?;
 /// core.start().await?;
-/// // ... components are running ...
+/// // ... only auto_start=true components are running ...
 ///
 /// core.stop().await?;
 /// // ... all components stopped ...
 ///
 /// core.start().await?;
-/// // ... previously running components automatically restarted ...
+/// // ... only auto_start=true components restarted ...
 /// # Ok(())
 /// # }
 /// ```
@@ -155,8 +156,6 @@ pub struct DrasiLib {
     pub(crate) reaction_manager: Arc<ReactionManager>,
     pub(crate) running: Arc<RwLock<bool>>,
     pub(crate) state_guard: StateGuard,
-    // Track components that were running before server stop
-    pub(crate) components_running_before_stop: Arc<RwLock<ComponentsRunningState>>,
     // Inspection API for querying server state
     pub(crate) inspection: InspectionAPI,
     // Lifecycle manager for orchestrating component lifecycle
@@ -174,7 +173,6 @@ impl Clone for DrasiLib {
             reaction_manager: Arc::clone(&self.reaction_manager),
             running: Arc::clone(&self.running),
             state_guard: self.state_guard.clone(),
-            components_running_before_stop: Arc::clone(&self.components_running_before_stop),
             inspection: self.inspection.clone(),
             lifecycle: Arc::clone(&self.lifecycle),
             middleware_registry: Arc::clone(&self.middleware_registry),
@@ -239,15 +237,11 @@ impl DrasiLib {
             config.clone(),
         );
 
-        let components_running_before_stop =
-            Arc::new(RwLock::new(ComponentsRunningState::default()));
-
         let lifecycle = Arc::new(RwLock::new(LifecycleManager::new(
             config.clone(),
             source_manager.clone(),
             query_manager.clone(),
             reaction_manager.clone(),
-            components_running_before_stop.clone(),
             Some(receivers),
         )));
 
@@ -258,7 +252,6 @@ impl DrasiLib {
             reaction_manager,
             running: Arc::new(RwLock::new(false)),
             state_guard,
-            components_running_before_stop,
             inspection,
             lifecycle,
             middleware_registry,
@@ -359,10 +352,10 @@ impl DrasiLib {
 
     /// Stop the server and all running components
     ///
-    /// This stops all currently running components (sources, queries, reactions) and saves their
-    /// state so they can be automatically restarted on the next `start()` call.
-    ///
+    /// This stops all currently running components (sources, queries, reactions).
     /// Components are stopped in reverse dependency order: Reactions → Queries → Sources
+    ///
+    /// On the next `start()`, only components with `auto_start=true` will be restarted.
     ///
     /// # Errors
     ///
@@ -382,7 +375,7 @@ impl DrasiLib {
     ///
     /// assert!(!core.is_running().await);
     ///
-    /// // Components will be automatically restarted on next start()
+    /// // Only auto_start=true components will be restarted
     /// core.start().await?;
     /// # Ok(())
     /// # }
@@ -396,11 +389,8 @@ impl DrasiLib {
 
         info!("Stopping Drasi Server Core");
 
-        // Save running component state before stopping
-        let lifecycle = self.lifecycle.read().await;
-        lifecycle.save_running_components_state().await?;
-
         // Stop all components
+        let lifecycle = self.lifecycle.read().await;
         lifecycle.stop_all_components().await?;
 
         *running = false;
