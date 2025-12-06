@@ -158,7 +158,9 @@ async fn main() -> Result<()> {
     // =========================================================================
     // Step 7: Start Results API Server
     // =========================================================================
-    // A simple HTTP server on port 8080 to query results via REST API.
+    // A simple HTTP server on port 8080 to view query results via REST API.
+    // This is for demonstration purposes only so the current query results
+    // can be viewed.
 
     let api_core = core.clone();
     let results_api = Router::new()
