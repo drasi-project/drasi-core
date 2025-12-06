@@ -1019,7 +1019,7 @@ impl QueryManager {
 
         info!("Added query: {} with bootstrap support", config.id);
 
-        // Note: Auto-start is handled by the caller (server.create_query)
+        // Note: Auto-start is handled by the caller (server.add_query)
         // which has access to the data router for subscriptions
         if should_auto_start {
             info!(

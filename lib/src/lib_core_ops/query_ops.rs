@@ -32,7 +32,7 @@ impl DrasiLib {
     /// ```no_run
     /// # use drasi_lib::{DrasiLib, Query};
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// core.create_query(
+    /// core.add_query(
     ///     Query::cypher("new-query")
     ///         .query("MATCH (n) RETURN n")
     ///         .from_source("source1")
@@ -42,10 +42,10 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn create_query(&self, query: QueryConfig) -> Result<()> {
+    pub async fn add_query(&self, query: QueryConfig) -> Result<()> {
         self.state_guard.require_initialized().await?;
 
-        self.create_query_with_options(query, true)
+        self.add_query_with_options(query, true)
             .await
             .map_err(|e| DrasiError::provisioning(format!("Failed to add query: {}", e)))?;
 
@@ -226,7 +226,7 @@ impl DrasiLib {
     }
 
     /// Internal helper for creating queries with auto-start control
-    pub(crate) async fn create_query_with_options(
+    pub(crate) async fn add_query_with_options(
         &self,
         config: QueryConfig,
         allow_auto_start: bool,

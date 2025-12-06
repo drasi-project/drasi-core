@@ -109,7 +109,7 @@ use drasi_core::middleware::MiddlewareTypeRegistry;
 /// // Add components at runtime
 /// core.add_source(new_source_instance).await?;
 ///
-/// core.create_query(
+/// core.add_query(
 ///     Query::cypher("new-query")
 ///         .query("MATCH (n) RETURN n")
 ///         .from_source("new-source")
