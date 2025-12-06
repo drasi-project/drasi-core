@@ -14,78 +14,93 @@
 
 //! Application bootstrap plugin for Drasi
 //!
-//! This plugin provides the Application bootstrap provider implementation and extension
-//! traits for creating Application bootstrap providers in the Drasi plugin architecture.
+//! This plugin provides the Application bootstrap provider implementation for replaying
+//! stored insert events during query subscription.
+//!
+//! # Example
+//!
+//! ```no_run
+//! use drasi_bootstrap_application::ApplicationBootstrapProvider;
+//!
+//! // Using the builder - creates with isolated storage
+//! let provider = ApplicationBootstrapProvider::builder().build();
+//!
+//! // Using the builder with shared storage
+//! use std::sync::Arc;
+//! use tokio::sync::RwLock;
+//! use drasi_core::models::SourceChange;
+//!
+//! let shared_data = Arc::new(RwLock::new(Vec::<SourceChange>::new()));
+//! let provider = ApplicationBootstrapProvider::builder()
+//!     .with_shared_data(shared_data)
+//!     .build();
+//!
+//! // Or using the constructor directly
+//! let provider = ApplicationBootstrapProvider::new();
+//! ```
 
 pub mod application;
 
-pub use drasi_lib::bootstrap::{ApplicationBootstrapConfig, BootstrapProviderConfig};
-pub use application::ApplicationBootstrapProvider;
-
-/// Extension trait for creating Application bootstrap providers
-///
-/// This trait is implemented on `BootstrapProviderConfig` to provide a fluent builder API
-/// for configuring Application bootstrap providers that replay stored insert events.
-///
-/// # Example
-///
-/// ```no_run
-/// use drasi_lib::bootstrap::BootstrapProviderConfig;
-/// use drasi_bootstrap_application::BootstrapProviderConfigApplicationExt;
-///
-/// let config = BootstrapProviderConfig::application().build();
-/// ```
-pub trait BootstrapProviderConfigApplicationExt {
-    /// Create a new Application bootstrap provider configuration builder
-    fn application() -> ApplicationBootstrapBuilder;
-}
-
-/// Builder for Application bootstrap provider configuration
-pub struct ApplicationBootstrapBuilder;
-
-impl ApplicationBootstrapBuilder {
-    /// Create a new Application bootstrap provider builder
-    pub fn new() -> Self {
-        Self
-    }
-
-    /// Build the Application bootstrap provider configuration
-    pub fn build(self) -> ApplicationBootstrapConfig {
-        ApplicationBootstrapConfig::default()
-    }
-}
-
-impl Default for ApplicationBootstrapBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl BootstrapProviderConfigApplicationExt for BootstrapProviderConfig {
-    fn application() -> ApplicationBootstrapBuilder {
-        ApplicationBootstrapBuilder::new()
-    }
-}
+pub use application::{ApplicationBootstrapProvider, ApplicationBootstrapProviderBuilder};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use drasi_core::models::SourceChange;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
 
     #[test]
-    fn test_application_bootstrap_builder() {
-        let config = ApplicationBootstrapBuilder::new().build();
-        assert_eq!(config, ApplicationBootstrapConfig::default());
+    fn test_application_bootstrap_builder_isolated() {
+        // Builder without shared data creates isolated provider
+        let provider = ApplicationBootstrapProviderBuilder::new().build();
+        // Provider should exist (we can't easily test internal state)
+        let _ = provider;
     }
 
     #[test]
-    fn test_application_bootstrap_extension_trait() {
-        let config = BootstrapProviderConfig::application().build();
-        assert_eq!(config, ApplicationBootstrapConfig::default());
+    fn test_application_bootstrap_builder_with_shared_data() {
+        // Builder with shared data creates connected provider
+        let shared_data = Arc::new(RwLock::new(Vec::<SourceChange>::new()));
+        let provider = ApplicationBootstrapProviderBuilder::new()
+            .with_shared_data(shared_data.clone())
+            .build();
+        let _ = provider;
+    }
+
+    #[test]
+    fn test_application_bootstrap_from_provider_method() {
+        // Test using ApplicationBootstrapProvider::builder()
+        let provider = ApplicationBootstrapProvider::builder().build();
+        let _ = provider;
+    }
+
+    #[test]
+    fn test_application_bootstrap_new() {
+        // Test using ApplicationBootstrapProvider::new()
+        let provider = ApplicationBootstrapProvider::new();
+        let _ = provider;
+    }
+
+    #[test]
+    fn test_application_bootstrap_with_shared_data() {
+        // Test using ApplicationBootstrapProvider::with_shared_data()
+        let shared_data = Arc::new(RwLock::new(Vec::<SourceChange>::new()));
+        let provider = ApplicationBootstrapProvider::with_shared_data(shared_data);
+        let _ = provider;
     }
 
     #[test]
     fn test_application_bootstrap_builder_default() {
-        let config = ApplicationBootstrapBuilder::default().build();
-        assert_eq!(config, ApplicationBootstrapConfig::default());
+        // Default builder should work
+        let provider = ApplicationBootstrapProviderBuilder::default().build();
+        let _ = provider;
+    }
+
+    #[test]
+    fn test_application_bootstrap_provider_default() {
+        // ApplicationBootstrapProvider::default() should work
+        let provider = ApplicationBootstrapProvider::default();
+        let _ = provider;
     }
 }

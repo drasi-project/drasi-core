@@ -74,9 +74,9 @@ async fn main() -> Result<()> {
 
     println!("Loading bootstrap data from: {}", bootstrap_path.display());
 
-    let bootstrap_provider = ScriptFileBootstrapProvider::new(vec![
-        bootstrap_path.to_string_lossy().to_string()
-    ]);
+    let bootstrap_provider = ScriptFileBootstrapProvider::builder()
+        .with_file(bootstrap_path.to_string_lossy().to_string())
+        .build();
 
     // =========================================================================
     // Step 2: Create HTTP Source
@@ -103,7 +103,7 @@ async fn main() -> Result<()> {
     // The query continuously monitors the stock_prices nodes and emits
     // results whenever the underlying data changes.
 
-    let all_prices = Query::cypher("all-prices")
+    let all_prices_query = Query::cypher("all-prices")
         .query(r#"
             MATCH (sp:stock_prices)
             RETURN sp.symbol AS symbol,
@@ -133,13 +133,13 @@ async fn main() -> Result<()> {
     // Step 5: Build DrasiLib
     // =========================================================================
     // Assemble all components into a DrasiLib instance. The builder pattern
-    // takes ownership of sources and reactions.
+    // takes ownership of sources, queries, and reactions.
 
     let core = Arc::new(
         DrasiLib::builder()
             .with_id("http-source-example")
             .with_source(http_source)
-            .with_query(all_prices)
+            .with_query(all_prices_query)
             .with_reaction(log_reaction)
             .build()
             .await?

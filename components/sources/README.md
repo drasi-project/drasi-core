@@ -831,9 +831,9 @@ let config = MySourceConfig {
 let source = MySource::new("my-source-1", config)?;
 
 // Create and set bootstrap provider (ownership transferred)
-let bootstrap = ScriptFileBootstrapProvider::new(vec![
-    "/data/initial.jsonl".to_string(),
-])?;
+let bootstrap = ScriptFileBootstrapProvider::builder()
+    .with_file("/data/initial.jsonl")
+    .build();
 source.base.set_bootstrap_provider(bootstrap).await;
 
 let core = DrasiLib::builder()

@@ -56,6 +56,8 @@ struct BootstrapElement {
     end_id: Option<String>,
 }
 
+use drasi_lib::bootstrap::PlatformBootstrapConfig;
+
 /// Platform bootstrap provider that connects to Query API service
 pub struct PlatformBootstrapProvider {
     query_api_url: String,
@@ -63,7 +65,22 @@ pub struct PlatformBootstrapProvider {
 }
 
 impl PlatformBootstrapProvider {
-    /// Create a new platform bootstrap provider
+    /// Create a new platform bootstrap provider from configuration
+    ///
+    /// # Arguments
+    /// * `config` - Platform bootstrap configuration
+    ///
+    /// # Returns
+    /// Returns a new instance of PlatformBootstrapProvider or an error if configuration is invalid
+    pub fn new(config: PlatformBootstrapConfig) -> Result<Self> {
+        let query_api_url = config
+            .query_api_url
+            .ok_or_else(|| anyhow::anyhow!("query_api_url is required for PlatformBootstrapProvider"))?;
+
+        Self::create_internal(query_api_url, config.timeout_seconds)
+    }
+
+    /// Create a new platform bootstrap provider with explicit parameters
     ///
     /// # Arguments
     /// * `query_api_url` - Base URL of the Query API service (e.g., "http://my-source-query-api:8080")
@@ -71,7 +88,17 @@ impl PlatformBootstrapProvider {
     ///
     /// # Returns
     /// Returns a new instance of PlatformBootstrapProvider or an error if the URL is invalid
-    pub fn new(query_api_url: String, timeout_seconds: u64) -> Result<Self> {
+    pub fn with_url(query_api_url: impl Into<String>, timeout_seconds: u64) -> Result<Self> {
+        Self::create_internal(query_api_url.into(), timeout_seconds)
+    }
+
+    /// Create a builder for PlatformBootstrapProvider
+    pub fn builder() -> PlatformBootstrapProviderBuilder {
+        PlatformBootstrapProviderBuilder::new()
+    }
+
+    /// Internal constructor
+    fn create_internal(query_api_url: String, timeout_seconds: u64) -> Result<Self> {
         // Validate URL format
         reqwest::Url::parse(&query_api_url)
             .context(format!("Invalid query_api_url: {}", query_api_url))?;
@@ -211,6 +238,63 @@ impl PlatformBootstrapProvider {
             element_count
         );
         Ok(elements)
+    }
+}
+
+/// Builder for PlatformBootstrapProvider
+///
+/// # Example
+///
+/// ```no_run
+/// use drasi_bootstrap_platform::PlatformBootstrapProvider;
+///
+/// let provider = PlatformBootstrapProvider::builder()
+///     .with_query_api_url("http://remote-drasi:8080")
+///     .with_timeout_seconds(600)
+///     .build()
+///     .expect("Failed to create platform bootstrap provider");
+/// ```
+pub struct PlatformBootstrapProviderBuilder {
+    query_api_url: Option<String>,
+    timeout_seconds: u64,
+}
+
+impl PlatformBootstrapProviderBuilder {
+    /// Create a new builder
+    pub fn new() -> Self {
+        Self {
+            query_api_url: None,
+            timeout_seconds: 300, // Default timeout
+        }
+    }
+
+    /// Set the Query API URL (required)
+    pub fn with_query_api_url(mut self, url: impl Into<String>) -> Self {
+        self.query_api_url = Some(url.into());
+        self
+    }
+
+    /// Set the timeout in seconds (default: 300)
+    pub fn with_timeout_seconds(mut self, seconds: u64) -> Self {
+        self.timeout_seconds = seconds;
+        self
+    }
+
+    /// Build the PlatformBootstrapProvider
+    ///
+    /// Returns an error if query_api_url is not set or is invalid
+    pub fn build(self) -> Result<PlatformBootstrapProvider> {
+        let query_api_url = self
+            .query_api_url
+            .ok_or_else(|| anyhow::anyhow!("query_api_url is required"))?;
+
+        PlatformBootstrapProvider::create_internal(query_api_url, self.timeout_seconds)
+    }
+}
+
+impl Default for PlatformBootstrapProviderBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

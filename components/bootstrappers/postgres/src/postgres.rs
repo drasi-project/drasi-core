@@ -45,6 +45,156 @@ impl PostgresBootstrapProvider {
             config: PostgresConfig::from_source_config(postgres_config),
         }
     }
+
+    /// Create a builder for PostgresBootstrapProvider
+    pub fn builder() -> PostgresBootstrapProviderBuilder {
+        PostgresBootstrapProviderBuilder::new()
+    }
+}
+
+/// Builder for PostgresBootstrapProvider
+///
+/// # Example
+///
+/// ```no_run
+/// use drasi_bootstrap_postgres::PostgresBootstrapProvider;
+///
+/// let provider = PostgresBootstrapProvider::builder()
+///     .with_host("localhost")
+///     .with_port(5432)
+///     .with_database("mydb")
+///     .with_user("postgres")
+///     .with_password("secret")
+///     .with_tables(vec!["users".to_string()])
+///     .build();
+/// ```
+pub struct PostgresBootstrapProviderBuilder {
+    host: String,
+    port: u16,
+    database: String,
+    user: String,
+    password: String,
+    tables: Vec<String>,
+    slot_name: String,
+    publication_name: String,
+    ssl_mode: SslMode,
+    table_keys: Vec<TableKeyConfig>,
+}
+
+impl PostgresBootstrapProviderBuilder {
+    /// Create a new builder with default values
+    pub fn new() -> Self {
+        Self {
+            host: "localhost".to_string(),
+            port: 5432,
+            database: String::new(),
+            user: String::new(),
+            password: String::new(),
+            tables: Vec::new(),
+            slot_name: "drasi_slot".to_string(),
+            publication_name: "drasi_pub".to_string(),
+            ssl_mode: SslMode::Disable,
+            table_keys: Vec::new(),
+        }
+    }
+
+    /// Set the PostgreSQL host
+    pub fn with_host(mut self, host: impl Into<String>) -> Self {
+        self.host = host.into();
+        self
+    }
+
+    /// Set the PostgreSQL port
+    pub fn with_port(mut self, port: u16) -> Self {
+        self.port = port;
+        self
+    }
+
+    /// Set the database name
+    pub fn with_database(mut self, database: impl Into<String>) -> Self {
+        self.database = database.into();
+        self
+    }
+
+    /// Set the username
+    pub fn with_user(mut self, user: impl Into<String>) -> Self {
+        self.user = user.into();
+        self
+    }
+
+    /// Set the password
+    pub fn with_password(mut self, password: impl Into<String>) -> Self {
+        self.password = password.into();
+        self
+    }
+
+    /// Set the tables to bootstrap
+    pub fn with_tables(mut self, tables: Vec<String>) -> Self {
+        self.tables = tables;
+        self
+    }
+
+    /// Add a table to bootstrap
+    pub fn with_table(mut self, table: impl Into<String>) -> Self {
+        self.tables.push(table.into());
+        self
+    }
+
+    /// Set the replication slot name
+    pub fn with_slot_name(mut self, slot_name: impl Into<String>) -> Self {
+        self.slot_name = slot_name.into();
+        self
+    }
+
+    /// Set the publication name
+    pub fn with_publication_name(mut self, publication_name: impl Into<String>) -> Self {
+        self.publication_name = publication_name.into();
+        self
+    }
+
+    /// Set the SSL mode
+    pub fn with_ssl_mode(mut self, ssl_mode: SslMode) -> Self {
+        self.ssl_mode = ssl_mode;
+        self
+    }
+
+    /// Set the table key configurations
+    pub fn with_table_keys(mut self, table_keys: Vec<TableKeyConfig>) -> Self {
+        self.table_keys = table_keys;
+        self
+    }
+
+    /// Add a table key configuration
+    pub fn with_table_key(mut self, table: impl Into<String>, key_columns: Vec<String>) -> Self {
+        self.table_keys.push(TableKeyConfig {
+            table: table.into(),
+            key_columns,
+        });
+        self
+    }
+
+    /// Build the PostgresBootstrapProvider
+    pub fn build(self) -> PostgresBootstrapProvider {
+        let config = PostgresSourceConfig {
+            host: self.host,
+            port: self.port,
+            database: self.database,
+            user: self.user,
+            password: self.password,
+            tables: self.tables,
+            slot_name: self.slot_name,
+            publication_name: self.publication_name,
+            ssl_mode: self.ssl_mode,
+            table_keys: self.table_keys,
+        };
+        PostgresBootstrapProvider::new(config)
+    }
+}
+
+impl Default for PostgresBootstrapProviderBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[async_trait]

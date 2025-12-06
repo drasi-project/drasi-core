@@ -20,10 +20,22 @@
 //! # Example
 //!
 //! ```no_run
-//! use drasi_bootstrap_postgres::{PostgresBootstrapProvider, PostgresSourceConfig};
+//! use drasi_bootstrap_postgres::PostgresBootstrapProvider;
+//!
+//! // Using the builder
+//! let provider = PostgresBootstrapProvider::builder()
+//!     .with_host("localhost")
+//!     .with_port(5432)
+//!     .with_database("mydb")
+//!     .with_user("user")
+//!     .with_password("password")
+//!     .with_tables(vec!["users".to_string()])
+//!     .build();
+//!
+//! // Or using configuration
+//! use drasi_bootstrap_postgres::PostgresSourceConfig;
 //! use drasi_lib::config::common::SslMode;
 //!
-//! // Create the bootstrap provider with typed configuration
 //! let config = PostgresSourceConfig {
 //!     host: "localhost".to_string(),
 //!     port: 5432,
@@ -36,10 +48,9 @@
 //!     ssl_mode: SslMode::Disable,
 //!     table_keys: vec![],
 //! };
-//!
 //! let provider = PostgresBootstrapProvider::new(config);
 //! ```
 
 pub mod postgres;
 
-pub use postgres::{PostgresBootstrapProvider, PostgresSourceConfig};
+pub use postgres::{PostgresBootstrapProvider, PostgresBootstrapProviderBuilder, PostgresSourceConfig};

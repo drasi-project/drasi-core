@@ -14,130 +14,112 @@
 
 //! Platform bootstrap plugin for Drasi
 //!
-//! This plugin provides the Platform bootstrap provider implementation and extension
-//! traits for creating Platform bootstrap providers in the Drasi plugin architecture.
+//! This plugin provides the Platform bootstrap provider implementation for fetching
+//! initial data from a remote Drasi Query API service.
+//!
+//! # Example
+//!
+//! ```no_run
+//! use drasi_bootstrap_platform::PlatformBootstrapProvider;
+//!
+//! // Using the builder
+//! let provider = PlatformBootstrapProvider::builder()
+//!     .with_query_api_url("http://remote-drasi:8080")
+//!     .with_timeout_seconds(600)
+//!     .build()
+//!     .expect("Failed to create provider");
+//!
+//! // Or using configuration
+//! use drasi_lib::bootstrap::PlatformBootstrapConfig;
+//!
+//! let config = PlatformBootstrapConfig {
+//!     query_api_url: Some("http://remote-drasi:8080".to_string()),
+//!     timeout_seconds: 600,
+//! };
+//! let provider = PlatformBootstrapProvider::new(config)
+//!     .expect("Failed to create provider");
+//! ```
 
 pub mod platform;
 
-pub use drasi_lib::bootstrap::{PlatformBootstrapConfig, BootstrapProviderConfig};
-pub use platform::PlatformBootstrapProvider;
-
-/// Extension trait for creating Platform bootstrap providers
-///
-/// This trait is implemented on `BootstrapProviderConfig` to provide a fluent builder API
-/// for configuring Platform bootstrap providers that fetch initial data from a remote
-/// Drasi Query API service.
-///
-/// # Example
-///
-/// ```no_run
-/// use drasi_lib::bootstrap::BootstrapProviderConfig;
-/// use drasi_bootstrap_platform::BootstrapProviderConfigPlatformExt;
-///
-/// let config = BootstrapProviderConfig::platform()
-///     .with_query_api_url("http://remote-drasi:8080")
-///     .with_timeout_seconds(600)
-///     .build();
-/// ```
-pub trait BootstrapProviderConfigPlatformExt {
-    /// Create a new Platform bootstrap provider configuration builder
-    fn platform() -> PlatformBootstrapBuilder;
-}
-
-/// Builder for Platform bootstrap provider configuration
-pub struct PlatformBootstrapBuilder {
-    query_api_url: Option<String>,
-    timeout_seconds: u64,
-}
-
-impl PlatformBootstrapBuilder {
-    /// Create a new Platform bootstrap provider builder
-    pub fn new() -> Self {
-        Self {
-            query_api_url: None,
-            timeout_seconds: 300, // Default timeout
-        }
-    }
-
-    /// Set the Query API URL
-    pub fn with_query_api_url(mut self, url: impl Into<String>) -> Self {
-        self.query_api_url = Some(url.into());
-        self
-    }
-
-    /// Set the timeout in seconds
-    pub fn with_timeout_seconds(mut self, seconds: u64) -> Self {
-        self.timeout_seconds = seconds;
-        self
-    }
-
-    /// Build the Platform bootstrap provider configuration
-    pub fn build(self) -> PlatformBootstrapConfig {
-        PlatformBootstrapConfig {
-            query_api_url: self.query_api_url,
-            timeout_seconds: self.timeout_seconds,
-        }
-    }
-}
-
-impl Default for PlatformBootstrapBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl BootstrapProviderConfigPlatformExt for BootstrapProviderConfig {
-    fn platform() -> PlatformBootstrapBuilder {
-        PlatformBootstrapBuilder::new()
-    }
-}
+pub use drasi_lib::bootstrap::PlatformBootstrapConfig;
+pub use platform::{PlatformBootstrapProvider, PlatformBootstrapProviderBuilder};
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_platform_bootstrap_builder_defaults() {
-        let config = PlatformBootstrapBuilder::new().build();
-        assert_eq!(config.query_api_url, None);
-        assert_eq!(config.timeout_seconds, 300);
+    fn test_platform_bootstrap_builder_requires_url() {
+        // Builder without URL should fail to build
+        let result = PlatformBootstrapProviderBuilder::new().build();
+        assert!(result.is_err());
     }
 
     #[test]
-    fn test_platform_bootstrap_builder_custom_values() {
-        let config = PlatformBootstrapBuilder::new()
+    fn test_platform_bootstrap_builder_with_valid_url() {
+        // Builder with valid URL should succeed
+        let result = PlatformBootstrapProviderBuilder::new()
             .with_query_api_url("http://remote-drasi:8080")
             .with_timeout_seconds(600)
             .build();
-
-        assert_eq!(config.query_api_url, Some("http://remote-drasi:8080".to_string()));
-        assert_eq!(config.timeout_seconds, 600);
+        assert!(result.is_ok());
     }
 
     #[test]
-    fn test_platform_bootstrap_extension_trait() {
-        let config = BootstrapProviderConfig::platform()
-            .with_query_api_url("http://localhost:8080")
+    fn test_platform_bootstrap_builder_invalid_url() {
+        // Builder with invalid URL should fail
+        let result = PlatformBootstrapProviderBuilder::new()
+            .with_query_api_url("not-a-valid-url")
             .build();
-
-        assert_eq!(config.query_api_url, Some("http://localhost:8080".to_string()));
+        assert!(result.is_err());
     }
 
     #[test]
     fn test_platform_bootstrap_builder_default() {
-        let config = PlatformBootstrapBuilder::default().build();
-        assert_eq!(config.query_api_url, None);
-        assert_eq!(config.timeout_seconds, 300);
+        // Default builder should have no URL set
+        let builder = PlatformBootstrapProviderBuilder::default();
+        // Without URL, build should fail
+        let result = builder.build();
+        assert!(result.is_err());
     }
 
     #[test]
-    fn test_platform_bootstrap_fluent_api() {
-        let config = BootstrapProviderConfig::platform()
+    fn test_platform_bootstrap_from_provider_method() {
+        // Test using PlatformBootstrapProvider::builder()
+        let result = PlatformBootstrapProvider::builder()
             .with_query_api_url("http://source-api:9000")
             .with_timeout_seconds(900)
             .build();
+        assert!(result.is_ok());
+    }
 
-        assert_eq!(config.query_api_url, Some("http://source-api:9000".to_string()));
-        assert_eq!(config.timeout_seconds, 900);
+    #[test]
+    fn test_platform_bootstrap_new_with_config() {
+        // Test using PlatformBootstrapProvider::new(config)
+        let config = PlatformBootstrapConfig {
+            query_api_url: Some("http://localhost:8080".to_string()),
+            timeout_seconds: 300,
+        };
+        let result = PlatformBootstrapProvider::new(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_platform_bootstrap_new_without_url() {
+        // Config without URL should fail
+        let config = PlatformBootstrapConfig {
+            query_api_url: None,
+            timeout_seconds: 300,
+        };
+        let result = PlatformBootstrapProvider::new(config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_platform_bootstrap_with_url() {
+        // Test using PlatformBootstrapProvider::with_url()
+        let result = PlatformBootstrapProvider::with_url("http://example.com:8080", 600);
+        assert!(result.is_ok());
     }
 }

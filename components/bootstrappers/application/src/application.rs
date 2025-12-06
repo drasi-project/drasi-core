@@ -46,6 +46,72 @@ impl ApplicationBootstrapProvider {
         Self { bootstrap_data }
     }
 
+    /// Create a builder for ApplicationBootstrapProvider
+    pub fn builder() -> ApplicationBootstrapProviderBuilder {
+        ApplicationBootstrapProviderBuilder::new()
+    }
+}
+
+impl Default for ApplicationBootstrapProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Builder for ApplicationBootstrapProvider
+///
+/// # Example
+///
+/// ```no_run
+/// use drasi_bootstrap_application::ApplicationBootstrapProvider;
+///
+/// // Create with isolated storage
+/// let provider = ApplicationBootstrapProvider::builder().build();
+///
+/// // Create with shared storage
+/// use std::sync::Arc;
+/// use tokio::sync::RwLock;
+/// use drasi_core::models::SourceChange;
+///
+/// let shared_data = Arc::new(RwLock::new(Vec::<SourceChange>::new()));
+/// let provider = ApplicationBootstrapProvider::builder()
+///     .with_shared_data(shared_data)
+///     .build();
+/// ```
+pub struct ApplicationBootstrapProviderBuilder {
+    shared_data: Option<Arc<RwLock<Vec<SourceChange>>>>,
+}
+
+impl ApplicationBootstrapProviderBuilder {
+    /// Create a new builder
+    pub fn new() -> Self {
+        Self { shared_data: None }
+    }
+
+    /// Set shared bootstrap data
+    ///
+    /// Use this when you want the provider to share bootstrap data with an ApplicationSource.
+    pub fn with_shared_data(mut self, data: Arc<RwLock<Vec<SourceChange>>>) -> Self {
+        self.shared_data = Some(data);
+        self
+    }
+
+    /// Build the ApplicationBootstrapProvider
+    pub fn build(self) -> ApplicationBootstrapProvider {
+        match self.shared_data {
+            Some(data) => ApplicationBootstrapProvider::with_shared_data(data),
+            None => ApplicationBootstrapProvider::new(),
+        }
+    }
+}
+
+impl Default for ApplicationBootstrapProviderBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ApplicationBootstrapProvider {
     /// Store an insert event for future bootstrap replay
     /// This would be called by the application source when it receives insert events
     pub async fn store_insert_event(&self, change: SourceChange) {

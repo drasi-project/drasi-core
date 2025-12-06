@@ -26,20 +26,95 @@ use crate::script_types::{BootstrapScriptRecord, NodeRecord, RelationRecord};
 use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 use drasi_lib::sources::manager::convert_json_to_element_properties;
 
+use drasi_lib::bootstrap::ScriptFileBootstrapConfig;
+
 /// Bootstrap provider that reads data from JSONL script files
 pub struct ScriptFileBootstrapProvider {
     file_paths: Vec<String>,
 }
 
 impl ScriptFileBootstrapProvider {
-    /// Create a new script file bootstrap provider
+    /// Create a new script file bootstrap provider from configuration
+    ///
+    /// # Arguments
+    /// * `config` - ScriptFile bootstrap configuration
+    pub fn new(config: ScriptFileBootstrapConfig) -> Self {
+        Self {
+            file_paths: config.file_paths,
+        }
+    }
+
+    /// Create a new script file bootstrap provider with explicit file paths
     ///
     /// # Arguments
     /// * `file_paths` - List of JSONL file paths to read in order
-    pub fn new(file_paths: Vec<String>) -> Self {
+    pub fn with_paths(file_paths: Vec<String>) -> Self {
         Self { file_paths }
     }
 
+    /// Create a builder for ScriptFileBootstrapProvider
+    pub fn builder() -> ScriptFileBootstrapProviderBuilder {
+        ScriptFileBootstrapProviderBuilder::new()
+    }
+}
+
+impl Default for ScriptFileBootstrapProvider {
+    fn default() -> Self {
+        Self {
+            file_paths: Vec::new(),
+        }
+    }
+}
+
+/// Builder for ScriptFileBootstrapProvider
+///
+/// # Example
+///
+/// ```no_run
+/// use drasi_bootstrap_scriptfile::ScriptFileBootstrapProvider;
+///
+/// let provider = ScriptFileBootstrapProvider::builder()
+///     .with_file("/path/to/data.jsonl")
+///     .with_file("/path/to/more_data.jsonl")
+///     .build();
+/// ```
+pub struct ScriptFileBootstrapProviderBuilder {
+    file_paths: Vec<String>,
+}
+
+impl ScriptFileBootstrapProviderBuilder {
+    /// Create a new builder
+    pub fn new() -> Self {
+        Self {
+            file_paths: Vec::new(),
+        }
+    }
+
+    /// Set all file paths at once
+    pub fn with_file_paths(mut self, paths: Vec<String>) -> Self {
+        self.file_paths = paths;
+        self
+    }
+
+    /// Add a single file path
+    pub fn with_file(mut self, path: impl Into<String>) -> Self {
+        self.file_paths.push(path.into());
+        self
+    }
+
+    /// Build the ScriptFileBootstrapProvider
+    pub fn build(self) -> ScriptFileBootstrapProvider {
+        ScriptFileBootstrapProvider::with_paths(self.file_paths)
+    }
+}
+
+impl Default for ScriptFileBootstrapProviderBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ScriptFileBootstrapProvider {
     /// Convert a NodeRecord to an Element::Node
     fn convert_node_to_element(source_id: &str, node: &NodeRecord) -> Result<Element> {
         // Convert properties from JSON to ElementPropertyMap

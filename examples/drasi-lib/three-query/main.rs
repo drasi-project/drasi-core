@@ -74,9 +74,9 @@ async fn main() -> Result<()> {
 
     println!("Loading bootstrap data from: {}", bootstrap_path.display());
 
-    let bootstrap_provider = ScriptFileBootstrapProvider::new(vec![
-        bootstrap_path.to_string_lossy().to_string()
-    ]);
+    let bootstrap_provider = ScriptFileBootstrapProvider::builder()
+        .with_file(bootstrap_path.to_string_lossy().to_string())
+        .build();
 
     // =========================================================================
     // Step 2: Create HTTP Source
@@ -104,7 +104,7 @@ async fn main() -> Result<()> {
     // results whenever the underlying data changes.
 
     // Query 1: All Prices - Returns all stock prices with their details
-    let all_prices = Query::cypher("all-prices")
+    let all_prices_query = Query::cypher("all-prices")
         .query(r#"
             MATCH (sp:stock_prices)
             RETURN sp.symbol AS symbol,
@@ -118,7 +118,7 @@ async fn main() -> Result<()> {
         .build();
 
     // Query 2: Gainers - Stocks where current price exceeds previous close
-    let gainers = Query::cypher("gainers")
+    let gainers_query = Query::cypher("gainers")
         .query(r#"
             MATCH (sp:stock_prices)
             WHERE sp.price > sp.previous_close
@@ -133,7 +133,7 @@ async fn main() -> Result<()> {
         .build();
 
     // Query 3: High Volume - Stocks with trading volume over 1 million
-    let high_volume = Query::cypher("high-volume")
+    let high_volume_query = Query::cypher("high-volume")
         .query(r#"
             MATCH (sp:stock_prices)
             WHERE sp.volume > 1000000
@@ -155,9 +155,9 @@ async fn main() -> Result<()> {
     // to identify which query produced each result.
 
     let log_reaction = LogReaction::builder("console-logger")
-        .from_query("all-prices")
-        .from_query("gainers")
-        .from_query("high-volume")
+        .from_query("all-prices_query")
+        .from_query("gainers_query")
+        .from_query("high-volume_query")
         .with_added_template("[{{query_name}}] + {{after.symbol}}: ${{after.price}}")
         .with_updated_template("[{{query_name}}] ~ {{after.symbol}}: ${{before.price}} -> ${{after.price}}")
         .with_deleted_template("[{{query_name}}] - {{before.symbol}} removed")
@@ -173,9 +173,9 @@ async fn main() -> Result<()> {
         DrasiLib::builder()
             .with_id("stock-monitor")
             .with_source(http_source)
-            .with_query(all_prices)
-            .with_query(gainers)
-            .with_query(high_volume)
+            .with_query(all_prices_query)
+            .with_query(gainers_query)
+            .with_query(high_volume_query)
             .with_reaction(log_reaction)
             .build()
             .await?

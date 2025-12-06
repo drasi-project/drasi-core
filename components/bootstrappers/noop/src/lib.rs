@@ -25,8 +25,44 @@ use drasi_lib::channels::BootstrapEventSender;
 pub struct NoOpBootstrapProvider;
 
 impl NoOpBootstrapProvider {
+    /// Create a new no-op bootstrap provider
     pub fn new() -> Self {
         Self
+    }
+
+    /// Create a builder for NoOpBootstrapProvider
+    pub fn builder() -> NoOpBootstrapProviderBuilder {
+        NoOpBootstrapProviderBuilder::new()
+    }
+}
+
+impl Default for NoOpBootstrapProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Builder for NoOpBootstrapProvider
+///
+/// This builder is provided for API consistency with other bootstrap providers,
+/// though no configuration options are available since no-op returns no data.
+pub struct NoOpBootstrapProviderBuilder;
+
+impl NoOpBootstrapProviderBuilder {
+    /// Create a new builder
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Build the NoOpBootstrapProvider
+    pub fn build(self) -> NoOpBootstrapProvider {
+        NoOpBootstrapProvider
+    }
+}
+
+impl Default for NoOpBootstrapProviderBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
