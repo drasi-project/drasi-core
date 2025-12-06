@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! # DrasiLib HTTP Source Example
+//! # DrasiLib Builder Example
 //!
 //! This example demonstrates programmatic use of drasi-lib with an HTTP source
 //! and a single query. It shows:
@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
     ).init();
 
     println!("========================================");
-    println!("  DrasiLib HTTP Source Example");
+    println!("  DrasiLib Builder Example");
     println!("========================================\n");
 
     // =========================================================================
@@ -173,7 +173,7 @@ async fn main() -> Result<()> {
     });
 
     println!("\n----------------------------------------");
-    println!(" HTTP Source Example Started!");
+    println!(" Builder Example Started!");
     println!("----------------------------------------");
     println!(" HTTP Source: http://localhost:9000");
     println!("   POST /sources/stock-prices/events");

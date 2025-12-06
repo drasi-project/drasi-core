@@ -1,9 +1,9 @@
 [package]
-name = "http-source-example"
+name = "builder-example"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "DrasiLib example demonstrating HTTP source with a single query"
+description = "DrasiLib example demonstrating builder-based creation"
 
 # Keep this crate independent from the parent workspace
 [workspace]
@@ -22,5 +22,5 @@ log = "0.4"
 serde_json = "1.0"
 
 [[bin]]
-name = "http-source-example"
+name = "builder-example"
 path = "main.rs"

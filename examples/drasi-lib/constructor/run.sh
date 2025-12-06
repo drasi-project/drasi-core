@@ -1,11 +1,11 @@
 #!/bin/bash
-# Run the DrasiLib HTTP Source Example
+# Run the DrasiLib Constructor Example
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "Starting DrasiLib HTTP Source Example..."
+echo "Starting DrasiLib Constructor Example..."
 echo ""
 
 cd "$SCRIPT_DIR"
