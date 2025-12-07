@@ -49,6 +49,7 @@ let source = GrpcSource::builder("production-grpc")
     .with_timeout_ms(10000)
     .with_dispatch_mode(DispatchMode::Channel)
     .with_dispatch_buffer_capacity(2000)
+    .with_auto_start(true)
     .build()?;
 
 // With bootstrap provider
@@ -117,9 +118,11 @@ drasi.start_source("events-grpc").await?;
 | `dispatch_mode` | Event dispatch strategy | `Option<DispatchMode>` | `Channel` (isolated, backpressure) or `Broadcast` (shared, no backpressure) | `Channel` |
 | `dispatch_buffer_capacity` | Buffer size for dispatch channel | `Option<usize>` | Positive integer | `1000` |
 | `bootstrap_provider` | Provider for initial data snapshots | `Option<Box<dyn BootstrapProvider>>` | Any type implementing `BootstrapProvider` | `None` |
+| `auto_start` | Whether to start automatically when added to DrasiLib | `bool` | `true`, `false` | `true` |
 
 ### Configuration Notes
 
+- **Auto-start**: When `auto_start=true` (default), the source starts immediately if added to a running DrasiLib instance. When `auto_start=false`, start manually with `drasi.start_source("source-id")`.
 - **Host binding**: Use `"0.0.0.0"` to accept connections from any network interface, or `"127.0.0.1"` for localhost only
 - **Port**: Must be available (not in use by another service)
 - **Timeout**: Applies to request processing; higher values for slow network conditions

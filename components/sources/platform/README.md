@@ -71,6 +71,7 @@ let source = PlatformSource::builder("my-platform-source")
     .with_block_ms(10000)
     .with_dispatch_mode(drasi_lib::channels::DispatchMode::Channel)
     .with_dispatch_buffer_capacity(1500)
+    .with_auto_start(true)
     .build()?;
 
 drasi_lib.add_source(source).await?;
@@ -128,6 +129,7 @@ sources:
 | `block_ms` | u64 | Milliseconds to block waiting for new events | 100-60000 (recommended) | `5000` |
 | `dispatch_mode` | DispatchMode | Event dispatch strategy | `Channel`, `Broadcast` | `Channel` |
 | `dispatch_buffer_capacity` | usize | Buffer size for dispatch channels | Any positive integer | `1000` |
+| `auto_start` | bool | Whether to start automatically when added to DrasiLib | `true`, `false` | `true` |
 
 ### Configuration Details
 

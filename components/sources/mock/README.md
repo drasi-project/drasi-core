@@ -58,6 +58,7 @@ let source = MockSource::builder("sensor-source")
     .with_dispatch_mode(DispatchMode::Channel)
     .with_dispatch_buffer_capacity(2000)
     .with_bootstrap_provider(my_bootstrap_provider)
+    .with_auto_start(true)
     .build()?;
 
 // Counter source for testing
@@ -101,6 +102,7 @@ let source = MockSource::with_dispatch(
 | `dispatch_mode` | Event dispatch mode for subscribers | `DispatchMode` | `Channel` (isolated with backpressure), `Broadcast` (shared, no backpressure) | `Channel` |
 | `dispatch_buffer_capacity` | Buffer size for dispatch channels | `usize` | Any positive integer | `1000` |
 | `bootstrap_provider` | Bootstrap provider for initial data delivery | `Box<dyn BootstrapProvider>` | Any bootstrap provider implementation | `None` |
+| `auto_start` | Whether to start automatically when added to DrasiLib | `bool` | `true`, `false` | `true` |
 
 **Configuration Validation:**
 

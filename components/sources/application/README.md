@@ -68,8 +68,11 @@ pub struct ApplicationSourceConfig {
 | Name | Description | Data Type | Valid Values | Default |
 |------|-------------|-----------|--------------|---------|
 | `properties` | Custom application-specific properties passed through to `Source::properties()` | `HashMap<String, serde_json::Value>` | Any JSON-serializable key-value pairs | `{}` (empty map) |
+| `auto_start` | Whether to start automatically when added to DrasiLib | `bool` | `true`, `false` | `true` |
 
 **Note**: The Application Source has minimal configuration requirements since it operates entirely in-process. The `properties` field is primarily for metadata and custom application logic.
+
+**Auto-Start Behavior**: When `auto_start=true` (default), the source starts immediately if added to a running DrasiLib instance. If added before `drasi.start()` is called, it starts when the DrasiLib starts. When `auto_start=false`, the source must be started manually via `drasi.start_source("source-id")`.
 
 ## Input Schema
 

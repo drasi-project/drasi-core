@@ -47,6 +47,7 @@ let reaction = AdaptiveHttpReaction::builder("analytics-webhook")
     .with_max_batch_size(500)
     .with_window_size(50)  // 5 seconds
     .with_batch_timeout_ms(1000)
+    .with_auto_start(true)
     .build()?;
 ```
 
@@ -89,6 +90,7 @@ let reaction = AdaptiveHttpReaction::new(
 | `adaptive_max_batch_size` | Maximum batch size used during burst traffic | usize | 1 - 10000 | `100` |
 | `adaptive_window_size` | Window size for throughput monitoring in 100ms units (10 = 1 sec, 50 = 5 sec, 100 = 10 sec) | usize | 1 - 255 | `10` (1 second) |
 | `adaptive_batch_timeout_ms` | Maximum time to wait before flushing a partial batch | u64 | 1 - 60000 | `1000` |
+| `auto_start` | Whether to start automatically when added to DrasiLib | bool | `true`, `false` | `true` |
 
 ### Adaptive Algorithm Behavior
 

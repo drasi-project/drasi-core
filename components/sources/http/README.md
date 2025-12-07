@@ -43,6 +43,7 @@ use drasi_source_http::HttpSource;
 let source = HttpSource::builder("my-source")
     .with_host("0.0.0.0")
     .with_port(8080)
+    .with_auto_start(true)
     .build()?;
 
 // With adaptive batching tuning
@@ -125,6 +126,7 @@ sources:
 | `port` | HTTP server port number | u16 | 1-65535 | 8080 |
 | `endpoint` | Optional custom endpoint path | Option<String> | Any valid path | None |
 | `timeout_ms` | Request timeout in milliseconds | u64 | Any positive integer | 10000 |
+| `auto_start` | Whether to start automatically when added to DrasiLib | bool | `true`, `false` | `true` |
 
 ### Adaptive Batching Settings
 

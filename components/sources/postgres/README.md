@@ -124,6 +124,7 @@ let source = PostgresReplicationSource::builder("postgres-source-1")
     })
     .with_dispatch_mode(drasi_lib::channels::DispatchMode::Channel)
     .with_dispatch_buffer_capacity(2000)
+    .with_auto_start(true)
     .build()?;
 ```
 
@@ -173,6 +174,7 @@ let source = PostgresReplicationSource::new("postgres-source-1", config)?;
 | `table_keys` | `Vec<TableKeyConfig>` | `[]` | Manual primary key configuration (see below) |
 | `dispatch_mode` | `Option<DispatchMode>` | `None` | Channel dispatch mode (builder only) |
 | `dispatch_buffer_capacity` | `Option<usize>` | `None` | Dispatch buffer size (builder only) |
+| `auto_start` | `bool` | `true` | Whether to start automatically when added to DrasiLib |
 
 ### TableKeyConfig
 
