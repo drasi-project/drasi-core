@@ -32,3 +32,4 @@ prost = "0.12.3"
 [dev-dependencies]
 shared-tests = { path = "../shared-tests" }
 uuid = { version = "0.8.2", features = ["serde", "v4"] }
+serial_test = "3"
