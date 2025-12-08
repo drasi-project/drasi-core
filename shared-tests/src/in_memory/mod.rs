@@ -524,3 +524,14 @@ mod future_aggregations {
         future_aggregations::truelater_max(&test_config).await;
     }
 }
+
+mod collect_function {
+    use super::InMemoryQueryConfig;
+    use crate::use_cases::*;
+
+    #[tokio::test]
+    async fn collect_basic() {
+        let test_config = InMemoryQueryConfig::new();
+        collect_function::collect_basic_test(&test_config).await;
+    }
+}

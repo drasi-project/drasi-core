@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod avg;
+mod collect;
 mod count;
 mod last;
 pub mod lazy_sorted_set;
@@ -22,6 +23,7 @@ mod min;
 mod sum;
 
 pub use avg::Avg;
+pub use collect::Collect;
 pub use count::Count;
 pub use last::AggregatingLast;
 pub use linear_gradient::LinearGradient;
@@ -32,6 +34,7 @@ pub use sum::Sum;
 use crate::models::{ElementPropertyMap, ElementValue};
 
 use self::lazy_sorted_set::LazySortedSet;
+use crate::evaluation::variable_value::VariableValue;
 
 #[derive(Debug, Clone)]
 pub enum ValueAccumulator {
@@ -58,6 +61,9 @@ pub enum ValueAccumulator {
     },
     Value(ElementValue),
     Map(ElementPropertyMap),
+    List {
+        values: Vec<VariableValue>,
+    },
 }
 
 #[derive(Clone)]

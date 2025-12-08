@@ -19,6 +19,7 @@ use drasi_core::query::QueryBuilder;
 use drasi_query_ast::ast::Query;
 
 pub mod building_comfort;
+pub mod collect_function;
 pub mod curbside_pickup;
 pub mod dapr_state_store;
 pub mod decoder;
@@ -50,5 +51,5 @@ pub mod steps_happen_in_any_order;
 
 #[async_trait]
 pub trait QueryTestConfig {
-    async fn config_query(&self, builder: QueryBuilder, query: Arc<Query>) -> QueryBuilder;
+    async fn config_query(&self, builder: QueryBuilder) -> QueryBuilder;
 }
