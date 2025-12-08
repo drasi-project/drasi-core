@@ -420,6 +420,9 @@ impl Reaction for GrpcReaction {
             )
             .await?;
 
+        // Create shutdown channel for graceful termination
+        let mut shutdown_rx = self.base.create_shutdown_channel().await;
+
         // Start processing task that dequeues from priority queue
         let reaction_name = self.base.id.clone();
         let status = self.base.status.clone();
@@ -461,7 +464,17 @@ impl Reaction for GrpcReaction {
             flush_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
-                let query_result = priority_queue.dequeue().await;
+                // Use select to wait for either a result OR shutdown signal
+                let query_result = tokio::select! {
+                    biased;
+
+                    _ = &mut shutdown_rx => {
+                        debug!("[{}] Received shutdown signal, exiting processing loop", reaction_name);
+                        break;
+                    }
+
+                    result = priority_queue.dequeue() => result,
+                };
                 debug!(
                     "Dequeued query result with {} items for processing",
                     query_result.results.len()

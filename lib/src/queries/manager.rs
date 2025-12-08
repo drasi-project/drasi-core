@@ -649,6 +649,10 @@ impl Query for DrasiQuery {
         let priority_queue = self.priority_queue.clone();
         let status = self.base.status.clone();
 
+        // Create shutdown channel for graceful termination
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        self.base.set_shutdown_tx(shutdown_tx).await;
+
         let handle = tokio::spawn(async move {
             info!(
                 "Query '{}' starting priority queue event processor",
@@ -665,8 +669,22 @@ impl Query for DrasiQuery {
                     break;
                 }
 
-                // Dequeue events from priority queue (blocks until available)
-                let arc_event = priority_queue.dequeue().await;
+                // Use select to wait for either an event OR shutdown signal
+                let arc_event = tokio::select! {
+                    // Check for shutdown signal first (biased)
+                    biased;
+
+                    _ = &mut shutdown_rx => {
+                        info!(
+                            "Query '{}' received shutdown signal, exiting processing loop",
+                            query_id
+                        );
+                        break;
+                    }
+
+                    // Dequeue events from priority queue (blocks until available)
+                    event = priority_queue.dequeue() => event,
+                };
 
                 // Try to extract without cloning if we have sole ownership (zero-copy path).
                 // This succeeds in Channel dispatch mode where each query has its own event copy.

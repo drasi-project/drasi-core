@@ -228,6 +228,9 @@ impl Reaction for LogReaction {
         let reaction_name = self.base.id.clone();
         let config = self.config.clone();
 
+        // Create shutdown channel for graceful termination
+        let mut shutdown_rx = self.base.create_shutdown_channel().await;
+
         let processing_task = tokio::spawn(async move {
             // Set up Handlebars with json helper
             let mut handlebars = Handlebars::new();
@@ -251,8 +254,17 @@ impl Reaction for LogReaction {
             );
 
             loop {
-                // Dequeue next result in timestamp order (blocking)
-                let query_result_arc = priority_queue.dequeue().await;
+                // Use select to wait for either a result OR shutdown signal
+                let query_result_arc = tokio::select! {
+                    biased;
+
+                    _ = &mut shutdown_rx => {
+                        debug!("[{}] Received shutdown signal, exiting processing loop", reaction_name);
+                        break;
+                    }
+
+                    result = priority_queue.dequeue() => result,
+                };
 
                 // Get mutable access to the result for profiling
                 // Note: We need to clone and modify since Arc doesn't allow mutation

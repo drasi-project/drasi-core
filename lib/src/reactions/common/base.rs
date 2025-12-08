@@ -112,6 +112,8 @@ pub struct ReactionBase {
     pub subscription_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
     /// Handle to the main processing task
     pub processing_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+    /// Sender for shutdown signal to processing task
+    pub shutdown_tx: Arc<RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
 }
 
 impl ReactionBase {
@@ -130,6 +132,7 @@ impl ReactionBase {
             query_subscriber: Arc::new(RwLock::new(None)),   // Injected later by DrasiLib
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
             processing_task: Arc::new(RwLock::new(None)),
+            shutdown_tx: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -179,7 +182,20 @@ impl ReactionBase {
             priority_queue: self.priority_queue.clone(),
             subscription_tasks: self.subscription_tasks.clone(),
             processing_task: self.processing_task.clone(),
+            shutdown_tx: self.shutdown_tx.clone(),
         }
+    }
+
+    /// Create a shutdown channel and store the sender
+    ///
+    /// Returns the receiver which should be passed to the processing task.
+    /// The sender is stored internally and will be triggered by `stop_common()`.
+    ///
+    /// This should be called before spawning the processing task.
+    pub async fn create_shutdown_channel(&self) -> tokio::sync::oneshot::Receiver<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        *self.shutdown_tx.write().await = Some(tx);
+        rx
     }
 
     /// Get the reaction ID
@@ -340,11 +356,17 @@ impl ReactionBase {
     /// Perform common cleanup operations
     ///
     /// This method handles:
-    /// 1. Aborting all subscription forwarder tasks
-    /// 2. Aborting the processing task
-    /// 3. Draining the priority queue
+    /// 1. Sending shutdown signal to processing task (for graceful termination)
+    /// 2. Aborting all subscription forwarder tasks
+    /// 3. Waiting for or aborting the processing task
+    /// 4. Draining the priority queue
     pub async fn stop_common(&self) -> Result<()> {
         info!("Stopping reaction: {}", self.id);
+
+        // Send shutdown signal to processing task (if it's using tokio::select!)
+        if let Some(tx) = self.shutdown_tx.write().await.take() {
+            let _ = tx.send(());
+        }
 
         // Abort all subscription forwarder tasks
         let mut subscription_tasks = self.subscription_tasks.write().await;
@@ -353,10 +375,27 @@ impl ReactionBase {
         }
         drop(subscription_tasks);
 
-        // Abort the processing task
+        // Wait for the processing task to complete (with timeout), or abort it
         let mut processing_task = self.processing_task.write().await;
         if let Some(task) = processing_task.take() {
-            task.abort();
+            // Give the task a short time to respond to the shutdown signal
+            match tokio::time::timeout(std::time::Duration::from_secs(2), task).await {
+                Ok(Ok(())) => {
+                    debug!("[{}] Processing task completed gracefully", self.id);
+                }
+                Ok(Err(e)) => {
+                    // Task was aborted or panicked
+                    debug!("[{}] Processing task ended: {}", self.id, e);
+                }
+                Err(_) => {
+                    // Timeout - task didn't respond to shutdown signal
+                    // This shouldn't happen if the task is using tokio::select! correctly
+                    warn!(
+                        "[{}] Processing task did not respond to shutdown signal within timeout",
+                        self.id
+                    );
+                }
+            }
         }
         drop(processing_task);
 

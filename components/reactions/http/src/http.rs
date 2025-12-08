@@ -298,6 +298,9 @@ impl Reaction for HttpReaction {
             )
             .await?;
 
+        // Create shutdown channel for graceful termination
+        let mut shutdown_rx = self.base.create_shutdown_channel().await;
+
         // Spawn the main processing task
         let reaction_name = self.base.id.clone();
         let status = self.base.status.clone();
@@ -342,8 +345,17 @@ impl Reaction for HttpReaction {
             );
 
             loop {
-                // Dequeue results from priority queue in timestamp order
-                let query_result_arc = priority_queue.dequeue().await;
+                // Use select to wait for either a result OR shutdown signal
+                let query_result_arc = tokio::select! {
+                    biased;
+
+                    _ = &mut shutdown_rx => {
+                        debug!("[{}] Received shutdown signal, exiting processing loop", reaction_name);
+                        break;
+                    }
+
+                    result = priority_queue.dequeue() => result,
+                };
                 let query_result = query_result_arc.as_ref();
 
                 if !matches!(*status.read().await, ComponentStatus::Running) {

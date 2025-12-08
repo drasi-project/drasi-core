@@ -300,6 +300,9 @@ impl Reaction for PlatformReaction {
             )
             .await?;
 
+        // Create shutdown channel for graceful termination
+        let mut shutdown_rx = self.base.create_shutdown_channel().await;
+
         // Clone what we need for the processing task
         let publisher = self.publisher.clone();
         let sequence_counter = self.sequence_counter.clone();
@@ -323,8 +326,17 @@ impl Reaction for PlatformReaction {
             let mut last_flush_time = std::time::Instant::now();
 
             loop {
-                // Dequeue from priority queue (blocking until available)
-                let query_result = priority_queue.dequeue().await;
+                // Use select to wait for either a result OR shutdown signal
+                let query_result = tokio::select! {
+                    biased;
+
+                    _ = &mut shutdown_rx => {
+                        log::debug!("[{}] Received shutdown signal, exiting processing loop", reaction_id);
+                        break;
+                    }
+
+                    result = priority_queue.dequeue() => result,
+                };
 
                 // Check if this is a control signal
                 if let Some(control_signal) = query_result.metadata.get("control_signal") {

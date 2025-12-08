@@ -170,6 +170,7 @@ impl AdaptiveGrpcReaction {
         initial_connection_timeout_ms: u64,
         adaptive_config: AdaptiveBatchConfig,
         base: ReactionBase,
+        mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) {
         let _timeout_ms = timeout_ms;
 
@@ -313,8 +314,17 @@ impl AdaptiveGrpcReaction {
             let mut current_batch = Vec::new();
 
             loop {
-                // Dequeue from priority queue (blocking)
-                let query_result = base.priority_queue.dequeue().await;
+                // Use select to wait for either a result OR shutdown signal
+                let query_result = tokio::select! {
+                    biased;
+
+                    _ = &mut shutdown_rx => {
+                        debug!("[{}] Received shutdown signal, exiting processing loop", reaction_name);
+                        break;
+                    }
+
+                    result = base.priority_queue.dequeue() => result,
+                };
 
                 if !matches!(*base.status.read().await, ComponentStatus::Running) {
                     info!(
@@ -459,6 +469,9 @@ impl Reaction for AdaptiveGrpcReaction {
             )
             .await?;
 
+        // Create shutdown channel for graceful termination
+        let shutdown_rx = self.base.create_shutdown_channel().await;
+
         // Start processing task that dequeues from priority queue
         let reaction_name = self.base.id.clone();
         let endpoint = self.endpoint.clone();
@@ -480,6 +493,7 @@ impl Reaction for AdaptiveGrpcReaction {
                 initial_connection_timeout_ms,
                 adaptive_config,
                 base,
+                shutdown_rx,
             )
             .await;
         });

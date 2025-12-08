@@ -331,6 +331,7 @@ impl AdaptiveHttpReaction {
         base: ReactionBase,
         adaptive_config: AdaptiveBatchConfig,
         sender: Arc<Self>,
+        mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) {
         // Create channel for batching with capacity based on batch configuration
         let batch_channel_capacity = adaptive_config.recommended_channel_capacity();
@@ -393,7 +394,17 @@ impl AdaptiveHttpReaction {
 
         // Main task: receive query results from priority queue and forward to batcher
         loop {
-            let query_result_arc = base.priority_queue.dequeue().await;
+            // Use select to wait for either a result OR shutdown signal
+            let query_result_arc = tokio::select! {
+                biased;
+
+                _ = &mut shutdown_rx => {
+                    debug!("[{}] Received shutdown signal, exiting processing loop", reaction_name);
+                    break;
+                }
+
+                result = base.priority_queue.dequeue() => result,
+            };
             let query_result = query_result_arc.as_ref();
 
             if !matches!(*base.status.read().await, ComponentStatus::Running) {
@@ -510,6 +521,9 @@ impl Reaction for AdaptiveHttpReaction {
             batch_endpoints_enabled: self.batch_endpoints_enabled,
         });
 
+        // Create shutdown channel for graceful termination
+        let shutdown_rx = self.base.create_shutdown_channel().await;
+
         let reaction_name = self.base.id.clone();
         let base = self.base.clone_shared();
         let adaptive_config = self.adaptive_config.clone();
@@ -519,6 +533,7 @@ impl Reaction for AdaptiveHttpReaction {
             base,
             adaptive_config,
             self_arc,
+            shutdown_rx,
         ));
 
         // Store the processing task handle

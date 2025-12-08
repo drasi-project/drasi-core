@@ -549,6 +549,9 @@ impl Reaction for ApplicationReaction {
             )
             .await?;
 
+        // Create shutdown channel for graceful termination
+        let mut shutdown_rx = self.base.create_shutdown_channel().await;
+
         // Spawn processing task to dequeue and process results in timestamp order
         let priority_queue = self.base.priority_queue.clone();
         let reaction_name = self.base.id.clone();
@@ -562,8 +565,17 @@ impl Reaction for ApplicationReaction {
             );
 
             loop {
-                // Dequeue next result in timestamp order (blocking)
-                let query_result_arc = priority_queue.dequeue().await;
+                // Use select to wait for either a result OR shutdown signal
+                let query_result_arc = tokio::select! {
+                    biased;
+
+                    _ = &mut shutdown_rx => {
+                        debug!("[{}] Received shutdown signal, exiting processing loop", reaction_name);
+                        break;
+                    }
+
+                    result = priority_queue.dequeue() => result,
+                };
 
                 // Clone to get owned QueryResult
                 let query_result = (*query_result_arc).clone();
