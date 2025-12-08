@@ -293,7 +293,7 @@ pub struct Query {
     id: String,
     query: String,
     query_language: QueryLanguage,
-    source_subscriptions: Vec<SourceSubscriptionConfig>,
+    sources: Vec<SourceSubscriptionConfig>,
     middleware: Vec<SourceMiddlewareConfig>,
     auto_start: bool,
     joins: Option<Vec<QueryJoinConfig>>,
@@ -312,7 +312,7 @@ impl Query {
             id: id.into(),
             query: String::new(),
             query_language: QueryLanguage::Cypher,
-            source_subscriptions: Vec::new(),
+            sources: Vec::new(),
             middleware: Vec::new(),
             auto_start: true,
             joins: None,
@@ -331,7 +331,7 @@ impl Query {
             id: id.into(),
             query: String::new(),
             query_language: QueryLanguage::GQL,
-            source_subscriptions: Vec::new(),
+            sources: Vec::new(),
             middleware: Vec::new(),
             auto_start: true,
             joins: None,
@@ -352,7 +352,7 @@ impl Query {
 
     /// Subscribe to a source.
     pub fn from_source(mut self, source_id: impl Into<String>) -> Self {
-        self.source_subscriptions.push(SourceSubscriptionConfig {
+        self.sources.push(SourceSubscriptionConfig {
             source_id: source_id.into(),
             pipeline: Vec::new(),
         });
@@ -368,7 +368,7 @@ impl Query {
         source_id: impl Into<String>,
         pipeline: Vec<String>,
     ) -> Self {
-        self.source_subscriptions.push(SourceSubscriptionConfig {
+        self.sources.push(SourceSubscriptionConfig {
             source_id: source_id.into(),
             pipeline,
         });
@@ -435,7 +435,7 @@ impl Query {
             id: self.id,
             query: self.query,
             query_language: self.query_language,
-            source_subscriptions: self.source_subscriptions,
+            sources: self.sources,
             middleware: self.middleware,
             auto_start: self.auto_start,
             joins: self.joins,
@@ -474,8 +474,8 @@ mod tests {
         assert_eq!(config.query, "MATCH (n) RETURN n");
         assert_eq!(config.query_language, QueryLanguage::Cypher);
         assert!(!config.auto_start);
-        assert_eq!(config.source_subscriptions.len(), 1);
-        assert_eq!(config.source_subscriptions[0].source_id, "source1");
+        assert_eq!(config.sources.len(), 1);
+        assert_eq!(config.sources[0].source_id, "source1");
     }
 
     #[test]
@@ -496,7 +496,7 @@ mod tests {
             .from_source("source2")
             .build();
 
-        assert_eq!(config.source_subscriptions.len(), 2);
+        assert_eq!(config.sources.len(), 2);
     }
 
     #[tokio::test]

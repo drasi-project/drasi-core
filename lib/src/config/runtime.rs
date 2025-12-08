@@ -184,7 +184,7 @@ impl From<QueryConfig> for QueryRuntime {
             query: config.query,
             status: ComponentStatus::Stopped,
             error_message: None,
-            source_subscriptions: config.source_subscriptions,
+            source_subscriptions: config.sources,
             joins: config.joins,
         }
     }

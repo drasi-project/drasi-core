@@ -52,7 +52,7 @@ mod query_joins_tests {
             query: query.to_string(),
             query_language: crate::config::QueryLanguage::Cypher,
             middleware: vec![],
-            source_subscriptions: sources
+            sources: sources
                 .into_iter()
                 .map(|source_id| SourceSubscriptionConfig {
                     source_id,

@@ -35,7 +35,7 @@ mod manager_tests {
             query: "MATCH (n) RETURN n".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
-            source_subscriptions: sources
+            sources: sources
                 .into_iter()
                 .map(|source_id| SourceSubscriptionConfig {
                     source_id,
@@ -60,7 +60,7 @@ mod manager_tests {
             query: "MATCH (n:Person) RETURN n.name".to_string(),
             query_language: QueryLanguage::GQL,
             middleware: vec![],
-            source_subscriptions: sources
+            sources: sources
                 .into_iter()
                 .map(|source_id| SourceSubscriptionConfig {
                     source_id,
@@ -374,8 +374,8 @@ mod manager_tests {
         assert_eq!(retrieved.id, config.id);
         assert_eq!(retrieved.query, config.query);
         assert_eq!(
-            retrieved.source_subscriptions.len(),
-            config.source_subscriptions.len()
+            retrieved.sources.len(),
+            config.sources.len()
         );
     }
 
@@ -561,7 +561,7 @@ mod query_core_tests {
                 query: query.to_string(),
                 query_language: crate::config::QueryLanguage::Cypher,
                 middleware: vec![],
-                source_subscriptions: vec![],
+                sources: vec![],
                 auto_start: false,
                 joins: None,
                 enable_bootstrap: true,
@@ -584,7 +584,7 @@ mod query_core_tests {
             query: "".to_string(),
             query_language: crate::config::QueryLanguage::Cypher,
             middleware: vec![],
-            source_subscriptions: vec![],
+            sources: vec![],
             auto_start: false,
             joins: None,
             enable_bootstrap: true,

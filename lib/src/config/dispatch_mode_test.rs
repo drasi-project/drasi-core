@@ -63,7 +63,7 @@ mod tests {
             query: "RETURN 1".to_string(),
             query_language: crate::config::QueryLanguage::Cypher,
             middleware: vec![],
-            source_subscriptions: vec![crate::config::SourceSubscriptionConfig {
+            sources: vec![crate::config::SourceSubscriptionConfig {
                 source_id: "source1".to_string(),
                 pipeline: vec![],
             }],
@@ -82,7 +82,7 @@ mod tests {
             query: "RETURN 2".to_string(),
             query_language: crate::config::QueryLanguage::Cypher,
             middleware: vec![],
-            source_subscriptions: vec![crate::config::SourceSubscriptionConfig {
+            sources: vec![crate::config::SourceSubscriptionConfig {
                 source_id: "source2".to_string(),
                 pipeline: vec![],
             }],
@@ -101,7 +101,7 @@ mod tests {
             query: "RETURN 3".to_string(),
             query_language: crate::config::QueryLanguage::Cypher,
             middleware: vec![],
-            source_subscriptions: vec![crate::config::SourceSubscriptionConfig {
+            sources: vec![crate::config::SourceSubscriptionConfig {
                 source_id: "source3".to_string(),
                 pipeline: vec![],
             }],

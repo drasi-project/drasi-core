@@ -242,7 +242,7 @@ impl Query for DrasiQuery {
         }
 
         // Configure source pipelines for all subscriptions
-        for sub in &self.base.config.source_subscriptions {
+        for sub in &self.base.config.sources {
             builder = builder.with_source_pipeline(&sub.source_id, &sub.pipeline);
         }
 
@@ -325,10 +325,10 @@ impl Query for DrasiQuery {
         info!(
             "Query '{}' subscribing to {} sources: {:?}",
             self.base.config.id,
-            self.base.config.source_subscriptions.len(),
+            self.base.config.sources.len(),
             self.base
                 .config
-                .source_subscriptions
+                .sources
                 .iter()
                 .map(|s| &s.source_id)
                 .collect::<Vec<_>>()
@@ -337,7 +337,7 @@ impl Query for DrasiQuery {
         let mut bootstrap_channels = Vec::new();
         let mut subscription_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
-        for subscription in &self.base.config.source_subscriptions {
+        for subscription in &self.base.config.sources {
             let source_id = &subscription.source_id;
             // Get source from SourceManager
             let source = match self.source_manager.get_source_instance(source_id).await {
@@ -1109,7 +1109,7 @@ impl QueryManager {
                     ComponentStatus::Error => Some("Query error occurred".to_string()),
                     _ => None,
                 },
-                source_subscriptions: config.source_subscriptions.clone(),
+                source_subscriptions: config.sources.clone(),
                 joins: config.joins.clone(),
             };
             Ok(runtime)
