@@ -421,6 +421,8 @@ impl ReactionBase {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
     use tokio::sync::mpsc;
 
     #[tokio::test]
@@ -490,5 +492,154 @@ mod tests {
         base.send_component_event(ComponentStatus::Starting, None)
             .await
             .unwrap();
+    }
+
+    // =============================================================================
+    // Shutdown Channel Tests
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_create_shutdown_channel() {
+        let params = ReactionBaseParams::new("test-reaction", vec![]);
+        let base = ReactionBase::new(params);
+
+        // Initially no shutdown_tx
+        assert!(base.shutdown_tx.read().await.is_none());
+
+        // Create channel
+        let rx = base.create_shutdown_channel().await;
+
+        // Verify tx is stored
+        assert!(base.shutdown_tx.read().await.is_some());
+
+        // Verify receiver is valid (dropping it should not panic)
+        drop(rx);
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_channel_signal() {
+        let params = ReactionBaseParams::new("test-reaction", vec![]);
+        let base = ReactionBase::new(params);
+
+        let mut rx = base.create_shutdown_channel().await;
+
+        // Send signal
+        if let Some(tx) = base.shutdown_tx.write().await.take() {
+            tx.send(()).unwrap();
+        }
+
+        // Verify signal received
+        let result = rx.try_recv();
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_channel_replaced_on_second_create() {
+        let params = ReactionBaseParams::new("test-reaction", vec![]);
+        let base = ReactionBase::new(params);
+
+        // Create first channel
+        let _rx1 = base.create_shutdown_channel().await;
+
+        // Create second channel (should replace the first)
+        let mut rx2 = base.create_shutdown_channel().await;
+
+        // Send signal - should go to second channel
+        if let Some(tx) = base.shutdown_tx.write().await.take() {
+            tx.send(()).unwrap();
+        }
+
+        // Second receiver should get the signal
+        let result = rx2.try_recv();
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_stop_common_sends_shutdown_signal() {
+        let params = ReactionBaseParams::new("test-reaction", vec![]);
+        let base = ReactionBase::new(params);
+
+        let mut rx = base.create_shutdown_channel().await;
+
+        // Spawn a task that waits for shutdown
+        let shutdown_received = Arc::new(AtomicBool::new(false));
+        let shutdown_flag = shutdown_received.clone();
+
+        let task = tokio::spawn(async move {
+            tokio::select! {
+                _ = &mut rx => {
+                    shutdown_flag.store(true, Ordering::SeqCst);
+                }
+            }
+        });
+
+        base.set_processing_task(task).await;
+
+        // Call stop_common - should send shutdown signal
+        let _ = base.stop_common().await;
+
+        // Give task time to process
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert!(
+            shutdown_received.load(Ordering::SeqCst),
+            "Processing task should have received shutdown signal"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_graceful_shutdown_timing() {
+        let params = ReactionBaseParams::new("test-reaction", vec![]);
+        let base = ReactionBase::new(params);
+
+        let rx = base.create_shutdown_channel().await;
+
+        // Spawn task that uses select! pattern like real reactions
+        let task = tokio::spawn(async move {
+            let mut shutdown_rx = rx;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut shutdown_rx => {
+                        break;
+                    }
+                    _ = tokio::time::sleep(Duration::from_secs(10)) => {
+                        // Simulates waiting on priority_queue.dequeue()
+                    }
+                }
+            }
+        });
+
+        base.set_processing_task(task).await;
+
+        // Measure shutdown time
+        let start = std::time::Instant::now();
+        let _ = base.stop_common().await;
+        let elapsed = start.elapsed();
+
+        // Should complete quickly (< 500ms), not hit 2s timeout
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "Shutdown took {:?}, expected < 500ms. Task may not be responding to shutdown signal.",
+            elapsed
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stop_common_without_shutdown_channel() {
+        // Test that stop_common works even if no shutdown channel was created
+        let params = ReactionBaseParams::new("test-reaction", vec![]);
+        let base = ReactionBase::new(params);
+
+        // Don't create shutdown channel - just spawn a short-lived task
+        let task = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        });
+
+        base.set_processing_task(task).await;
+
+        // stop_common should still work
+        let result = base.stop_common().await;
+        assert!(result.is_ok());
     }
 }
