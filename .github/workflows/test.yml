@@ -39,6 +39,14 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
 
+    - name: Install libraries
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y jq libjq-dev libonig-dev
+
+    - name: Set JQ_LIB_DIR
+      run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+
     - name: Cache Cargo registry
       uses: actions/cache@v4.2.2 # v4.0.2
       with:
@@ -96,6 +104,14 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+
+    - name: Install libraries
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y jq libjq-dev libonig-dev
+
+    - name: Set JQ_LIB_DIR
+      run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
 
     - name: Cache Cargo registry
       uses: actions/cache@v4.2.2
