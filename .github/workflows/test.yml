@@ -42,10 +42,10 @@ jobs:
     - name: Install libraries
       run: |
         sudo apt-get update
-        sudo apt-get install -y jq libjq-dev libonig-dev
+        sudo apt-get install -y jq libjq-dev libonig-dev pkg-config
 
     - name: Set JQ_LIB_DIR
-      run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+      run: echo "JQ_LIB_DIR=$(pkg-config --variable=libdir jq)" >> $GITHUB_ENV
 
     - name: Cache Cargo registry
       uses: actions/cache@v4.2.2 # v4.0.2
@@ -108,10 +108,10 @@ jobs:
     - name: Install libraries
       run: |
         sudo apt-get update
-        sudo apt-get install -y jq libjq-dev libonig-dev
+        sudo apt-get install -y jq libjq-dev libonig-dev pkg-config
 
     - name: Set JQ_LIB_DIR
-      run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+      run: echo "JQ_LIB_DIR=$(pkg-config --variable=libdir jq)" >> $GITHUB_ENV
 
     - name: Cache Cargo registry
       uses: actions/cache@v4.2.2
