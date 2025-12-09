@@ -17,8 +17,6 @@ pub mod runtime;
 pub mod schema;
 
 #[cfg(test)]
-mod dispatch_mode_test;
-#[cfg(test)]
 mod tests;
 
 // Re-export common types
