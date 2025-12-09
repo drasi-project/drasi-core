@@ -138,43 +138,4 @@ impl SseReactionBuilder {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use drasi_lib::plugin_core::Reaction;
-
-    #[test]
-    fn test_sse_builder_defaults() {
-        let reaction = SseReactionBuilder::new("test-reaction").build().unwrap();
-        assert_eq!(reaction.id(), "test-reaction");
-        let props = reaction.properties();
-        assert_eq!(
-            props.get("host"),
-            Some(&serde_json::Value::String("0.0.0.0".to_string()))
-        );
-        assert_eq!(
-            props.get("port"),
-            Some(&serde_json::Value::Number(8080.into()))
-        );
-    }
-
-    #[test]
-    fn test_sse_builder_custom() {
-        let reaction = SseReaction::builder("test-reaction")
-            .with_host("localhost")
-            .with_port(9090)
-            .with_sse_path("/stream")
-            .with_queries(vec!["query1".to_string()])
-            .build()
-            .unwrap();
-
-        assert_eq!(reaction.id(), "test-reaction");
-        assert_eq!(reaction.query_ids(), vec!["query1".to_string()]);
-    }
-
-    #[test]
-    fn test_sse_new_constructor() {
-        let config = SseReactionConfig::default();
-        let reaction = SseReaction::new("test-reaction", vec!["query1".to_string()], config);
-        assert_eq!(reaction.id(), "test-reaction");
-    }
-}
+mod tests;
