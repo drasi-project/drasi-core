@@ -12,23 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod common;
 pub mod runtime;
 pub mod schema;
 
 #[cfg(test)]
 mod tests;
 
-// Re-export common types
-pub use common::*;
-
 // Re-export runtime types
 pub use runtime::{QueryRuntime, ReactionRuntime, RuntimeConfig, SourceRuntime};
 
 // Re-export schema types
 pub use schema::*;
-
-// Convenience re-exports for config types that remain in core
-
-// Common reaction configs
-pub use crate::reactions::common::AdaptiveBatchConfig;
