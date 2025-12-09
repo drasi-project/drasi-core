@@ -34,16 +34,16 @@ struct RocksDbQueryConfig {
 }
 
 impl RocksDbQueryConfig {
-     pub fn new() -> Self {
-         let base_path = match env::var("ROCKS_PATH") {
-             Ok(url) => url,
-             Err(_) => "test-data".to_string(),
-         };
-         // Create unique directory per test instance
-         let url = format!("{}/{}", base_path, Uuid::new_v4());
+    pub fn new() -> Self {
+        let base_path = match env::var("ROCKS_PATH") {
+            Ok(url) => url,
+            Err(_) => "test-data".to_string(),
+        };
+        // Create unique directory per test instance
+        let url = format!("{}/{}", base_path, Uuid::new_v4());
 
-         RocksDbQueryConfig { url }
-     }
+        RocksDbQueryConfig { url }
+    }
 
     #[allow(clippy::unwrap_used)]
     pub fn build_future_queue(&self, query_id: &str) -> RocksDbFutureQueue {
