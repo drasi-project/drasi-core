@@ -19,11 +19,11 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_postgres::{Client, NoTls, Row, Transaction};
 
-use drasi_lib::bootstrap::BootstrapRequest;
-use drasi_lib::channels::SourceChangeEvent;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
+use drasi_lib::bootstrap::BootstrapRequest;
+use drasi_lib::channels::SourceChangeEvent;
 
 use super::PostgresSourceConfig;
 

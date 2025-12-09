@@ -26,9 +26,9 @@ use tokio_stream::StreamExt;
 use tower_http::cors::{Any, CorsLayer};
 
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
+use drasi_lib::managers::log_component_start;
 use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::managers::log_component_start;
 
 pub use super::config::SseReactionConfig;
 use super::SseReactionBuilder;
@@ -65,7 +65,13 @@ impl SseReaction {
         config: SseReactionConfig,
         priority_queue_capacity: usize,
     ) -> Self {
-        Self::create_internal(id.into(), queries, config, Some(priority_queue_capacity), true)
+        Self::create_internal(
+            id.into(),
+            queries,
+            config,
+            Some(priority_queue_capacity),
+            true,
+        )
     }
 
     /// Create from builder (internal method)

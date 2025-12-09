@@ -17,10 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_server(true)
         .build_client(false)
         .compile(
-            &[
-                "proto/drasi/v1/source.proto",
-                "proto/drasi/v1/common.proto",
-            ],
+            &["proto/drasi/v1/source.proto", "proto/drasi/v1/common.proto"],
             &["proto"],
         )?;
     Ok(())

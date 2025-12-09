@@ -526,7 +526,11 @@ impl HttpSource {
         batch_rx: mpsc::Receiver<SourceChangeEvent>,
         dispatchers: Arc<
             tokio::sync::RwLock<
-                Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
+                Vec<
+                    Box<
+                        dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync,
+                    >,
+                >,
             >,
         >,
         adaptive_config: AdaptiveBatchConfig,
@@ -1038,8 +1042,7 @@ impl HttpSourceBuilder {
         };
 
         // Build SourceBaseParams with all settings
-        let mut params = SourceBaseParams::new(&self.id)
-            .with_auto_start(self.auto_start);
+        let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {
             params = params.with_dispatch_mode(mode);
         }
@@ -1299,7 +1302,10 @@ mod tests {
         #[test]
         fn test_convert_node_insert() {
             let mut props = serde_json::Map::new();
-            props.insert("name".to_string(), serde_json::Value::String("Alice".to_string()));
+            props.insert(
+                "name".to_string(),
+                serde_json::Value::String("Alice".to_string()),
+            );
             props.insert("age".to_string(), serde_json::Value::Number(30.into()));
 
             let http_change = HttpSourceChange::Insert {
@@ -1315,18 +1321,19 @@ mod tests {
             assert!(result.is_ok());
 
             match result.unwrap() {
-                drasi_core::models::SourceChange::Insert { element } => {
-                    match element {
-                        drasi_core::models::Element::Node { metadata, properties } => {
-                            assert_eq!(metadata.reference.element_id.as_ref(), "user-1");
-                            assert_eq!(metadata.labels.len(), 1);
-                            assert_eq!(metadata.effective_from, 1234567890000000000);
-                            assert!(properties.get("name").is_some());
-                            assert!(properties.get("age").is_some());
-                        }
-                        _ => panic!("Expected Node element"),
+                drasi_core::models::SourceChange::Insert { element } => match element {
+                    drasi_core::models::Element::Node {
+                        metadata,
+                        properties,
+                    } => {
+                        assert_eq!(metadata.reference.element_id.as_ref(), "user-1");
+                        assert_eq!(metadata.labels.len(), 1);
+                        assert_eq!(metadata.effective_from, 1234567890000000000);
+                        assert!(properties.get("name").is_some());
+                        assert!(properties.get("age").is_some());
                     }
-                }
+                    _ => panic!("Expected Node element"),
+                },
                 _ => panic!("Expected Insert operation"),
             }
         }
@@ -1348,16 +1355,19 @@ mod tests {
             assert!(result.is_ok());
 
             match result.unwrap() {
-                drasi_core::models::SourceChange::Insert { element } => {
-                    match element {
-                        drasi_core::models::Element::Relation { metadata, out_node, in_node, .. } => {
-                            assert_eq!(metadata.reference.element_id.as_ref(), "follows-1");
-                            assert_eq!(out_node.element_id.as_ref(), "user-1");
-                            assert_eq!(in_node.element_id.as_ref(), "user-2");
-                        }
-                        _ => panic!("Expected Relation element"),
+                drasi_core::models::SourceChange::Insert { element } => match element {
+                    drasi_core::models::Element::Relation {
+                        metadata,
+                        out_node,
+                        in_node,
+                        ..
+                    } => {
+                        assert_eq!(metadata.reference.element_id.as_ref(), "follows-1");
+                        assert_eq!(out_node.element_id.as_ref(), "user-1");
+                        assert_eq!(in_node.element_id.as_ref(), "user-2");
                     }
-                }
+                    _ => panic!("Expected Relation element"),
+                },
                 _ => panic!("Expected Insert operation"),
             }
         }
@@ -1431,8 +1441,14 @@ mod tests {
 
             // Should use AdaptiveBatchConfig defaults
             let default_config = AdaptiveBatchConfig::default();
-            assert_eq!(source.adaptive_config.max_batch_size, default_config.max_batch_size);
-            assert_eq!(source.adaptive_config.min_batch_size, default_config.min_batch_size);
+            assert_eq!(
+                source.adaptive_config.max_batch_size,
+                default_config.max_batch_size
+            );
+            assert_eq!(
+                source.adaptive_config.min_batch_size,
+                default_config.min_batch_size
+            );
         }
     }
 }

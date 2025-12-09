@@ -156,7 +156,10 @@ mod builder {
 
     #[test]
     fn test_builder_with_port() {
-        let source = GrpcSourceBuilder::new("test-grpc").with_port(9999).build().unwrap();
+        let source = GrpcSourceBuilder::new("test-grpc")
+            .with_port(9999)
+            .build()
+            .unwrap();
         assert_eq!(source.config.port, 9999);
     }
 

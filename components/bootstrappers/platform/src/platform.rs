@@ -29,9 +29,9 @@ use serde_json::Map;
 use std::sync::Arc;
 use std::time::Duration;
 
+use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 use drasi_lib::sources::manager::convert_json_to_element_properties;
-use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 
 /// Request format for Query API subscription
 #[derive(Debug, Clone, Serialize)]
@@ -73,9 +73,9 @@ impl PlatformBootstrapProvider {
     /// # Returns
     /// Returns a new instance of PlatformBootstrapProvider or an error if configuration is invalid
     pub fn new(config: PlatformBootstrapConfig) -> Result<Self> {
-        let query_api_url = config
-            .query_api_url
-            .ok_or_else(|| anyhow::anyhow!("query_api_url is required for PlatformBootstrapProvider"))?;
+        let query_api_url = config.query_api_url.ok_or_else(|| {
+            anyhow::anyhow!("query_api_url is required for PlatformBootstrapProvider")
+        })?;
 
         Self::create_internal(query_api_url, config.timeout_seconds)
     }

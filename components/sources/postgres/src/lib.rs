@@ -343,10 +343,7 @@ impl Source for PostgresReplicationSource {
         }
 
         self.base.set_status(ComponentStatus::Starting).await;
-        info!(
-            "Starting PostgreSQL replication source: {}",
-            self.base.id
-        );
+        info!("Starting PostgreSQL replication source: {}", self.base.id);
 
         let config = self.config.clone();
         let source_id = self.base.id.clone();
@@ -398,10 +395,7 @@ impl Source for PostgresReplicationSource {
             return Ok(());
         }
 
-        info!(
-            "Stopping PostgreSQL replication source: {}",
-            self.base.id
-        );
+        info!("Stopping PostgreSQL replication source: {}", self.base.id);
 
         self.base.set_status(ComponentStatus::Stopping).await;
 
@@ -463,7 +457,9 @@ async fn run_replication(
     source_id: String,
     config: PostgresSourceConfig,
     dispatchers: Arc<
-        RwLock<Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>,
+        RwLock<
+            Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
+        >,
     >,
     event_tx: Arc<RwLock<Option<ComponentEventSender>>>,
     status: Arc<RwLock<ComponentStatus>>,
@@ -671,8 +667,7 @@ impl PostgresSourceBuilder {
             table_keys: self.table_keys,
         };
 
-        let mut params = SourceBaseParams::new(&self.id)
-            .with_auto_start(self.auto_start);
+        let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {
             params = params.with_dispatch_mode(mode);
         }

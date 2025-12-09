@@ -149,11 +149,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProviderConfig, BootstrapProviderFactory, BootstrapRequest};
+use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProviderConfig, BootstrapProviderFactory, BootstrapRequest,
+};
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ComponentType, *};
 use drasi_lib::plugin_core::Source;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
-use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 
 /// Handle for programmatic event injection into an Application Source
 ///
@@ -183,14 +185,13 @@ impl ApplicationSourceHandle {
         labels: Vec<impl Into<Arc<str>>>,
         properties: drasi_core::models::ElementPropertyMap,
     ) -> Result<()> {
-        let effective_from =
-            crate::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
-                warn!(
-                    "Failed to get timestamp for node insert: {}, using fallback",
-                    e
-                );
-                (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
-            });
+        let effective_from = crate::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
+            warn!(
+                "Failed to get timestamp for node insert: {}, using fallback",
+                e
+            );
+            (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
+        });
 
         let element = Element::Node {
             metadata: ElementMetadata {
@@ -214,14 +215,13 @@ impl ApplicationSourceHandle {
         labels: Vec<impl Into<Arc<str>>>,
         properties: drasi_core::models::ElementPropertyMap,
     ) -> Result<()> {
-        let effective_from =
-            crate::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
-                warn!(
-                    "Failed to get timestamp for node update: {}, using fallback",
-                    e
-                );
-                (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
-            });
+        let effective_from = crate::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
+            warn!(
+                "Failed to get timestamp for node update: {}, using fallback",
+                e
+            );
+            (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
+        });
 
         let element = Element::Node {
             metadata: ElementMetadata {
@@ -244,11 +244,10 @@ impl ApplicationSourceHandle {
         element_id: impl Into<Arc<str>>,
         labels: Vec<impl Into<Arc<str>>>,
     ) -> Result<()> {
-        let effective_from =
-            crate::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
-                warn!("Failed to get timestamp for delete: {}, using fallback", e);
-                (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
-            });
+        let effective_from = crate::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
+            warn!("Failed to get timestamp for delete: {}, using fallback", e);
+            (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
+        });
 
         let metadata = ElementMetadata {
             reference: ElementReference {
@@ -271,14 +270,13 @@ impl ApplicationSourceHandle {
         start_node_id: impl Into<Arc<str>>,
         end_node_id: impl Into<Arc<str>>,
     ) -> Result<()> {
-        let effective_from =
-            crate::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
-                warn!(
-                    "Failed to get timestamp for relation insert: {}, using fallback",
-                    e
-                );
-                (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
-            });
+        let effective_from = crate::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
+            warn!(
+                "Failed to get timestamp for relation insert: {}, using fallback",
+                e
+            );
+            (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
+        });
 
         let element = Element::Relation {
             metadata: ElementMetadata {
@@ -602,23 +600,19 @@ impl Source for ApplicationSource {
 
                 let (tx, rx) = tokio::sync::mpsc::channel(1000);
 
-                let provider: Box<dyn drasi_lib::bootstrap::BootstrapProvider> = if matches!(
-                    provider_config,
-                    BootstrapProviderConfig::Application { .. }
-                ) {
-                    Box::new(
+                let provider: Box<dyn drasi_lib::bootstrap::BootstrapProvider> =
+                    if matches!(provider_config, BootstrapProviderConfig::Application { .. }) {
+                        Box::new(
                         drasi_bootstrap_application::ApplicationBootstrapProvider::with_shared_data(
                             self.get_bootstrap_data()
                         )
                     )
-                } else {
-                    BootstrapProviderFactory::create_provider(provider_config)?
-                };
+                    } else {
+                        BootstrapProviderFactory::create_provider(provider_config)?
+                    };
 
-                let context = BootstrapContext::new_minimal(
-                    self.base.id.clone(),
-                    self.base.id.clone(),
-                );
+                let context =
+                    BootstrapContext::new_minimal(self.base.id.clone(), self.base.id.clone());
 
                 let request = BootstrapRequest {
                     query_id: query_id.clone(),

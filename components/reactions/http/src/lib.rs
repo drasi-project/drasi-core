@@ -232,11 +232,7 @@ mod tests {
             routes: Default::default(),
         };
 
-        let reaction = HttpReaction::new(
-            "test-reaction",
-            vec!["query1".to_string()],
-            config,
-        );
+        let reaction = HttpReaction::new("test-reaction", vec!["query1".to_string()], config);
 
         assert_eq!(reaction.id(), "test-reaction");
         assert_eq!(reaction.query_ids(), vec!["query1".to_string()]);

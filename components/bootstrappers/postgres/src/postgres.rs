@@ -212,7 +212,8 @@ impl BootstrapProvider for PostgresBootstrapProvider {
         );
 
         // Create bootstrap handler with pre-configured settings
-        let mut handler = PostgresBootstrapHandler::new(self.config.clone(), context.source_id.clone());
+        let mut handler =
+            PostgresBootstrapHandler::new(self.config.clone(), context.source_id.clone());
 
         // Store query_id before moving request
         let query_id = request.query_id.clone();

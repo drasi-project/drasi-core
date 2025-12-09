@@ -56,19 +56,16 @@ pub use super::config::PlatformReactionConfig;
 // Use modules declared in lib.rs
 use crate::publisher;
 use crate::transformer;
-use crate::types::{
-    CloudEvent, CloudEventConfig, ControlSignal, ResultControlEvent,
-    ResultEvent,
-};
+use crate::types::{CloudEvent, CloudEventConfig, ControlSignal, ResultControlEvent, ResultEvent};
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
-use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
-use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::managers::log_component_start;
-use std::collections::HashMap;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
+use drasi_lib::managers::log_component_start;
+use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
+use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use publisher::{PublisherConfig, RedisStreamPublisher};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -125,7 +122,6 @@ impl PlatformReaction {
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
     ) -> Result<Self> {
-
         // Extract configuration values
         let redis_url = config.redis_url.clone();
         let pubsub_name = config

@@ -26,9 +26,9 @@ use super::decoder::PgOutputDecoder;
 use super::protocol::BackendMessage;
 use super::types::{StandbyStatusUpdate, WalMessage};
 use super::PostgresSourceConfig;
+use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus, SourceEvent, SourceEventWrapper};
 use drasi_lib::sources::base::SourceBase;
-use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 
 pub struct ReplicationStream {
     config: PostgresSourceConfig,
@@ -36,7 +36,9 @@ pub struct ReplicationStream {
     connection: Option<ReplicationConnection>,
     decoder: PgOutputDecoder,
     dispatchers: Arc<
-        RwLock<Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>,
+        RwLock<
+            Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
+        >,
     >,
     #[allow(dead_code)]
     event_tx: Arc<RwLock<Option<ComponentEventSender>>>,
@@ -62,7 +64,11 @@ impl ReplicationStream {
         source_id: String,
         dispatchers: Arc<
             RwLock<
-                Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
+                Vec<
+                    Box<
+                        dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync,
+                    >,
+                >,
             >,
         >,
         event_tx: Arc<RwLock<Option<ComponentEventSender>>>,

@@ -20,10 +20,10 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
+use drasi_lib::managers::log_component_start;
 use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
 use drasi_lib::profiling::ProfilingMetadata;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::managers::log_component_start;
 use std::collections::HashMap;
 
 pub use super::config::ProfilerReactionConfig;
@@ -379,7 +379,11 @@ impl ProfilerReaction {
     ///
     /// The event channel is automatically injected when the reaction is added
     /// to DrasiLib via `add_reaction()`.
-    pub fn new(id: impl Into<String>, queries: Vec<String>, config: ProfilerReactionConfig) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        queries: Vec<String>,
+        config: ProfilerReactionConfig,
+    ) -> Self {
         Self::create_internal(id.into(), queries, config, None, true)
     }
 

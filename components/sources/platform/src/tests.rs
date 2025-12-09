@@ -102,7 +102,9 @@ mod properties {
 
         assert_eq!(
             props.get("redis_url"),
-            Some(&serde_json::Value::String("redis://192.168.1.1:6379".to_string()))
+            Some(&serde_json::Value::String(
+                "redis://192.168.1.1:6379".to_string()
+            ))
         );
         assert_eq!(
             props.get("stream_key"),
@@ -273,7 +275,10 @@ mod config {
 
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("redis_url cannot be empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("redis_url cannot be empty"));
     }
 
     #[test]
@@ -289,7 +294,10 @@ mod config {
 
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("stream_key cannot be empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("stream_key cannot be empty"));
     }
 
     #[test]
@@ -305,7 +313,10 @@ mod config {
 
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("consumer_group cannot be empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("consumer_group cannot be empty"));
     }
 
     #[test]
@@ -321,7 +332,10 @@ mod config {
 
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("batch_size cannot be 0"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("batch_size cannot be 0"));
     }
 
     #[test]

@@ -170,6 +170,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
+use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 use drasi_lib::channels::{
     ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, ControlOperation,
     DispatchMode, SourceControl, SourceEvent, SourceEventWrapper, SubscriptionResponse,
@@ -177,7 +178,6 @@ use drasi_lib::channels::{
 use drasi_lib::plugin_core::Source;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::manager::convert_json_to_element_properties;
-use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 
 #[cfg(test)]
 mod tests;
@@ -402,14 +402,15 @@ impl PlatformSourceBuilder {
         let config = PlatformSourceConfig {
             redis_url: self.redis_url,
             stream_key: self.stream_key,
-            consumer_group: self.consumer_group.unwrap_or_else(|| "drasi-core".to_string()),
+            consumer_group: self
+                .consumer_group
+                .unwrap_or_else(|| "drasi-core".to_string()),
             consumer_name: self.consumer_name,
             batch_size: self.batch_size.unwrap_or(100),
             block_ms: self.block_ms.unwrap_or(5000),
         };
 
-        let mut params = SourceBaseParams::new(&self.id)
-            .with_auto_start(self.auto_start);
+        let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {
             params = params.with_dispatch_mode(mode);
         }
@@ -708,7 +709,11 @@ impl PlatformSource {
         platform_config: PlatformConfig,
         dispatchers: Arc<
             RwLock<
-                Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
+                Vec<
+                    Box<
+                        dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync,
+                    >,
+                >,
             >,
         >,
         event_tx: Arc<RwLock<Option<ComponentEventSender>>>,
@@ -776,7 +781,8 @@ impl PlatformSource {
             // Main consumer loop
             loop {
                 // Read from stream using ">" to get next undelivered messages for this consumer group
-                let read_result: Result<StreamReadReply, redis::RedisError> = redis::cmd("XREADGROUP")
+                let read_result: Result<StreamReadReply, redis::RedisError> =
+                    redis::cmd("XREADGROUP")
                         .arg("GROUP")
                         .arg(&platform_config.consumer_group)
                         .arg(&platform_config.consumer_name)
@@ -786,7 +792,7 @@ impl PlatformSource {
                         .arg(platform_config.block_ms)
                         .arg("STREAMS")
                         .arg(&platform_config.stream_key)
-                        .arg(">")  // Always use ">" for consumer group reads
+                        .arg(">") // Always use ">" for consumer group reads
                         .query_async(&mut conn)
                         .await;
 
@@ -922,7 +928,9 @@ impl PlatformSource {
                                                                     "Failed to transform event {}: {}",
                                                                     stream_id.id, e
                                                                 );
-                                                                if let Some(ref tx) = *event_tx.read().await {
+                                                                if let Some(ref tx) =
+                                                                    *event_tx.read().await
+                                                                {
                                                                     let _ = tx
                                                                         .send(ComponentEvent {
                                                                             component_id: source_id.clone(),

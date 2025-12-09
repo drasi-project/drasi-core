@@ -15,9 +15,9 @@
 //! Transformation logic for converting drasi-core QueryResult to Platform ChangeEvent
 
 use super::types::{ResultChangeEvent, ResultEvent, UpdatePayload};
+use anyhow::{anyhow, Result};
 use drasi_lib::channels::QueryResult;
 use drasi_lib::profiling::ProfilingMetadata;
-use anyhow::{anyhow, Result};
 use serde_json::{json, Map, Value};
 
 /// Build tracking metadata structure from profiling data

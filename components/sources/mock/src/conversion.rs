@@ -84,8 +84,8 @@ pub fn batch_json_to_element_values<'a>(
     values: impl Iterator<Item = &'a Value>,
 ) -> Vec<drasi_core::models::ElementValue> {
     values
-        .filter_map(
-            |json_value| match drasi_lib::sources::convert_json_to_element_value(json_value) {
+        .filter_map(|json_value| {
+            match drasi_lib::sources::convert_json_to_element_value(json_value) {
                 Ok(value) => Some(value),
                 Err(e) => {
                     log::error!(
@@ -95,8 +95,8 @@ pub fn batch_json_to_element_values<'a>(
                     );
                     None
                 }
-            },
-        )
+            }
+        })
         .collect()
 }
 

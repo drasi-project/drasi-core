@@ -280,10 +280,7 @@ impl Source for GrpcSource {
 
         let addr = format!("{}:{}", host, port).parse()?;
 
-        info!(
-            "gRPC source '{}' listening on {}",
-            self.base.id, addr
-        );
+        info!("gRPC source '{}' listening on {}", self.base.id, addr);
 
         // Create shutdown channel
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -391,7 +388,9 @@ struct GrpcSourceService {
     source_id: String,
     /// Shared dispatchers for sending events to subscribers
     dispatchers: Arc<
-        RwLock<Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>,
+        RwLock<
+            Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
+        >,
     >,
 }
 
@@ -919,8 +918,7 @@ impl GrpcSourceBuilder {
             timeout_ms: self.timeout_ms,
         };
 
-        let mut params = SourceBaseParams::new(&self.id)
-            .with_auto_start(self.auto_start);
+        let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {
             params = params.with_dispatch_mode(mode);
         }

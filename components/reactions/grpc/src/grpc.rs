@@ -22,9 +22,9 @@ use std::time::Duration;
 use tonic::transport::Channel;
 
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
+use drasi_lib::managers::log_component_start;
 use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::managers::log_component_start;
 
 pub use super::config::GrpcReactionConfig;
 use super::GrpcReactionBuilder;
@@ -788,10 +788,7 @@ impl Reaction for GrpcReaction {
                                     }
                                 }
                                 Err(e) => {
-                                    error!(
-                                        "[{}] Failed to send final batch: {}",
-                                        reaction_name, e
-                                    );
+                                    error!("[{}] Failed to send final batch: {}", reaction_name, e);
                                     break;
                                 }
                             }

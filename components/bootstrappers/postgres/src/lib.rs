@@ -53,4 +53,6 @@
 
 pub mod postgres;
 
-pub use postgres::{PostgresBootstrapProvider, PostgresBootstrapProviderBuilder, PostgresSourceConfig};
+pub use postgres::{
+    PostgresBootstrapProvider, PostgresBootstrapProviderBuilder, PostgresSourceConfig,
+};

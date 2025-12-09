@@ -40,7 +40,9 @@ pub use grpc::GrpcReaction;
 
 // Re-export types for plugin-grpc-adaptive
 pub use helpers::convert_json_to_proto_struct;
-pub use proto::{ProcessResultsRequest, ProtoQueryResult, ProtoQueryResultItem, ReactionServiceClient};
+pub use proto::{
+    ProcessResultsRequest, ProtoQueryResult, ProtoQueryResultItem, ReactionServiceClient,
+};
 
 use std::collections::HashMap;
 
@@ -229,8 +231,7 @@ mod tests {
     fn test_grpc_new_constructor() {
         let config = GrpcReactionConfig::default();
 
-        let reaction =
-            GrpcReaction::new("test-reaction", vec!["query1".to_string()], config);
+        let reaction = GrpcReaction::new("test-reaction", vec!["query1".to_string()], config);
 
         assert_eq!(reaction.id(), "test-reaction");
         assert_eq!(reaction.query_ids(), vec!["query1".to_string()]);
