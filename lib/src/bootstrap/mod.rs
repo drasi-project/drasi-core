@@ -332,6 +332,7 @@ mod tests {
 
     #[test]
     fn test_platform_bootstrap_config_defaults() {
+        // devskim: ignore DS137138: Unit test only – no actual network request is made
         let config = PlatformBootstrapConfig {
             query_api_url: Some("http://test:8080".to_string()),
             ..Default::default()
@@ -342,6 +343,7 @@ mod tests {
 
     #[test]
     fn test_postgres_bootstrap_config_defaults() {
+        // devskim: ignore DS137138: Unit test only – no actual network request is made
         let config = PostgresBootstrapConfig::default();
         // Should be empty struct for now
         assert_eq!(config, PostgresBootstrapConfig {});
@@ -356,6 +358,7 @@ mod tests {
 
     #[test]
     fn test_platform_bootstrap_config_serialization() {
+        // devskim: ignore DS137138: Unit test only – no actual network request is made
         let config = BootstrapProviderConfig::Platform(PlatformBootstrapConfig {
             query_api_url: Some("http://test:8080".to_string()),
             timeout_seconds: 600,
@@ -438,6 +441,7 @@ mod tests {
 
     #[test]
     fn test_yaml_deserialization_platform() {
+        // devskim: ignore DS137138: Unit test only – no actual network request is made
         let yaml = r#"
 type: platform
 query_api_url: "http://remote:8080"
@@ -475,6 +479,7 @@ file_paths:
 
     #[test]
     fn test_platform_config_with_defaults() {
+        // devskim: ignore DS137138: Unit test only – no actual network request is made
         let yaml = r#"
 type: platform
 query_api_url: "http://test:8080"
@@ -491,6 +496,7 @@ query_api_url: "http://test:8080"
 
     #[test]
     fn test_bootstrap_config_equality() {
+        // devskim: ignore DS137138: Unit test only – no actual network request is made
         let config1 = BootstrapProviderConfig::Platform(PlatformBootstrapConfig {
             query_api_url: Some("http://test:8080".to_string()),
             timeout_seconds: 300,
