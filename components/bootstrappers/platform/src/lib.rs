@@ -58,6 +58,7 @@ mod tests {
 
     #[test]
     fn test_platform_bootstrap_builder_with_valid_url() {
+        // devskim: ignore DS137138: Unit test only – no actual network request is made
         // Builder with valid URL should succeed
         let result = PlatformBootstrapProviderBuilder::new()
             .with_query_api_url("http://remote-drasi:8080")
@@ -86,6 +87,7 @@ mod tests {
 
     #[test]
     fn test_platform_bootstrap_from_provider_method() {
+        // devskim: ignore DS137138: Unit test only – no actual network request is made
         // Test using PlatformBootstrapProvider::builder()
         let result = PlatformBootstrapProvider::builder()
             .with_query_api_url("http://source-api:9000")
@@ -96,6 +98,7 @@ mod tests {
 
     #[test]
     fn test_platform_bootstrap_new_with_config() {
+        // devskim: ignore DS137138: Unit test only – no actual network request is made
         // Test using PlatformBootstrapProvider::new(config)
         let config = PlatformBootstrapConfig {
             query_api_url: Some("http://localhost:8080".to_string()),
@@ -118,6 +121,7 @@ mod tests {
 
     #[test]
     fn test_platform_bootstrap_with_url() {
+        // devskim: ignore DS137138: Unit test only – no actual network request is made
         // Test using PlatformBootstrapProvider::with_url()
         let result = PlatformBootstrapProvider::with_url("http://example.com:8080", 600);
         assert!(result.is_ok());
