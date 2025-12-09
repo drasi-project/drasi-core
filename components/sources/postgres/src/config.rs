@@ -19,7 +19,48 @@
 
 use serde::{Deserialize, Serialize};
 
-use drasi_lib::config::common::{SslMode, TableKeyConfig};
+// =============================================================================
+// SSL Configuration
+// =============================================================================
+
+/// SSL mode for PostgreSQL connections
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SslMode {
+    /// Disable SSL encryption
+    Disable,
+    /// Prefer SSL but allow unencrypted connections
+    Prefer,
+    /// Require SSL encryption
+    Require,
+}
+
+impl Default for SslMode {
+    fn default() -> Self {
+        Self::Prefer
+    }
+}
+
+impl std::fmt::Display for SslMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Disable => write!(f, "disable"),
+            Self::Prefer => write!(f, "prefer"),
+            Self::Require => write!(f, "require"),
+        }
+    }
+}
+
+// =============================================================================
+// Database Table Configuration
+// =============================================================================
+
+/// Table key configuration for PostgreSQL sources
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TableKeyConfig {
+    pub table: String,
+    pub key_columns: Vec<String>,
+}
 
 /// PostgreSQL replication source configuration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -176,7 +176,7 @@ pub mod scram;
 pub mod stream;
 pub mod types;
 
-pub use config::PostgresSourceConfig;
+pub use config::{PostgresSourceConfig, SslMode, TableKeyConfig};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -186,7 +186,6 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use drasi_lib::channels::{DispatchMode, *};
-use drasi_lib::config::common::{SslMode, TableKeyConfig};
 use drasi_lib::plugin_core::Source;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 

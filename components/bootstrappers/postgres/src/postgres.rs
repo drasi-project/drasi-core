@@ -26,9 +26,8 @@ use tokio_postgres::{Client, NoTls, Row, Transaction};
 
 use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 use drasi_lib::channels::SourceChangeEvent;
-use drasi_lib::config::common::{SslMode, TableKeyConfig};
 
-pub use drasi_source_postgres::PostgresSourceConfig;
+pub use drasi_source_postgres::{PostgresSourceConfig, SslMode, TableKeyConfig};
 
 /// Bootstrap provider for PostgreSQL sources
 ///
