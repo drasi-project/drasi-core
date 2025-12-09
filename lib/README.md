@@ -23,8 +23,6 @@ Data In    Change Detection    Actions Out
 
 ## Getting Started
 
-The primary way to use DrasiLib is through the **Builder API**. The builder provides a fluent interface for configuring sources, queries, and reactions.
-
 ### Installation
 
 ```toml
@@ -32,6 +30,18 @@ The primary way to use DrasiLib is through the **Builder API**. The builder prov
 drasi-lib = { path = "path/to/drasi-lib" }
 tokio = { version = "1", features = ["full"] }
 ```
+
+## Initialization Methods
+
+DrasiLib can be initialized in two ways:
+1. **Builder Pattern** (Recommended) - Fluent API for programmatic configuration
+2. **Config Struct** - Direct configuration for YAML/JSON loading scenarios
+
+---
+
+## Method 1: Builder Pattern (Recommended)
+
+The builder provides a fluent interface for configuring sources, queries, and reactions.
 
 ### Basic Example
 
@@ -80,11 +90,9 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-## Builder API Reference
+### DrasiLibBuilder API Reference
 
-### DrasiLibBuilder
-
-Create a builder with `DrasiLib::builder()` and configure your instance using the fluent API.
+Create a builder with `DrasiLib::builder()` and configure using the fluent API.
 
 #### `with_id(id: impl Into<String>)`
 
@@ -97,7 +105,7 @@ DrasiLib::builder()
 
 #### `with_source(source: impl Source + 'static)`
 
-Add a source plugin instance. **Ownership is transferred** to DrasiLib - you cannot use the source after calling this method.
+Add a source plugin instance. **Ownership is transferred** to DrasiLib.
 
 ```rust
 let source = MockSource::new("my-source", config)?;
@@ -161,13 +169,18 @@ DrasiLib::builder()
 Add a storage backend for persistent query state (RocksDB, Redis/Garnet).
 
 ```rust
+use drasi_lib::StorageBackendConfig;
+
 DrasiLib::builder()
-    .add_storage_backend(StorageBackendConfig::rocksdb("./data"))
+    .add_storage_backend(StorageBackendConfig {
+        id: "rocksdb-backend".to_string(),
+        spec: StorageBackendSpec::RocksDb { path: "./data".to_string() },
+    })
 ```
 
 #### `build() -> Result<DrasiLib>`
 
-Build the DrasiLib instance. This validates configuration, creates all components, and initializes the system. The instance is ready to start after building.
+Build the DrasiLib instance. This validates configuration, creates all components, and initializes the system.
 
 ```rust
 let core = DrasiLib::builder()
@@ -181,11 +194,173 @@ let core = DrasiLib::builder()
 core.start().await?;
 ```
 
-### Query Builder
+---
+
+## Method 2: Config Struct Initialization
+
+For scenarios where you need to load configuration from YAML/JSON files or construct configuration programmatically without the builder.
+
+### DrasiLibConfig Structure
+
+```rust
+use drasi_lib::{DrasiLibConfig, QueryConfig, RuntimeConfig};
+use std::sync::Arc;
+
+// Create configuration directly
+let config = DrasiLibConfig {
+    id: "my-server".to_string(),
+    priority_queue_capacity: Some(50000),
+    dispatch_buffer_capacity: Some(5000),
+    storage_backends: vec![],
+    queries: vec![
+        QueryConfig {
+            id: "my-query".to_string(),
+            query: "MATCH (n:Person) RETURN n".to_string(),
+            query_language: QueryLanguage::Cypher,
+            sources: vec![
+                SourceSubscriptionConfig {
+                    source_id: "my-source".to_string(),
+                    pipeline: vec![],
+                }
+            ],
+            middleware: vec![],
+            auto_start: true,
+            joins: None,
+            enable_bootstrap: true,
+            bootstrap_buffer_size: 10000,
+            priority_queue_capacity: None,  // Inherits from global
+            dispatch_buffer_capacity: None, // Inherits from global
+            dispatch_mode: None,
+            storage_backend: None,
+        },
+    ],
+};
+
+// Validate the configuration
+config.validate()?;
+```
+
+### YAML Configuration Format
+
+```yaml
+# DrasiLibConfig structure
+id: my-server
+priority_queue_capacity: 50000      # Optional, default: 10000
+dispatch_buffer_capacity: 5000      # Optional, default: 1000
+
+storage_backends:                    # Optional
+  - id: rocksdb-backend
+    spec:
+      type: rocksdb
+      path: ./data
+
+queries:
+  - id: high-temp-alerts
+    query: |
+      MATCH (s:Sensor)
+      WHERE s.temperature > 75
+      RETURN s.id, s.temperature, s.location
+    queryLanguage: Cypher           # Optional, default: Cypher
+    sources:
+      - source_id: sensors
+        pipeline: []                # Optional middleware pipeline
+    auto_start: true                # Optional, default: true
+    enableBootstrap: true           # Optional, default: true
+    bootstrapBufferSize: 10000      # Optional, default: 10000
+
+  - id: complex-join-query
+    query: |
+      MATCH (o:Order)-[:PLACED_BY]->(c:Customer)
+      WHERE o.status = 'pending'
+      RETURN o.id, c.email, o.total
+    sources:
+      - source_id: orders
+      - source_id: customers
+    joins:                          # Synthetic joins for cross-source queries
+      - id: PLACED_BY
+        keys:
+          - label: Order
+            property: customer_id
+          - label: Customer
+            property: id
+```
+
+### Loading from YAML and Initializing
+
+```rust
+use drasi_lib::{DrasiLibConfig, RuntimeConfig};
+use std::sync::Arc;
+
+// Load YAML configuration
+let yaml_str = std::fs::read_to_string("config.yaml")?;
+let config: DrasiLibConfig = serde_yaml::from_str(&yaml_str)?;
+
+// Validate configuration
+config.validate()?;
+
+// Convert to RuntimeConfig (applies defaults to queries)
+let runtime_config = Arc::new(RuntimeConfig::from(config));
+
+// Note: DrasiLib::new() is internal. For config-based initialization,
+// use the builder pattern and add sources/reactions programmatically:
+
+let mut core = DrasiLib::builder()
+    .with_id(&runtime_config.id);
+
+// Add queries from config
+for query_config in &runtime_config.queries {
+    core = core.with_query(query_config.clone());
+}
+
+// Add sources and reactions as plugin instances
+// (Sources/reactions must be created from plugin types - they cannot be in YAML)
+let source = create_source_from_external_config()?;
+let reaction = create_reaction_from_external_config()?;
+
+let core = core
+    .with_source(source)
+    .with_reaction(reaction)
+    .build()
+    .await?;
+
+core.start().await?;
+```
+
+### Configuration Fields Reference
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `id` | `String` | UUID | Unique identifier for this instance |
+| `priority_queue_capacity` | `Option<usize>` | `10000` | Default event queue capacity |
+| `dispatch_buffer_capacity` | `Option<usize>` | `1000` | Default channel buffer capacity |
+| `storage_backends` | `Vec<StorageBackendConfig>` | `[]` | Storage backend definitions |
+| `queries` | `Vec<QueryConfig>` | `[]` | Query configurations |
+
+### QueryConfig Fields Reference
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `id` | `String` | Required | Unique query identifier |
+| `query` | `String` | Required | Cypher or GQL query string |
+| `query_language` | `QueryLanguage` | `Cypher` | Query language (`Cypher` or `GQL`) |
+| `sources` | `Vec<SourceSubscriptionConfig>` | `[]` | Source subscriptions |
+| `middleware` | `Vec<SourceMiddlewareConfig>` | `[]` | Middleware configurations |
+| `auto_start` | `bool` | `true` | Start automatically with DrasiLib |
+| `joins` | `Option<Vec<QueryJoinConfig>>` | `None` | Synthetic join definitions |
+| `enable_bootstrap` | `bool` | `true` | Load initial data from sources |
+| `bootstrap_buffer_size` | `usize` | `10000` | Bootstrap buffer size |
+| `priority_queue_capacity` | `Option<usize>` | Inherited | Override queue capacity |
+| `dispatch_buffer_capacity` | `Option<usize>` | Inherited | Override buffer capacity |
+| `dispatch_mode` | `Option<DispatchMode>` | `Channel` | Event dispatch mode |
+| `storage_backend` | `Option<StorageBackendRef>` | Default | Storage backend reference |
+
+---
+
+## Query Builder
 
 The `Query` builder creates query configurations with a fluent API.
 
-#### `Query::cypher(id: impl Into<String>)`
+### `Query::cypher(id: impl Into<String>)`
 
 Create a new Cypher query builder:
 
@@ -196,7 +371,7 @@ Query::cypher("my-query")
     .build()
 ```
 
-#### `Query::gql(id: impl Into<String>)`
+### `Query::gql(id: impl Into<String>)`
 
 Create a new GQL (GraphQL) query builder:
 
@@ -207,7 +382,7 @@ Query::gql("my-gql-query")
     .build()
 ```
 
-#### Query Builder Methods
+### Query Builder Methods
 
 | Method | Description | Default |
 |--------|-------------|---------|
@@ -224,9 +399,11 @@ Query::gql("my-gql-query")
 | `.with_dispatch_mode(mode)` | Set dispatch mode | `Channel` |
 | `.with_storage_backend(ref)` | Use specific storage backend | Default |
 
-#### Complete Query Example
+### Complete Query Example
 
 ```rust
+use drasi_lib::{Query, DispatchMode};
+
 Query::cypher("complex-query")
     .query(r#"
         MATCH (o:Order)-[:PLACED_BY]->(c:Customer)
@@ -242,13 +419,15 @@ Query::cypher("complex-query")
     .build()
 ```
 
+---
+
 ## Runtime Management
 
 After building, use these methods to manage the DrasiLib instance:
 
 ```rust
 // Lifecycle
-core.start().await?;           // Start all components
+core.start().await?;           // Start all auto-start components
 core.stop().await?;            // Stop all components
 
 // Component control
@@ -262,6 +441,7 @@ core.stop_reaction("my-reaction").await?;
 // Add components at runtime
 core.add_source(new_source).await?;
 core.add_reaction(new_reaction).await?;
+core.add_query(query_config).await?;
 
 // Remove components
 core.remove_source("my-source").await?;
@@ -273,13 +453,24 @@ let sources = core.list_sources().await?;
 let queries = core.list_queries().await?;
 let reactions = core.list_reactions().await?;
 let status = core.get_source_status("my-source").await?;
+let results = core.get_query_results("my-query").await?;
+
+// Check running state
+let is_running = core.is_running().await;
+
+// Get current configuration
+let config = core.get_current_config().await?;
 ```
+
+---
 
 ## Core Concepts
 
 ### Sources
 
 Sources ingest data from external systems and emit graph elements (nodes and relationships). DrasiLib provides a trait-based plugin architecture.
+
+**Important**: Sources are plugins that must be instantiated externally and passed to DrasiLib. DrasiLib has no awareness of which source plugins exist.
 
 **Available Source Plugins:** See `components/sources/` for PostgreSQL, HTTP, gRPC, Mock, Platform, and Application sources.
 
@@ -296,11 +487,15 @@ Queries define what changes matter using Cypher. They track **three types of res
 
 Reactions respond to query results by triggering actions (webhooks, logging, etc.).
 
-**Available Reaction Plugins:** See `components/reactions/` for HTTP, gRPC, SSE, Log, and Application reactions.
+**Important**: Like sources, reactions are plugins that must be instantiated externally.
+
+**Available Reaction Plugins:** See `components/reactions/` for HTTP, gRPC, SSE, Log, Platform, and Profiler reactions.
 
 ### Bootstrap Providers
 
-Bootstrap providers deliver initial data to queries before streaming begins. Any source can use any bootstrap provider.
+Bootstrap providers deliver initial data to queries before streaming begins. Any source can use any bootstrap provider, enabling flexible scenarios like "bootstrap from database, stream changes via HTTP."
+
+---
 
 ## Dispatch Modes
 
@@ -311,13 +506,29 @@ DrasiLib supports two dispatch modes for event routing:
 | **Channel** (default) | Yes | None | Different subscriber speeds, critical data |
 | **Broadcast** | No | Possible | High fanout (10+ subscribers), uniform speeds |
 
+Configure per-query:
+
+```rust
+use drasi_lib::DispatchMode;
+
+Query::cypher("my-query")
+    .with_dispatch_mode(DispatchMode::Channel)  // Default
+    // or
+    .with_dispatch_mode(DispatchMode::Broadcast)
+    .build()
+```
+
+---
+
 ## Developer Guides
 
 For detailed information on building plugins:
 
 - **[Source Developer Guide](../components/sources/README.md)** - Creating custom data sources
 - **[Reaction Developer Guide](../components/reactions/README.md)** - Creating custom reactions
-- **[Bootstrap Provider Guide](../components/bootstrap/README.md)** - Creating bootstrap providers
+- **[Bootstrap Provider Guide](../components/bootstrappers/README.md)** - Creating bootstrap providers
+
+---
 
 ## Troubleshooting
 
@@ -342,7 +553,7 @@ let core = DrasiLib::builder()
 
 - **Broadcast mode**: May lose events if receivers are slow
 - **Channel mode**: Provides backpressure but may block senders
-- Check `dispatch_buffer_capacity` settings
+- Check `dispatch_buffer_capacity` and `priority_queue_capacity` settings
 
 ### Debug Logging
 
@@ -350,6 +561,8 @@ let core = DrasiLib::builder()
 std::env::set_var("RUST_LOG", "drasi_lib=debug");
 env_logger::init();
 ```
+
+---
 
 ## License
 
