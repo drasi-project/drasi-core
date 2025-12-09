@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// DevSkim: ignore DS137138 - localhost is used for unit test endpoints only
+// DevSkim: ignore DS162092 - localhost is used for unit test endpoints only
+// DevSkim: ignore DS137138,DS137121 - http:// URLs are used for unit test configuration only
+
 #[cfg(test)]
 mod tests {
     use drasi_lib::channels::ComponentStatus;
