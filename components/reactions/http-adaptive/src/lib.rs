@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn test_adaptive_http_builder_defaults() {
-        // devskim: ignore DS137138: Unit test only – no actual network request is made
+        // DevSkim: ignore DS137138: Unit test only – no actual network request is made
         let reaction = HttpAdaptiveReactionBuilder::new("test-reaction")
             .build()
             .unwrap();
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn test_adaptive_http_builder_custom_values() {
-        // devskim: ignore DS137138: Unit test only – no actual network request is made
+        // DevSkim: ignore DS137138: Unit test only – no actual network request is made
         let reaction = AdaptiveHttpReaction::builder("test-reaction")
             .with_base_url("http://api.example.com")
             .with_token("secret-token")

@@ -97,6 +97,7 @@ impl ReplicationConnection {
                             .await?;
                         }
                         AuthenticationMessage::MD5Password(salt) => {
+                            // DevSkim: ignore DS126858: server requests MD5 password authentication
                             debug!("Server requested MD5 password");
                             let md5_password = compute_md5_password(user, password, &salt);
                             self.send_message(FrontendMessage::PasswordMessage(md5_password))
