@@ -252,10 +252,7 @@ impl ReactionManager {
         for reaction in reactions {
             // Only start reactions with auto_start enabled
             if !reaction.auto_start() {
-                info!(
-                    "Skipping reaction '{}' (auto_start=false)",
-                    reaction.id()
-                );
+                info!("Skipping reaction '{}' (auto_start=false)", reaction.id());
                 continue;
             }
 

@@ -62,16 +62,16 @@
 
 use std::sync::Arc;
 
+use crate::channels::DispatchMode;
 use crate::config::{
     DrasiLibConfig, QueryConfig, QueryJoinConfig, QueryLanguage, SourceSubscriptionConfig,
 };
-use drasi_core::models::SourceMiddlewareConfig;
-use crate::channels::DispatchMode;
 use crate::error::{DrasiError, Result};
 use crate::indexes::StorageBackendConfig;
+use crate::lib_core::DrasiLib;
 use crate::plugin_core::Reaction as ReactionTrait;
 use crate::plugin_core::Source as SourceTrait;
-use crate::lib_core::DrasiLib;
+use drasi_core::models::SourceMiddlewareConfig;
 
 // ============================================================================
 // DrasiLibBuilder
@@ -238,15 +238,12 @@ impl DrasiLibBuilder {
         // Inject pre-built source instances
         for source in self.source_instances {
             let source_id = source.id().to_string();
-            core.source_manager
-                .add_source(source)
-                .await
-                .map_err(|e| {
-                    DrasiError::provisioning(format!(
-                        "Failed to add source instance '{}': {}",
-                        source_id, e
-                    ))
-                })?;
+            core.source_manager.add_source(source).await.map_err(|e| {
+                DrasiError::provisioning(format!(
+                    "Failed to add source instance '{}': {}",
+                    source_id, e
+                ))
+            })?;
         }
 
         // Inject pre-built reaction instances
@@ -541,10 +538,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_builder_creates_initialized_server() {
-        let core = DrasiLib::builder()
-            .with_id("builder-test")
-            .build()
-            .await;
+        let core = DrasiLib::builder().with_id("builder-test").build().await;
 
         assert!(core.is_ok(), "Builder should create initialized server");
         let core = core.unwrap();

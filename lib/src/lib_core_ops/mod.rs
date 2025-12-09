@@ -24,9 +24,9 @@
 //! - `query_ops`: Query management operations (create, remove, start, stop)
 //! - `reaction_ops`: Reaction management operations (add, remove, start, stop)
 
-mod source_ops;
 mod query_ops;
 mod reaction_ops;
+mod source_ops;
 
 // These modules add impl blocks to DrasiLib, they don't export types
 // The modules are compiled but we don't need to re-export anything

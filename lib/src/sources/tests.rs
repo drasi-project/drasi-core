@@ -53,7 +53,11 @@ impl TestMockSource {
     }
 
     /// Create a new test mock source with configurable auto_start
-    pub fn with_auto_start(id: String, event_tx: ComponentEventSender, auto_start: bool) -> Result<Self> {
+    pub fn with_auto_start(
+        id: String,
+        event_tx: ComponentEventSender,
+        auto_start: bool,
+    ) -> Result<Self> {
         Ok(Self {
             id,
             auto_start,
@@ -193,8 +197,11 @@ mod manager_tests {
     use crate::sources::SourceManager;
     use tokio::sync::mpsc;
 
-    async fn create_test_manager(
-    ) -> (Arc<SourceManager>, mpsc::Receiver<ComponentEvent>, mpsc::Sender<ComponentEvent>) {
+    async fn create_test_manager() -> (
+        Arc<SourceManager>,
+        mpsc::Receiver<ComponentEvent>,
+        mpsc::Sender<ComponentEvent>,
+    ) {
         let (event_tx, event_rx) = mpsc::channel(100);
         let manager = Arc::new(SourceManager::new(event_tx.clone()));
         (manager, event_rx, event_tx)
@@ -428,7 +435,10 @@ mod manager_tests {
         // Wait for all tasks to complete
         for handle in handles {
             let result = handle.await.unwrap();
-            assert!(result.is_ok(), "All add_source calls with unique IDs should succeed");
+            assert!(
+                result.is_ok(),
+                "All add_source calls with unique IDs should succeed"
+            );
         }
 
         // Verify all 10 sources exist
@@ -450,7 +460,8 @@ mod manager_tests {
             "auto-start-source".to_string(),
             event_tx.clone(),
             true,
-        ).unwrap();
+        )
+        .unwrap();
         manager.add_source(source1).await.unwrap();
 
         // Add source with auto_start=false
@@ -458,7 +469,8 @@ mod manager_tests {
             "no-auto-start-source".to_string(),
             event_tx.clone(),
             false,
-        ).unwrap();
+        )
+        .unwrap();
         manager.add_source(source2).await.unwrap();
 
         // Start all sources
@@ -468,8 +480,14 @@ mod manager_tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // Check statuses
-        let status1 = manager.get_source_status("auto-start-source".to_string()).await.unwrap();
-        let status2 = manager.get_source_status("no-auto-start-source".to_string()).await.unwrap();
+        let status1 = manager
+            .get_source_status("auto-start-source".to_string())
+            .await
+            .unwrap();
+        let status2 = manager
+            .get_source_status("no-auto-start-source".to_string())
+            .await
+            .unwrap();
 
         assert!(
             matches!(status1, ComponentStatus::Running),
@@ -499,7 +517,10 @@ mod manager_tests {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        let status = manager.get_source_status("default-source".to_string()).await.unwrap();
+        let status = manager
+            .get_source_status("default-source".to_string())
+            .await
+            .unwrap();
         assert!(
             matches!(status, ComponentStatus::Running),
             "Default source should be started by start_all"
@@ -512,11 +533,8 @@ mod manager_tests {
         let (manager, _event_rx, event_tx) = create_test_manager().await;
 
         // Add source with auto_start=false
-        let source = TestMockSource::with_auto_start(
-            "manual-source".to_string(),
-            event_tx,
-            false,
-        ).unwrap();
+        let source =
+            TestMockSource::with_auto_start("manual-source".to_string(), event_tx, false).unwrap();
         manager.add_source(source).await.unwrap();
 
         // start_all should not start it
@@ -524,18 +542,27 @@ mod manager_tests {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        let status = manager.get_source_status("manual-source".to_string()).await.unwrap();
+        let status = manager
+            .get_source_status("manual-source".to_string())
+            .await
+            .unwrap();
         assert!(
             matches!(status, ComponentStatus::Stopped),
             "Source with auto_start=false should not be started by start_all"
         );
 
         // Manually start the source
-        manager.start_source("manual-source".to_string()).await.unwrap();
+        manager
+            .start_source("manual-source".to_string())
+            .await
+            .unwrap();
 
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        let status = manager.get_source_status("manual-source".to_string()).await.unwrap();
+        let status = manager
+            .get_source_status("manual-source".to_string())
+            .await
+            .unwrap();
         assert!(
             matches!(status, ComponentStatus::Running),
             "Source with auto_start=false should be manually startable"

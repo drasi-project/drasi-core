@@ -280,10 +280,7 @@ impl SourceManager {
         for source in sources {
             // Only start sources with auto_start enabled
             if !source.auto_start() {
-                info!(
-                    "Skipping source '{}' (auto_start=false)",
-                    source.id()
-                );
+                info!("Skipping source '{}' (auto_start=false)", source.id());
                 continue;
             }
 

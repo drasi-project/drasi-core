@@ -294,10 +294,7 @@ mod runtime_tests {
         let runtime = QueryRuntime::from(config.clone());
         assert_eq!(runtime.id, config.id);
         assert_eq!(runtime.query, config.query);
-        assert_eq!(
-            runtime.source_subscriptions.len(),
-            config.sources.len()
-        );
+        assert_eq!(runtime.source_subscriptions.len(), config.sources.len());
         matches!(runtime.status, ComponentStatus::Stopped);
     }
 

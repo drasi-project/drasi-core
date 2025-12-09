@@ -17,8 +17,8 @@ mod manager_tests {
     use super::super::*;
     use crate::channels::*;
     use crate::config::{QueryConfig, QueryLanguage, SourceSubscriptionConfig};
-    use crate::sources::SourceManager;
     use crate::sources::tests::create_test_mock_source;
+    use crate::sources::SourceManager;
     use drasi_core::middleware::MiddlewareTypeRegistry;
     use std::sync::Arc;
     use tokio::sync::mpsc;
@@ -29,7 +29,11 @@ mod manager_tests {
     }
 
     /// Creates a test query configuration with configurable auto_start
-    fn create_test_query_config_with_auto_start(id: &str, sources: Vec<String>, auto_start: bool) -> QueryConfig {
+    fn create_test_query_config_with_auto_start(
+        id: &str,
+        sources: Vec<String>,
+        auto_start: bool,
+    ) -> QueryConfig {
         QueryConfig {
             id: id.to_string(),
             query: "MATCH (n) RETURN n".to_string(),
@@ -373,10 +377,7 @@ mod manager_tests {
         let retrieved = retrieved.unwrap();
         assert_eq!(retrieved.id, config.id);
         assert_eq!(retrieved.query, config.query);
-        assert_eq!(
-            retrieved.sources.len(),
-            config.sources.len()
-        );
+        assert_eq!(retrieved.sources.len(), config.sources.len());
     }
 
     #[tokio::test]
@@ -500,7 +501,10 @@ mod manager_tests {
         );
 
         // Manually start the query
-        manager.start_query("manual-query".to_string()).await.unwrap();
+        manager
+            .start_query("manual-query".to_string())
+            .await
+            .unwrap();
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 

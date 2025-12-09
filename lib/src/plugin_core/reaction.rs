@@ -235,4 +235,3 @@ impl Reaction for Box<dyn Reaction + 'static> {
         (**self).inject_event_tx(tx).await
     }
 }
-

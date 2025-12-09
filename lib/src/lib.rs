@@ -40,13 +40,13 @@ pub mod component_ops;
 #[cfg_attr(not(test), doc(hidden))]
 pub mod inspection;
 #[cfg_attr(not(test), doc(hidden))]
+pub mod lib_core;
+#[cfg_attr(not(test), doc(hidden))]
 pub mod lifecycle;
 #[cfg_attr(not(test), doc(hidden))]
 pub mod queries;
 #[cfg_attr(not(test), doc(hidden))]
 pub mod reactions;
-#[cfg_attr(not(test), doc(hidden))]
-pub mod lib_core;
 #[cfg_attr(not(test), doc(hidden))]
 pub mod sources;
 
@@ -118,15 +118,13 @@ pub use indexes::{StorageBackendConfig, StorageBackendRef, StorageBackendSpec};
 /// Plugin core traits for implementing sources, reactions, and bootstrap providers
 /// Note: Traits are named with 'Trait' suffix to avoid conflicts with builder API types
 pub use plugin_core::{
-    BootstrapProvider, QuerySubscriber,
-    Reaction as ReactionTrait,
-    Source as SourceTrait,
+    BootstrapProvider, QuerySubscriber, Reaction as ReactionTrait, Source as SourceTrait,
 };
 
+pub use reactions::common::base::{ReactionBase, ReactionBaseParams};
 /// Base implementations for source and reaction plugins
 /// These are used by plugin developers, not by drasi-lib itself
 pub use sources::base::{SourceBase, SourceBaseParams};
-pub use reactions::common::base::{ReactionBase, ReactionBaseParams};
 
 // ============================================================================
 // Builder Types (for fluent configuration)

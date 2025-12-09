@@ -578,11 +578,8 @@ mod tests {
         pq.try_dequeue().await;
 
         // Now the blocked enqueue should complete
-        let result = tokio::time::timeout(
-            tokio::time::Duration::from_millis(100),
-            enqueue_task
-        )
-        .await;
+        let result =
+            tokio::time::timeout(tokio::time::Duration::from_millis(100), enqueue_task).await;
 
         assert!(result.is_ok(), "enqueue_wait should have unblocked");
         assert_eq!(pq.depth().await, 2); // Should be back at capacity
@@ -611,11 +608,8 @@ mod tests {
         assert!(dequeued.is_some());
 
         // The enqueue should complete now
-        let result = tokio::time::timeout(
-            tokio::time::Duration::from_millis(100),
-            enqueue_task
-        )
-        .await;
+        let result =
+            tokio::time::timeout(tokio::time::Duration::from_millis(100), enqueue_task).await;
 
         assert!(result.is_ok(), "enqueue_wait should have been notified");
         assert_eq!(pq.depth().await, 1);
@@ -725,7 +719,10 @@ mod tests {
 
         // Non-blocking enqueue should fail
         let result = pq.enqueue(create_test_event("event3", now)).await;
-        assert!(!result, "Non-blocking enqueue should return false when full");
+        assert!(
+            !result,
+            "Non-blocking enqueue should return false when full"
+        );
 
         // Check that drop counter increased
         let metrics = pq.metrics().await;

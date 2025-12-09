@@ -547,4 +547,3 @@ impl From<QueryJoinConfig> for drasi_core::models::QueryJoin {
         }
     }
 }
-

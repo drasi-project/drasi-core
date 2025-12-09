@@ -148,7 +148,11 @@ pub fn query_operation_failed(id: &str, operation: &str, reason: impl Into<Strin
 
 /// Create an operation failed error for a reaction.
 #[inline]
-pub fn reaction_operation_failed(id: &str, operation: &str, reason: impl Into<String>) -> DrasiError {
+pub fn reaction_operation_failed(
+    id: &str,
+    operation: &str,
+    reason: impl Into<String>,
+) -> DrasiError {
     DrasiError::operation_failed("reaction", id, operation, reason)
 }
 
@@ -260,10 +264,7 @@ mod tests {
     #[test]
     fn test_query_operation_failed() {
         let err = query_operation_failed("my-query", "stop", "Timeout");
-        assert_eq!(
-            err.to_string(),
-            "Failed to stop query 'my-query': Timeout"
-        );
+        assert_eq!(err.to_string(), "Failed to stop query 'my-query': Timeout");
     }
 
     #[test]

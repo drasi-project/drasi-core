@@ -128,8 +128,8 @@ impl ReactionBase {
             queries: params.queries,
             auto_start: params.auto_start,
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            event_tx: Arc::new(RwLock::new(None)),           // Injected later by DrasiLib
-            query_subscriber: Arc::new(RwLock::new(None)),   // Injected later by DrasiLib
+            event_tx: Arc::new(RwLock::new(None)), // Injected later by DrasiLib
+            query_subscriber: Arc::new(RwLock::new(None)), // Injected later by DrasiLib
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
             processing_task: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
@@ -297,7 +297,8 @@ impl ReactionBase {
             let dispatch_mode = query_config
                 .dispatch_mode
                 .unwrap_or(crate::channels::DispatchMode::Channel);
-            let use_blocking_enqueue = matches!(dispatch_mode, crate::channels::DispatchMode::Channel);
+            let use_blocking_enqueue =
+                matches!(dispatch_mode, crate::channels::DispatchMode::Channel);
 
             // Spawn forwarder task to read from receiver and enqueue to priority queue
             let forwarder_task = tokio::spawn(async move {
@@ -459,8 +460,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_priority_queue_operations() {
-        let params = ReactionBaseParams::new("test-reaction", vec![])
-            .with_priority_queue_capacity(10);
+        let params =
+            ReactionBaseParams::new("test-reaction", vec![]).with_priority_queue_capacity(10);
 
         let base = ReactionBase::new(params);
 

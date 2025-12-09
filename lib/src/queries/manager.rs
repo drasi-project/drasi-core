@@ -412,7 +412,8 @@ impl Query for DrasiQuery {
 
             // Get source dispatch mode to determine enqueue strategy
             let dispatch_mode = source.dispatch_mode();
-            let use_blocking_enqueue = matches!(dispatch_mode, crate::channels::DispatchMode::Channel);
+            let use_blocking_enqueue =
+                matches!(dispatch_mode, crate::channels::DispatchMode::Channel);
 
             let task = tokio::spawn(async move {
                 debug!(

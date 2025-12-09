@@ -14,8 +14,8 @@
 
 use std::sync::Arc;
 
-use crate::error::DrasiError;
 use crate::config::{DrasiLibConfig, RuntimeConfig};
+use crate::error::DrasiError;
 use crate::queries::QueryManager;
 use crate::reactions::ReactionManager;
 use crate::sources::SourceManager;
@@ -201,7 +201,10 @@ impl InspectionAPI {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_query_results(&self, id: &str) -> crate::error::Result<Vec<serde_json::Value>> {
+    pub async fn get_query_results(
+        &self,
+        id: &str,
+    ) -> crate::error::Result<Vec<serde_json::Value>> {
         self.state_guard.require_initialized().await?;
         self.query_manager.get_query_results(id).await.map_err(|e| {
             if e.to_string().contains("not found") {

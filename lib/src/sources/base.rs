@@ -75,7 +75,10 @@ impl std::fmt::Debug for SourceBaseParams {
             .field("id", &self.id)
             .field("dispatch_mode", &self.dispatch_mode)
             .field("dispatch_buffer_capacity", &self.dispatch_buffer_capacity)
-            .field("bootstrap_provider", &self.bootstrap_provider.as_ref().map(|_| "<provider>"))
+            .field(
+                "bootstrap_provider",
+                &self.bootstrap_provider.as_ref().map(|_| "<provider>"),
+            )
             .field("auto_start", &self.auto_start)
             .finish()
     }
@@ -141,8 +144,7 @@ pub struct SourceBase {
     /// This is a vector of dispatchers that send source events to all registered
     /// subscribers (queries). When a source produces a change event, it broadcasts
     /// it to all dispatchers in this vector.
-    pub dispatchers:
-        Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    pub dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     /// Channel for sending component lifecycle events (injected by DrasiLib when added)
     event_tx: Arc<RwLock<Option<ComponentEventSender>>>,
     /// Handle to the source's main task
@@ -280,7 +282,9 @@ impl SourceBase {
             }
             DispatchMode::Channel => {
                 // For channel mode, create a new dispatcher for this subscription
-                let dispatcher = ChannelChangeDispatcher::<SourceEventWrapper>::new(self.dispatch_buffer_capacity);
+                let dispatcher = ChannelChangeDispatcher::<SourceEventWrapper>::new(
+                    self.dispatch_buffer_capacity,
+                );
                 let receiver = dispatcher.create_receiver().await?;
 
                 // Add the new dispatcher to our list
@@ -526,10 +530,7 @@ impl SourceBase {
                     error!("Source '{}' task panicked: {}", self.id, e);
                 }
                 Err(_) => {
-                    error!(
-                        "Source '{}' task did not complete within timeout",
-                        self.id
-                    );
+                    error!("Source '{}' task did not complete within timeout", self.id);
                 }
             }
         }

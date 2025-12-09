@@ -118,7 +118,10 @@ impl DrasiError {
     /// ```ignore
     /// DrasiError::component_not_found("source", "my-source-id")
     /// ```
-    pub fn component_not_found(component_type: impl Into<String>, component_id: impl Into<String>) -> Self {
+    pub fn component_not_found(
+        component_type: impl Into<String>,
+        component_id: impl Into<String>,
+    ) -> Self {
         DrasiError::ComponentNotFound {
             component_type: component_type.into(),
             component_id: component_id.into(),
@@ -131,7 +134,10 @@ impl DrasiError {
     /// ```ignore
     /// DrasiError::already_exists("query", "my-query-id")
     /// ```
-    pub fn already_exists(component_type: impl Into<String>, component_id: impl Into<String>) -> Self {
+    pub fn already_exists(
+        component_type: impl Into<String>,
+        component_id: impl Into<String>,
+    ) -> Self {
         DrasiError::AlreadyExists {
             component_type: component_type.into(),
             component_id: component_id.into(),
@@ -275,7 +281,8 @@ mod tests {
 
     #[test]
     fn test_operation_failed_display() {
-        let err = DrasiError::operation_failed("source", "my-source", "start", "Connection refused");
+        let err =
+            DrasiError::operation_failed("source", "my-source", "start", "Connection refused");
         assert_eq!(
             err.to_string(),
             "Failed to start source 'my-source': Connection refused"

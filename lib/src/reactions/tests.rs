@@ -42,7 +42,12 @@ mod manager_tests {
             }
         }
 
-        fn with_auto_start(id: String, queries: Vec<String>, event_tx: ComponentEventSender, auto_start: bool) -> Self {
+        fn with_auto_start(
+            id: String,
+            queries: Vec<String>,
+            event_tx: ComponentEventSender,
+            auto_start: bool,
+        ) -> Self {
             Self {
                 id,
                 queries,
@@ -152,7 +157,11 @@ mod manager_tests {
         TestMockReaction::new(id, queries, event_tx)
     }
 
-    async fn create_test_manager() -> (Arc<ReactionManager>, mpsc::Receiver<ComponentEvent>, mpsc::Sender<ComponentEvent>) {
+    async fn create_test_manager() -> (
+        Arc<ReactionManager>,
+        mpsc::Receiver<ComponentEvent>,
+        mpsc::Sender<ComponentEvent>,
+    ) {
         let (event_tx, event_rx) = mpsc::channel(100);
         let manager = Arc::new(ReactionManager::new(event_tx.clone()));
         (manager, event_rx, event_tx)
@@ -181,16 +190,9 @@ mod manager_tests {
     async fn test_add_duplicate_reaction() {
         let (manager, _event_rx, event_tx) = create_test_manager().await;
 
-        let reaction1 = create_test_mock_reaction(
-            "test-reaction".to_string(),
-            vec![],
-            event_tx.clone(),
-        );
-        let reaction2 = create_test_mock_reaction(
-            "test-reaction".to_string(),
-            vec![],
-            event_tx,
-        );
+        let reaction1 =
+            create_test_mock_reaction("test-reaction".to_string(), vec![], event_tx.clone());
+        let reaction2 = create_test_mock_reaction("test-reaction".to_string(), vec![], event_tx);
 
         // Add reaction first time
         assert!(manager.add_reaction(reaction1).await.is_ok());
@@ -205,11 +207,7 @@ mod manager_tests {
     async fn test_delete_reaction() {
         let (manager, _event_rx, event_tx) = create_test_manager().await;
 
-        let reaction = create_test_mock_reaction(
-            "test-reaction".to_string(),
-            vec![],
-            event_tx,
-        );
+        let reaction = create_test_mock_reaction("test-reaction".to_string(), vec![], event_tx);
         manager.add_reaction(reaction).await.unwrap();
 
         // Delete the reaction
@@ -255,16 +253,9 @@ mod manager_tests {
         let (manager, _event_rx, event_tx) = create_test_manager().await;
 
         // Add multiple reactions
-        let reaction1 = create_test_mock_reaction(
-            "reaction1".to_string(),
-            vec![],
-            event_tx.clone(),
-        );
-        let reaction2 = create_test_mock_reaction(
-            "reaction2".to_string(),
-            vec![],
-            event_tx,
-        );
+        let reaction1 =
+            create_test_mock_reaction("reaction1".to_string(), vec![], event_tx.clone());
+        let reaction2 = create_test_mock_reaction("reaction2".to_string(), vec![], event_tx);
 
         manager.add_reaction(reaction1).await.unwrap();
         manager.add_reaction(reaction2).await.unwrap();
@@ -282,14 +273,12 @@ mod manager_tests {
     async fn test_get_reaction_status() {
         let (manager, _event_rx, event_tx) = create_test_manager().await;
 
-        let reaction = create_test_mock_reaction(
-            "test-reaction".to_string(),
-            vec![],
-            event_tx,
-        );
+        let reaction = create_test_mock_reaction("test-reaction".to_string(), vec![], event_tx);
         manager.add_reaction(reaction).await.unwrap();
 
-        let status = manager.get_reaction_status("test-reaction".to_string()).await;
+        let status = manager
+            .get_reaction_status("test-reaction".to_string())
+            .await;
         assert!(status.is_ok());
         assert!(matches!(status.unwrap(), ComponentStatus::Stopped));
     }
@@ -316,11 +305,8 @@ mod manager_tests {
             let manager_clone = manager.clone();
             let event_tx_clone = event_tx.clone();
             handles.push(tokio::spawn(async move {
-                let reaction = create_test_mock_reaction(
-                    "same-reaction".to_string(),
-                    vec![],
-                    event_tx_clone,
-                );
+                let reaction =
+                    create_test_mock_reaction("same-reaction".to_string(), vec![], event_tx_clone);
                 let result = manager_clone.add_reaction(reaction).await;
                 (i, result.is_ok())
             }));
@@ -359,11 +345,8 @@ mod manager_tests {
             let manager_clone = manager.clone();
             let event_tx_clone = event_tx.clone();
             handles.push(tokio::spawn(async move {
-                let reaction = create_test_mock_reaction(
-                    format!("reaction-{}", i),
-                    vec![],
-                    event_tx_clone,
-                );
+                let reaction =
+                    create_test_mock_reaction(format!("reaction-{}", i), vec![], event_tx_clone);
                 manager_clone.add_reaction(reaction).await
             }));
         }
@@ -371,7 +354,10 @@ mod manager_tests {
         // Wait for all tasks to complete
         for handle in handles {
             let result = handle.await.unwrap();
-            assert!(result.is_ok(), "All add_reaction calls with unique IDs should succeed");
+            assert!(
+                result.is_ok(),
+                "All add_reaction calls with unique IDs should succeed"
+            );
         }
 
         // Verify all 10 reactions exist
@@ -413,8 +399,14 @@ mod manager_tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // Check statuses
-        let status1 = manager.get_reaction_status("auto-start-reaction".to_string()).await.unwrap();
-        let status2 = manager.get_reaction_status("no-auto-start-reaction".to_string()).await.unwrap();
+        let status1 = manager
+            .get_reaction_status("auto-start-reaction".to_string())
+            .await
+            .unwrap();
+        let status2 = manager
+            .get_reaction_status("no-auto-start-reaction".to_string())
+            .await
+            .unwrap();
 
         assert!(
             matches!(status1, ComponentStatus::Running),
@@ -432,11 +424,7 @@ mod manager_tests {
         let (manager, _event_rx, event_tx) = create_test_manager().await;
 
         // Create reaction using default constructor (should have auto_start=true)
-        let reaction = create_test_mock_reaction(
-            "default-reaction".to_string(),
-            vec![],
-            event_tx,
-        );
+        let reaction = create_test_mock_reaction("default-reaction".to_string(), vec![], event_tx);
 
         // Verify auto_start is true
         use crate::plugin_core::Reaction;
@@ -449,7 +437,10 @@ mod manager_tests {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        let status = manager.get_reaction_status("default-reaction".to_string()).await.unwrap();
+        let status = manager
+            .get_reaction_status("default-reaction".to_string())
+            .await
+            .unwrap();
         assert!(
             matches!(status, ComponentStatus::Running),
             "Default reaction should be started by start_all"
@@ -475,18 +466,27 @@ mod manager_tests {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        let status = manager.get_reaction_status("manual-reaction".to_string()).await.unwrap();
+        let status = manager
+            .get_reaction_status("manual-reaction".to_string())
+            .await
+            .unwrap();
         assert!(
             matches!(status, ComponentStatus::Stopped),
             "Reaction with auto_start=false should not be started by start_all"
         );
 
         // Manually start the reaction
-        manager.start_reaction("manual-reaction".to_string()).await.unwrap();
+        manager
+            .start_reaction("manual-reaction".to_string())
+            .await
+            .unwrap();
 
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        let status = manager.get_reaction_status("manual-reaction".to_string()).await.unwrap();
+        let status = manager
+            .get_reaction_status("manual-reaction".to_string())
+            .await
+            .unwrap();
         assert!(
             matches!(status, ComponentStatus::Running),
             "Reaction with auto_start=false should be manually startable"
