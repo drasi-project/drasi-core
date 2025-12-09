@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use crate::error::DrasiError;
-use crate::config::{DrasiLibConfig, DrasiLibSettings, RuntimeConfig};
+use crate::config::{DrasiLibConfig, RuntimeConfig};
 use crate::queries::QueryManager;
 use crate::reactions::ReactionManager;
 use crate::sources::SourceManager;
@@ -348,11 +348,9 @@ impl InspectionAPI {
         }
 
         Ok(DrasiLibConfig {
-            server_core: DrasiLibSettings {
-                id: self.config.server_core.id.clone(),
-                priority_queue_capacity: self.config.server_core.priority_queue_capacity,
-                dispatch_buffer_capacity: self.config.server_core.dispatch_buffer_capacity,
-            },
+            id: self.config.id.clone(),
+            priority_queue_capacity: None, // Already applied to queries
+            dispatch_buffer_capacity: None, // Already applied to queries
             storage_backends: vec![],
             queries,
         })

@@ -559,7 +559,7 @@ impl DrasiLib {
     ///     .await?;
     ///
     /// let config = core.get_config();
-    /// println!("Server ID: {}", config.server_core.id);
+    /// println!("Server ID: {}", config.id);
     /// println!("Number of queries: {}", config.queries.len());
     /// # Ok(())
     /// # }

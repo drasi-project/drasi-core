@@ -63,8 +63,7 @@
 use std::sync::Arc;
 
 use crate::config::{
-    DrasiLibConfig, DrasiLibSettings, QueryConfig, QueryJoinConfig, QueryLanguage,
-    SourceSubscriptionConfig,
+    DrasiLibConfig, QueryConfig, QueryJoinConfig, QueryLanguage, SourceSubscriptionConfig,
 };
 use drasi_core::models::SourceMiddlewareConfig;
 use crate::channels::DispatchMode;
@@ -217,11 +216,9 @@ impl DrasiLibBuilder {
     pub async fn build(self) -> Result<DrasiLib> {
         // Build the configuration
         let config = DrasiLibConfig {
-            server_core: DrasiLibSettings {
-                id: self.server_id.unwrap_or_else(|| "drasi-lib".to_string()),
-                priority_queue_capacity: self.priority_queue_capacity,
-                dispatch_buffer_capacity: self.dispatch_buffer_capacity,
-            },
+            id: self.server_id.unwrap_or_else(|| "drasi-lib".to_string()),
+            priority_queue_capacity: self.priority_queue_capacity,
+            dispatch_buffer_capacity: self.dispatch_buffer_capacity,
             storage_backends: self.storage_backends,
             queries: self.query_configs.clone(),
         };
@@ -514,7 +511,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(core.get_config().server_core.id, "test-server");
+        assert_eq!(core.get_config().id, "test-server");
     }
 
     #[tokio::test]

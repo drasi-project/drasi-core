@@ -126,9 +126,23 @@ pub struct SourceSubscriptionConfig {
 ///
 /// A typical configuration has these sections:
 ///
-/// 1. **server_core**: Global server settings (optional)
-/// 2. **storage_backends**: Storage backend definitions (optional)
-/// 3. **queries**: Continuous queries to process data
+/// 1. **id**: Unique server identifier (optional, defaults to UUID)
+/// 2. **priority_queue_capacity**: Default capacity for event queues (optional)
+/// 3. **dispatch_buffer_capacity**: Default capacity for dispatch buffers (optional)
+/// 4. **storage_backends**: Storage backend definitions (optional)
+/// 5. **queries**: Continuous queries to process data
+///
+/// # Capacity Settings
+///
+/// - **priority_queue_capacity**: Default capacity for timestamp-ordered event queues in
+///   queries and reactions. Higher values support more out-of-order events but consume
+///   more memory. Default: 10000
+///
+/// - **dispatch_buffer_capacity**: Default capacity for event dispatch channels between
+///   components (sources → queries, queries → reactions). Higher values improve throughput
+///   under load but consume more memory. Default: 1000
+///
+/// Individual components can override these defaults by setting their own capacity values.
 ///
 /// # Thread Safety
 ///
@@ -163,85 +177,9 @@ pub struct SourceSubscriptionConfig {
 /// - Valid storage backend references
 ///
 /// Note: Source and reaction validation happens at runtime when instances are added.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct DrasiLibConfig {
-    #[serde(default)]
-    pub server_core: DrasiLibSettings,
-    /// Global storage backend definitions that can be referenced by queries
-    #[serde(default)]
-    pub storage_backends: Vec<StorageBackendConfig>,
-    /// Query configurations
-    #[serde(default)]
-    pub queries: Vec<QueryConfig>,
-}
-
-/// Global server settings for Drasi Server Core
-///
-/// `DrasiLibSettings` configures global behavior and default capacity settings
-/// that apply to all components unless overridden at the component level.
-///
-/// # Capacity Settings
-///
-/// - **priority_queue_capacity**: Default capacity for timestamp-ordered event queues in
-///   queries and reactions. Higher values support more out-of-order events but consume
-///   more memory. Default: 10000
-///
-/// - **dispatch_buffer_capacity**: Default capacity for event dispatch channels between
-///   components (sources → queries, queries → reactions). Higher values improve throughput
-///   under load but consume more memory. Default: 1000
-///
-/// # Component Overrides
-///
-/// Individual components can override these defaults by setting their own capacity values.
-/// This allows fine-tuning performance for specific high-throughput components while
-/// keeping reasonable defaults for others.
-///
-/// # Examples
-///
-/// ## Default Settings
-///
-/// ```yaml
-/// server_core:
-///   id: my-server
-/// # priority_queue_capacity defaults to 10000
-/// # dispatch_buffer_capacity defaults to 1000
-/// ```
-///
-/// ## High-Throughput Configuration
-///
-/// ```yaml
-/// server_core:
-///   id: production-server
-///   priority_queue_capacity: 50000   # Large queues for high event volumes
-///   dispatch_buffer_capacity: 5000   # Large buffers for throughput
-/// ```
-///
-/// ## Component-Specific Override
-///
-/// ```yaml
-/// server_core:
-///   priority_queue_capacity: 10000  # Default for most components
-///
-/// queries:
-///   - id: high_volume_query
-///     priority_queue_capacity: 100000  # Override for this specific query
-///     query: "MATCH (n) RETURN n"
-///     sources: [data_source]
-/// ```
-///
-/// # Performance Considerations
-///
-/// **Priority Queue Capacity**:
-/// - Too small: Out-of-order events may be dropped
-/// - Too large: Higher memory usage
-/// - Recommended: 10000-50000 for most workloads
-///
-/// **Dispatch Buffer Capacity**:
-/// - Too small: Backpressure may slow down upstream components
-/// - Too large: Higher memory usage, longer shutdown times
-/// - Recommended: 1000-10000 for most workloads
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DrasiLibSettings {
+pub struct DrasiLibConfig {
+    /// Unique identifier for this DrasiLib instance (defaults to UUID)
     #[serde(default = "default_id")]
     pub id: String,
     /// Default priority queue capacity for queries and reactions (default: 10000 if not specified)
@@ -250,6 +188,24 @@ pub struct DrasiLibSettings {
     /// Default dispatch buffer capacity for sources and queries (default: 1000 if not specified)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_buffer_capacity: Option<usize>,
+    /// Global storage backend definitions that can be referenced by queries
+    #[serde(default)]
+    pub storage_backends: Vec<StorageBackendConfig>,
+    /// Query configurations
+    #[serde(default)]
+    pub queries: Vec<QueryConfig>,
+}
+
+impl Default for DrasiLibConfig {
+    fn default() -> Self {
+        Self {
+            id: default_id(),
+            priority_queue_capacity: None,
+            dispatch_buffer_capacity: None,
+            storage_backends: Vec::new(),
+            queries: Vec::new(),
+        }
+    }
 }
 
 /// Configuration for a continuous query
@@ -554,17 +510,6 @@ impl DrasiLibConfig {
         }
 
         Ok(())
-    }
-}
-
-impl Default for DrasiLibSettings {
-    fn default() -> Self {
-        Self {
-            // Default server ID to a random UUID
-            id: uuid::Uuid::new_v4().to_string(),
-            priority_queue_capacity: None,
-            dispatch_buffer_capacity: None,
-        }
     }
 }
 

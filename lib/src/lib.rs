@@ -104,8 +104,8 @@ pub use channels::DispatchMode;
 
 /// Configuration types
 pub use config::{
-    DrasiLibConfig, DrasiLibSettings, QueryConfig, QueryLanguage, QueryRuntime, ReactionRuntime,
-    RuntimeConfig, SourceRuntime,
+    DrasiLibConfig, QueryConfig, QueryLanguage, QueryRuntime, ReactionRuntime, RuntimeConfig,
+    SourceRuntime,
 };
 
 /// Storage backend configuration types

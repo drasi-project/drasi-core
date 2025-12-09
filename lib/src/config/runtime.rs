@@ -213,8 +213,8 @@ impl From<QueryConfig> for QueryRuntime {
 /// # Examples
 ///
 /// ```yaml
-/// server_core:
-///   priority_queue_capacity: 50000  # Global default
+/// id: my-server
+/// priority_queue_capacity: 50000  # Global default
 ///
 /// queries:
 ///   - id: q1
@@ -231,7 +231,8 @@ impl From<QueryConfig> for QueryRuntime {
 /// ```
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
-    pub server_core: super::schema::DrasiLibSettings,
+    /// Unique identifier for this DrasiLib instance
+    pub id: String,
     /// Index factory for creating storage backend indexes for queries
     pub index_factory: Arc<IndexFactory>,
     /// Query configurations (sources/reactions are now instance-only)
@@ -241,8 +242,8 @@ pub struct RuntimeConfig {
 impl From<super::schema::DrasiLibConfig> for RuntimeConfig {
     fn from(config: super::schema::DrasiLibConfig) -> Self {
         // Get the global defaults (or hardcoded fallbacks)
-        let global_priority_queue = config.server_core.priority_queue_capacity.unwrap_or(10000);
-        let global_dispatch_capacity = config.server_core.dispatch_buffer_capacity.unwrap_or(1000);
+        let global_priority_queue = config.priority_queue_capacity.unwrap_or(10000);
+        let global_dispatch_capacity = config.dispatch_buffer_capacity.unwrap_or(1000);
 
         // Create IndexFactory from storage backend configurations
         let index_factory = Arc::new(IndexFactory::new(config.storage_backends));
@@ -263,7 +264,7 @@ impl From<super::schema::DrasiLibConfig> for RuntimeConfig {
             .collect();
 
         Self {
-            server_core: config.server_core,
+            id: config.id,
             index_factory,
             queries,
         }

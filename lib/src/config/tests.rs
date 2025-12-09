@@ -18,13 +18,17 @@ mod schema_tests {
     use serde_json::json;
 
     #[test]
-    fn test_server_settings_defaults() {
-        let settings: DrasiLibSettings = serde_json::from_value(json!({
+    fn test_config_defaults() {
+        let config: DrasiLibConfig = serde_json::from_value(json!({
             "id": "default-server"
         }))
         .unwrap();
 
-        assert_eq!(settings.id, "default-server"); // default
+        assert_eq!(config.id, "default-server");
+        assert!(config.priority_queue_capacity.is_none());
+        assert!(config.dispatch_buffer_capacity.is_none());
+        assert!(config.queries.is_empty());
+        assert!(config.storage_backends.is_empty());
     }
 
     #[test]
@@ -154,7 +158,7 @@ mod persistence_tests {
 
         // Create config programmatically and serialize it
         let mut config = DrasiLibConfig::default();
-        config.server_core.id = "test-server".to_string();
+        config.id = "test-server".to_string();
 
         // Note: Sources are now instance-based. Only queries are stored in config.
         config.queries.push(QueryConfig {
@@ -218,7 +222,7 @@ mod persistence_tests {
         let loaded_yaml = fs::read_to_string(&config_path).unwrap();
         let loaded_config: DrasiLibConfig = serde_yaml::from_str(&loaded_yaml).unwrap();
 
-        assert_eq!(loaded_config.server_core.id, config.server_core.id);
+        assert_eq!(loaded_config.id, config.id);
         assert_eq!(loaded_config.queries.len(), config.queries.len());
     }
 
