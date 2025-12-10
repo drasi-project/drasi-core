@@ -513,12 +513,11 @@ impl ReplicationConnection {
     }
 }
 
-// DevSkim: ignore DS126858 (PostgreSQL MD5 auth compatibility)
 fn compute_md5_password(user: &str, password: &str, salt: &[u8; 4]) -> String {
     use std::fmt::Write;
 
     // First MD5: password + username
-    let mut hasher = md5::Context::new();
+    let mut hasher = md5::Context::new(); // DevSkim: ignore DS126858 (PostgreSQL MD5 auth compatibility)
     hasher.consume(password.as_bytes());
     hasher.consume(user.as_bytes());
     let pass_user_hash = hasher.compute();
@@ -564,6 +563,7 @@ fn parse_lsn(lsn_str: &str) -> Result<u64> {
 }
 
 // Simple MD5 implementation for password hashing
+// DevSkim: ignore DS126858 (PostgreSQL MD5 auth compatibility)
 mod md5 {
     pub struct Context {
         state: [u32; 4],
