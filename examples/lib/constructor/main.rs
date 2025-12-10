@@ -165,7 +165,7 @@ async fn main() -> Result<()> {
         "#.to_string(),
         query_language: QueryLanguage::Cypher,
         middleware: vec![],
-        source_subscriptions: vec![
+        sources: vec![
             SourceSubscriptionConfig {
                 source_id: "stock-prices".to_string(),
                 pipeline: vec![],
