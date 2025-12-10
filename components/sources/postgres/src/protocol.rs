@@ -176,6 +176,7 @@ impl FrontendMessage {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum BackendMessage {
     Authentication(AuthenticationMessage),
