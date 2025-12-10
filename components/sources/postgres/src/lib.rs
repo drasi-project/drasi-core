@@ -167,7 +167,6 @@
 //! drasi.add_source(source).await?;
 //! ```
 
-pub mod bootstrap;
 pub mod config;
 pub mod connection;
 pub mod decoder;
