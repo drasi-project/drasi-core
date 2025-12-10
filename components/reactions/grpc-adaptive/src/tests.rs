@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// DevSkim: ignore DS137138 - localhost is used for unit test endpoints only
-// DevSkim: ignore DS162092 - localhost is used for unit test endpoints only
-
 use super::AdaptiveGrpcReaction;
 use drasi_lib::channels::*;
 use drasi_lib::config::{QueryConfig, ReactionConfig, ReactionSpecificConfig};
@@ -168,7 +165,7 @@ fn create_adaptive_grpc_reaction_with_custom_config(
 async fn test_adaptive_grpc_reaction_creation() {
     let (event_tx, _event_rx) = mpsc::channel(100);
     let config =
-        create_adaptive_grpc_reaction_config("test-adaptive-grpc", "grpc://localhost:50052");
+        create_adaptive_grpc_reaction_config("test-adaptive-grpc", "grpc://localhost:50052"); // DevSkim: ignore DS137138
     let reaction = AdaptiveGrpcReaction::new(config.clone(), event_tx);
     assert_eq!(reaction.status().await, ComponentStatus::Stopped);
 }
@@ -178,7 +175,7 @@ async fn test_adaptive_grpc_reaction_lifecycle() {
     let (event_tx, _event_rx) = mpsc::channel(100);
     let config = create_adaptive_grpc_reaction_config(
         "test-adaptive-grpc-lifecycle",
-        "grpc://localhost:50052",
+        "grpc://localhost:50052", // DevSkim: ignore DS137138
     );
     let reaction = AdaptiveGrpcReaction::new(config, event_tx);
 
@@ -205,7 +202,7 @@ async fn test_adaptive_grpc_reaction_lifecycle() {
 async fn test_adaptive_grpc_reaction_default_config() {
     let (event_tx, _event_rx) = mpsc::channel(100);
     let config =
-        create_adaptive_grpc_reaction_config("test-adaptive-default", "grpc://localhost:50052");
+        create_adaptive_grpc_reaction_config("test-adaptive-default", "grpc://localhost:50052"); // DevSkim: ignore DS137138
     let reaction = AdaptiveGrpcReaction::new(config, event_tx);
 
     // Verify default adaptive config is applied
@@ -217,7 +214,7 @@ async fn test_adaptive_grpc_reaction_custom_config() {
     let (event_tx, _event_rx) = mpsc::channel(100);
     let config = create_adaptive_grpc_reaction_with_custom_config(
         "test-adaptive-custom",
-        "grpc://localhost:50052",
+        "grpc://localhost:50052", // DevSkim: ignore DS137138
         2000, // max_batch_size
         50,   // min_batch_size
         10,   // window_size
@@ -233,7 +230,7 @@ async fn test_adaptive_grpc_reaction_high_throughput_config() {
     let (event_tx, _event_rx) = mpsc::channel(100);
     let config = create_adaptive_grpc_reaction_with_custom_config(
         "test-adaptive-high-throughput",
-        "grpc://localhost:50052",
+        "grpc://localhost:50052", // DevSkim: ignore DS137138
         2000, // max_batch_size
         100,  // min_batch_size
         10,   // window_size
@@ -257,7 +254,7 @@ async fn test_adaptive_grpc_reaction_low_latency_config() {
     let (event_tx, _event_rx) = mpsc::channel(100);
     let config = create_adaptive_grpc_reaction_with_custom_config(
         "test-adaptive-low-latency",
-        "grpc://localhost:50052",
+        "grpc://localhost:50052", // DevSkim: ignore DS137138
         100, // max_batch_size
         5,   // min_batch_size
         3,   // window_size
@@ -281,7 +278,7 @@ async fn test_adaptive_grpc_reaction_disabled_adaptation() {
     let (event_tx, _event_rx) = mpsc::channel(100);
     let config = create_adaptive_grpc_reaction_with_custom_config(
         "test-adaptive-disabled",
-        "grpc://localhost:50052",
+        "grpc://localhost:50052", // DevSkim: ignore DS137138
         1000, // max_batch_size
         100,  // min_batch_size
         5,    // window_size
@@ -342,7 +339,7 @@ async fn test_adaptive_grpc_reaction_with_metadata() {
         queries: vec!["query1".to_string()],
         auto_start: false,
         config: ReactionSpecificConfig::GrpcAdaptive(GrpcAdaptiveReactionConfig {
-            endpoint: "grpc://localhost:50052".to_string(),
+            endpoint: "grpc://localhost:50052".to_string(), // DevSkim: ignore DS137138
             timeout_ms: 5000,
             max_retries: 3,
             connection_retry_attempts: 5,
@@ -369,7 +366,7 @@ async fn test_adaptive_grpc_reaction_batch_size_constraints() {
     // Test with narrow range (limited adaptation)
     let config = create_adaptive_grpc_reaction_with_custom_config(
         "test-adaptive-narrow-range",
-        "grpc://localhost:50052",
+        "grpc://localhost:50052", // DevSkim: ignore DS137138
         100, // max
         90,  // min - very narrow range
         5,   // window_size
@@ -381,7 +378,7 @@ async fn test_adaptive_grpc_reaction_batch_size_constraints() {
     // Test with wide range (maximum adaptation)
     let config = create_adaptive_grpc_reaction_with_custom_config(
         "test-adaptive-wide-range",
-        "grpc://localhost:50052",
+        "grpc://localhost:50052", // DevSkim: ignore DS137138
         5000, // max
         1,    // min - very wide range
         5,    // window_size
@@ -398,7 +395,7 @@ async fn test_adaptive_grpc_reaction_window_size_variations() {
     // Test with short window (fast adaptation)
     let config = create_adaptive_grpc_reaction_with_custom_config(
         "test-adaptive-short-window",
-        "grpc://localhost:50052",
+        "grpc://localhost:50052", // DevSkim: ignore DS137138
         1000, // max_batch_size
         10,   // min_batch_size
         1,    // window_size - very short
@@ -410,7 +407,7 @@ async fn test_adaptive_grpc_reaction_window_size_variations() {
     // Test with long window (stable adaptation)
     let config = create_adaptive_grpc_reaction_with_custom_config(
         "test-adaptive-long-window",
-        "grpc://localhost:50052",
+        "grpc://localhost:50052", // DevSkim: ignore DS137138
         1000, // max_batch_size
         10,   // min_batch_size
         30,   // window_size - long window
@@ -427,7 +424,7 @@ async fn test_adaptive_grpc_reaction_timeout_configurations() {
     // Test with short timeout (for fast failures)
     let mut config = create_adaptive_grpc_reaction_config(
         "test-adaptive-short-timeout",
-        "grpc://localhost:50052",
+        "grpc://localhost:50052", // DevSkim: ignore DS137138
     );
     if let ReactionSpecificConfig::GrpcAdaptive(ref mut grpc_config) = config.config {
         grpc_config.timeout_ms = 1000; // Short timeout
@@ -439,7 +436,7 @@ async fn test_adaptive_grpc_reaction_timeout_configurations() {
     // Test with long timeout (for slow servers)
     let mut config = create_adaptive_grpc_reaction_config(
         "test-adaptive-long-timeout",
-        "grpc://localhost:50052",
+        "grpc://localhost:50052", // DevSkim: ignore DS137138
     );
     if let ReactionSpecificConfig::GrpcAdaptive(ref mut grpc_config) = config.config {
         grpc_config.timeout_ms = 30000; // Long timeout
@@ -456,7 +453,7 @@ async fn test_adaptive_grpc_reaction_connection_retry_configurations() {
     // Test with aggressive retries
     let mut config = create_adaptive_grpc_reaction_config(
         "test-adaptive-aggressive-retry",
-        "grpc://localhost:50052",
+        "grpc://localhost:50052", // DevSkim: ignore DS137138
     );
     if let ReactionSpecificConfig::GrpcAdaptive(ref mut grpc_config) = config.config {
         grpc_config.connection_retry_attempts = 10;
@@ -468,7 +465,7 @@ async fn test_adaptive_grpc_reaction_connection_retry_configurations() {
     // Test with minimal retries
     let mut config = create_adaptive_grpc_reaction_config(
         "test-adaptive-minimal-retry",
-        "grpc://localhost:50052",
+        "grpc://localhost:50052", // DevSkim: ignore DS137138
     );
     if let ReactionSpecificConfig::GrpcAdaptive(ref mut grpc_config) = config.config {
         grpc_config.connection_retry_attempts = 1;

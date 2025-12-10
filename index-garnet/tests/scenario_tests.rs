@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// DevSkim: ignore DS137138 - localhost is used for unit test Redis connection only
-// DevSkim: ignore DS162092 - localhost/127.0.0.1 is used for unit test Redis connection only
-
 use std::{
     env,
     sync::{Arc, Mutex},

@@ -182,7 +182,6 @@ mod tests {
 
     #[test]
     fn test_adaptive_http_builder_defaults() {
-        // DevSkim: ignore DS137138: Unit test only – no actual network request is made
         let reaction = HttpAdaptiveReactionBuilder::new("test-reaction")
             .build()
             .unwrap();
@@ -190,15 +189,14 @@ mod tests {
         let props = reaction.properties();
         assert_eq!(
             props.get("base_url"),
-            Some(&serde_json::Value::String("http://localhost".to_string()))
+            Some(&serde_json::Value::String("http://localhost".to_string())) // DevSkim: ignore DS137138
         );
     }
 
     #[test]
     fn test_adaptive_http_builder_custom_values() {
-        // DevSkim: ignore DS137138: Unit test only – no actual network request is made
         let reaction = AdaptiveHttpReaction::builder("test-reaction")
-            .with_base_url("http://api.example.com")
+            .with_base_url("http://api.example.com") // DevSkim: ignore DS137138
             .with_token("secret-token")
             .with_timeout_ms(10000)
             .with_queries(vec!["query1".to_string()])

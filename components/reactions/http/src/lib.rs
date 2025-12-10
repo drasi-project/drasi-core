@@ -189,9 +189,8 @@ mod tests {
 
     #[test]
     fn test_http_builder_custom_values() {
-        // DevSkim: ignore DS137138 in unit test
         let reaction = HttpReaction::builder("test-reaction")
-            .with_base_url("http://api.example.com") 
+            .with_base_url("http://api.example.com") // DevSkim: ignore DS137138 
             .with_token("secret-token")
             .with_timeout_ms(10000)
             .with_queries(vec!["query1".to_string()])
@@ -203,7 +202,7 @@ mod tests {
         assert_eq!(
             props.get("base_url"),
             Some(&serde_json::Value::String(
-                "http://api.example.com".to_string()
+                "http://api.example.com".to_string() // DevSkim: ignore DS137138
             ))
         );
         assert_eq!(
@@ -227,7 +226,7 @@ mod tests {
     #[test]
     fn test_http_new_constructor() {
         let config = HttpReactionConfig {
-            base_url: "http://test.example.com".to_string(),
+            base_url: "http://test.example.com".to_string(), // DevSkim: ignore DS137138
             token: Some("test-token".to_string()),
             timeout_ms: 3000,
             routes: Default::default(),

@@ -96,10 +96,10 @@ impl ReplicationConnection {
                             ))
                             .await?;
                         }
+                        // DevSkim: ignore DS126858 (PostgreSQL MD5 auth compatibility)
                         AuthenticationMessage::MD5Password(salt) => {
-                            // DevSkim: ignore DS126858: server requests MD5 password authentication
                             debug!("Server requested MD5 password");
-                            let md5_password = compute_md5_password(user, password, &salt);
+                            let md5_password = compute_md5_password(user, password, &salt); // DevSkim: ignore DS126858
                             self.send_message(FrontendMessage::PasswordMessage(md5_password))
                                 .await?;
                         }
@@ -513,6 +513,7 @@ impl ReplicationConnection {
     }
 }
 
+// DevSkim: ignore DS126858 (PostgreSQL MD5 auth compatibility)
 fn compute_md5_password(user: &str, password: &str, salt: &[u8; 4]) -> String {
     use std::fmt::Write;
 
