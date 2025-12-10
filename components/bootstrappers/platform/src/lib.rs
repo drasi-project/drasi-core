@@ -62,7 +62,7 @@ mod tests {
         let result = PlatformBootstrapProviderBuilder::new()
             .with_query_api_url("http://remote-drasi:8080") // DevSkim: ignore DS137138
             .with_timeout_seconds(600)
-            .build(); 
+            .build();
         assert!(result.is_ok());
     }
 

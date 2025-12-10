@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn test_http_builder_custom_values() {
         let reaction = HttpReaction::builder("test-reaction")
-            .with_base_url("http://api.example.com") // DevSkim: ignore DS137138 
+            .with_base_url("http://api.example.com") // DevSkim: ignore DS137138
             .with_token("secret-token")
             .with_timeout_ms(10000)
             .with_queries(vec!["query1".to_string()])
