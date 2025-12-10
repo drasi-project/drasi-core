@@ -29,6 +29,7 @@ use drasi_lib::sources::manager::convert_json_to_element_properties;
 use drasi_lib::bootstrap::ScriptFileBootstrapConfig;
 
 /// Bootstrap provider that reads data from JSONL script files
+#[derive(Default)]
 pub struct ScriptFileBootstrapProvider {
     file_paths: Vec<String>,
 }
@@ -58,13 +59,6 @@ impl ScriptFileBootstrapProvider {
     }
 }
 
-impl Default for ScriptFileBootstrapProvider {
-    fn default() -> Self {
-        Self {
-            file_paths: Vec::new(),
-        }
-    }
-}
 
 /// Builder for ScriptFileBootstrapProvider
 ///

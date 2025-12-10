@@ -16,7 +16,7 @@ use super::config::LogReactionConfig;
 use anyhow::Result;
 use async_trait::async_trait;
 use handlebars::Handlebars;
-use log::debug;
+use log::{debug, info};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -65,7 +65,7 @@ impl LogReaction {
     }
 
     fn log_result(&self, message: &str) {
-        println!("[{}] {}", self.base.id, message);
+        info!("[{}] {}", self.base.id, message);
     }
 
     /// Create a builder for LogReaction
@@ -280,7 +280,7 @@ impl Reaction for LogReaction {
                     continue;
                 }
 
-                println!(
+                info!(
                     "[{}] Query '{}' ({} items):",
                     reaction_name,
                     query_result.query_id,
@@ -312,7 +312,7 @@ impl Reaction for LogReaction {
                                         // Use template
                                         match handlebars.render_template(template, &context) {
                                             Ok(rendered) => {
-                                                println!("[{}]   {}", reaction_name, rendered);
+                                                info!("[{}]   {}", reaction_name, rendered);
                                             }
                                             Err(e) => {
                                                 debug!(
@@ -320,12 +320,12 @@ impl Reaction for LogReaction {
                                                     reaction_name, e
                                                 );
                                                 // Fall back to JSON output
-                                                println!("[{}]   [ADD] {}", reaction_name, data);
+                                                info!("[{}]   [ADD] {}", reaction_name, data);
                                             }
                                         }
                                     } else {
                                         // Default: show full JSON
-                                        println!("[{}]   [ADD] {}", reaction_name, data);
+                                        info!("[{}]   [ADD] {}", reaction_name, data);
                                     }
                                 }
                             }
@@ -337,7 +337,7 @@ impl Reaction for LogReaction {
                                         // Use template
                                         match handlebars.render_template(template, &context) {
                                             Ok(rendered) => {
-                                                println!("[{}]   {}", reaction_name, rendered);
+                                                info!("[{}]   {}", reaction_name, rendered);
                                             }
                                             Err(e) => {
                                                 debug!(
@@ -345,12 +345,12 @@ impl Reaction for LogReaction {
                                                     reaction_name, e
                                                 );
                                                 // Fall back to JSON output
-                                                println!("[{}]   [DELETE] {}", reaction_name, data);
+                                                info!("[{}]   [DELETE] {}", reaction_name, data);
                                             }
                                         }
                                     } else {
                                         // Default: show full JSON
-                                        println!("[{}]   [DELETE] {}", reaction_name, data);
+                                        info!("[{}]   [DELETE] {}", reaction_name, data);
                                     }
                                 }
                             }
@@ -368,7 +368,7 @@ impl Reaction for LogReaction {
                                         // Use template
                                         match handlebars.render_template(template, &context) {
                                             Ok(rendered) => {
-                                                println!("[{}]   {}", reaction_name, rendered);
+                                                info!("[{}]   {}", reaction_name, rendered);
                                             }
                                             Err(e) => {
                                                 debug!(
@@ -376,7 +376,7 @@ impl Reaction for LogReaction {
                                                     reaction_name, e
                                                 );
                                                 // Fall back to JSON output
-                                                println!(
+                                                info!(
                                                     "[{}]   [UPDATE] {} -> {}",
                                                     reaction_name, before, after
                                                 );
@@ -384,7 +384,7 @@ impl Reaction for LogReaction {
                                         }
                                     } else {
                                         // Default: show full JSON
-                                        println!(
+                                        info!(
                                             "[{}]   [UPDATE] {} -> {}",
                                             reaction_name, before, after
                                         );
@@ -392,7 +392,7 @@ impl Reaction for LogReaction {
                                 }
                             }
                             _ => {
-                                println!(
+                                info!(
                                     "[{}]   [{}] {}",
                                     reaction_name,
                                     result_type.to_uppercase(),

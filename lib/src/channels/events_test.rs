@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn test_component_status_variants() {
-        let statuses = vec![
+        let statuses = [
             ComponentStatus::Starting,
             ComponentStatus::Running,
             ComponentStatus::Stopping,
@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn test_component_type_variants() {
-        let types = vec![ComponentType::Source, ComponentType::Query, ComponentType::Reaction];
+        let types = [ComponentType::Source, ComponentType::Query, ComponentType::Reaction];
 
         assert_eq!(types.len(), 3);
     }

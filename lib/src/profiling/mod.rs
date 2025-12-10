@@ -357,17 +357,18 @@ mod tests {
 
     #[test]
     fn test_elapsed_calculations() {
-        let mut metadata = ProfilingMetadata::default();
-
         // Set up timestamps for testing
-        metadata.source_receive_ns = Some(1000);
-        metadata.source_send_ns = Some(2000);
-        metadata.query_receive_ns = Some(3000);
-        metadata.query_core_call_ns = Some(3500);
-        metadata.query_core_return_ns = Some(5500);
-        metadata.query_send_ns = Some(6000);
-        metadata.reaction_receive_ns = Some(7000);
-        metadata.reaction_complete_ns = Some(8000);
+        let metadata = ProfilingMetadata {
+            source_receive_ns: Some(1000),
+            source_send_ns: Some(2000),
+            query_receive_ns: Some(3000),
+            query_core_call_ns: Some(3500),
+            query_core_return_ns: Some(5500),
+            query_send_ns: Some(6000),
+            reaction_receive_ns: Some(7000),
+            reaction_complete_ns: Some(8000),
+            ..Default::default()
+        };
 
         // Test individual elapsed time calculations
         assert_eq!(metadata.elapsed_source_internal(), Some(1000));
@@ -392,16 +393,17 @@ mod tests {
 
     #[test]
     fn test_elapsed_summary_ms() {
-        let mut metadata = ProfilingMetadata::default();
-
-        metadata.source_receive_ns = Some(1_000_000); // 1ms
-        metadata.source_send_ns = Some(2_000_000); // 2ms
-        metadata.query_receive_ns = Some(3_000_000); // 3ms
-        metadata.query_core_call_ns = Some(3_500_000); // 3.5ms
-        metadata.query_core_return_ns = Some(5_500_000); // 5.5ms
-        metadata.query_send_ns = Some(6_000_000); // 6ms
-        metadata.reaction_receive_ns = Some(7_000_000); // 7ms
-        metadata.reaction_complete_ns = Some(8_000_000); // 8ms
+        let metadata = ProfilingMetadata {
+            source_receive_ns: Some(1_000_000),  // 1ms
+            source_send_ns: Some(2_000_000),     // 2ms
+            query_receive_ns: Some(3_000_000),   // 3ms
+            query_core_call_ns: Some(3_500_000), // 3.5ms
+            query_core_return_ns: Some(5_500_000), // 5.5ms
+            query_send_ns: Some(6_000_000),      // 6ms
+            reaction_receive_ns: Some(7_000_000), // 7ms
+            reaction_complete_ns: Some(8_000_000), // 8ms
+            ..Default::default()
+        };
 
         let summary = metadata.elapsed_summary_ms();
 
@@ -425,14 +427,18 @@ mod tests {
 
     #[test]
     fn test_merge_metadata() {
-        let mut metadata1 = ProfilingMetadata::default();
-        metadata1.source_receive_ns = Some(1000);
-        metadata1.source_send_ns = Some(2000);
+        let mut metadata1 = ProfilingMetadata {
+            source_receive_ns: Some(1000),
+            source_send_ns: Some(2000),
+            ..Default::default()
+        };
 
-        let mut metadata2 = ProfilingMetadata::default();
-        metadata2.query_receive_ns = Some(3000);
-        metadata2.query_send_ns = Some(4000);
-        metadata2.source_send_ns = Some(9999); // Should not override
+        let metadata2 = ProfilingMetadata {
+            query_receive_ns: Some(3000),
+            query_send_ns: Some(4000),
+            source_send_ns: Some(9999), // Should not override
+            ..Default::default()
+        };
 
         metadata1.merge(&metadata2);
 

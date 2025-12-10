@@ -154,19 +154,14 @@ use tokio::sync::{broadcast, mpsc};
 /// For 10 subscribers with 1000-event buffers:
 /// - Broadcast: ~1,000 events in memory
 /// - Channel: ~10,000 events in memory
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum DispatchMode {
     /// Broadcast mode: single channel with multiple receivers (1-to-N fanout)
     Broadcast,
     /// Channel mode: dedicated channel per subscriber (1-to-1)
+    #[default]
     Channel,
-}
-
-impl Default for DispatchMode {
-    fn default() -> Self {
-        DispatchMode::Channel
-    }
 }
 
 /// Trait for dispatching changes to subscribers

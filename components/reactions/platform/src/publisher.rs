@@ -22,18 +22,10 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 /// Configuration for the Redis Stream Publisher
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PublisherConfig {
     /// Maximum stream length (optional, for MAXLEN policy)
     pub max_stream_length: Option<usize>,
-}
-
-impl Default for PublisherConfig {
-    fn default() -> Self {
-        Self {
-            max_stream_length: None,
-        }
-    }
 }
 
 /// Redis Stream Publisher for CloudEvents

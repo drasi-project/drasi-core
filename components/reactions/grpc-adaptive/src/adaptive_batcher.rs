@@ -458,10 +458,12 @@ mod tests {
     #[tokio::test]
     async fn test_adaptive_batcher_burst() {
         let (tx, rx) = mpsc::channel(1000);
-        let mut config = AdaptiveBatchConfig::default();
         // Start with slightly higher defaults for testing
-        config.min_batch_size = 20;
-        config.max_batch_size = 100;
+        let config = AdaptiveBatchConfig {
+            min_batch_size: 20,
+            max_batch_size: 100,
+            ..Default::default()
+        };
         let mut batcher = AdaptiveBatcher::new(rx, config);
 
         // Send many messages quickly to simulate burst

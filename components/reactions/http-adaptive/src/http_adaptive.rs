@@ -374,7 +374,7 @@ impl AdaptiveHttpReaction {
                         error!("[{}] Failed to send batch: {}", reaction_name, e);
                     }
 
-                    if total_batches % 100 == 0 {
+                    if total_batches.is_multiple_of(100) {
                         info!(
                             "[{}] Adaptive HTTP metrics - Batches: {}, Results: {}, Avg batch size: {:.1}",
                             reaction_name,

@@ -118,7 +118,7 @@ mod properties {
         let source = GrpcSource::new("test", config).unwrap();
         let props = source.properties();
 
-        assert!(props.get("endpoint").is_none());
+        assert!(!props.contains_key("endpoint"));
     }
 }
 
@@ -354,12 +354,12 @@ mod proto_conversion {
     #[test]
     fn test_convert_proto_value_to_element_value_float() {
         let value = prost_types::Value {
-            kind: Some(prost_types::value::Kind::NumberValue(3.14)),
+            kind: Some(prost_types::value::Kind::NumberValue(1.23456)),
         };
         let result = convert_proto_value_to_element_value(&value).unwrap();
         match result {
             drasi_core::models::ElementValue::Float(f) => {
-                assert!((f.0 - 3.14).abs() < 0.001);
+                assert!((f.0 - 1.23456).abs() < 0.001);
             }
             _ => panic!("Expected Float"),
         }

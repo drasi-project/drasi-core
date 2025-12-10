@@ -487,14 +487,11 @@ impl PlatformSource {
     ///
     /// This method is intended for use in tests to receive events broadcast by the source.
     /// In production, queries subscribe to sources through the SourceManager.
-
     /// Parse configuration from properties
     #[allow(dead_code)]
     fn parse_config(properties: &HashMap<String, Value>) -> Result<PlatformConfig> {
-        let mut config = PlatformConfig::default();
-
-        // Required fields
-        config.redis_url = properties
+        // Extract required fields first
+        let redis_url = properties
             .get("redis_url")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
@@ -505,7 +502,7 @@ impl PlatformSource {
             })?
             .to_string();
 
-        config.stream_key = properties
+        let stream_key = properties
             .get("stream_key")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
@@ -516,7 +513,7 @@ impl PlatformSource {
             })?
             .to_string();
 
-        config.consumer_group = properties
+        let consumer_group = properties
             .get("consumer_group")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
@@ -527,7 +524,7 @@ impl PlatformSource {
             })?
             .to_string();
 
-        config.consumer_name = properties
+        let consumer_name = properties
             .get("consumer_name")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
@@ -538,33 +535,43 @@ impl PlatformSource {
             })?
             .to_string();
 
-        // Optional fields
-        if let Some(batch_size) = properties.get("batch_size").and_then(|v| v.as_u64()) {
-            config.batch_size = batch_size as usize;
-        }
+        // Get defaults for optional field handling
+        let defaults = PlatformConfig::default();
 
-        if let Some(block_ms) = properties.get("block_ms").and_then(|v| v.as_u64()) {
-            config.block_ms = block_ms;
-        }
-
-        if let Some(start_id) = properties.get("start_id").and_then(|v| v.as_str()) {
-            config.start_id = start_id.to_string();
-        }
-
-        if let Some(always_create) = properties
-            .get("always_create_consumer_group")
-            .and_then(|v| v.as_bool())
-        {
-            config.always_create_consumer_group = always_create;
-        }
-
-        if let Some(max_retries) = properties.get("max_retries").and_then(|v| v.as_u64()) {
-            config.max_retries = max_retries as usize;
-        }
-
-        if let Some(retry_delay_ms) = properties.get("retry_delay_ms").and_then(|v| v.as_u64()) {
-            config.retry_delay_ms = retry_delay_ms;
-        }
+        // Build config with optional fields
+        let config = PlatformConfig {
+            redis_url,
+            stream_key,
+            consumer_group,
+            consumer_name,
+            batch_size: properties
+                .get("batch_size")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize)
+                .unwrap_or(defaults.batch_size),
+            block_ms: properties
+                .get("block_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(defaults.block_ms),
+            start_id: properties
+                .get("start_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or(defaults.start_id),
+            always_create_consumer_group: properties
+                .get("always_create_consumer_group")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.always_create_consumer_group),
+            max_retries: properties
+                .get("max_retries")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize)
+                .unwrap_or(defaults.max_retries),
+            retry_delay_ms: properties
+                .get("retry_delay_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(defaults.retry_delay_ms),
+        };
 
         // Validate
         if config.redis_url.is_empty() {

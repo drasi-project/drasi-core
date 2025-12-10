@@ -575,7 +575,7 @@ mod event_transformation {
                         "properties": {
                             "string_prop": "hello",
                             "int_prop": 42,
-                            "float_prop": 3.14,
+                            "float_prop": 1.23456,
                             "bool_prop": true,
                             "null_prop": null,
                             "array_prop": [1, 2, 3],

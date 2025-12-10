@@ -313,7 +313,7 @@ impl Source for MockSource {
                             labels: Arc::from(vec![Arc::from("Generic")]),
                             effective_from: std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
+                                .expect("System time is before UNIX epoch")
                                 .as_nanos() as u64,
                         };
 

@@ -157,8 +157,10 @@ mod persistence_tests {
         let config_path = temp_dir.path().join("test_config.yaml");
 
         // Create config programmatically and serialize it
-        let mut config = DrasiLibConfig::default();
-        config.id = "test-server".to_string();
+        let mut config = DrasiLibConfig {
+            id: "test-server".to_string(),
+            ..Default::default()
+        };
 
         // Note: Sources are now instance-based. Only queries are stored in config.
         config.queries.push(QueryConfig {

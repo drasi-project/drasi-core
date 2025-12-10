@@ -16,6 +16,19 @@ use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 
 use crate::adaptive_batcher::{AdaptiveBatchConfig, AdaptiveBatcher};
 
+/// Internal parameters for running the gRPC adaptive reaction
+struct RunInternalParams {
+    reaction_name: String,
+    endpoint: String,
+    metadata: HashMap<String, String>,
+    #[allow(dead_code)] // Reserved for future use
+    timeout_ms: u64,
+    max_retries: u32,
+    initial_connection_timeout_ms: u64,
+    adaptive_config: AdaptiveBatchConfig,
+    base: ReactionBase,
+}
+
 // Use the proto module and helpers from the grpc-reaction plugin
 use drasi_reaction_grpc::{
     convert_json_to_proto_struct, ProcessResultsRequest, ProtoQueryResult, ProtoQueryResultItem,
@@ -161,18 +174,16 @@ impl AdaptiveGrpcReaction {
     }
 
     async fn run_internal(
-        reaction_name: String,
-        endpoint: String,
-        metadata: HashMap<String, String>,
-        timeout_ms: u64,
-        max_retries: u32,
-        _connection_retry_attempts: u32,
-        initial_connection_timeout_ms: u64,
-        adaptive_config: AdaptiveBatchConfig,
-        base: ReactionBase,
+        params: RunInternalParams,
         mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) {
-        let _timeout_ms = timeout_ms;
+        let reaction_name = params.reaction_name;
+        let endpoint = params.endpoint;
+        let metadata = params.metadata;
+        let max_retries = params.max_retries;
+        let initial_connection_timeout_ms = params.initial_connection_timeout_ms;
+        let adaptive_config = params.adaptive_config;
+        let base = params.base;
 
         // Create channel for batching with capacity based on batch configuration
         let batch_channel_capacity = adaptive_config.recommended_channel_capacity();
@@ -255,7 +266,7 @@ impl AdaptiveGrpcReaction {
                                         successful_sends += 1;
                                         consecutive_failures = 0;
 
-                                        if successful_sends % 100 == 0 {
+                                        if successful_sends.is_multiple_of(100) {
                                             info!(
                                                 "Adaptive metrics - Successful: {}, Failed: {}",
                                                 successful_sends, failed_sends
@@ -483,19 +494,17 @@ impl Reaction for AdaptiveGrpcReaction {
         let base = self.base.clone_shared();
 
         let processing_task_handle = tokio::spawn(async move {
-            Self::run_internal(
+            let params = RunInternalParams {
                 reaction_name,
                 endpoint,
                 metadata,
                 timeout_ms,
                 max_retries,
-                0, // We'll handle connection retry inside run_internal
                 initial_connection_timeout_ms,
                 adaptive_config,
                 base,
-                shutdown_rx,
-            )
-            .await;
+            };
+            Self::run_internal(params, shutdown_rx).await;
         });
 
         // Store the processing task handle

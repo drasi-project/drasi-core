@@ -162,7 +162,7 @@ impl IndexFactory {
     ) -> Result<IndexSet, IndexError> {
         // Validate configuration before building
         spec.validate()
-            .map_err(|e| IndexError::InitializationFailed(e))?;
+            .map_err(IndexError::InitializationFailed)?;
 
         match spec {
             StorageBackendSpec::Memory { enable_archive } => {

@@ -119,6 +119,8 @@ use drasi_lib::plugin_core::Source;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 
 // Include generated protobuf code
+// Allow unwrap in generated proto code - tonic generates code with unwrap() for HTTP response building
+#[allow(clippy::unwrap_used)]
 pub mod proto {
     tonic::include_proto!("drasi.v1");
 }

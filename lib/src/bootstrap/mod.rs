@@ -157,16 +157,10 @@ impl BootstrapProvider for Box<dyn BootstrapProvider> {
 /// bootstrap_provider:
 ///   type: postgres
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct PostgresBootstrapConfig {
     // No additional config needed - uses parent source config
     // Include this struct for consistency and future extensibility
-}
-
-impl Default for PostgresBootstrapConfig {
-    fn default() -> Self {
-        Self {}
-    }
 }
 
 /// Application bootstrap provider configuration
@@ -181,16 +175,10 @@ impl Default for PostgresBootstrapConfig {
 /// bootstrap_provider:
 ///   type: application
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ApplicationBootstrapConfig {
     // No config needed - uses shared state
     // Include for consistency and future extensibility
-}
-
-impl Default for ApplicationBootstrapConfig {
-    fn default() -> Self {
-        Self {}
-    }
 }
 
 /// Script file bootstrap provider configuration

@@ -179,7 +179,7 @@ impl ProfilingStats {
         &self,
         extract_fn: impl Fn(&ProfilingMetadata) -> Option<f64>,
     ) -> (f64, f64, f64, f64, f64) {
-        let mut values: Vec<f64> = self.samples.iter().filter_map(|p| extract_fn(p)).collect();
+        let mut values: Vec<f64> = self.samples.iter().filter_map(&extract_fn).collect();
 
         if values.is_empty() {
             return (0.0, 0.0, 0.0, 0.0, 0.0);

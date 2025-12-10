@@ -135,7 +135,7 @@ mod tests {
 
     #[test]
     fn test_batch_json_to_element_values() {
-        let values = vec![json!(1), json!("test"), json!(true), json!(null)];
+        let values = [json!(1), json!("test"), json!(true), json!(null)];
         let results = batch_json_to_element_values(values.iter());
         // Should have converted all valid values
         assert!(!results.is_empty());

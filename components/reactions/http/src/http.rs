@@ -374,7 +374,7 @@ impl Reaction for HttpReaction {
                     // Try without source prefix if format is "source.query"
                     query_name
                         .split('.')
-                        .last()
+                        .next_back()
                         .and_then(|name| query_configs.get(name))
                 });
 

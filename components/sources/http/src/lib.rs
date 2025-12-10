@@ -1220,7 +1220,7 @@ mod tests {
                 .unwrap();
             let props = source.properties();
 
-            assert!(props.get("endpoint").is_none());
+            assert!(!props.contains_key("endpoint"));
         }
     }
 

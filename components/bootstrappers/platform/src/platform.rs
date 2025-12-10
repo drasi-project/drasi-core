@@ -574,7 +574,7 @@ mod tests {
         let mut properties = Map::new();
         properties.insert("string_prop".to_string(), serde_json::json!("text"));
         properties.insert("number_prop".to_string(), serde_json::json!(42));
-        properties.insert("float_prop".to_string(), serde_json::json!(3.14));
+        properties.insert("float_prop".to_string(), serde_json::json!(1.23456));
         properties.insert("bool_prop".to_string(), serde_json::json!(true));
         properties.insert("null_prop".to_string(), serde_json::json!(null));
 

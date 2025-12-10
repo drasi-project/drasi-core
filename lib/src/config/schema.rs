@@ -65,16 +65,11 @@ use drasi_core::models::SourceMiddlewareConfig;
 ///
 /// **Unsupported Clauses**: ORDER BY, TOP, and LIMIT clauses are not supported in continuous
 /// queries as they conflict with incremental result computation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum QueryLanguage {
+    #[default]
     Cypher,
     GQL,
-}
-
-impl Default for QueryLanguage {
-    fn default() -> Self {
-        QueryLanguage::Cypher
-    }
 }
 
 /// Source subscription configuration for queries
