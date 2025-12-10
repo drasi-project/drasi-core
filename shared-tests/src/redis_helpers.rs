@@ -98,23 +98,31 @@ impl RedisGuard {
     /// Call this at the end of your test to ensure the container is cleaned up.
     /// This is an async method that properly stops and removes the container.
     pub async fn cleanup(self) {
-        if let Ok(mut container_guard) = self.inner.container.lock() {
-            if let Some(container) = container_guard.take() {
-                let container_id = container.id().to_string();
-
-                // Stop and remove the container
-                match container.stop().await {
-                    Ok(_) => {
-                        log::debug!("Successfully stopped Redis container: {}", container_id);
-                    }
-                    Err(e) => {
-                        log::warn!("Error stopping container {}: {}", container_id, e);
-                    }
-                }
-
-                // Explicit drop to trigger removal
-                drop(container);
+        // Take the container out while holding the lock, then drop the lock before awaiting
+        let container_to_stop = {
+            if let Ok(mut container_guard) = self.inner.container.lock() {
+                container_guard.take()
+            } else {
+                None
             }
+        };
+
+        // Now await without holding the lock
+        if let Some(container) = container_to_stop {
+            let container_id = container.id().to_string();
+
+            // Stop and remove the container
+            match container.stop().await {
+                Ok(_) => {
+                    log::debug!("Successfully stopped Redis container: {}", container_id);
+                }
+                Err(e) => {
+                    log::warn!("Error stopping container {}: {}", container_id, e);
+                }
+            }
+
+            // Explicit drop to trigger removal
+            drop(container);
         }
     }
 }
