@@ -1,0 +1,30 @@
+# Clippy configuration for Drasi Server Core
+# Enforces strict code quality standards for library development
+
+# Performance and efficiency
+avoid-breaking-exported-api = true
+msrv = "1.70.0"
+
+# Cognitive complexity thresholds
+cognitive-complexity-threshold = 25
+type-complexity-threshold = 100
+
+# Documentation requirements
+missing-docs-in-crate-items = true
+
+# Naming conventions
+enum-variant-name-threshold = 3
+max-struct-bools = 3
+max-fn-params-bools = 3
+
+# Safety and correctness
+allow-expect-in-tests = true
+allow-unwrap-in-tests = true
+
+# Size and length limits
+too-many-arguments-threshold = 8
+trivial-copy-size-limit = 64
+pass-by-value-size-limit = 128
+
+# Additional strict rules for library code
+warn-on-all-wildcard-imports = true

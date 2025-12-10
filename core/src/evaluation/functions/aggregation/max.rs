@@ -73,7 +73,7 @@ impl AggregatingFunction for Max {
             });
         }
 
-        log::info!("Applying Max with args: {:?}", args);
+        log::info!("Applying Max with args: {args:?}");
         let accumulator = match accumulator {
             Accumulator::LazySortedSet(accumulator) => accumulator,
             _ => {

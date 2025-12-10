@@ -74,6 +74,7 @@ impl Location {
         }
     }
 
+    #[allow(dead_code)]
     pub fn from_string(s: &str) -> Location {
         let parts: Vec<&str> = s.split('_').collect();
         match parts[0] {
@@ -211,6 +212,7 @@ impl Building {
         }
     }
 
+    #[allow(dead_code)]
     fn from_domain_graph_node(node: Node) -> Building {
         Building {
             effective_from: node.effective_from,
@@ -227,6 +229,7 @@ impl Building {
         format!("Building {}", self.location.get_building_idx())
     }
 
+    #[allow(dead_code)]
     fn element_reference(&self) -> ElementReference {
         ElementReference::new(&self.source_id, &self.id())
     }
@@ -269,6 +272,7 @@ impl Floor {
         }
     }
 
+    #[allow(dead_code)]
     fn from_domain_graph_node(node: Node) -> Floor {
         Floor {
             effective_from: node.effective_from,
@@ -330,6 +334,7 @@ impl Room {
         }
     }
 
+    #[allow(dead_code)]
     fn from_domain_graph_node(node: Node) -> Room {
         Room {
             source_id: "bootstrap".to_string(),
@@ -355,10 +360,12 @@ impl Room {
         format!("Room {}_", self.location)
     }
 
+    #[allow(dead_code)]
     fn element_reference(&self) -> ElementReference {
         ElementReference::new(&self.source_id, &self.id())
     }
 
+    #[allow(dead_code)]
     fn update_temperature(&self, effective_from: u64, temperature_delta: f32) {
         // Add temperature delta to current temperature
         let mut e = self.effective_from.write().unwrap();
@@ -369,6 +376,7 @@ impl Room {
         *e = effective_from;
     }
 
+    #[allow(dead_code)]
     fn update_humidity(&self, effective_from: u64, humidity_delta: f32) {
         let mut e = self.effective_from.write().unwrap();
         {
@@ -378,6 +386,7 @@ impl Room {
         *e = effective_from;
     }
 
+    #[allow(dead_code)]
     fn update_co2(&self, effective_from: u64, co2_delta: f32) {
         let mut e = self.effective_from.write().unwrap();
         {
@@ -387,6 +396,7 @@ impl Room {
         *e = effective_from;
     }
 
+    #[allow(dead_code)]
     pub fn get_comfort_level(&self) -> f32 {
         let mut comfort_level = match *self.co2.read().unwrap() {
             co2 if co2 > 500.0 => (co2 - 500.0) / 25.0,
@@ -451,6 +461,7 @@ impl PartOfRelationship {
         }
     }
 
+    #[allow(dead_code)]
     pub fn from_domain_graph_relation(relation: Relation) -> PartOfRelationship {
         PartOfRelationship {
             effective_from: relation.effective_from,
@@ -464,10 +475,12 @@ impl PartOfRelationship {
         format!("po_{}_{}", self.from_id, self.to_id)
     }
 
+    #[allow(dead_code)]
     pub fn element_reference(&self) -> ElementReference {
         ElementReference::new(&self.source_id, &self.id())
     }
 
+    #[allow(dead_code)]
     pub fn to_change_element(&self) -> Element {
         Element::Relation {
             metadata: ElementMetadata {

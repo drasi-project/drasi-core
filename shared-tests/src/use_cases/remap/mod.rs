@@ -235,13 +235,11 @@ pub async fn remap_invalid_config_fails(config: &(impl QueryTestConfig + Send)) 
     let err_str = err.to_string();
     assert!(
         err_str.contains("Middleware setup error"),
-        "unexpected error: {}",
-        err_str
+        "unexpected error: {err_str}"
     );
     assert!(
         err_str.contains("Invalid configuration"),
-        "unexpected error: {}",
-        err_str
+        "unexpected error: {err_str}"
     );
 }
 
@@ -273,12 +271,10 @@ pub async fn remap_incorrect_structure_fails(config: &(impl QueryTestConfig + Se
     let err_str = err.to_string();
     assert!(
         err_str.contains("Middleware setup error"),
-        "unexpected error: {}",
-        err_str
+        "unexpected error: {err_str}"
     );
     assert!(
         err_str.contains("Invalid configuration"),
-        "unexpected error: {}",
-        err_str
+        "unexpected error: {err_str}"
     );
 }

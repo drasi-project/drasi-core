@@ -227,8 +227,7 @@ async fn and_not_short_circuited() {
     // Bool(false) would indicate short-circuit evaluation
     assert!(
         result.is_err(),
-        "Expected DivideByZero error (proving both operands evaluated), but got: {:?}",
-        result
+        "Expected DivideByZero error (proving both operands evaluated), but got: {result:?}"
     );
 }
 
@@ -265,7 +264,6 @@ async fn or_not_short_circuited() {
     // Bool(true) would indicate short-circuit evaluation
     assert!(
         result.is_err(),
-        "Expected DivideByZero error (proving both operands evaluated), but got: {:?}",
-        result
+        "Expected DivideByZero error (proving both operands evaluated), but got: {result:?}"
     );
 }

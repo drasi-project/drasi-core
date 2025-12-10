@@ -1,0 +1,28 @@
+[package]
+name = "drasi-bootstrap-noop"
+version = "0.2.0"
+edition = "2021"
+authors = ["Drasi Project"]
+description = "No-op bootstrap provider plugin for Drasi"
+license = "Apache-2.0"
+repository = "https://github.com/drasi-project/drasi-core"
+keywords = ["drasi", "plugin", "bootstrap", "noop"]
+categories = ["development-tools"]
+
+[dependencies]
+drasi-lib = { path = "../../../lib" }
+anyhow = "1.0"
+async-trait = "0.1"
+log = "0.4"
+tokio = { version = "1.0", features = ["full"] }
+futures = "0.3"
+chrono = "0.4"
+uuid = { version = "1.0", features = ["v4"] }
+tokio-stream = "0.1"
+prost-types = "0.12"
+ordered-float = "3.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio-postgres = "0.7"
+postgres-types = "0.2"
+redis = { version = "0.25", features = ["tokio-comp"] }

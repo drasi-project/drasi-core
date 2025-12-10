@@ -146,7 +146,7 @@ impl PromoteMiddleware {
             );
             match self.on_error {
                 ErrorHandling::Skip => {
-                    debug!("{}", msg);
+                    debug!("{msg}");
                     Ok(None)
                 }
                 ErrorHandling::Fail => Err(MiddlewareError::SourceChangeError(msg)),
@@ -161,7 +161,7 @@ impl PromoteMiddleware {
             );
             match self.on_error {
                 ErrorHandling::Skip => {
-                    debug!("{}", msg);
+                    debug!("{msg}");
                     Ok(None)
                 }
                 ErrorHandling::Fail => Err(MiddlewareError::SourceChangeError(msg)),

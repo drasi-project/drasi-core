@@ -1,0 +1,67 @@
+# Copyright 2025 The Drasi Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[package]
+name = "drasi-lib"
+version = "0.1.0"
+edition = "2021"
+authors = ["Drasi Project"]
+description = "Drasi Lib"
+license = "Apache-2.0"
+repository = "https://github.com/drasi-project/drasi-core"
+keywords = ["drasi"]
+categories = ["database"]
+readme = "README.md"
+
+[lib]
+name = "drasi_lib"
+path = "src/lib.rs"
+
+[dependencies]
+drasi-core = { path = "../core" }
+drasi-functions-cypher = { path = "../functions-cypher" }
+drasi-functions-gql = { path = "../functions-gql" }
+drasi-query-ast = { path = "../query-ast" }
+drasi-query-cypher = { path = "../query-cypher" }
+drasi-query-gql = { path = "../query-gql" }
+drasi-index-rocksdb = { path = "../index-rocksdb" }
+drasi-index-garnet = { path = "../index-garnet" }
+drasi-middleware = { path = "../middleware" }
+
+tokio = { version = "1.0", features = ["rt-multi-thread", "sync", "time", "macros"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+anyhow = "1.0"
+thiserror = "2.0"
+log = "0.4"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+ordered-float = "3.7"
+rand = "0.8"
+
+[dev-dependencies]
+# Testing utilities
+tempfile = "3.8"
+mockall = "0.12"
+tokio-test = "0.4"
+assert_matches = "1.5"
+serial_test = "3.0"
+pretty_assertions = "1.4"
+test-case = "3.3"
+
+# Additional testing dependencies
+futures = "0.3"
+rstest = "0.18"

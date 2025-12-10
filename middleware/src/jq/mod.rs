@@ -116,7 +116,7 @@ impl SourceMiddleware for JQ {
                 None => continue,
             };
 
-            log::info!("Processing mappings for label: {}", label);
+            log::info!("Processing mappings for label: {label}");
 
             #[allow(unused_assignments)]
             let mut del_element_binding = Option::<Element>::None;
@@ -163,7 +163,7 @@ impl SourceMiddleware for JQ {
 
                 let output = match run_jq(mapping.query.as_str(), &source_obj_str) {
                     Ok(output) => {
-                        log::info!("JQ output: {}", output);
+                        log::info!("JQ output: {output}");
                         output
                     }
                     Err(e) => {

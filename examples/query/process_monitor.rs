@@ -27,6 +27,7 @@ use drasi_functions_cypher::CypherFunctionSet;
 use drasi_query_cypher::CypherParser;
 
 #[tokio::main]
+#[allow(dead_code)]
 async fn main() {
     let query_str = "
     MATCH 

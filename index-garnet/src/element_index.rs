@@ -533,7 +533,7 @@ impl ElementIndex for GarnetElementIndex {
 
         let mut pipeline = redis::pipe();
         pipeline.atomic();
-        log::debug!("Deleting element: {:?}", stored_element_ref);
+        log::debug!("Deleting element: {stored_element_ref:?}");
         self.delete_element_internal(&mut pipeline, &stored_element_ref)
             .await?;
 
@@ -610,7 +610,7 @@ impl ElementIndex for GarnetElementIndex {
                                 Err(e) => Err(IndexError::other(e)),
                             },
                             Ok(None) => {
-                                log::debug!("Garbage collecting reference of deleted element: {}", element_ref);
+                                log::debug!("Garbage collecting reference of deleted element: {element_ref}");
                                 _ = con2.srem::<&str, &str, ()>(&inbound_key, &element_ref).await;
                                 continue;
                             },
@@ -656,7 +656,7 @@ impl ElementIndex for GarnetElementIndex {
                                 Err(e) => Err(IndexError::other(e)),
                             },
                             Ok(None) => {
-                                log::debug!("Garbage collecting reference of deleted element: {}", element_ref);
+                                log::debug!("Garbage collecting reference of deleted element: {element_ref}");
                                 _ = con2.srem::<&str, &str, ()>(&outbound_key, &element_ref).await;
                                 continue;
                             },

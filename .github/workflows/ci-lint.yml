@@ -14,27 +14,27 @@ jobs:
     env:
       # Set RUSTFLAGS for Clippy linting
       # RUSTFLAGS: |
-      #   -Dwarnings                        # Treat warnings as errors
+      #   -D warnings                       # Treat warnings as errors
       #   -W clippy::print_stdout           # Warn on use of 'print' and 'println!'
       #   -W clippy::unwrap_used            # Warn on use of '.unwrap()'
-      #   -A unused                         # Allow unused code (false positive occurences in query-perf)
+      #   -A unused                         # Allow unused code (false positive occurrences in query-perf)
       #   -A clippy::module_inception       # Allow module inception (module with same name as the file)
       #   -A clippy::ptr_arg                # Allow passing references as function parameters
       #   -A clippy::type_complexity        # Allow complex types without warning
-      RUSTFLAGS: |
-        -Dwarnings                        
+      RUSTFLAGS: >-
+        -D warnings                        
         -W clippy::print_stdout       
         -W clippy::unwrap_used    
         -A unused                         
         -A clippy::module_inception       
-        -A clippy::ptr_arg                
-        -A clippy::type_complexity        
+        -A clippy::ptr_arg
+        -A clippy::type_complexity
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install specific Rust version
         run: |
-          rustup update 1.83.0 && rustup default 1.83.0
+          rustup update 1.88.0 && rustup default 1.88.0
 
       - name: Install Clippy
         run: rustup component add clippy
@@ -42,7 +42,7 @@ jobs:
       - name: Install libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq libjq-dev
+          sudo apt-get install -y jq libjq-dev protobuf-compiler
       
       - name: Set JQ_LIB_DIR
         run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV

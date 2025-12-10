@@ -66,7 +66,7 @@ impl MatchPathSolver {
         MatchPathSolver { element_index }
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all, err, level = "debug")]
     pub async fn solve(
         &self,
         path: Arc<match_path::MatchPath>,
@@ -177,7 +177,7 @@ async fn create_solution_stream(
     }
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, level = "debug")]
 async fn try_complete_solution(
     mut solution: MatchPathSolution,
     path: Arc<match_path::MatchPath>,
@@ -326,7 +326,7 @@ async fn try_complete_solution(
     cmd_tx.send(SolutionStreamCommand::Unsolvable).unwrap();
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err, level = "debug")]
 async fn get_adjacent_elements(
     element_index: Arc<dyn ElementIndex>,
     element: Arc<Element>,

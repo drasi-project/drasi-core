@@ -1,7 +1,5 @@
 name: Automerge Renovate PRs
 
-name: Automerge Renovate PRs
-
 on:
   schedule:
       # Disable AutoRun for now: Runs at 12:00 PM Pacific Time on Wednesdays.

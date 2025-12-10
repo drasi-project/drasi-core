@@ -254,8 +254,7 @@ impl ElementIndex for RocksDbElementIndex {
                             }
                             Ok(None) => {
                                 log::debug!(
-                                    "Garbage collecting reference of deleted element: {:?}",
-                                    element_key
+                                    "Garbage collecting reference of deleted element: {element_key:?}"
                                 );
                                 _ = context.db.delete_cf(&inbound_cf, key);
                                 continue;
@@ -304,8 +303,7 @@ impl ElementIndex for RocksDbElementIndex {
                             }
                             Ok(None) => {
                                 log::debug!(
-                                    "Garbage collecting reference of deleted element: {:?}",
-                                    element_key
+                                    "Garbage collecting reference of deleted element: {element_key:?}"
                                 );
                                 _ = context.db.delete_cf(&outbound_cf, key);
                                 continue;
@@ -463,12 +461,12 @@ fn delete_element_internal(
     }
 
     match txn.delete_cf(&element_cf, element_key) {
-        Ok(_) => log::debug!("Deleted element {:?}", element_key),
+        Ok(_) => log::debug!("Deleted element {element_key:?}"),
         Err(e) => return Err(IndexError::other(e)),
     };
 
     match txn.delete_cf(&slot_cf, element_key) {
-        Ok(_) => log::debug!("Deleted element slots {:?}", element_key),
+        Ok(_) => log::debug!("Deleted element slots {element_key:?}"),
         Err(e) => return Err(IndexError::other(e)),
     };
 
@@ -483,11 +481,9 @@ fn delete_element_internal(
                             break;
                         }
                         match txn.delete_cf(&inbound_cf, key) {
-                            Ok(_) => log::debug!(
-                                "Deleted inbound slot index {:?} {:?}",
-                                element_key,
-                                slot
-                            ),
+                            Ok(_) => {
+                                log::debug!("Deleted inbound slot index {element_key:?} {slot:?}")
+                            }
                             Err(e) => return Err(IndexError::other(e)),
                         };
                     }
@@ -502,11 +498,9 @@ fn delete_element_internal(
                             break;
                         }
                         match txn.delete_cf(&outbound_cf, key) {
-                            Ok(_) => log::debug!(
-                                "Deleted outbound slot index {:?} {:?}",
-                                element_key,
-                                slot
-                            ),
+                            Ok(_) => {
+                                log::debug!("Deleted outbound slot index {element_key:?} {slot:?}")
+                            }
                             Err(e) => return Err(IndexError::other(e)),
                         };
                     }
@@ -572,7 +566,7 @@ fn set_element_internal(
     };
 
     match txn.put_cf(&element_cf, key_hash, &encoded_element) {
-        Ok(_) => log::debug!("Stored element {:?}", key_hash),
+        Ok(_) => log::debug!("Stored element {key_hash:?}"),
         Err(e) => return Err(IndexError::other(e)),
     };
 
@@ -581,7 +575,7 @@ fn set_element_internal(
         key_hash,
         new_slots.clone().into_bit_vec().to_bytes(),
     ) {
-        Ok(_) => log::debug!("Stored element slots {:?}", key_hash),
+        Ok(_) => log::debug!("Stored element slots {key_hash:?}"),
         Err(e) => return Err(IndexError::other(e)),
     };
 
@@ -600,20 +594,14 @@ fn set_element_internal(
 
                     if let Err(err) = txn.delete_cf(&inbound_cf, inbound_key) {
                         log::error!(
-                            "Failed to delete inbound index {:?} for element {:?}: {:?}",
-                            inbound_key,
-                            key_hash,
-                            err
+                            "Failed to delete inbound index {inbound_key:?} for element {key_hash:?}: {err:?}"
                         );
                         return Err(IndexError::other(err));
                     }
 
                     if let Err(err) = txn.delete_cf(&outbound_cf, outbound_key) {
                         log::error!(
-                            "Failed to delete outbound index {:?} for element {:?}: {:?}",
-                            outbound_key,
-                            key_hash,
-                            err
+                            "Failed to delete outbound index {outbound_key:?} for element {key_hash:?}: {err:?}"
                         );
                         return Err(IndexError::other(err));
                     }
@@ -628,20 +616,14 @@ fn set_element_internal(
 
                 if let Err(err) = txn.put_cf(&inbound_cf, inbound_key, []) {
                     log::error!(
-                        "Failed to store inbound index {:?} for element {:?}: {:?}",
-                        inbound_key,
-                        key_hash,
-                        err
+                        "Failed to store inbound index {inbound_key:?} for element {key_hash:?}: {err:?}"
                     );
                     return Err(IndexError::other(err));
                 }
 
                 if let Err(err) = txn.put_cf(&outbound_cf, outbound_key, []) {
                     log::error!(
-                        "Failed to store outbound index {:?} for element {:?}: {:?}",
-                        outbound_key,
-                        key_hash,
-                        err
+                        "Failed to store outbound index {outbound_key:?} for element {key_hash:?}: {err:?}"
                     );
                     return Err(IndexError::other(err));
                 }
@@ -673,7 +655,7 @@ fn update_source_joins(
         StoredElement::Node(n) => {
             let join_spec_by_label = match context.join_spec_by_label.read() {
                 Ok(joins) => joins,
-                Err(e) => return Err(IndexError::CorruptedData),
+                Err(_) => return Err(IndexError::CorruptedData),
             };
             for (label, joins) in join_spec_by_label.iter() {
                 if !n.metadata.labels.contains(label) {
@@ -838,7 +820,7 @@ fn delete_source_joins(
         StoredElement::Node(n) => {
             let join_spec_by_label = match context.join_spec_by_label.read() {
                 Ok(joins) => joins,
-                Err(e) => return Err(IndexError::CorruptedData),
+                Err(_) => return Err(IndexError::CorruptedData),
             };
             for (label, joins) in join_spec_by_label.iter() {
                 if !n.metadata.labels.contains(label) {

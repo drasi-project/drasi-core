@@ -150,7 +150,7 @@ impl Decoder {
                         encoded_str.len(),
                         self.config.max_size_bytes
                     );
-                    log::warn!("{}", msg);
+                    log::warn!("{msg}");
                     return if self.config.on_error == ErrorHandling::Fail {
                         Err(MiddlewareError::SourceChangeError(msg))
                     } else {
@@ -207,7 +207,7 @@ impl Decoder {
                             "[{}] Failed to decode property '{}' using {} encoding: {}",
                             self.name, target_prop_name, encoding_name, e
                         );
-                        log::warn!("{}", msg);
+                        log::warn!("{msg}");
                         if self.config.on_error == ErrorHandling::Fail {
                             Err(MiddlewareError::SourceChangeError(msg))
                         } else {
@@ -223,7 +223,7 @@ impl Decoder {
                     "[{}] Target property '{}' is not a string value (Type: {}).",
                     self.name, target_prop_name, type_name
                 );
-                log::warn!("{}", msg);
+                log::warn!("{msg}");
                 if self.config.on_error == ErrorHandling::Fail {
                     Err(MiddlewareError::SourceChangeError(msg))
                 } else {
@@ -236,7 +236,7 @@ impl Decoder {
                     "[{}] Target property '{}' not found in element.",
                     self.name, target_prop_name
                 );
-                log::warn!("{}", msg);
+                log::warn!("{msg}");
                 if self.config.on_error == ErrorHandling::Fail {
                     Err(MiddlewareError::SourceChangeError(msg))
                 } else {
