@@ -256,7 +256,7 @@ where
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 // Log the lag but try to continue
-                log::warn!("Broadcast receiver lagged by {} messages", n);
+                log::warn!("Broadcast receiver lagged by {n} messages");
                 // Try to receive the next message
                 self.recv().await
             }
@@ -472,7 +472,7 @@ mod tests {
         for i in 0..5 {
             let msg = Arc::new(TestMessage {
                 id: i,
-                content: format!("msg{}", i),
+                content: format!("msg{i}"),
             });
             dispatcher.dispatch_change(msg).await.unwrap();
         }

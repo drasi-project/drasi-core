@@ -346,7 +346,7 @@ mod manager_tests {
             let event_tx_clone = event_tx.clone();
             handles.push(tokio::spawn(async move {
                 let reaction =
-                    create_test_mock_reaction(format!("reaction-{}", i), vec![], event_tx_clone);
+                    create_test_mock_reaction(format!("reaction-{i}"), vec![], event_tx_clone);
                 manager_clone.add_reaction(reaction).await
             }));
         }

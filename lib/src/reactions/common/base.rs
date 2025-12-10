@@ -233,7 +233,7 @@ impl ReactionBase {
 
         if let Some(ref tx) = *self.event_tx.read().await {
             if let Err(e) = tx.send(event).await {
-                error!("Failed to send component event: {}", e);
+                error!("Failed to send component event: {e}");
             }
         }
         // If event_tx is None, silently skip - injection happens before start()
@@ -303,8 +303,7 @@ impl ReactionBase {
             // Spawn forwarder task to read from receiver and enqueue to priority queue
             let forwarder_task = tokio::spawn(async move {
                 debug!(
-                    "[{}] Started result forwarder for query '{}' (dispatch_mode: {:?}, blocking_enqueue: {})",
-                    reaction_id, query_id_clone, dispatch_mode, use_blocking_enqueue
+                    "[{reaction_id}] Started result forwarder for query '{query_id_clone}' (dispatch_mode: {dispatch_mode:?}, blocking_enqueue: {use_blocking_enqueue})"
                 );
 
                 loop {
@@ -320,8 +319,7 @@ impl ReactionBase {
                                 // Messages may be dropped when priority queue is full
                                 if !priority_queue.enqueue(query_result).await {
                                     warn!(
-                                        "[{}] Failed to enqueue result from query '{}' - priority queue at capacity (broadcast mode)",
-                                        reaction_id, query_id_clone
+                                        "[{reaction_id}] Failed to enqueue result from query '{query_id_clone}' - priority queue at capacity (broadcast mode)"
                                     );
                                 }
                             }
@@ -331,14 +329,12 @@ impl ReactionBase {
                             let error_str = e.to_string();
                             if error_str.contains("lagged") {
                                 warn!(
-                                    "[{}] Receiver lagged for query '{}': {}",
-                                    reaction_id, query_id_clone, error_str
+                                    "[{reaction_id}] Receiver lagged for query '{query_id_clone}': {error_str}"
                                 );
                                 continue;
                             } else {
                                 info!(
-                                    "[{}] Receiver error for query '{}': {}",
-                                    reaction_id, query_id_clone, error_str
+                                    "[{reaction_id}] Receiver error for query '{query_id_clone}': {error_str}"
                                 );
                                 break;
                             }
@@ -621,8 +617,7 @@ mod tests {
         // Should complete quickly (< 500ms), not hit 2s timeout
         assert!(
             elapsed < Duration::from_millis(500),
-            "Shutdown took {:?}, expected < 500ms. Task may not be responding to shutdown signal.",
-            elapsed
+            "Shutdown took {elapsed:?}, expected < 500ms. Task may not be responding to shutdown signal."
         );
     }
 

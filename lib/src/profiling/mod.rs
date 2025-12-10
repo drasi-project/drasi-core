@@ -305,10 +305,7 @@ pub fn timestamp_ns() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or_else(|e| {
-            log::warn!(
-                "System time before UNIX epoch in profiling: {:?}, using 0",
-                e
-            );
+            log::warn!("System time before UNIX epoch in profiling: {e:?}, using 0");
             0 // Use 0 for profiling when system time is invalid
         })
 }
@@ -326,7 +323,7 @@ pub fn ns_to_secs(ns: u64) -> f64 {
 /// Format nanoseconds as a human-readable duration string
 pub fn format_duration_ns(ns: u64) -> String {
     if ns < 1_000 {
-        format!("{}ns", ns)
+        format!("{ns}ns")
     } else if ns < 1_000_000 {
         format!("{:.2}µs", ns as f64 / 1_000.0)
     } else if ns < 1_000_000_000 {

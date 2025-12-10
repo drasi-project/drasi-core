@@ -717,7 +717,7 @@ mod query_joins_tests {
         for i in 1..=3 {
             let product = create_node_with_properties(
                 "products",
-                &format!("prod{}", i),
+                &format!("prod{i}"),
                 vec!["Product".to_string()],
                 HashMap::from([
                     ("name", json!(format!("Product {}", i))),

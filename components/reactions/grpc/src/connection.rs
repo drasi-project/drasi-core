@@ -62,10 +62,7 @@ pub async fn create_client(
     timeout_ms: u64,
 ) -> Result<ReactionServiceClient<Channel>> {
     let endpoint = endpoint.replace("grpc://", "http://");
-    info!(
-        "Creating lazy gRPC channel to {} with timeout: {}ms",
-        endpoint, timeout_ms
-    );
+    info!("Creating lazy gRPC channel to {endpoint} with timeout: {timeout_ms}ms");
     let channel = Channel::from_shared(endpoint.clone())?
         .timeout(Duration::from_millis(timeout_ms))
         .connect_lazy();
@@ -97,15 +94,12 @@ pub async fn create_client_with_retry(
     loop {
         match create_client(endpoint, timeout_ms).await {
             Ok(client) => {
-                info!("Successfully created client for endpoint: {}", endpoint);
+                info!("Successfully created client for endpoint: {endpoint}");
                 return Ok(client);
             }
             Err(e) => {
                 if retries >= max_retries {
-                    error!(
-                        "Failed to create client after {} retries: {}",
-                        max_retries, e
-                    );
+                    error!("Failed to create client after {max_retries} retries: {e}");
                     return Err(e);
                 }
                 warn!(

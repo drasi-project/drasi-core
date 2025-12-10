@@ -553,7 +553,7 @@ impl ContinuousQuery {
                                         continue;
                                     }
                                     Err(e) => {
-                                        log::error!("Future queue consumer error: {:?}", e);
+                                        log::error!("Future queue consumer error: {e:?}");
                                         tokio::time::sleep(error_interval).await;
                                         continue;
                                     }
@@ -564,7 +564,7 @@ impl ContinuousQuery {
                                 continue;
                             }
                             Err(e) => {
-                                log::error!("Future queue consumer error: {:?}", e);
+                                log::error!("Future queue consumer error: {e:?}");
                                 tokio::time::sleep(error_interval).await;
                                 continue;
                             }
@@ -575,7 +575,7 @@ impl ContinuousQuery {
                         match consumer.on_due(&fut_ref).await {
                             Ok(_) => log::info!("Future queue consumer processed {}", &fut_ref.element_ref),
                             Err(e) => {
-                                log::error!("Future queue consumer error: {:?}", e);
+                                log::error!("Future queue consumer error: {e:?}");
                                 consumer.on_error(&fut_ref, e).await;
                             }
                         }

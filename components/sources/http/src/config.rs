@@ -97,10 +97,8 @@ impl HttpSourceConfig {
         {
             if min > max {
                 return Err(anyhow::anyhow!(
-                    "Validation error: adaptive_min_batch_size ({}) cannot be greater than \
-                     adaptive_max_batch_size ({})",
-                    min,
-                    max
+                    "Validation error: adaptive_min_batch_size ({min}) cannot be greater than \
+                     adaptive_max_batch_size ({max})"
                 ));
             }
         }
@@ -108,10 +106,8 @@ impl HttpSourceConfig {
         if let (Some(min), Some(max)) = (self.adaptive_min_wait_ms, self.adaptive_max_wait_ms) {
             if min > max {
                 return Err(anyhow::anyhow!(
-                    "Validation error: adaptive_min_wait_ms ({}) cannot be greater than \
-                     adaptive_max_wait_ms ({})",
-                    min,
-                    max
+                    "Validation error: adaptive_min_wait_ms ({min}) cannot be greater than \
+                     adaptive_max_wait_ms ({max})"
                 ));
             }
         }

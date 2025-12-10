@@ -210,7 +210,7 @@ impl InspectionAPI {
             if e.to_string().contains("not found") {
                 DrasiError::component_not_found("query", id)
             } else if e.to_string().contains("not running") {
-                DrasiError::invalid_state(format!("Query '{}' is not running", id))
+                DrasiError::invalid_state(format!("Query '{id}' is not running"))
             } else {
                 DrasiError::provisioning(e.to_string())
             }

@@ -280,7 +280,7 @@ impl Source for GrpcSource {
         let host = self.config.host.clone();
         let port = self.config.port;
 
-        let addr = format!("{}:{}", host, port).parse()?;
+        let addr = format!("{host}:{port}").parse()?;
 
         info!("gRPC source '{}' listening on {}", self.base.id, addr);
 
@@ -309,12 +309,12 @@ impl Source for GrpcSource {
                 component_type: ComponentType::Source,
                 status: ComponentStatus::Running,
                 timestamp: chrono::Utc::now(),
-                message: Some(format!("gRPC source listening on {}", addr)),
+                message: Some(format!("gRPC source listening on {addr}")),
             };
 
             if let Some(ref tx) = *event_tx.read().await {
                 if let Err(e) = tx.send(running_event).await {
-                    error!("Failed to send component event: {}", e);
+                    error!("Failed to send component event: {e}");
                 }
             }
 
@@ -327,7 +327,7 @@ impl Source for GrpcSource {
                 });
 
             if let Err(e) = server.await {
-                error!("gRPC server error: {}", e);
+                error!("gRPC server error: {e}");
             }
 
             *status.write().await = ComponentStatus::Stopped;
@@ -500,7 +500,7 @@ impl SourceService for GrpcSourceService {
                         )
                         .await
                         {
-                            debug!("[{}] Failed to dispatch (no subscribers): {}", source_id, e);
+                            debug!("[{source_id}] Failed to dispatch (no subscribers): {e}");
                         }
 
                         events_processed += 1;
@@ -510,7 +510,7 @@ impl SourceService for GrpcSourceService {
                             let _ = tx
                                 .send(Ok(StreamEventResponse {
                                     success: true,
-                                    message: format!("Processed {} events", events_processed),
+                                    message: format!("Processed {events_processed} events"),
                                     error: String::new(),
                                     events_processed,
                                 }))
@@ -518,7 +518,7 @@ impl SourceService for GrpcSourceService {
                         }
                     }
                     Err(e) => {
-                        error!("[{}] Invalid event data: {}", source_id, e);
+                        error!("[{source_id}] Invalid event data: {e}");
                         let _ = tx
                             .send(Ok(StreamEventResponse {
                                 success: false,
@@ -535,7 +535,7 @@ impl SourceService for GrpcSourceService {
             let _ = tx
                 .send(Ok(StreamEventResponse {
                     success: true,
-                    message: format!("Stream completed. Processed {} events", events_processed),
+                    message: format!("Stream completed. Processed {events_processed} events"),
                     error: String::new(),
                     events_processed,
                 }))

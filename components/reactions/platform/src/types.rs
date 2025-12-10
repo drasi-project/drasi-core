@@ -322,7 +322,7 @@ where
     pub fn new(data: T, query_id: &str, config: &CloudEventConfig) -> Self {
         let now = chrono::Utc::now();
         let id = uuid::Uuid::new_v4().to_string();
-        let topic = format!("{}-results", query_id);
+        let topic = format!("{query_id}-results");
 
         Self {
             data,

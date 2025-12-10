@@ -101,7 +101,7 @@ impl StorageBackendSpec {
                 // Validate path is absolute
                 let path_obj = Path::new(path);
                 if !path_obj.is_absolute() {
-                    return Err(format!("RocksDB path must be absolute, got: {}", path));
+                    return Err(format!("RocksDB path must be absolute, got: {path}"));
                 }
                 Ok(())
             }
@@ -114,8 +114,7 @@ impl StorageBackendSpec {
                     && !connection_string.starts_with("rediss://")
                 {
                     return Err(format!(
-                        "Redis connection string must start with 'redis://' or 'rediss://', got: {}",
-                        connection_string
+                        "Redis connection string must start with 'redis://' or 'rediss://', got: {connection_string}"
                     ));
                 }
 
@@ -123,8 +122,7 @@ impl StorageBackendSpec {
                 if let Some(size) = cache_size {
                     if *size > 10_000_000 {
                         log::warn!(
-                            "Redis cache_size is very large ({}), this may consume significant memory",
-                            size
+                            "Redis cache_size is very large ({size}), this may consume significant memory"
                         );
                     }
                 }

@@ -86,14 +86,13 @@ impl ReactionManager {
             let mut reactions = self.reactions.write().await;
             if reactions.contains_key(&reaction_id) {
                 return Err(anyhow::anyhow!(
-                    "Reaction with id '{}' already exists",
-                    reaction_id
+                    "Reaction with id '{reaction_id}' already exists"
                 ));
             }
             reactions.insert(reaction_id.clone(), reaction);
         }
 
-        info!("Added reaction: {}", reaction_id);
+        info!("Added reaction: {reaction_id}");
         Ok(())
     }
 
@@ -115,7 +114,7 @@ impl ReactionManager {
             is_operation_valid(&status, &Operation::Start).map_err(|e| anyhow::anyhow!(e))?;
             reaction.start().await?;
         } else {
-            return Err(anyhow::anyhow!("Reaction not found: {}", id));
+            return Err(anyhow::anyhow!("Reaction not found: {id}"));
         }
 
         Ok(())
@@ -132,7 +131,7 @@ impl ReactionManager {
             is_operation_valid(&status, &Operation::Stop).map_err(|e| anyhow::anyhow!(e))?;
             reaction.stop().await?;
         } else {
-            return Err(anyhow::anyhow!("Reaction not found: {}", id));
+            return Err(anyhow::anyhow!("Reaction not found: {id}"));
         }
 
         Ok(())
@@ -147,7 +146,7 @@ impl ReactionManager {
         if let Some(reaction) = reaction {
             Ok(reaction.status().await)
         } else {
-            Err(anyhow::anyhow!("Reaction not found: {}", id))
+            Err(anyhow::anyhow!("Reaction not found: {id}"))
         }
     }
 
@@ -172,7 +171,7 @@ impl ReactionManager {
             };
             Ok(runtime)
         } else {
-            Err(anyhow::anyhow!("Reaction not found: {}", id))
+            Err(anyhow::anyhow!("Reaction not found: {id}"))
         }
     }
 
@@ -188,7 +187,7 @@ impl ReactionManager {
 
             // If the reaction is running, stop it first
             if matches!(status, ComponentStatus::Running) {
-                info!("Stopping reaction '{}' before deletion", id);
+                info!("Stopping reaction '{id}' before deletion");
                 reaction.stop().await?;
 
                 // Wait a bit to ensure the reaction has fully stopped
@@ -198,8 +197,7 @@ impl ReactionManager {
                 let new_status = reaction.status().await;
                 if !matches!(new_status, ComponentStatus::Stopped) {
                     return Err(anyhow::anyhow!(
-                        "Failed to stop reaction '{}' before deletion",
-                        id
+                        "Failed to stop reaction '{id}' before deletion"
                     ));
                 }
             } else {
@@ -209,11 +207,11 @@ impl ReactionManager {
 
             // Now remove the reaction
             self.reactions.write().await.remove(&id);
-            info!("Deleted reaction: {}", id);
+            info!("Deleted reaction: {id}");
 
             Ok(())
         } else {
-            Err(anyhow::anyhow!("Reaction not found: {}", id))
+            Err(anyhow::anyhow!("Reaction not found: {id}"))
         }
     }
 
@@ -257,9 +255,9 @@ impl ReactionManager {
             }
 
             let reaction_id = reaction.id().to_string();
-            info!("Starting reaction: {}", reaction_id);
+            info!("Starting reaction: {reaction_id}");
             if let Err(e) = reaction.start().await {
-                error!("Failed to start reaction {}: {}", reaction_id, e);
+                error!("Failed to start reaction {reaction_id}: {e}");
                 failed_reactions.push((reaction_id, e.to_string()));
                 // Continue starting other reactions instead of returning early
             }
@@ -269,12 +267,11 @@ impl ReactionManager {
         if !failed_reactions.is_empty() {
             let error_msg = failed_reactions
                 .iter()
-                .map(|(id, err)| format!("{}: {}", id, err))
+                .map(|(id, err)| format!("{id}: {err}"))
                 .collect::<Vec<_>>()
                 .join(", ");
             Err(anyhow::anyhow!(
-                "Failed to start some reactions: {}",
-                error_msg
+                "Failed to start some reactions: {error_msg}"
             ))
         } else {
             Ok(())

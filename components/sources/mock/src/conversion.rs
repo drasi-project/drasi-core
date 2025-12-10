@@ -29,12 +29,8 @@ use serde_json::Value;
 /// Returns the converted Element value or an error with context.
 #[allow(dead_code)]
 pub fn safe_json_to_element_value(json_value: &Value) -> Result<drasi_core::models::ElementValue> {
-    drasi_lib::sources::convert_json_to_element_value(json_value).with_context(|| {
-        format!(
-            "Failed to convert JSON value to Element value: {:?}",
-            json_value
-        )
-    })
+    drasi_lib::sources::convert_json_to_element_value(json_value)
+        .with_context(|| format!("Failed to convert JSON value to Element value: {json_value:?}"))
 }
 
 /// Convert JSON to Element value with a default fallback.
@@ -57,10 +53,7 @@ pub fn json_to_element_value_or_default(
     match drasi_lib::sources::convert_json_to_element_value(json_value) {
         Ok(value) => value,
         Err(e) => {
-            log::warn!(
-                "Failed to convert JSON to Element value, using default: {}",
-                e
-            );
+            log::warn!("Failed to convert JSON to Element value, using default: {e}");
             default
         }
     }
@@ -89,9 +82,7 @@ pub fn batch_json_to_element_values<'a>(
                 Ok(value) => Some(value),
                 Err(e) => {
                     log::error!(
-                        "Skipping invalid JSON value during batch conversion: {:?}, error: {}",
-                        json_value,
-                        e
+                        "Skipping invalid JSON value during batch conversion: {json_value:?}, error: {e}"
                     );
                     None
                 }

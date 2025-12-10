@@ -178,7 +178,7 @@ impl Source for MockSource {
                 // Generate data based on type
                 let source_change = match data_type.as_str() {
                     "counter" => {
-                        let element_id = format!("counter_{}", seq);
+                        let element_id = format!("counter_{seq}");
                         let reference = ElementReference::new(&source_name, &element_id);
 
                         let mut property_map = ElementPropertyMap::new();
@@ -202,7 +202,7 @@ impl Source for MockSource {
                             labels: Arc::from(vec![Arc::from("Counter")]),
                             effective_from: crate::time::get_system_time_nanos().unwrap_or_else(
                                 |e| {
-                                    log::warn!("Failed to get timestamp for mock counter: {}", e);
+                                    log::warn!("Failed to get timestamp for mock counter: {e}");
                                     // Use current milliseconds * 1M as fallback
                                     (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
                                 },
@@ -218,14 +218,14 @@ impl Source for MockSource {
                     }
                     "sensor" => {
                         let sensor_id = rand::random::<u32>() % 5;
-                        let element_id = format!("reading_{}_{}", sensor_id, seq);
+                        let element_id = format!("reading_{sensor_id}_{seq}");
                         let reference = ElementReference::new(&source_name, &element_id);
 
                         let mut property_map = ElementPropertyMap::new();
                         property_map.insert(
                             "sensor_id",
                             crate::conversion::json_to_element_value_or_default(
-                                &Value::String(format!("sensor_{}", sensor_id)),
+                                &Value::String(format!("sensor_{sensor_id}")),
                                 drasi_core::models::ElementValue::Null,
                             ),
                         );
@@ -266,7 +266,7 @@ impl Source for MockSource {
                             labels: Arc::from(vec![Arc::from("SensorReading")]),
                             effective_from: crate::time::get_system_time_nanos().unwrap_or_else(
                                 |e| {
-                                    log::warn!("Failed to get timestamp for mock sensor: {}", e);
+                                    log::warn!("Failed to get timestamp for mock sensor: {e}");
                                     // Use current milliseconds * 1M as fallback
                                     (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
                                 },
@@ -282,7 +282,7 @@ impl Source for MockSource {
                     }
                     _ => {
                         // Generic data
-                        let element_id = format!("generic_{}", seq);
+                        let element_id = format!("generic_{seq}");
                         let reference = ElementReference::new(&source_name, &element_id);
 
                         let mut property_map = ElementPropertyMap::new();
@@ -342,7 +342,7 @@ impl Source for MockSource {
                     SourceBase::dispatch_from_task(base_dispatchers.clone(), wrapper, &source_id)
                         .await
                 {
-                    debug!("Failed to dispatch change: {}", e);
+                    debug!("Failed to dispatch change: {e}");
                 }
             }
 

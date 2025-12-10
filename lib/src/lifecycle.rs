@@ -127,19 +127,13 @@ impl LifecycleManager {
                         id, query_config.auto_start
                     );
                     self.query_manager.start_query(id.clone()).await?;
-                    info!("Query '{}' started successfully", id);
+                    info!("Query '{id}' started successfully");
                 } else {
-                    info!(
-                        "Query '{}' already started or starting, status: {:?}",
-                        id, status
-                    );
+                    info!("Query '{id}' already started or starting, status: {status:?}");
                 }
             } else {
                 let status = self.query_manager.get_query_status(id.to_string()).await;
-                info!(
-                    "Skipping query '{}' (auto_start=false), status: {:?}",
-                    id, status
-                );
+                info!("Skipping query '{id}' (auto_start=false), status: {status:?}");
             }
         }
         info!("All auto-start queries started successfully");
@@ -176,7 +170,7 @@ impl LifecycleManager {
             let status = self.reaction_manager.get_reaction_status(id.clone()).await;
             if matches!(status, Ok(ComponentStatus::Running)) {
                 if let Err(e) = self.reaction_manager.stop_reaction(id.clone()).await {
-                    error!("Error stopping reaction {}: {}", id, e);
+                    error!("Error stopping reaction {id}: {e}");
                 }
                 // Subscriptions are managed by the reaction itself - no router cleanup needed
             }
@@ -196,7 +190,7 @@ impl LifecycleManager {
             let status = self.query_manager.get_query_status(id.clone()).await;
             if matches!(status, Ok(ComponentStatus::Running)) {
                 if let Err(e) = self.query_manager.stop_query(id.clone()).await {
-                    error!("Error stopping query {}: {}", id, e);
+                    error!("Error stopping query {id}: {e}");
                 }
                 // Query unsubscribes from sources automatically when stopped
             }
@@ -216,7 +210,7 @@ impl LifecycleManager {
             let status = self.source_manager.get_source_status(id.clone()).await;
             if matches!(status, Ok(ComponentStatus::Running)) {
                 if let Err(e) = self.source_manager.stop_source(id.clone()).await {
-                    error!("Error stopping source {}: {}", id, e);
+                    error!("Error stopping source {id}: {e}");
                 }
             }
         }

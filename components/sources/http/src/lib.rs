@@ -383,10 +383,7 @@ impl HttpSource {
         State(state): State<HttpAppState>,
         Json(event): Json<HttpSourceChange>,
     ) -> Result<impl IntoResponse, (StatusCode, Json<EventResponse>)> {
-        debug!(
-            "[{}] HTTP endpoint received single event: {:?}",
-            source_id, event
-        );
+        debug!("[{source_id}] HTTP endpoint received single event: {event:?}");
         Self::process_events(&source_id, &state, vec![event]).await
     }
 
@@ -483,8 +480,7 @@ impl HttpSource {
         }
 
         debug!(
-            "[{}] Event processing complete: {} succeeded, {} failed",
-            source_id, success_count, error_count
+            "[{source_id}] Event processing complete: {success_count} succeeded, {error_count} failed"
         );
 
         if error_count > 0 && success_count == 0 {
@@ -492,7 +488,7 @@ impl HttpSource {
                 StatusCode::BAD_REQUEST,
                 Json(EventResponse {
                     success: false,
-                    message: format!("All {} events failed", error_count),
+                    message: format!("All {error_count} events failed"),
                     error: last_error,
                 }),
             ))
@@ -500,15 +496,14 @@ impl HttpSource {
             Ok(Json(EventResponse {
                 success: true,
                 message: format!(
-                    "Processed {} events successfully, {} failed",
-                    success_count, error_count
+                    "Processed {success_count} events successfully, {error_count} failed"
                 ),
                 error: last_error,
             }))
         } else {
             Ok(Json(EventResponse {
                 success: true,
-                message: format!("All {} events processed successfully", success_count),
+                message: format!("All {success_count} events processed successfully"),
                 error: None,
             }))
         }
@@ -540,14 +535,11 @@ impl HttpSource {
         let mut total_events = 0u64;
         let mut total_batches = 0u64;
 
-        info!(
-            "[{}] Adaptive HTTP batcher started with config: {:?}",
-            source_id, adaptive_config
-        );
+        info!("[{source_id}] Adaptive HTTP batcher started with config: {adaptive_config:?}");
 
         while let Some(batch) = batcher.next_batch().await {
             if batch.is_empty() {
-                debug!("[{}] Batcher received empty batch, skipping", source_id);
+                debug!("[{source_id}] Batcher received empty batch, skipping");
                 continue;
             }
 
@@ -556,8 +548,7 @@ impl HttpSource {
             total_batches += 1;
 
             debug!(
-                "[{}] Batcher forwarding batch #{} with {} events to dispatchers",
-                source_id, total_batches, batch_size
+                "[{source_id}] Batcher forwarding batch #{total_batches} with {batch_size} events to dispatchers"
             );
 
             let mut sent_count = 0;
@@ -607,8 +598,7 @@ impl HttpSource {
             }
 
             debug!(
-                "[{}] Batch #{} complete: {} dispatched, {} failed",
-                source_id, total_batches, sent_count, failed_count
+                "[{source_id}] Batch #{total_batches} complete: {sent_count} dispatched, {failed_count} failed"
             );
 
             if total_batches.is_multiple_of(100) {
@@ -623,8 +613,7 @@ impl HttpSource {
         }
 
         info!(
-            "[{}] Adaptive HTTP batcher stopped - Total batches: {}, Total events: {}",
-            source_id, total_batches, total_events
+            "[{source_id}] Adaptive HTTP batcher stopped - Total batches: {total_batches}, Total events: {total_events}"
         );
     }
 }
@@ -688,7 +677,7 @@ impl Source for HttpSource {
         let adaptive_config = self.adaptive_config.clone();
         let source_id = self.base.id.clone();
 
-        info!("[{}] Starting adaptive batcher task", source_id);
+        info!("[{source_id}] Starting adaptive batcher task");
         tokio::spawn(Self::run_adaptive_batcher(
             batch_rx,
             self.base.dispatchers.clone(),
@@ -723,28 +712,18 @@ impl Source for HttpSource {
         // Start server
         let (error_tx, error_rx) = tokio::sync::oneshot::channel();
         let server_handle = tokio::spawn(async move {
-            let addr = format!("{}:{}", host, port);
-            info!(
-                "[{}] Adaptive HTTP source attempting to bind to {}",
-                source_id, addr
-            );
+            let addr = format!("{host}:{port}");
+            info!("[{source_id}] Adaptive HTTP source attempting to bind to {addr}");
 
             let listener = match tokio::net::TcpListener::bind(&addr).await {
                 Ok(listener) => {
-                    info!(
-                        "[{}] Adaptive HTTP source successfully listening on {}",
-                        source_id, addr
-                    );
+                    info!("[{source_id}] Adaptive HTTP source successfully listening on {addr}");
                     listener
                 }
                 Err(e) => {
-                    error!(
-                        "[{}] Failed to bind HTTP server to {}: {}",
-                        source_id, addr, e
-                    );
+                    error!("[{source_id}] Failed to bind HTTP server to {addr}: {e}");
                     let _ = error_tx.send(format!(
-                        "Failed to bind HTTP server to {}: {}. Common causes: port already in use, insufficient permissions",
-                        addr, e
+                        "Failed to bind HTTP server to {addr}: {e}. Common causes: port already in use, insufficient permissions"
                     ));
                     return;
                 }
@@ -756,7 +735,7 @@ impl Source for HttpSource {
                 })
                 .await
             {
-                error!("[{}] HTTP server error: {}", source_id, e);
+                error!("[{source_id}] HTTP server error: {e}");
             }
         });
 
@@ -767,7 +746,7 @@ impl Source for HttpSource {
         match timeout(Duration::from_millis(500), error_rx).await {
             Ok(Ok(error_msg)) => {
                 self.base.set_status(ComponentStatus::Error).await;
-                return Err(anyhow::anyhow!("{}", error_msg));
+                return Err(anyhow::anyhow!("{error_msg}"));
             }
             _ => {
                 self.base.set_status(ComponentStatus::Running).await;
@@ -778,8 +757,7 @@ impl Source for HttpSource {
             .send_component_event(
                 ComponentStatus::Running,
                 Some(format!(
-                    "Adaptive HTTP source running on {}:{} with batch support",
-                    host_clone, port
+                    "Adaptive HTTP source running on {host_clone}:{port} with batch support"
                 )),
             )
             .await?;

@@ -240,8 +240,7 @@ impl DrasiLibBuilder {
             let source_id = source.id().to_string();
             core.source_manager.add_source(source).await.map_err(|e| {
                 DrasiError::provisioning(format!(
-                    "Failed to add source instance '{}': {}",
-                    source_id, e
+                    "Failed to add source instance '{source_id}': {e}"
                 ))
             })?;
         }
@@ -254,8 +253,7 @@ impl DrasiLibBuilder {
                 .await
                 .map_err(|e| {
                     DrasiError::provisioning(format!(
-                        "Failed to add reaction instance '{}': {}",
-                        reaction_id, e
+                        "Failed to add reaction instance '{reaction_id}': {e}"
                     ))
                 })?;
         }

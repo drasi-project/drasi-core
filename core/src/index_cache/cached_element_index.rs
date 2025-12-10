@@ -41,7 +41,7 @@ impl CachedElementIndex {
         element_index: Arc<dyn ElementIndex>,
         cache_size: usize,
     ) -> Result<Self, CacheError> {
-        log::info!("using cached element index with size {}", cache_size);
+        log::info!("using cached element index with size {cache_size}");
 
         let element_cache = LRUCache::new(cache_size)?;
         let element_cache = Arc::new(RwLock::new(element_cache));

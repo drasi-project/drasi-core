@@ -629,9 +629,7 @@ impl PlatformSource {
                 }
                 Err(e) => {
                     return Err(anyhow::anyhow!(
-                        "Failed to connect to Redis after {} attempts: {}",
-                        max_retries,
-                        e
+                        "Failed to connect to Redis after {max_retries} attempts: {e}"
                     ));
                 }
             }
@@ -658,8 +656,7 @@ impl PlatformSource {
         // If always_create is true, delete the existing group first
         if always_create {
             info!(
-                "always_create_consumer_group=true, deleting consumer group '{}' if it exists",
-                consumer_group
+                "always_create_consumer_group=true, deleting consumer group '{consumer_group}' if it exists"
             );
 
             let destroy_result: Result<i64, redis::RedisError> = redis::cmd("XGROUP")
@@ -670,10 +667,10 @@ impl PlatformSource {
                 .await;
 
             match destroy_result {
-                Ok(1) => info!("Successfully deleted consumer group '{}'", consumer_group),
-                Ok(0) => debug!("Consumer group '{}' did not exist", consumer_group),
-                Ok(n) => warn!("Unexpected result from XGROUP DESTROY: {}", n),
-                Err(e) => warn!("Error deleting consumer group (will continue): {}", e),
+                Ok(1) => info!("Successfully deleted consumer group '{consumer_group}'"),
+                Ok(0) => debug!("Consumer group '{consumer_group}' did not exist"),
+                Ok(n) => warn!("Unexpected result from XGROUP DESTROY: {n}"),
+                Err(e) => warn!("Error deleting consumer group (will continue): {e}"),
             }
         }
 
@@ -690,8 +687,7 @@ impl PlatformSource {
         match result {
             Ok(_) => {
                 info!(
-                    "Created consumer group '{}' for stream '{}' at position '{}'",
-                    consumer_group, stream_key, group_start_id
+                    "Created consumer group '{consumer_group}' for stream '{stream_key}' at position '{group_start_id}'"
                 );
                 Ok(())
             }
@@ -699,12 +695,11 @@ impl PlatformSource {
                 // BUSYGROUP error means the group already exists
                 if e.to_string().contains("BUSYGROUP") {
                     info!(
-                        "Consumer group '{}' already exists for stream '{}', will resume from last position",
-                        consumer_group, stream_key
+                        "Consumer group '{consumer_group}' already exists for stream '{stream_key}', will resume from last position"
                     );
                     Ok(())
                 } else {
-                    Err(anyhow::anyhow!("Failed to create consumer group: {}", e))
+                    Err(anyhow::anyhow!("Failed to create consumer group: {e}"))
                 }
             }
         }
@@ -742,7 +737,7 @@ impl PlatformSource {
             {
                 Ok(conn) => conn,
                 Err(e) => {
-                    error!("Failed to connect to Redis: {}", e);
+                    error!("Failed to connect to Redis: {e}");
                     if let Some(ref tx) = *event_tx.read().await {
                         let _ = tx
                             .send(ComponentEvent {
@@ -750,7 +745,7 @@ impl PlatformSource {
                                 component_type: ComponentType::Source,
                                 status: ComponentStatus::Stopped,
                                 timestamp: chrono::Utc::now(),
-                                message: Some(format!("Failed to connect to Redis: {}", e)),
+                                message: Some(format!("Failed to connect to Redis: {e}")),
                             })
                             .await;
                     }
@@ -769,7 +764,7 @@ impl PlatformSource {
             )
             .await
             {
-                error!("Failed to create consumer group: {}", e);
+                error!("Failed to create consumer group: {e}");
                 if let Some(ref tx) = *event_tx.read().await {
                     let _ = tx
                         .send(ComponentEvent {
@@ -777,7 +772,7 @@ impl PlatformSource {
                             component_type: ComponentType::Source,
                             status: ComponentStatus::Stopped,
                             timestamp: chrono::Utc::now(),
-                            message: Some(format!("Failed to create consumer group: {}", e)),
+                            message: Some(format!("Failed to create consumer group: {e}")),
                         })
                         .await;
                 }
@@ -830,8 +825,7 @@ impl PlatformSource {
                                                     MessageType::Control(control_type) => {
                                                         // Handle control message
                                                         debug!(
-                                                            "Detected control message of type: {}",
-                                                            control_type
+                                                            "Detected control message of type: {control_type}"
                                                         );
 
                                                         match transform_control_event(
@@ -861,7 +855,7 @@ impl PlatformSource {
                                                                     )
                                                                     .await
                                                                     {
-                                                                        debug!("[{}] Failed to dispatch control event (no subscribers): {}", source_id, e);
+                                                                        debug!("[{source_id}] Failed to dispatch control event (no subscribers): {e}");
                                                                     } else {
                                                                         debug!(
                                                                             "Published control event for stream {}",
@@ -921,7 +915,7 @@ impl PlatformSource {
                                                                     )
                                                                     .await
                                                                     {
-                                                                        debug!("[{}] Failed to dispatch change (no subscribers): {}", source_id, e);
+                                                                        debug!("[{source_id}] Failed to dispatch change (no subscribers): {e}");
                                                                     } else {
                                                                         debug!(
                                                                             "Published source change for event {}",
@@ -946,8 +940,7 @@ impl PlatformSource {
                                                                             status: ComponentStatus::Running,
                                                                             timestamp: chrono::Utc::now(),
                                                                             message: Some(format!(
-                                                                                "Transformation error: {}",
-                                                                                e
+                                                                                "Transformation error: {e}"
                                                                             )),
                                                                         })
                                                                         .await;
@@ -990,7 +983,7 @@ impl PlatformSource {
 
                             match cmd.query_async::<_, i64>(&mut conn).await {
                                 Ok(ack_count) => {
-                                    debug!("Successfully acknowledged {} messages", ack_count);
+                                    debug!("Successfully acknowledged {ack_count} messages");
                                     if ack_count as usize != all_stream_ids.len() {
                                         warn!(
                                             "Acknowledged {} messages but expected {}",
@@ -1000,7 +993,7 @@ impl PlatformSource {
                                     }
                                 }
                                 Err(e) => {
-                                    error!("Failed to acknowledge message batch: {}", e);
+                                    error!("Failed to acknowledge message batch: {e}");
 
                                     // Fallback: Try acknowledging messages individually
                                     warn!("Falling back to individual acknowledgments");
@@ -1014,14 +1007,12 @@ impl PlatformSource {
                                         {
                                             Ok(_) => {
                                                 debug!(
-                                                    "Individually acknowledged message {}",
-                                                    stream_id
+                                                    "Individually acknowledged message {stream_id}"
                                                 );
                                             }
                                             Err(e) => {
                                                 error!(
-                                                    "Failed to individually acknowledge message {}: {}",
-                                                    stream_id, e
+                                                    "Failed to individually acknowledge message {stream_id}: {e}"
                                                 );
                                             }
                                         }
@@ -1033,7 +1024,7 @@ impl PlatformSource {
                     Err(e) => {
                         // Check if it's a connection error
                         if is_connection_error(&e) {
-                            error!("Redis connection lost: {}", e);
+                            error!("Redis connection lost: {e}");
                             if let Some(ref tx) = *event_tx.read().await {
                                 let _ = tx
                                     .send(ComponentEvent {
@@ -1041,7 +1032,7 @@ impl PlatformSource {
                                         component_type: ComponentType::Source,
                                         status: ComponentStatus::Running,
                                         timestamp: chrono::Utc::now(),
-                                        message: Some(format!("Redis connection lost: {}", e)),
+                                        message: Some(format!("Redis connection lost: {e}")),
                                     })
                                     .await;
                             }
@@ -1059,14 +1050,14 @@ impl PlatformSource {
                                     info!("Reconnected to Redis");
                                 }
                                 Err(e) => {
-                                    error!("Failed to reconnect to Redis: {}", e);
+                                    error!("Failed to reconnect to Redis: {e}");
                                     *status.write().await = ComponentStatus::Stopped;
                                     return;
                                 }
                             }
                         } else if !e.to_string().contains("timeout") {
                             // Log non-timeout errors
-                            error!("Error reading from stream: {}", e);
+                            error!("Error reading from stream: {e}");
                         }
                     }
                 }
@@ -1242,7 +1233,7 @@ fn extract_event_data(entry_map: &HashMap<String, redis::Value>) -> Result<Strin
     for key in &["data", "event", "payload", "message"] {
         if let Some(redis::Value::Data(data)) = entry_map.get(*key) {
             return String::from_utf8(data.clone())
-                .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in event data: {}", e));
+                .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in event data: {e}"));
         }
     }
 
@@ -1348,13 +1339,12 @@ fn transform_platform_event(
         let element_data = match op {
             "i" | "u" => &payload["after"],
             "d" => &payload["before"],
-            _ => return Err(anyhow::anyhow!("Unknown operation type: {}", op)),
+            _ => return Err(anyhow::anyhow!("Unknown operation type: {op}")),
         };
 
         if element_data.is_null() {
             return Err(anyhow::anyhow!(
-                "Missing element data (after/before) for operation {}",
-                op
+                "Missing element data (after/before) for operation {op}"
             ));
         }
 
@@ -1429,7 +1419,7 @@ fn transform_platform_event(
                     in_node: ElementReference::new(source_id, end_id),
                 }
             }
-            _ => return Err(anyhow::anyhow!("Unknown element type: {}", element_type)),
+            _ => return Err(anyhow::anyhow!("Unknown element type: {element_type}")),
         };
 
         // Build SourceChange
@@ -1464,8 +1454,7 @@ fn transform_control_event(cloud_event: Value, control_type: &str) -> Result<Vec
     // Check if control type is supported
     if control_type != "SourceSubscription" {
         info!(
-            "Skipping unknown control type '{}' (only 'SourceSubscription' is supported)",
-            control_type
+            "Skipping unknown control type '{control_type}' (only 'SourceSubscription' is supported)"
         );
         return Ok(control_events); // Return empty vec for unknown types
     }
@@ -1489,16 +1478,13 @@ fn transform_control_event(cloud_event: Value, control_type: &str) -> Result<Vec
             "i" | "u" => &payload["after"],
             "d" => &payload["before"],
             _ => {
-                warn!("Unknown operation type in control event: {}, skipping", op);
+                warn!("Unknown operation type in control event: {op}, skipping");
                 continue;
             }
         };
 
         if control_data.is_null() {
-            warn!(
-                "Missing control data (after/before) for operation {}, skipping",
-                op
-            );
+            warn!("Missing control data (after/before) for operation {op}, skipping");
             continue;
         }
 

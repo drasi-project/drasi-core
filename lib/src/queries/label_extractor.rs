@@ -68,8 +68,8 @@ impl LabelExtractor {
             Self::extract_from_query_part(query_part, &mut node_labels, &mut relation_labels);
         }
 
-        debug!("Extracted node labels: {:?}", node_labels);
-        debug!("Extracted relation labels: {:?}", relation_labels);
+        debug!("Extracted node labels: {node_labels:?}");
+        debug!("Extracted relation labels: {relation_labels:?}");
 
         Ok(QueryLabels {
             node_labels: node_labels.into_iter().collect(),

@@ -95,7 +95,7 @@ fn convert_variable_value_to_json(value: &VariableValue) -> serde_json::Value {
             serde_json::Value::Object(result)
         }
         // For complex types, convert to string representation
-        _ => serde_json::Value::String(format!("{:?}", value)),
+        _ => serde_json::Value::String(format!("{value:?}")),
     }
 }
 
@@ -198,7 +198,7 @@ impl Query for DrasiQuery {
         };
 
         if let Err(e) = self.base.event_tx.send(event).await {
-            error!("Failed to send component event: {}", e);
+            error!("Failed to send component event: {e}");
         }
 
         // Build and initialize the actual Drasi ContinuousQuery
@@ -294,14 +294,14 @@ impl Query for DrasiQuery {
                     component_type: ComponentType::Query,
                     status: ComponentStatus::Error,
                     timestamp: chrono::Utc::now(),
-                    message: Some(format!("Failed to build query: {}", e)),
+                    message: Some(format!("Failed to build query: {e}")),
                 };
 
                 if let Err(e) = self.base.event_tx.send(event).await {
-                    error!("Failed to send component event: {}", e);
+                    error!("Failed to send component event: {e}");
                 }
 
-                return Err(anyhow::anyhow!("Failed to build query: {}", e));
+                return Err(anyhow::anyhow!("Failed to build query: {e}"));
             }
         };
 
@@ -353,7 +353,7 @@ impl Query for DrasiQuery {
                         let _ = handle.await;
                     }
                     *self.base.status.write().await = ComponentStatus::Error;
-                    return Err(anyhow::anyhow!("Source '{}' not found", source_id));
+                    return Err(anyhow::anyhow!("Source '{source_id}' not found"));
                 }
             };
 
@@ -381,9 +381,7 @@ impl Query for DrasiQuery {
                     }
                     *self.base.status.write().await = ComponentStatus::Error;
                     return Err(anyhow::anyhow!(
-                        "Failed to subscribe to source '{}': {}",
-                        source_id,
-                        e
+                        "Failed to subscribe to source '{source_id}': {e}"
                     ));
                 }
             };
@@ -417,8 +415,7 @@ impl Query for DrasiQuery {
 
             let task = tokio::spawn(async move {
                 debug!(
-                    "Query '{}' started event forwarder for source '{}' (dispatch_mode: {:?}, blocking_enqueue: {})",
-                    query_id, source_id_clone, dispatch_mode, use_blocking_enqueue
+                    "Query '{query_id}' started event forwarder for source '{source_id_clone}' (dispatch_mode: {dispatch_mode:?}, blocking_enqueue: {use_blocking_enqueue})"
                 );
 
                 loop {
@@ -434,30 +431,24 @@ impl Query for DrasiQuery {
                                 // Messages may be dropped when priority queue is full
                                 if !priority_queue.enqueue(arc_event).await {
                                     warn!(
-                                        "Query '{}' priority queue at capacity, dropping event from source '{}' (broadcast mode)",
-                                        query_id, source_id_clone
+                                        "Query '{query_id}' priority queue at capacity, dropping event from source '{source_id_clone}' (broadcast mode)"
                                     );
                                 }
                             }
                         }
                         Err(e) => {
                             error!(
-                                "Query '{}' receiver error for source '{}': {}",
-                                query_id, source_id_clone, e
+                                "Query '{query_id}' receiver error for source '{source_id_clone}': {e}"
                             );
                             info!(
-                                "Query '{}' channel closed for source '{}'",
-                                query_id, source_id_clone
+                                "Query '{query_id}' channel closed for source '{source_id_clone}'"
                             );
                             break;
                         }
                     }
                 }
 
-                debug!(
-                    "Query '{}' event forwarder exited for source '{}'",
-                    query_id, source_id_clone
-                );
+                debug!("Query '{query_id}' event forwarder exited for source '{source_id_clone}'");
             });
 
             subscription_tasks.push(task);
@@ -516,8 +507,7 @@ impl Query for DrasiQuery {
                     .insert(source_id.to_string(), BootstrapPhase::InProgress);
 
                 info!(
-                    "[BOOTSTRAP] Query '{}' processing bootstrap from source '{}'",
-                    query_id, source_id
+                    "[BOOTSTRAP] Query '{query_id}' processing bootstrap from source '{source_id}'"
                 );
 
                 let continuous_query_ref = continuous_query_clone.clone();
@@ -548,16 +538,14 @@ impl Query for DrasiQuery {
                             }
                             Err(e) => {
                                 error!(
-                                    "[BOOTSTRAP] Query '{}' failed to process bootstrap event from source '{}': {}",
-                                    query_id_clone, source_id_clone, e
+                                    "[BOOTSTRAP] Query '{query_id_clone}' failed to process bootstrap event from source '{source_id_clone}': {e}"
                                 );
                             }
                         }
                     }
 
                     info!(
-                        "[BOOTSTRAP] Query '{}' completed bootstrap from source '{}' ({} events)",
-                        query_id_clone, source_id_clone, count
+                        "[BOOTSTRAP] Query '{query_id_clone}' completed bootstrap from source '{source_id_clone}' ({count} events)"
                     );
 
                     // Mark source bootstrap as completed
@@ -576,8 +564,7 @@ impl Query for DrasiQuery {
 
                     if all_completed {
                         info!(
-                            "[BOOTSTRAP] Query '{}' all sources completed bootstrap",
-                            query_id_clone
+                            "[BOOTSTRAP] Query '{query_id_clone}' all sources completed bootstrap"
                         );
 
                         // Emit bootstrapCompleted control signal
@@ -607,13 +594,11 @@ impl Query for DrasiQuery {
 
                         if !dispatched {
                             debug!(
-                                "No reactions subscribed to query '{}' for bootstrapCompleted signal",
-                                query_id_clone
+                                "No reactions subscribed to query '{query_id_clone}' for bootstrapCompleted signal"
                             );
                         } else {
                             info!(
-                                "[BOOTSTRAP] Emitted bootstrapCompleted signal for query '{}'",
-                                query_id_clone
+                                "[BOOTSTRAP] Emitted bootstrapCompleted signal for query '{query_id_clone}'"
                             );
                         }
                     }
@@ -638,7 +623,7 @@ impl Query for DrasiQuery {
         };
 
         if let Err(e) = self.base.event_tx.send(event).await {
-            error!("Failed to send component event: {}", e);
+            error!("Failed to send component event: {e}");
         }
 
         // NEW: Spawn event processor task that reads from priority queue
@@ -655,17 +640,13 @@ impl Query for DrasiQuery {
         self.base.set_shutdown_tx(shutdown_tx).await;
 
         let handle = tokio::spawn(async move {
-            info!(
-                "Query '{}' starting priority queue event processor",
-                query_id
-            );
+            info!("Query '{query_id}' starting priority queue event processor");
 
             loop {
                 // Check if query is still running
                 if !matches!(*status.read().await, ComponentStatus::Running) {
                     info!(
-                        "Query '{}' status changed to non-running, exiting processing loop",
-                        query_id
+                        "Query '{query_id}' status changed to non-running, exiting processing loop"
                     );
                     break;
                 }
@@ -677,8 +658,7 @@ impl Query for DrasiQuery {
 
                     _ = &mut shutdown_rx => {
                         info!(
-                            "Query '{}' received shutdown signal, exiting processing loop",
-                            query_id
+                            "Query '{query_id}' received shutdown signal, exiting processing loop"
                         );
                         break;
                     }
@@ -704,26 +684,19 @@ impl Query for DrasiQuery {
                         }
                     };
 
-                debug!(
-                    "Query '{}' processing event from source '{}'",
-                    query_id, source_id
-                );
+                debug!("Query '{query_id}' processing event from source '{source_id}'");
 
                 // Extract the SourceChange from the SourceEvent (now owned, no clone needed)
                 let source_change = match event {
                     SourceEvent::Change(change) => change,
                     SourceEvent::Control(_) => {
                         debug!(
-                            "Query '{}' ignoring control event from source '{}'",
-                            query_id, source_id
+                            "Query '{query_id}' ignoring control event from source '{source_id}'"
                         );
                         continue;
                     }
                     SourceEvent::BootstrapStart { .. } | SourceEvent::BootstrapEnd { .. } => {
-                        debug!(
-                            "Query '{}' ignoring bootstrap marker event (deprecated)",
-                            query_id
-                        );
+                        debug!("Query '{query_id}' ignoring bootstrap marker event (deprecated)");
                         continue;
                     }
                 };
@@ -756,7 +729,7 @@ impl Query for DrasiQuery {
                                 .iter()
                                 .map(|ctx| match ctx {
                                     QueryPartEvaluationContext::Adding { after } => {
-                                        debug!("Query '{}' got Adding context", query_id);
+                                        debug!("Query '{query_id}' got Adding context");
                                         serde_json::json!({
                                             "type": "ADD",
                                             "data": convert_query_variables_to_json(after)
@@ -764,8 +737,7 @@ impl Query for DrasiQuery {
                                     }
                                     QueryPartEvaluationContext::Removing { before } => {
                                         warn!(
-                                            "Query '{}' got Removing context for UPDATE source event",
-                                            query_id
+                                            "Query '{query_id}' got Removing context for UPDATE source event"
                                         );
                                         serde_json::json!({
                                             "type": "DELETE",
@@ -773,7 +745,7 @@ impl Query for DrasiQuery {
                                         })
                                     }
                                     QueryPartEvaluationContext::Updating { before, after } => {
-                                        debug!("Query '{}' got Updating context", query_id);
+                                        debug!("Query '{query_id}' got Updating context");
                                         serde_json::json!({
                                             "type": "UPDATE",
                                             "data": convert_query_variables_to_json(after),
@@ -879,24 +851,18 @@ impl Query for DrasiQuery {
                             for dispatcher in dispatchers.iter() {
                                 if let Err(e) = dispatcher.dispatch_change(arc_result.clone()).await
                                 {
-                                    debug!(
-                                        "Failed to dispatch result for query '{}': {}",
-                                        query_id, e
-                                    );
+                                    debug!("Failed to dispatch result for query '{query_id}': {e}");
                                 }
                             }
                         }
                     }
                     Err(e) => {
-                        error!(
-                            "Query '{}' failed to process source change: {}",
-                            query_id, e
-                        );
+                        error!("Query '{query_id}' failed to process source change: {e}");
                     }
                 }
             }
 
-            info!("Query '{}' processing task exited", query_id);
+            info!("Query '{query_id}' processing task exited");
         });
 
         // Store the task handle
@@ -955,7 +921,7 @@ impl Query for DrasiQuery {
         self.base
             .subscribe(&reaction_id)
             .await
-            .map_err(|e| format!("Failed to subscribe: {}", e))
+            .map_err(|e| format!("Failed to subscribe: {e}"))
     }
 }
 
@@ -999,10 +965,7 @@ impl QueryManager {
         // This eliminates the TOCTOU race condition from separate read-then-write
         let mut queries = self.queries.write().await;
         if queries.contains_key(&query_id) {
-            return Err(anyhow::anyhow!(
-                "Query with id '{}' already exists",
-                query_id
-            ));
+            return Err(anyhow::anyhow!("Query with id '{query_id}' already exists"));
         }
         queries.insert(query_id, query);
         Ok(())
@@ -1041,10 +1004,7 @@ impl QueryManager {
         // Note: Auto-start is handled by the caller (server.add_query)
         // which has access to the data router for subscriptions
         if should_auto_start {
-            info!(
-                "Query '{}' is configured for auto-start (will be started by caller)",
-                query_id
-            );
+            info!("Query '{query_id}' is configured for auto-start (will be started by caller)");
         }
 
         Ok(())
@@ -1061,7 +1021,7 @@ impl QueryManager {
             is_operation_valid(&status, &Operation::Start).map_err(|e| anyhow::anyhow!(e))?;
             query.start().await?;
         } else {
-            return Err(anyhow::anyhow!("Query not found: {}", id));
+            return Err(anyhow::anyhow!("Query not found: {id}"));
         }
 
         Ok(())
@@ -1078,7 +1038,7 @@ impl QueryManager {
             is_operation_valid(&status, &Operation::Stop).map_err(|e| anyhow::anyhow!(e))?;
             query.stop().await?;
         } else {
-            return Err(anyhow::anyhow!("Query not found: {}", id));
+            return Err(anyhow::anyhow!("Query not found: {id}"));
         }
 
         Ok(())
@@ -1093,7 +1053,7 @@ impl QueryManager {
         if let Some(query) = query {
             Ok(query.status().await)
         } else {
-            Err(anyhow::anyhow!("Query not found: {}", id))
+            Err(anyhow::anyhow!("Query not found: {id}"))
         }
     }
 
@@ -1105,8 +1065,7 @@ impl QueryManager {
             Ok(Arc::clone(query))
         } else {
             Err(format!(
-                "Query '{}' not found. Available queries can be listed using list_queries().",
-                query_id
+                "Query '{query_id}' not found. Available queries can be listed using list_queries()."
             ))
         }
     }
@@ -1133,7 +1092,7 @@ impl QueryManager {
             };
             Ok(runtime)
         } else {
-            Err(anyhow::anyhow!("Query not found: {}", id))
+            Err(anyhow::anyhow!("Query not found: {id}"))
         }
     }
 
@@ -1147,7 +1106,7 @@ impl QueryManager {
                     matches!(status, ComponentStatus::Running | ComponentStatus::Starting);
                 (query, was_running)
             } else {
-                return Err(anyhow::anyhow!("Query not found: {}", id));
+                return Err(anyhow::anyhow!("Query not found: {id}"));
             }
         };
 
@@ -1189,7 +1148,7 @@ impl QueryManager {
 
             // If the query is running, stop it first
             if matches!(status, ComponentStatus::Running) {
-                info!("Stopping query '{}' before deletion", id);
+                info!("Stopping query '{id}' before deletion");
                 query.stop().await?;
 
                 // Wait a bit to ensure the query has fully stopped
@@ -1199,8 +1158,7 @@ impl QueryManager {
                 let new_status = query.status().await;
                 if !matches!(new_status, ComponentStatus::Stopped) {
                     return Err(anyhow::anyhow!(
-                        "Failed to stop query '{}' before deletion",
-                        id
+                        "Failed to stop query '{id}' before deletion"
                     ));
                 }
             } else {
@@ -1210,11 +1168,11 @@ impl QueryManager {
 
             // Now remove the query
             self.queries.write().await.remove(&id);
-            info!("Deleted query: {}", id);
+            info!("Deleted query: {id}");
 
             Ok(())
         } else {
-            Err(anyhow::anyhow!("Query not found: {}", id))
+            Err(anyhow::anyhow!("Query not found: {id}"))
         }
     }
 
@@ -1251,7 +1209,7 @@ impl QueryManager {
             // Check if the query is running
             let status = query.status().await;
             if status != ComponentStatus::Running {
-                return Err(anyhow::anyhow!("Query '{}' is not running", id));
+                return Err(anyhow::anyhow!("Query '{id}' is not running"));
             }
 
             // Downcast to DrasiQuery to access get_current_results
@@ -1263,7 +1221,7 @@ impl QueryManager {
 
             Ok(drasi_query.get_current_results().await)
         } else {
-            Err(anyhow::anyhow!("Query not found: {}", id))
+            Err(anyhow::anyhow!("Query not found: {id}"))
         }
     }
 
@@ -1281,17 +1239,14 @@ impl QueryManager {
         for (id, query) in queries_snapshot {
             let config = query.get_config();
             if config.auto_start {
-                info!("Auto-starting query: {}", id);
+                info!("Auto-starting query: {id}");
                 if let Err(e) = query.start().await {
-                    error!("Failed to start query {}: {}", id, e);
+                    error!("Failed to start query {id}: {e}");
                     failed_queries.push((id.clone(), e.to_string()));
                     // Continue starting other queries instead of returning early
                 }
             } else {
-                info!(
-                    "Query '{}' has auto_start=false, skipping automatic startup",
-                    id
-                );
+                info!("Query '{id}' has auto_start=false, skipping automatic startup");
             }
         }
 
@@ -1299,13 +1254,10 @@ impl QueryManager {
         if !failed_queries.is_empty() {
             let error_msg = failed_queries
                 .iter()
-                .map(|(id, err)| format!("{}: {}", id, err))
+                .map(|(id, err)| format!("{id}: {err}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            Err(anyhow::anyhow!(
-                "Failed to start some queries: {}",
-                error_msg
-            ))
+            Err(anyhow::anyhow!("Failed to start some queries: {error_msg}"))
         } else {
             Ok(())
         }

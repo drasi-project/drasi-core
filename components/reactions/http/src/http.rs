@@ -152,7 +152,7 @@ impl HttpReaction {
         let full_url = if url.starts_with("http://") || url.starts_with("https://") {
             url
         } else {
-            format!("{}{}", base_url, url)
+            format!("{base_url}{url}")
         };
 
         // Render body
@@ -162,7 +162,7 @@ impl HttpReaction {
                 reaction_name, call_spec.body, context
             );
             let rendered = handlebars.render_template(&call_spec.body, &context)?;
-            debug!("[{}] Rendered body: {}", reaction_name, rendered);
+            debug!("[{reaction_name}] Rendered body: {rendered}");
             rendered
         } else {
             serde_json::to_string(&data)?
@@ -175,7 +175,7 @@ impl HttpReaction {
         if let Some(token) = token {
             headers.insert(
                 "Authorization",
-                HeaderValue::from_str(&format!("Bearer {}", token))?,
+                HeaderValue::from_str(&format!("Bearer {token}"))?,
             );
         }
 
@@ -197,10 +197,7 @@ impl HttpReaction {
         };
 
         // Make HTTP request
-        debug!(
-            "[{}] Sending {} request to {} with body: {}",
-            reaction_name, method, full_url, body
-        );
+        debug!("[{reaction_name}] Sending {method} request to {full_url} with body: {body}");
 
         let response = client
             .request(method.clone(), &full_url)
@@ -317,7 +314,7 @@ impl Reaction for HttpReaction {
             {
                 Ok(c) => c,
                 Err(e) => {
-                    error!("[{}] Failed to create HTTP client: {}", reaction_name, e);
+                    error!("[{reaction_name}] Failed to create HTTP client: {e}");
                     return;
                 }
             };
@@ -350,7 +347,7 @@ impl Reaction for HttpReaction {
                     biased;
 
                     _ = &mut shutdown_rx => {
-                        debug!("[{}] Received shutdown signal, exiting processing loop", reaction_name);
+                        debug!("[{reaction_name}] Received shutdown signal, exiting processing loop");
                         break;
                     }
 
@@ -363,7 +360,7 @@ impl Reaction for HttpReaction {
                 }
 
                 if query_result.results.is_empty() {
-                    debug!("[{}] Received empty result set from query", reaction_name);
+                    debug!("[{reaction_name}] Received empty result set from query");
                     continue;
                 }
 
@@ -383,25 +380,24 @@ impl Reaction for HttpReaction {
                     Some(config) => config,
                     None => {
                         debug!(
-                            "[{}] No configuration for query '{}', using default",
-                            reaction_name, query_name
+                            "[{reaction_name}] No configuration for query '{query_name}', using default"
                         );
                         // Create a default configuration that POSTs all changes
                         default_config = QueryConfig {
                             added: Some(CallSpec {
-                                url: format!("/changes/{}", query_name),
+                                url: format!("/changes/{query_name}"),
                                 method: "POST".to_string(),
                                 body: String::new(),
                                 headers: HashMap::new(),
                             }),
                             updated: Some(CallSpec {
-                                url: format!("/changes/{}", query_name),
+                                url: format!("/changes/{query_name}"),
                                 method: "POST".to_string(),
                                 body: String::new(),
                                 headers: HashMap::new(),
                             }),
                             deleted: Some(CallSpec {
-                                url: format!("/changes/{}", query_name),
+                                url: format!("/changes/{query_name}"),
                                 method: "POST".to_string(),
                                 body: String::new(),
                                 headers: HashMap::new(),
@@ -450,14 +446,14 @@ impl Reaction for HttpReaction {
                             )
                             .await
                             {
-                                error!("[{}] Failed to process result: {}", reaction_name, e);
+                                error!("[{reaction_name}] Failed to process result: {e}");
                             }
                         }
                     }
                 }
             }
 
-            info!("[{}] HTTP reaction stopped", reaction_name);
+            info!("[{reaction_name}] HTTP reaction stopped");
             *status.write().await = ComponentStatus::Stopped;
         });
 

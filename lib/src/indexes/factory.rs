@@ -48,16 +48,16 @@ impl fmt::Display for IndexError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             IndexError::UnknownStore(name) => {
-                write!(f, "Unknown storage backend: '{}'. Check that the backend is defined in storage_backends configuration.", name)
+                write!(f, "Unknown storage backend: '{name}'. Check that the backend is defined in storage_backends configuration.")
             }
             IndexError::ConnectionFailed(details) => {
-                write!(f, "Failed to connect to storage backend: {}", details)
+                write!(f, "Failed to connect to storage backend: {details}")
             }
             IndexError::PathError(details) => {
-                write!(f, "Storage path error: {}", details)
+                write!(f, "Storage path error: {details}")
             }
             IndexError::InitializationFailed(details) => {
-                write!(f, "Failed to initialize storage backend: {}", details)
+                write!(f, "Failed to initialize storage backend: {details}")
             }
             IndexError::NotSupported => {
                 write!(f, "Operation not supported")
@@ -215,42 +215,30 @@ impl IndexFactory {
 
         let element_index = RocksDbElementIndex::new(query_id, path, options).map_err(|e| {
             log::error!(
-                "Failed to create RocksDB element index for query '{}' at path '{}': {}",
-                query_id,
-                path,
-                e
+                "Failed to create RocksDB element index for query '{query_id}' at path '{path}': {e}"
             );
             IndexError::PathError(format!(
-                "Failed to initialize RocksDB at '{}' for query '{}': {}",
-                path, query_id, e
+                "Failed to initialize RocksDB at '{path}' for query '{query_id}': {e}"
             ))
         })?;
         let element_index = Arc::new(element_index);
 
         let result_index = RocksDbResultIndex::new(query_id, path).map_err(|e| {
             log::error!(
-                "Failed to create RocksDB result index for query '{}' at path '{}': {}",
-                query_id,
-                path,
-                e
+                "Failed to create RocksDB result index for query '{query_id}' at path '{path}': {e}"
             );
             IndexError::PathError(format!(
-                "Failed to initialize RocksDB result index at '{}' for query '{}': {}",
-                path, query_id, e
+                "Failed to initialize RocksDB result index at '{path}' for query '{query_id}': {e}"
             ))
         })?;
         let result_index = Arc::new(result_index);
 
         let future_queue = RocksDbFutureQueue::new(query_id, path).map_err(|e| {
             log::error!(
-                "Failed to create RocksDB future queue for query '{}' at path '{}': {}",
-                query_id,
-                path,
-                e
+                "Failed to create RocksDB future queue for query '{query_id}' at path '{path}': {e}"
             );
             IndexError::PathError(format!(
-                "Failed to initialize RocksDB future queue at '{}' for query '{}': {}",
-                path, query_id, e
+                "Failed to initialize RocksDB future queue at '{path}' for query '{query_id}': {e}"
             ))
         })?;
         let future_queue = Arc::new(future_queue);
@@ -274,14 +262,10 @@ impl IndexFactory {
             .await
             .map_err(|e| {
                 log::error!(
-                    "Failed to connect to Redis/Garnet element index for query '{}' at '{}': {}",
-                    query_id,
-                    connection_string,
-                    e
+                    "Failed to connect to Redis/Garnet element index for query '{query_id}' at '{connection_string}': {e}"
                 );
                 IndexError::ConnectionFailed(format!(
-                    "Failed to connect to Redis/Garnet at '{}' for query '{}': {}",
-                    connection_string, query_id, e
+                    "Failed to connect to Redis/Garnet at '{connection_string}' for query '{query_id}': {e}"
                 ))
             })?;
         let element_index = Arc::new(element_index);
@@ -290,14 +274,10 @@ impl IndexFactory {
             .await
             .map_err(|e| {
                 log::error!(
-                    "Failed to connect to Redis/Garnet result index for query '{}' at '{}': {}",
-                    query_id,
-                    connection_string,
-                    e
+                    "Failed to connect to Redis/Garnet result index for query '{query_id}' at '{connection_string}': {e}"
                 );
                 IndexError::ConnectionFailed(format!(
-                    "Failed to connect to Redis/Garnet result index at '{}' for query '{}': {}",
-                    connection_string, query_id, e
+                    "Failed to connect to Redis/Garnet result index at '{connection_string}' for query '{query_id}': {e}"
                 ))
             })?;
         let result_index = Arc::new(result_index);
@@ -306,14 +286,10 @@ impl IndexFactory {
             .await
             .map_err(|e| {
                 log::error!(
-                    "Failed to connect to Redis/Garnet future queue for query '{}' at '{}': {}",
-                    query_id,
-                    connection_string,
-                    e
+                    "Failed to connect to Redis/Garnet future queue for query '{query_id}' at '{connection_string}': {e}"
                 );
                 IndexError::ConnectionFailed(format!(
-                    "Failed to connect to Redis/Garnet future queue at '{}' for query '{}': {}",
-                    connection_string, query_id, e
+                    "Failed to connect to Redis/Garnet future queue at '{connection_string}' for query '{query_id}': {e}"
                 ))
             })?;
         let future_queue = Arc::new(future_queue);
@@ -324,9 +300,7 @@ impl IndexFactory {
                 let cached_element_index =
                     CachedElementIndex::new(element_index.clone(), cache_size).map_err(|e| {
                         log::error!(
-                            "Failed to create cached element index for query '{}': {}",
-                            query_id,
-                            e
+                            "Failed to create cached element index for query '{query_id}': {e}"
                         );
                         IndexError::NotSupported
                     })?;
@@ -334,9 +308,7 @@ impl IndexFactory {
                 let cached_result_index = CachedResultIndex::new(result_index, cache_size)
                     .map_err(|e| {
                         log::error!(
-                            "Failed to create cached result index for query '{}': {}",
-                            query_id,
-                            e
+                            "Failed to create cached result index for query '{query_id}': {e}"
                         );
                         IndexError::NotSupported
                     })?;

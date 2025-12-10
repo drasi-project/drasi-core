@@ -186,10 +186,7 @@ impl ApplicationSourceHandle {
         properties: drasi_core::models::ElementPropertyMap,
     ) -> Result<()> {
         let effective_from = crate::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
-            warn!(
-                "Failed to get timestamp for node insert: {}, using fallback",
-                e
-            );
+            warn!("Failed to get timestamp for node insert: {e}, using fallback");
             (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
         });
 
@@ -216,10 +213,7 @@ impl ApplicationSourceHandle {
         properties: drasi_core::models::ElementPropertyMap,
     ) -> Result<()> {
         let effective_from = crate::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
-            warn!(
-                "Failed to get timestamp for node update: {}, using fallback",
-                e
-            );
+            warn!("Failed to get timestamp for node update: {e}, using fallback");
             (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
         });
 
@@ -245,7 +239,7 @@ impl ApplicationSourceHandle {
         labels: Vec<impl Into<Arc<str>>>,
     ) -> Result<()> {
         let effective_from = crate::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
-            warn!("Failed to get timestamp for delete: {}, using fallback", e);
+            warn!("Failed to get timestamp for delete: {e}, using fallback");
             (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
         });
 
@@ -271,10 +265,7 @@ impl ApplicationSourceHandle {
         end_node_id: impl Into<Arc<str>>,
     ) -> Result<()> {
         let effective_from = crate::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
-            warn!(
-                "Failed to get timestamp for relation insert: {}, using fallback",
-                e
-            );
+            warn!("Failed to get timestamp for relation insert: {e}, using fallback");
             (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
         });
 
@@ -455,10 +446,7 @@ impl ApplicationSource {
         let bootstrap_data = self.bootstrap_data.clone();
 
         let handle = tokio::spawn(async move {
-            info!(
-                "ApplicationSource '{}' event processor started",
-                source_name
-            );
+            info!("ApplicationSource '{source_name}' event processor started");
 
             if let Some(ref tx) = *event_tx.read().await {
                 let _ = tx
@@ -475,10 +463,7 @@ impl ApplicationSource {
             *status.write().await = ComponentStatus::Running;
 
             while let Some(change) = rx.recv().await {
-                debug!(
-                    "ApplicationSource '{}' received event: {:?}",
-                    source_name, change
-                );
+                debug!("ApplicationSource '{source_name}' received event: {change:?}");
 
                 if matches!(change, SourceChange::Insert { .. }) {
                     bootstrap_data.write().await.push(change.clone());
@@ -498,14 +483,11 @@ impl ApplicationSource {
                     SourceBase::dispatch_from_task(base_dispatchers.clone(), wrapper, &source_name)
                         .await
                 {
-                    debug!("Failed to dispatch change (no subscribers): {}", e);
+                    debug!("Failed to dispatch change (no subscribers): {e}");
                 }
             }
 
-            info!(
-                "ApplicationSource '{}' event processor stopped",
-                source_name
-            );
+            info!("ApplicationSource '{source_name}' event processor stopped");
         });
 
         *self.base.task_handle.write().await = Some(handle);
@@ -625,12 +607,11 @@ impl Source for ApplicationSource {
                     match provider.bootstrap(request, &context, tx).await {
                         Ok(count) => {
                             info!(
-                                "Bootstrap completed successfully for query '{}', sent {} events",
-                                query_id, count
+                                "Bootstrap completed successfully for query '{query_id}', sent {count} events"
                             );
                         }
                         Err(e) => {
-                            log::error!("Bootstrap failed for query '{}': {}", query_id, e);
+                            log::error!("Bootstrap failed for query '{query_id}': {e}");
                         }
                     }
                 });
@@ -638,8 +619,7 @@ impl Source for ApplicationSource {
                 Some(rx)
             } else {
                 info!(
-                    "Bootstrap requested for query '{}' but no bootstrap provider configured, using internal bootstrap",
-                    query_id
+                    "Bootstrap requested for query '{query_id}' but no bootstrap provider configured, using internal bootstrap"
                 );
 
                 let (tx, rx) = tokio::sync::mpsc::channel(1000);

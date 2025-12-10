@@ -192,7 +192,7 @@ impl QueryBase {
         };
 
         if let Err(e) = self.event_tx.send(event).await {
-            error!("Failed to send component event: {}", e);
+            error!("Failed to send component event: {e}");
         }
     }
 

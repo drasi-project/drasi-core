@@ -174,7 +174,7 @@ pub fn transform_query_result(
                 deleted_results.push(data);
             }
             unknown => {
-                log::warn!("Unknown result type: {}, skipping", unknown);
+                log::warn!("Unknown result type: {unknown}, skipping");
                 continue;
             }
         }

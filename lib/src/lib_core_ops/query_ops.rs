@@ -47,7 +47,7 @@ impl DrasiLib {
 
         self.add_query_with_options(query, true)
             .await
-            .map_err(|e| DrasiError::provisioning(format!("Failed to add query: {}", e)))?;
+            .map_err(|e| DrasiError::provisioning(format!("Failed to add query: {e}")))?;
 
         Ok(())
     }
@@ -78,14 +78,14 @@ impl DrasiLib {
             self.query_manager
                 .stop_query(id.to_string())
                 .await
-                .map_err(|e| DrasiError::provisioning(format!("Failed to stop query: {}", e)))?;
+                .map_err(|e| DrasiError::provisioning(format!("Failed to stop query: {e}")))?;
         }
 
         // Delete the query
         self.query_manager
             .delete_query(id.to_string())
             .await
-            .map_err(|e| DrasiError::provisioning(format!("Failed to delete query: {}", e)))?;
+            .map_err(|e| DrasiError::provisioning(format!("Failed to delete query: {e}")))?;
 
         Ok(())
     }

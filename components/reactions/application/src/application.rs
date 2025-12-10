@@ -556,10 +556,7 @@ impl Reaction for ApplicationReaction {
         let query_filter = self.base.queries.clone();
 
         let processing_task = tokio::spawn(async move {
-            info!(
-                "ApplicationReaction '{}' result processor started",
-                reaction_name
-            );
+            info!("ApplicationReaction '{reaction_name}' result processor started");
 
             loop {
                 // Use select to wait for either a result OR shutdown signal
@@ -567,7 +564,7 @@ impl Reaction for ApplicationReaction {
                     biased;
 
                     _ = &mut shutdown_rx => {
-                        debug!("[{}] Received shutdown signal, exiting processing loop", reaction_name);
+                        debug!("[{reaction_name}] Received shutdown signal, exiting processing loop");
                         break;
                     }
 
@@ -591,7 +588,7 @@ impl Reaction for ApplicationReaction {
 
                 // Forward to application
                 if let Err(e) = app_tx.send(query_result).await {
-                    error!("Failed to send result to application: {}", e);
+                    error!("Failed to send result to application: {e}");
                     break;
                 }
             }

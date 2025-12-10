@@ -52,11 +52,7 @@ impl RedisStreamPublisher {
                 Ok(conn) => return Ok(conn),
                 Err(e) if attempt < max_retries => {
                     log::warn!(
-                        "Failed to connect to Redis (attempt {}/{}): {}. Retrying in {:?}",
-                        attempt,
-                        max_retries,
-                        e,
-                        retry_delay
+                        "Failed to connect to Redis (attempt {attempt}/{max_retries}): {e}. Retrying in {retry_delay:?}"
                     );
                     sleep(retry_delay).await;
                     retry_delay *= 2; // Exponential backoff
@@ -104,11 +100,7 @@ impl RedisStreamPublisher {
                 .context("Failed to publish message to Redis Stream")?
         };
 
-        log::debug!(
-            "Published CloudEvent to stream '{}' with message ID: {}",
-            stream_key,
-            message_id
-        );
+        log::debug!("Published CloudEvent to stream '{stream_key}' with message ID: {message_id}");
 
         Ok(message_id)
     }
@@ -126,11 +118,7 @@ impl RedisStreamPublisher {
                 Ok(message_id) => return Ok(message_id),
                 Err(e) if attempt < max_retries => {
                     log::warn!(
-                        "Failed to publish CloudEvent (attempt {}/{}): {}. Retrying in {:?}",
-                        attempt,
-                        max_retries,
-                        e,
-                        retry_delay
+                        "Failed to publish CloudEvent (attempt {attempt}/{max_retries}): {e}. Retrying in {retry_delay:?}"
                     );
                     sleep(retry_delay).await;
                     retry_delay *= 2; // Exponential backoff
@@ -231,8 +219,7 @@ impl RedisStreamPublisher {
                 }
                 Err(e) => {
                     log::error!(
-                        "Failed to publish batch after {} retries, falling back to individual publishes",
-                        max_retries
+                        "Failed to publish batch after {max_retries} retries, falling back to individual publishes"
                     );
 
                     // Fallback: Try publishing events individually
@@ -242,8 +229,7 @@ impl RedisStreamPublisher {
                             Ok(msg_id) => message_ids.push(msg_id),
                             Err(individual_err) => {
                                 return Err(e).context(format!(
-                                    "Batch publish failed after retries, and individual fallback also failed: {}",
-                                    individual_err
+                                    "Batch publish failed after retries, and individual fallback also failed: {individual_err}"
                                 ));
                             }
                         }

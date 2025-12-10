@@ -144,14 +144,12 @@ impl PlatformReaction {
         }
         if batch_max_size > 10000 {
             log::warn!(
-                "batch_max_size {} is very large, consider using a smaller value (recommended: 100-1000)",
-                batch_max_size
+                "batch_max_size {batch_max_size} is very large, consider using a smaller value (recommended: 100-1000)"
             );
         }
         if batch_max_wait_ms > 1000 {
             log::warn!(
-                "batch_max_wait_ms {} is large and may increase latency (recommended: 1-100ms)",
-                batch_max_wait_ms
+                "batch_max_wait_ms {batch_max_wait_ms} is large and may increase latency (recommended: 1-100ms)"
             );
         }
 
@@ -281,7 +279,7 @@ impl Reaction for PlatformReaction {
 
         // Emit Running control event
         if let Err(e) = self.emit_control_event(ControlSignal::Running).await {
-            log::warn!("Failed to emit Running control event: {}", e);
+            log::warn!("Failed to emit Running control event: {e}");
         }
 
         // Subscribe to all configured queries using ReactionBase
@@ -312,10 +310,7 @@ impl Reaction for PlatformReaction {
 
         // Spawn main processing task
         let processing_task_handle = tokio::spawn(async move {
-            log::debug!(
-                "Platform Reaction '{}' processing task started",
-                reaction_id
-            );
+            log::debug!("Platform Reaction '{reaction_id}' processing task started");
 
             // Buffer for batching CloudEvents before publishing
             let mut event_buffer: Vec<CloudEvent<ResultEvent>> = Vec::new();
@@ -327,7 +322,7 @@ impl Reaction for PlatformReaction {
                     biased;
 
                     _ = &mut shutdown_rx => {
-                        log::debug!("[{}] Received shutdown signal, exiting processing loop", reaction_id);
+                        log::debug!("[{reaction_id}] Received shutdown signal, exiting processing loop");
                         break;
                     }
 
@@ -347,8 +342,7 @@ impl Reaction for PlatformReaction {
                             .await
                         {
                             log::error!(
-                                "Failed to publish buffered events before control signal: {}",
-                                e
+                                "Failed to publish buffered events before control signal: {e}"
                             );
                         }
                         event_buffer.clear();
@@ -362,7 +356,7 @@ impl Reaction for PlatformReaction {
                                 "bootstrapStarted" => ControlSignal::BootstrapStarted,
                                 "bootstrapCompleted" => ControlSignal::BootstrapCompleted,
                                 _ => {
-                                    log::debug!("Unknown control signal type: {}", signal_type);
+                                    log::debug!("Unknown control signal type: {signal_type}");
                                     continue;
                                 }
                             };
@@ -390,9 +384,9 @@ impl Reaction for PlatformReaction {
                             );
 
                             if let Err(e) = publisher.publish_with_retry(cloud_event, 3).await {
-                                log::warn!("Failed to emit control event {}: {}", signal_type, e);
+                                log::warn!("Failed to emit control event {signal_type}: {e}");
                             } else {
-                                log::info!("Emitted control event: {}", signal_type);
+                                log::info!("Emitted control event: {signal_type}");
                             }
                         }
                     }
@@ -512,7 +506,7 @@ impl Reaction for PlatformReaction {
 
         // Emit Stopped control event
         if let Err(e) = self.emit_control_event(ControlSignal::Stopped).await {
-            log::warn!("Failed to emit Stopped control event: {}", e);
+            log::warn!("Failed to emit Stopped control event: {e}");
         }
 
         // Transition to Stopped

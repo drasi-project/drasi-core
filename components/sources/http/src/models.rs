@@ -80,10 +80,7 @@ pub fn convert_http_to_source_change(
     let get_timestamp = |ts: Option<u64>| -> u64 {
         ts.unwrap_or_else(|| {
             crate::time::get_system_time_nanos().unwrap_or_else(|e| {
-                log::warn!(
-                    "Failed to get system time for HTTP event: {}, using fallback",
-                    e
-                );
+                log::warn!("Failed to get system time for HTTP event: {e}, using fallback");
                 // Use current milliseconds * 1M as fallback
                 (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
             })

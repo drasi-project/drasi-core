@@ -240,7 +240,7 @@ mod tests {
 
         for i in 1..=5 {
             let event = ComponentEvent {
-                component_id: format!("component-{}", i),
+                component_id: format!("component-{i}"),
                 component_type: ComponentType::Source,
                 status: ComponentStatus::Running,
                 timestamp: chrono::Utc::now(),
@@ -251,7 +251,7 @@ mod tests {
 
         for i in 1..=5 {
             let received = rx.recv().await.unwrap();
-            assert_eq!(received.component_id, format!("component-{}", i));
+            assert_eq!(received.component_id, format!("component-{i}"));
         }
     }
 }

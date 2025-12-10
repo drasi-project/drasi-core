@@ -298,13 +298,11 @@ pub async fn unwind_invalid_config_fails(config: &(impl QueryTestConfig + Send))
     // Surface should indicate Middleware setup/Invalid configuration
     assert!(
         err_str.contains("Middleware setup error"),
-        "unexpected error: {}",
-        err_str
+        "unexpected error: {err_str}"
     );
     assert!(
         err_str.contains("Invalid configuration"),
-        "unexpected error: {}",
-        err_str
+        "unexpected error: {err_str}"
     );
 }
 
@@ -337,12 +335,10 @@ pub async fn unwind_incorrect_structure_fails(config: &(impl QueryTestConfig + S
     let err_str = err.to_string();
     assert!(
         err_str.contains("Middleware setup error"),
-        "unexpected error: {}",
-        err_str
+        "unexpected error: {err_str}"
     );
     assert!(
         err_str.contains("Invalid configuration"),
-        "unexpected error: {}",
-        err_str
+        "unexpected error: {err_str}"
     );
 }

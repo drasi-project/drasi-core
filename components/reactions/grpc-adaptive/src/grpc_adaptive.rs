@@ -202,10 +202,7 @@ impl AdaptiveGrpcReaction {
             let mut successful_sends = 0u64;
             let mut failed_sends = 0u64;
 
-            info!(
-                "Adaptive gRPC reaction starting for endpoint: {} (lazy connection)",
-                endpoint
-            );
+            info!("Adaptive gRPC reaction starting for endpoint: {endpoint} (lazy connection)");
 
             while let Some(batch) = batcher.next_batch().await {
                 if batch.is_empty() {
@@ -218,19 +215,13 @@ impl AdaptiveGrpcReaction {
                 if client.is_none() {
                     match Self::create_client(&endpoint, initial_connection_timeout_ms).await {
                         Ok(c) => {
-                            info!(
-                                "Successfully created gRPC client for endpoint: {}",
-                                endpoint
-                            );
+                            info!("Successfully created gRPC client for endpoint: {endpoint}");
                             client = Some(c);
                             consecutive_failures = 0;
                         }
                         Err(e) => {
                             consecutive_failures += 1;
-                            error!(
-                                "Failed to create client (attempt {}): {}",
-                                consecutive_failures, e
-                            );
+                            error!("Failed to create client (attempt {consecutive_failures}): {e}");
 
                             // Exponential backoff
                             let backoff =
@@ -268,23 +259,20 @@ impl AdaptiveGrpcReaction {
 
                                         if successful_sends.is_multiple_of(100) {
                                             info!(
-                                                "Adaptive metrics - Successful: {}, Failed: {}",
-                                                successful_sends, failed_sends
+                                                "Adaptive metrics - Successful: {successful_sends}, Failed: {failed_sends}"
                                             );
                                         }
                                     }
                                     Err(e) => {
                                         retries += 1;
                                         warn!(
-                                            "Failed to send batch (retry {}/{}): {}",
-                                            retries, max_retries, e
+                                            "Failed to send batch (retry {retries}/{max_retries}): {e}"
                                         );
 
                                         if retries > max_retries {
                                             failed_sends += 1;
                                             error!(
-                                                "Failed to send batch after {} retries",
-                                                max_retries
+                                                "Failed to send batch after {max_retries} retries"
                                             );
                                             break;
                                         }
@@ -314,8 +302,7 @@ impl AdaptiveGrpcReaction {
             }
 
             info!(
-                "Adaptive batcher task completed - Successful: {}, Failed: {}",
-                successful_sends, failed_sends
+                "Adaptive batcher task completed - Successful: {successful_sends}, Failed: {failed_sends}"
             );
         });
 
@@ -330,7 +317,7 @@ impl AdaptiveGrpcReaction {
                     biased;
 
                     _ = &mut shutdown_rx => {
-                        debug!("[{}] Received shutdown signal, exiting processing loop", reaction_name);
+                        debug!("[{reaction_name}] Received shutdown signal, exiting processing loop");
                         break;
                     }
 
@@ -338,15 +325,12 @@ impl AdaptiveGrpcReaction {
                 };
 
                 if !matches!(*base.status.read().await, ComponentStatus::Running) {
-                    info!(
-                        "[{}] Reaction status changed to non-running, exiting",
-                        reaction_name
-                    );
+                    info!("[{reaction_name}] Reaction status changed to non-running, exiting");
                     break;
                 }
 
                 if query_result.results.is_empty() {
-                    debug!("[{}] Received empty result set from query", reaction_name);
+                    debug!("[{reaction_name}] Received empty result set from query");
                     continue;
                 }
 
@@ -413,7 +397,7 @@ impl AdaptiveGrpcReaction {
             // Wait for batcher to complete
             let _ = batcher_handle.await;
 
-            info!("[{}] Adaptive gRPC reaction completed", reaction_name);
+            info!("[{reaction_name}] Adaptive gRPC reaction completed");
         });
     }
 }

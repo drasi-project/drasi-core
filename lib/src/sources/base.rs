@@ -378,12 +378,11 @@ impl SourceBase {
                 match provider.bootstrap(request, &context, bootstrap_tx).await {
                     Ok(count) => {
                         info!(
-                            "Bootstrap completed successfully for query '{}', sent {} events",
-                            query_id, count
+                            "Bootstrap completed successfully for query '{query_id}', sent {count} events"
                         );
                     }
                     Err(e) => {
-                        error!("Bootstrap failed for query '{}': {}", query_id, e);
+                        error!("Bootstrap failed for query '{query_id}': {e}");
                     }
                 }
             });
@@ -504,7 +503,7 @@ impl SourceBase {
         let dispatchers_guard = dispatchers.read().await;
         for dispatcher in dispatchers_guard.iter() {
             if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
-                debug!("[{}] Failed to dispatch event from task: {}", source_id, e);
+                debug!("[{source_id}] Failed to dispatch event from task: {e}");
             }
         }
 
@@ -590,7 +589,7 @@ impl SourceBase {
 
         if let Some(ref tx) = *self.event_tx.read().await {
             if let Err(e) = tx.send(event).await {
-                error!("Failed to send component event: {}", e);
+                error!("Failed to send component event: {e}");
             }
         }
         // If event_tx is None, silently skip - injection happens before start()

@@ -119,8 +119,7 @@ impl GrpcReaction {
             // Check if we've exceeded max retry duration
             if start_time.elapsed() > max_retry_duration {
                 warn!(
-                    "Max retry duration ({:?}) exceeded after {} attempts",
-                    max_retry_duration, retries
+                    "Max retry duration ({max_retry_duration:?}) exceeded after {retries} attempts"
                 );
                 return Ok((true, None)); // Signal connection needs replacement but don't fail
             }
@@ -197,7 +196,7 @@ impl GrpcReaction {
                     let error_str_lower = error_str.to_lowercase();
 
                     // Log full error details
-                    error!("Request failed after {:?} - Full error: {}", elapsed, e);
+                    error!("Request failed after {elapsed:?} - Full error: {e}");
                     debug!(
                         "Error details - code: {:?}, message: {}",
                         e.code(),
@@ -250,8 +249,7 @@ impl GrpcReaction {
 
                     if is_connection_error {
                         warn!(
-                            "Connection error detected - type: {}, endpoint: {}",
-                            error_type, endpoint
+                            "Connection error detected - type: {error_type}, endpoint: {endpoint}"
                         );
 
                         match error_type {
@@ -269,7 +267,7 @@ impl GrpcReaction {
                                         return Ok((true, Some(new_client)));
                                     }
                                     Err(create_err) => {
-                                        warn!("Failed to create new client after GoAway: {}. Will retry on next batch.", create_err);
+                                        warn!("Failed to create new client after GoAway: {create_err}. Will retry on next batch.");
                                         return Ok((true, None));
                                     }
                                 }
@@ -291,21 +289,20 @@ impl GrpcReaction {
                         }
 
                         if retries == 0 {
-                            debug!("Connection error on first attempt for endpoint {}, signaling for new client", endpoint);
+                            debug!("Connection error on first attempt for endpoint {endpoint}, signaling for new client");
                             match create_client(endpoint, timeout_ms).await {
                                 Ok(new_client) => {
                                     info!("Successfully created new client for retry");
                                     return Ok((true, Some(new_client)));
                                 }
                                 Err(create_err) => {
-                                    warn!("Failed to create new client: {}. Will retry on next batch.", create_err);
+                                    warn!("Failed to create new client: {create_err}. Will retry on next batch.");
                                     return Ok((true, None));
                                 }
                             }
                         } else if retries < max_retries {
                             debug!(
-                                "Connection error on retry {}/{}, attempting new client",
-                                retries, max_retries
+                                "Connection error on retry {retries}/{max_retries}, attempting new client"
                             );
                             match create_client(endpoint, timeout_ms).await {
                                 Ok(new_client) => {
@@ -313,24 +310,21 @@ impl GrpcReaction {
                                     return Ok((true, Some(new_client)));
                                 }
                                 Err(create_err) => {
-                                    warn!("Failed to create new client: {}", create_err);
+                                    warn!("Failed to create new client: {create_err}");
                                 }
                             }
                         } else {
                             warn!(
-                                "Connection failed after {} retries. Will retry on next batch.",
-                                max_retries
+                                "Connection failed after {max_retries} retries. Will retry on next batch."
                             );
                             return Ok((true, None));
                         }
                     } else {
-                        error!("gRPC call failed (type: application): {}", e);
+                        error!("gRPC call failed (type: application): {e}");
                         if retries >= max_retries {
                             return Err(anyhow::anyhow!(
-                                "gRPC reaction failed: Application error after {} retries: {}. \
-                                 This indicates an error in the receiving application, not a connection issue.",
-                                max_retries,
-                                e
+                                "gRPC reaction failed: Application error after {max_retries} retries: {e}. \
+                                 This indicates an error in the receiving application, not a connection issue."
                             ));
                         }
                     }
@@ -343,8 +337,7 @@ impl GrpcReaction {
             let jittered_backoff = backoff + Duration::from_millis(jitter);
 
             debug!(
-                "Retry {}/{} - backing off for {:?} (base: {:?}, jitter: {}ms)",
-                retries, max_retries, jittered_backoff, backoff, jitter
+                "Retry {retries}/{max_retries} - backing off for {jittered_backoff:?} (base: {backoff:?}, jitter: {jitter}ms)"
             );
 
             tokio::time::sleep(jittered_backoff).await;
@@ -437,10 +430,7 @@ impl Reaction for GrpcReaction {
         let priority_queue = self.base.priority_queue.clone();
 
         let processing_task_handle = tokio::spawn(async move {
-            info!(
-                "gRPC reaction starting for endpoint: {} (lazy connection)",
-                endpoint
-            );
+            info!("gRPC reaction starting for endpoint: {endpoint} (lazy connection)");
 
             let mut client: Option<ReactionServiceClient<Channel>> = None;
             let mut connection_state = ConnectionState::Disconnected;
@@ -469,7 +459,7 @@ impl Reaction for GrpcReaction {
                     biased;
 
                     _ = &mut shutdown_rx => {
-                        debug!("[{}] Received shutdown signal, exiting processing loop", reaction_name);
+                        debug!("[{reaction_name}] Received shutdown signal, exiting processing loop");
                         break;
                     }
 
@@ -487,12 +477,12 @@ impl Reaction for GrpcReaction {
                 }
 
                 if query_result.results.is_empty() {
-                    debug!("[{}] Received empty result set from query", reaction_name);
+                    debug!("[{reaction_name}] Received empty result set from query");
                     continue;
                 }
 
                 let query_id = &query_result.query_id;
-                trace!("Processing results for query_id: {}", query_id);
+                trace!("Processing results for query_id: {query_id}");
 
                 if !last_query_id.is_empty()
                     && last_query_id != query_result.query_id
@@ -536,8 +526,7 @@ impl Reaction for GrpcReaction {
                             Err(e) => {
                                 connection_state = ConnectionState::Failed;
                                 consecutive_failures += 1;
-                                error!("State transition: Connecting -> Failed (attempt {}, total: {}): {}",
-                                       consecutive_failures, _total_connection_attempts, e);
+                                error!("State transition: Connecting -> Failed (attempt {consecutive_failures}, total: {_total_connection_attempts}): {e}");
                                 continue;
                             }
                         }
@@ -593,8 +582,7 @@ impl Reaction for GrpcReaction {
                                     Err(e) => {
                                         _failed_sends += 1;
                                         error!(
-                                            "[{}] Failed to send batch (total failures: {}): {}",
-                                            reaction_name, _failed_sends, e
+                                            "[{reaction_name}] Failed to send batch (total failures: {_failed_sends}): {e}"
                                         );
                                         break;
                                     }
@@ -655,8 +643,7 @@ impl Reaction for GrpcReaction {
                                 Err(e) => {
                                     consecutive_failures += 1;
                                     error!(
-                                        "Failed to create client (attempt {}, total: {}): {}",
-                                        consecutive_failures, _total_connection_attempts, e
+                                        "Failed to create client (attempt {consecutive_failures}, total: {_total_connection_attempts}): {e}"
                                     );
                                     continue;
                                 }
@@ -704,7 +691,7 @@ impl Reaction for GrpcReaction {
                                         }
                                         Err(e) => {
                                             _failed_sends += 1;
-                                            error!("[{}] Failed to send batch (total failures: {}): {}", reaction_name, _failed_sends, e);
+                                            error!("[{reaction_name}] Failed to send batch (total failures: {_failed_sends}): {e}");
                                             break;
                                         }
                                     }
@@ -742,8 +729,7 @@ impl Reaction for GrpcReaction {
                         }
                         Err(e) => {
                             error!(
-                                "[{}] Failed to create client for final batch: {}",
-                                reaction_name, e
+                                "[{reaction_name}] Failed to create client for final batch: {e}"
                             );
                             return;
                         }
@@ -788,7 +774,7 @@ impl Reaction for GrpcReaction {
                                     }
                                 }
                                 Err(e) => {
-                                    error!("[{}] Failed to send final batch: {}", reaction_name, e);
+                                    error!("[{reaction_name}] Failed to send final batch: {e}");
                                     break;
                                 }
                             }
@@ -799,7 +785,7 @@ impl Reaction for GrpcReaction {
                 }
             }
 
-            info!("[{}] gRPC reaction processing task stopped", reaction_name);
+            info!("[{reaction_name}] gRPC reaction processing task stopped");
             *status.write().await = ComponentStatus::Stopped;
         });
 

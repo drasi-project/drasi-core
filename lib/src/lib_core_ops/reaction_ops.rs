@@ -53,16 +53,14 @@ impl DrasiLib {
         self.reaction_manager
             .add_reaction(reaction)
             .await
-            .map_err(|e| DrasiError::provisioning(format!("Failed to add reaction: {}", e)))?;
+            .map_err(|e| DrasiError::provisioning(format!("Failed to add reaction: {e}")))?;
 
         // If server is running and reaction wants auto-start, start it
         if self.is_running().await && should_auto_start {
             self.reaction_manager
                 .start_reaction(reaction_id)
                 .await
-                .map_err(|e| {
-                    DrasiError::provisioning(format!("Failed to start reaction: {}", e))
-                })?;
+                .map_err(|e| DrasiError::provisioning(format!("Failed to start reaction: {e}")))?;
         }
 
         Ok(())
@@ -94,14 +92,14 @@ impl DrasiLib {
             self.reaction_manager
                 .stop_reaction(id.to_string())
                 .await
-                .map_err(|e| DrasiError::provisioning(format!("Failed to stop reaction: {}", e)))?;
+                .map_err(|e| DrasiError::provisioning(format!("Failed to stop reaction: {e}")))?;
         }
 
         // Delete the reaction
         self.reaction_manager
             .delete_reaction(id.to_string())
             .await
-            .map_err(|e| DrasiError::provisioning(format!("Failed to delete reaction: {}", e)))?;
+            .map_err(|e| DrasiError::provisioning(format!("Failed to delete reaction: {e}")))?;
 
         Ok(())
     }

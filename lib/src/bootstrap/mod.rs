@@ -300,8 +300,7 @@ impl BootstrapProviderFactory {
                 Err(anyhow::anyhow!(
                     "Platform bootstrap provider is available in the drasi-bootstrap-platform crate. \
                      Use PlatformBootstrapProvider::builder().with_query_api_url(...).build() to create it. \
-                     Config: {:?}",
-                    config
+                     Config: {config:?}"
                 ))
             }
             BootstrapProviderConfig::Noop => {

@@ -175,12 +175,12 @@ mod tests {
 
         for i in 1..=5 {
             let props = PropertyMapBuilder::new()
-                .with_string("name", format!("Person-{}", i))
+                .with_string("name", format!("Person-{i}"))
                 .with_integer("id", i)
                 .build();
 
             let result = handle
-                .send_node_insert(format!("node-{}", i), vec!["Person"], props)
+                .send_node_insert(format!("node-{i}"), vec!["Person"], props)
                 .await;
             assert!(result.is_ok());
         }

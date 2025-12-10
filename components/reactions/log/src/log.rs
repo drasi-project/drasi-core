@@ -259,7 +259,7 @@ impl Reaction for LogReaction {
                     biased;
 
                     _ = &mut shutdown_rx => {
-                        debug!("[{}] Received shutdown signal, exiting processing loop", reaction_name);
+                        debug!("[{reaction_name}] Received shutdown signal, exiting processing loop");
                         break;
                     }
 
@@ -276,7 +276,7 @@ impl Reaction for LogReaction {
                 }
 
                 if query_result.results.is_empty() {
-                    debug!("[{}] Received empty result set from query", reaction_name);
+                    debug!("[{reaction_name}] Received empty result set from query");
                     continue;
                 }
 
@@ -312,20 +312,19 @@ impl Reaction for LogReaction {
                                         // Use template
                                         match handlebars.render_template(template, &context) {
                                             Ok(rendered) => {
-                                                info!("[{}]   {}", reaction_name, rendered);
+                                                info!("[{reaction_name}]   {rendered}");
                                             }
                                             Err(e) => {
                                                 debug!(
-                                                    "[{}] Template render error: {}",
-                                                    reaction_name, e
+                                                    "[{reaction_name}] Template render error: {e}"
                                                 );
                                                 // Fall back to JSON output
-                                                info!("[{}]   [ADD] {}", reaction_name, data);
+                                                info!("[{reaction_name}]   [ADD] {data}");
                                             }
                                         }
                                     } else {
                                         // Default: show full JSON
-                                        info!("[{}]   [ADD] {}", reaction_name, data);
+                                        info!("[{reaction_name}]   [ADD] {data}");
                                     }
                                 }
                             }
@@ -337,20 +336,19 @@ impl Reaction for LogReaction {
                                         // Use template
                                         match handlebars.render_template(template, &context) {
                                             Ok(rendered) => {
-                                                info!("[{}]   {}", reaction_name, rendered);
+                                                info!("[{reaction_name}]   {rendered}");
                                             }
                                             Err(e) => {
                                                 debug!(
-                                                    "[{}] Template render error: {}",
-                                                    reaction_name, e
+                                                    "[{reaction_name}] Template render error: {e}"
                                                 );
                                                 // Fall back to JSON output
-                                                info!("[{}]   [DELETE] {}", reaction_name, data);
+                                                info!("[{reaction_name}]   [DELETE] {data}");
                                             }
                                         }
                                     } else {
                                         // Default: show full JSON
-                                        info!("[{}]   [DELETE] {}", reaction_name, data);
+                                        info!("[{reaction_name}]   [DELETE] {data}");
                                     }
                                 }
                             }
@@ -368,26 +366,21 @@ impl Reaction for LogReaction {
                                         // Use template
                                         match handlebars.render_template(template, &context) {
                                             Ok(rendered) => {
-                                                info!("[{}]   {}", reaction_name, rendered);
+                                                info!("[{reaction_name}]   {rendered}");
                                             }
                                             Err(e) => {
                                                 debug!(
-                                                    "[{}] Template render error: {}",
-                                                    reaction_name, e
+                                                    "[{reaction_name}] Template render error: {e}"
                                                 );
                                                 // Fall back to JSON output
                                                 info!(
-                                                    "[{}]   [UPDATE] {} -> {}",
-                                                    reaction_name, before, after
+                                                    "[{reaction_name}]   [UPDATE] {before} -> {after}"
                                                 );
                                             }
                                         }
                                     } else {
                                         // Default: show full JSON
-                                        info!(
-                                            "[{}]   [UPDATE] {} -> {}",
-                                            reaction_name, before, after
-                                        );
+                                        info!("[{reaction_name}]   [UPDATE] {before} -> {after}");
                                     }
                                 }
                             }

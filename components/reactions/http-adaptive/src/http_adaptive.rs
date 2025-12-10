@@ -172,7 +172,7 @@ impl AdaptiveHttpReaction {
             if let Some(ref token) = self.token {
                 headers.insert(
                     "Authorization",
-                    HeaderValue::from_str(&format!("Bearer {}", token))?,
+                    HeaderValue::from_str(&format!("Bearer {token}"))?,
                 );
             }
 
@@ -204,7 +204,7 @@ impl AdaptiveHttpReaction {
                     error_body
                 );
             } else {
-                debug!("[{}] Batch sent successfully", reaction_name);
+                debug!("[{reaction_name}] Batch sent successfully");
             }
         } else {
             // Send individual requests for each result
@@ -214,7 +214,7 @@ impl AdaptiveHttpReaction {
                         .send_single_result(&query_id, &result, reaction_name)
                         .await
                     {
-                        error!("[{}] Failed to send result: {}", reaction_name, e);
+                        error!("[{reaction_name}] Failed to send result: {e}");
                     }
                 }
             }
@@ -278,7 +278,7 @@ impl AdaptiveHttpReaction {
             if let Some(ref token) = self.token {
                 headers.insert(
                     "Authorization",
-                    HeaderValue::from_str(&format!("Bearer {}", token))?,
+                    HeaderValue::from_str(&format!("Bearer {token}"))?,
                 );
             }
 
@@ -351,7 +351,7 @@ impl AdaptiveHttpReaction {
                 let mut total_batches = 0u64;
                 let mut total_results = 0u64;
 
-                info!("[{}] Adaptive HTTP batcher started", reaction_name);
+                info!("[{reaction_name}] Adaptive HTTP batcher started");
 
                 while let Some(batch) = batcher.next_batch().await {
                     if batch.is_empty() {
@@ -365,13 +365,10 @@ impl AdaptiveHttpReaction {
                     total_results += batch_size as u64;
                     total_batches += 1;
 
-                    debug!(
-                        "[{}] Processing adaptive batch of {} results",
-                        reaction_name, batch_size
-                    );
+                    debug!("[{reaction_name}] Processing adaptive batch of {batch_size} results");
 
                     if let Err(e) = sender.send_batch(batch, &reaction_name).await {
-                        error!("[{}] Failed to send batch: {}", reaction_name, e);
+                        error!("[{reaction_name}] Failed to send batch: {e}");
                     }
 
                     if total_batches.is_multiple_of(100) {
@@ -386,8 +383,7 @@ impl AdaptiveHttpReaction {
                 }
 
                 info!(
-                    "[{}] Adaptive HTTP batcher stopped - Total batches: {}, Total results: {}",
-                    reaction_name, total_batches, total_results
+                    "[{reaction_name}] Adaptive HTTP batcher stopped - Total batches: {total_batches}, Total results: {total_results}"
                 );
             }
         });
@@ -399,7 +395,7 @@ impl AdaptiveHttpReaction {
                 biased;
 
                 _ = &mut shutdown_rx => {
-                    debug!("[{}] Received shutdown signal, exiting processing loop", reaction_name);
+                    debug!("[{reaction_name}] Received shutdown signal, exiting processing loop");
                     break;
                 }
 
@@ -408,10 +404,7 @@ impl AdaptiveHttpReaction {
             let query_result = query_result_arc.as_ref();
 
             if !matches!(*base.status.read().await, ComponentStatus::Running) {
-                info!(
-                    "[{}] Reaction status changed to non-running, exiting",
-                    reaction_name
-                );
+                info!("[{reaction_name}] Reaction status changed to non-running, exiting");
                 break;
             }
 
@@ -425,7 +418,7 @@ impl AdaptiveHttpReaction {
                 .await
                 .is_err()
             {
-                error!("[{}] Failed to send to batch channel", reaction_name);
+                error!("[{reaction_name}] Failed to send to batch channel");
                 break;
             }
         }
@@ -436,7 +429,7 @@ impl AdaptiveHttpReaction {
         // Wait for batcher to complete
         let _ = tokio::time::timeout(Duration::from_secs(5), batcher_handle).await;
 
-        info!("[{}] Adaptive HTTP reaction completed", reaction_name);
+        info!("[{reaction_name}] Adaptive HTTP reaction completed");
     }
 }
 

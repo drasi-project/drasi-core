@@ -164,8 +164,7 @@ impl BootstrapScriptReader {
                             // Warn if there is a Header record in the middle of the script.
                             if seq_rec.seq > 0 {
                                 log::warn!(
-                                    "Header record found not at start of the script: {:?}",
-                                    seq_rec
+                                    "Header record found not at start of the script: {seq_rec:?}"
                                 );
                             }
 
@@ -184,7 +183,7 @@ impl BootstrapScriptReader {
                     }
                     Ok(seq_rec)
                 }
-                Err(e) => Err(anyhow!("Error reading file: {}", e)),
+                Err(e) => Err(anyhow!("Error reading file: {e}")),
             }
         } else {
             // Generate a synthetic Finish record to mark the end of the script.

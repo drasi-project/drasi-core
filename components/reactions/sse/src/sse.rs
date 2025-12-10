@@ -178,10 +178,10 @@ impl Reaction for SseReaction {
         let reaction_id = self.base.id.clone();
         let priority_queue = self.base.priority_queue.clone();
         let processing_handle = tokio::spawn(async move {
-            info!("[{}] SSE result processing task started", reaction_id);
+            info!("[{reaction_id}] SSE result processing task started");
             loop {
                 if !matches!(*status.read().await, ComponentStatus::Running) {
-                    info!("[{}] SSE reaction not running, breaking loop", reaction_id);
+                    info!("[{reaction_id}] SSE reaction not running, breaking loop");
                     break;
                 }
 
@@ -190,7 +190,7 @@ impl Reaction for SseReaction {
                     biased;
 
                     _ = &mut shutdown_rx => {
-                        debug!("[{}] Received shutdown signal, exiting processing loop", reaction_id);
+                        debug!("[{reaction_id}] Received shutdown signal, exiting processing loop");
                         break;
                     }
 
@@ -212,14 +212,13 @@ impl Reaction for SseReaction {
                 .to_string();
 
                 match broadcaster.send(payload.clone()) {
-                    Ok(count) => info!(
-                        "[{}] Broadcast query result to {} SSE listeners",
-                        reaction_id, count
-                    ),
-                    Err(e) => debug!("[{}] no SSE listeners: {}", reaction_id, e),
+                    Ok(count) => {
+                        info!("[{reaction_id}] Broadcast query result to {count} SSE listeners")
+                    }
+                    Err(e) => debug!("[{reaction_id}] no SSE listeners: {e}"),
                 }
             }
-            info!("[{}] SSE result processing task ended", reaction_id);
+            info!("[{reaction_id}] SSE result processing task ended");
         });
 
         // Store the processing task handle
@@ -270,19 +269,16 @@ impl Reaction for SseReaction {
                 )
                 .layer(cors);
 
-            info!(
-                "Starting SSE server on {}:{} path {} with CORS enabled",
-                host, port, path
-            );
+            info!("Starting SSE server on {host}:{port} path {path} with CORS enabled");
             let listener = match tokio::net::TcpListener::bind((host.as_str(), port)).await {
                 Ok(l) => l,
                 Err(e) => {
-                    error!("Failed to bind SSE server: {}", e);
+                    error!("Failed to bind SSE server: {e}");
                     return;
                 }
             };
             if let Err(e) = axum::serve(listener, app).await {
-                error!("SSE server error: {}", e);
+                error!("SSE server error: {e}");
             }
         });
         self.task_handles.lock().await.push(server_handle);

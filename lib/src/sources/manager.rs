@@ -122,14 +122,13 @@ impl SourceManager {
             let mut sources = self.sources.write().await;
             if sources.contains_key(&source_id) {
                 return Err(anyhow::anyhow!(
-                    "Source with id '{}' already exists",
-                    source_id
+                    "Source with id '{source_id}' already exists"
                 ));
             }
             sources.insert(source_id.clone(), source);
         }
 
-        info!("Added source: {}", source_id);
+        info!("Added source: {source_id}");
         Ok(())
     }
 
@@ -144,7 +143,7 @@ impl SourceManager {
             is_operation_valid(&status, &Operation::Start).map_err(|e| anyhow::anyhow!(e))?;
             source.start().await?;
         } else {
-            return Err(anyhow::anyhow!("Source not found: {}", id));
+            return Err(anyhow::anyhow!("Source not found: {id}"));
         }
 
         Ok(())
@@ -161,7 +160,7 @@ impl SourceManager {
             is_operation_valid(&status, &Operation::Stop).map_err(|e| anyhow::anyhow!(e))?;
             source.stop().await?;
         } else {
-            return Err(anyhow::anyhow!("Source not found: {}", id));
+            return Err(anyhow::anyhow!("Source not found: {id}"));
         }
 
         Ok(())
@@ -176,7 +175,7 @@ impl SourceManager {
         if let Some(source) = source {
             Ok(source.status().await)
         } else {
-            Err(anyhow::anyhow!("Source not found: {}", id))
+            Err(anyhow::anyhow!("Source not found: {id}"))
         }
     }
 
@@ -218,7 +217,7 @@ impl SourceManager {
             };
             Ok(runtime)
         } else {
-            Err(anyhow::anyhow!("Source not found: {}", id))
+            Err(anyhow::anyhow!("Source not found: {id}"))
         }
     }
 
@@ -234,7 +233,7 @@ impl SourceManager {
 
             // If the source is running, stop it first
             if matches!(status, ComponentStatus::Running) {
-                info!("Stopping source '{}' before deletion", id);
+                info!("Stopping source '{id}' before deletion");
                 source.stop().await?;
 
                 // Wait a bit to ensure the source has fully stopped
@@ -244,8 +243,7 @@ impl SourceManager {
                 let new_status = source.status().await;
                 if !matches!(new_status, ComponentStatus::Stopped) {
                     return Err(anyhow::anyhow!(
-                        "Failed to stop source '{}' before deletion",
-                        id
+                        "Failed to stop source '{id}' before deletion"
                     ));
                 }
             } else {
@@ -255,11 +253,11 @@ impl SourceManager {
 
             // Now remove the source
             self.sources.write().await.remove(&id);
-            info!("Deleted source: {}", id);
+            info!("Deleted source: {id}");
 
             Ok(())
         } else {
-            Err(anyhow::anyhow!("Source not found: {}", id))
+            Err(anyhow::anyhow!("Source not found: {id}"))
         }
     }
 
@@ -285,7 +283,7 @@ impl SourceManager {
             }
 
             let source_id = source.id().to_string();
-            info!("Starting source: {}", source_id);
+            info!("Starting source: {source_id}");
             if let Err(e) = source.start().await {
                 log_component_error("Source", &source_id, &e.to_string());
                 failed_sources.push((source_id, e.to_string()));
@@ -297,13 +295,10 @@ impl SourceManager {
         if !failed_sources.is_empty() {
             let error_msg = failed_sources
                 .iter()
-                .map(|(id, err)| format!("{}: {}", id, err))
+                .map(|(id, err)| format!("{id}: {err}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            Err(anyhow::anyhow!(
-                "Failed to start some sources: {}",
-                error_msg
-            ))
+            Err(anyhow::anyhow!("Failed to start some sources: {error_msg}"))
         } else {
             Ok(())
         }

@@ -627,7 +627,7 @@ mod tests {
         let mut tasks = vec![];
         for i in 2..=4 {
             let pq_clone = pq.clone();
-            let event = create_test_event(&format!("event{}", i), now);
+            let event = create_test_event(&format!("event{i}"), now);
             let task = tokio::spawn(async move {
                 pq_clone.enqueue_wait(event).await;
                 i

@@ -29,7 +29,7 @@ pub fn get_current_timestamp_nanos() -> Result<u64> {
         Some(nanos) => {
             // Ensure it's not negative (shouldn't happen with Utc::now())
             if nanos < 0 {
-                anyhow::bail!("System time produced negative timestamp: {}", nanos);
+                anyhow::bail!("System time produced negative timestamp: {nanos}");
             }
             Ok(nanos as u64)
         }
@@ -39,7 +39,7 @@ pub fn get_current_timestamp_nanos() -> Result<u64> {
             log::warn!("Timestamp overflow detected, falling back to millisecond precision");
             let millis = chrono::Utc::now().timestamp_millis();
             if millis < 0 {
-                anyhow::bail!("System time produced negative timestamp: {} ms", millis);
+                anyhow::bail!("System time produced negative timestamp: {millis} ms");
             }
             // Convert milliseconds to nanoseconds
             Ok((millis as u64) * 1_000_000)
@@ -91,10 +91,7 @@ pub fn get_timestamp_with_fallback(default_on_error: Option<u64>) -> Result<u64>
 
     // Use default if provided
     if let Some(default) = default_on_error {
-        log::error!(
-            "All timestamp methods failed, using default value: {}",
-            default
-        );
+        log::error!("All timestamp methods failed, using default value: {default}");
         return Ok(default);
     }
 

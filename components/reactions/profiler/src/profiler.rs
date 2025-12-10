@@ -526,11 +526,11 @@ impl Reaction for ProfilerReaction {
                         let stats_guard = stats.read().await;
 
                         if stats_guard.count == 0 {
-                            info!("[{}] No profiling data collected yet", reaction_name);
+                            info!("[{reaction_name}] No profiling data collected yet");
                             continue;
                         }
 
-                        info!("[{}] ========== Profiling Report ==========", reaction_name);
+                        info!("[{reaction_name}] ========== Profiling Report ==========");
 
                         let source_to_query = stats_guard.get_source_to_query_stats();
                         info!("[{}] {}", reaction_name, Self::format_stats("Source→Query", &source_to_query));
@@ -547,7 +547,7 @@ impl Reaction for ProfilerReaction {
                         let total = stats_guard.get_total_latency_stats();
                         info!("[{}] {}", reaction_name, Self::format_stats("Total End-to-End", &total));
 
-                        info!("[{}] ======================================", reaction_name);
+                        info!("[{reaction_name}] ======================================");
                     }
                 }
             }

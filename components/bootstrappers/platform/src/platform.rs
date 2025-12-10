@@ -101,7 +101,7 @@ impl PlatformBootstrapProvider {
     fn create_internal(query_api_url: String, timeout_seconds: u64) -> Result<Self> {
         // Validate URL format
         reqwest::Url::parse(&query_api_url)
-            .context(format!("Invalid query_api_url: {}", query_api_url))?;
+            .context(format!("Invalid query_api_url: {query_api_url}"))?;
 
         let timeout = Duration::from_secs(timeout_seconds);
         let client = Client::builder()
@@ -143,7 +143,7 @@ impl PlatformBootstrapProvider {
             .json(&subscription_req)
             .send()
             .await
-            .context(format!("Failed to connect to Query API at {}", url))?;
+            .context(format!("Failed to connect to Query API at {url}"))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -152,9 +152,7 @@ impl PlatformBootstrapProvider {
                 .await
                 .unwrap_or_else(|_| "Unable to read error response".to_string());
             return Err(anyhow::anyhow!(
-                "Query API returned error status {}: {}",
-                status,
-                error_text
+                "Query API returned error status {status}: {error_text}"
             ));
         }
 
@@ -202,14 +200,11 @@ impl PlatformBootstrapProvider {
                         elements.push(element);
                         element_count += 1;
                         if element_count % 1000 == 0 {
-                            debug!("Received {} bootstrap elements from stream", element_count);
+                            debug!("Received {element_count} bootstrap elements from stream");
                         }
                     }
                     Err(e) => {
-                        warn!(
-                            "Failed to parse bootstrap element from JSON: {} - Line: {}",
-                            e, line
-                        );
+                        warn!("Failed to parse bootstrap element from JSON: {e} - Line: {line}");
                         // Continue processing other elements
                     }
                 }
@@ -226,17 +221,13 @@ impl PlatformBootstrapProvider {
                 }
                 Err(e) => {
                     warn!(
-                        "Failed to parse final bootstrap element from JSON: {} - Line: {}",
-                        e, remaining
+                        "Failed to parse final bootstrap element from JSON: {e} - Line: {remaining}"
                     );
                 }
             }
         }
 
-        info!(
-            "Received total of {} bootstrap elements from Query API stream",
-            element_count
-        );
+        info!("Received total of {element_count} bootstrap elements from Query API stream");
         Ok(elements)
     }
 }
@@ -380,8 +371,7 @@ impl BootstrapProvider for PlatformBootstrapProvider {
         }
 
         debug!(
-            "Filtered {} nodes and {} relations based on requested labels",
-            filtered_nodes, filtered_relations
+            "Filtered {filtered_nodes} nodes and {filtered_relations} relations based on requested labels"
         );
 
         info!(

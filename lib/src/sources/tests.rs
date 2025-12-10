@@ -427,7 +427,7 @@ mod manager_tests {
             let manager_clone = manager.clone();
             let event_tx_clone = event_tx.clone();
             handles.push(tokio::spawn(async move {
-                let source = create_test_mock_source(format!("source-{}", i), event_tx_clone);
+                let source = create_test_mock_source(format!("source-{i}"), event_tx_clone);
                 manager_clone.add_source(source).await
             }));
         }

@@ -237,7 +237,7 @@ impl ScriptFileBootstrapProvider {
                         event_tx
                             .send(bootstrap_event)
                             .await
-                            .map_err(|e| anyhow!("Failed to send node: {}", e))?;
+                            .map_err(|e| anyhow!("Failed to send node: {e}"))?;
 
                         count += 1;
                     }
@@ -270,7 +270,7 @@ impl ScriptFileBootstrapProvider {
                         event_tx
                             .send(bootstrap_event)
                             .await
-                            .map_err(|e| anyhow!("Failed to send relation: {}", e))?;
+                            .map_err(|e| anyhow!("Failed to send relation: {e}"))?;
 
                         count += 1;
                     }
@@ -316,8 +316,8 @@ impl BootstrapProvider for ScriptFileBootstrapProvider {
 
         // Create the script reader
         let mut reader = BootstrapScriptReader::new(paths).map_err(|e| {
-            error!("Failed to create script reader: {}", e);
-            anyhow!("Failed to create script reader: {}", e)
+            error!("Failed to create script reader: {e}");
+            anyhow!("Failed to create script reader: {e}")
         })?;
 
         // Get and log header information

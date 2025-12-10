@@ -54,7 +54,7 @@ async fn setup_redis_raw() -> (testcontainers::ContainerAsync<Redis>, String) {
     // Start Redis container
     let container = Redis::default().start().await.unwrap();
     let redis_port = container.get_host_port_ipv4(6379).await.unwrap();
-    let redis_url = format!("redis://127.0.0.1:{}", redis_port);
+    let redis_url = format!("redis://127.0.0.1:{redis_port}");
 
     (container, redis_url)
 }
@@ -114,10 +114,10 @@ impl RedisGuard {
             // Stop and remove the container
             match container.stop().await {
                 Ok(_) => {
-                    log::debug!("Successfully stopped Redis container: {}", container_id);
+                    log::debug!("Successfully stopped Redis container: {container_id}");
                 }
                 Err(e) => {
-                    log::warn!("Error stopping container {}: {}", container_id, e);
+                    log::warn!("Error stopping container {container_id}: {e}");
                 }
             }
 
@@ -149,9 +149,9 @@ impl Drop for RedisGuardInner {
                 }));
 
                 if cleanup_result.is_ok() {
-                    log::debug!("Redis container {} cleaned up in Drop", container_id);
+                    log::debug!("Redis container {container_id} cleaned up in Drop");
                 } else {
-                    log::warn!("Failed to cleanup Redis container {} in Drop", container_id);
+                    log::warn!("Failed to cleanup Redis container {container_id} in Drop");
                 }
             }
         }
@@ -391,7 +391,7 @@ pub fn verify_cloudevent_structure(cloud_event: &Value) -> Result<()> {
 
     for field in required_fields {
         if cloud_event.get(field).is_none() {
-            return Err(anyhow::anyhow!("Missing required field: {}", field));
+            return Err(anyhow::anyhow!("Missing required field: {field}"));
         }
     }
 
