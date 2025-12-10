@@ -13,7 +13,7 @@ members = [
   "lib",
 
   # Source Plugins
-  "components/sources/postgres",
+  # "components/sources/postgres",
   "components/sources/http",
   "components/sources/grpc",
   "components/sources/platform",
@@ -21,7 +21,7 @@ members = [
   "components/sources/mock",
 
   # Bootstrap Plugins
-  "components/bootstrappers/postgres",
+  # "components/bootstrappers/postgres",
   "components/bootstrappers/platform",
   "components/bootstrappers/scriptfile",
   "components/bootstrappers/application",
