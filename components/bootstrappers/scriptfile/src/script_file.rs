@@ -59,7 +59,6 @@ impl ScriptFileBootstrapProvider {
     }
 }
 
-
 /// Builder for ScriptFileBootstrapProvider
 ///
 /// # Example

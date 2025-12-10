@@ -394,13 +394,13 @@ mod tests {
     #[test]
     fn test_elapsed_summary_ms() {
         let metadata = ProfilingMetadata {
-            source_receive_ns: Some(1_000_000),  // 1ms
-            source_send_ns: Some(2_000_000),     // 2ms
-            query_receive_ns: Some(3_000_000),   // 3ms
-            query_core_call_ns: Some(3_500_000), // 3.5ms
+            source_receive_ns: Some(1_000_000),    // 1ms
+            source_send_ns: Some(2_000_000),       // 2ms
+            query_receive_ns: Some(3_000_000),     // 3ms
+            query_core_call_ns: Some(3_500_000),   // 3.5ms
             query_core_return_ns: Some(5_500_000), // 5.5ms
-            query_send_ns: Some(6_000_000),      // 6ms
-            reaction_receive_ns: Some(7_000_000), // 7ms
+            query_send_ns: Some(6_000_000),        // 6ms
+            reaction_receive_ns: Some(7_000_000),  // 7ms
             reaction_complete_ns: Some(8_000_000), // 8ms
             ..Default::default()
         };
