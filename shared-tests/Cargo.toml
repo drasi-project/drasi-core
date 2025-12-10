@@ -28,3 +28,7 @@ uuid = { version = "1.0", features = ["v4"] }
 redis = { version = "0.27", features = ["tokio-comp"] }
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["redis"] }
+
+[patch.crates-io]
+# Dependency of testcontainers. Need this version because it uses rust 1.85
+home = { version = "0.5.9" }
