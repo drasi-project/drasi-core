@@ -11,7 +11,7 @@ The PostgreSQL Replication Source is a Change Data Capture (CDC) plugin for Dras
 - Automatic reconnection and recovery on connection failures
 - Support for multiple PostgreSQL data types with type-safe conversion
 - Primary key detection and custom key configuration
-- SCRAM-SHA-256, MD5, and cleartext authentication
+- SCRAM-SHA-256 authentication (recommended) and cleartext fallback
 
 **Use Cases**:
 - Real-time data synchronization from PostgreSQL databases
@@ -166,7 +166,7 @@ let source = PostgresReplicationSource::new("postgres-source-1", config)?;
 | `port` | `u16` | `5432` | PostgreSQL server port number |
 | `database` | `String` | **(Required)** | Database name to connect to |
 | `user` | `String` | **(Required)** | Database user with replication privileges |
-| `password` | `String` | `""` | Database password (supports cleartext, MD5, SCRAM-SHA-256) |
+| `password` | `String` | `""` | Database password (supports SCRAM-SHA-256 and cleartext) |
 | `tables` | `Vec<String>` | `[]` | List of tables to monitor (empty = all tables in publication) |
 | `slot_name` | `String` | `"drasi_slot"` | Replication slot name (created if doesn't exist) |
 | `publication_name` | `String` | `"drasi_publication"` | PostgreSQL publication to subscribe to |
@@ -601,9 +601,10 @@ cargo test -p drasi-source-postgres -- --test-threads=1
 ```
 
 ### Authentication Methods Supported
-- Cleartext password (not recommended for production)
-- MD5 password hashing
 - SCRAM-SHA-256 (recommended, see `scram.rs`)
+- Cleartext password (not recommended for production)
+
+**Note**: MD5 authentication is explicitly not supported due to security concerns. If your PostgreSQL server requests MD5 authentication, you will receive an error instructing you to configure `scram-sha-256` in `pg_hba.conf`.
 
 ### Wire Protocol
 The source implements PostgreSQL wire protocol 3.0:
