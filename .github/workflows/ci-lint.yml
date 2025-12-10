@@ -29,8 +29,6 @@ jobs:
         -A clippy::module_inception       
         -A clippy::ptr_arg
         -A clippy::type_complexity
-        -A clippy::uninlined_format_args
-        -A clippy::redundant_guards
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
