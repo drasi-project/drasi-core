@@ -8,7 +8,7 @@ The Application Source is a programmatic data injection plugin for Drasi that en
 
 - **Handle-based API**: Clone and share handles across threads for concurrent event injection
 - **Type-safe Event Construction**: Builder pattern for creating graph nodes and relationships with compile-time type safety
-- **Automatic Bootstrap Support**: All insert events are automatically tracked and replayed for new query subscriptions
+- **Pluggable Bootstrap Support**: Configure any bootstrap provider for initial data delivery
 - **Zero Network Overhead**: In-process communication via bounded async channels
 - **Flexible Property Types**: Support for strings, integers, floats, booleans, and null values
 - **Batch Operations**: Send multiple changes efficiently in a single operation
@@ -45,13 +45,8 @@ let config = ApplicationSourceConfig {
 // Create source and handle
 let (source, handle) = ApplicationSource::new("my-source", config)?;
 
-// For bootstrap provider support
-let bootstrap_config = BootstrapProviderConfig::Application { /* ... */ };
-let (source, handle) = ApplicationSource::with_bootstrap_provider(
-    "my-source",
-    config,
-    bootstrap_config
-)?;
+// Configure bootstrap provider (optional)
+source.set_bootstrap_provider(Box::new(my_bootstrap_provider)).await;
 ```
 
 ### Configuration Struct
@@ -354,64 +349,40 @@ let props = PropertyMapBuilder::new()
 handle.send_node_insert("sensor-1", vec!["Sensor"], props).await?;
 ```
 
-## Bootstrap Behavior
+## Bootstrap Support
 
-The Application Source provides automatic bootstrap support for continuous queries:
+The Application Source supports pluggable bootstrap providers via the `BootstrapProvider` trait. Any bootstrap provider implementation can be used with this source.
 
-### How Bootstrap Works
-
-1. **Automatic Tracking**: All `Insert` events (both nodes and relationships) are automatically stored in an internal `bootstrap_data` collection
-2. **Query Subscription**: When a query subscribes with `enable_bootstrap: true`, the source replays all stored insert events
-3. **Insert-Only Storage**: Only `Insert` events are stored for bootstrap; `Update` and `Delete` events are not included
-4. **Internal vs. External Bootstrap**:
-   - Without bootstrap provider: Uses internal replay of stored inserts
-   - With bootstrap provider: Delegates to configured `BootstrapProvider` (e.g., `ApplicationBootstrapProvider`)
-
-### Bootstrap Characteristics
-
-**Bootstrap represents:**
-- All creation events (inserts) that have occurred
-- The sequence of "how the graph was built"
-
-**Bootstrap does NOT represent:**
-- Current state after updates and deletes
-- The result of applying all changes cumulatively
-
-### Example Bootstrap Behavior
+### Configuring Bootstrap
 
 ```rust
-// Insert a node
-handle.send_node_insert("user-1", vec!["User"], props1).await?;
-// ✓ Stored for bootstrap
+use drasi_source_application::{ApplicationSource, ApplicationSourceConfig};
+use drasi_bootstrap_application::ApplicationBootstrapProvider;
 
-// Update the node
-handle.send_node_update("user-1", vec!["User"], props2).await?;
-// ✗ NOT stored for bootstrap
+// Create source
+let config = ApplicationSourceConfig { properties: HashMap::new() };
+let (source, handle) = ApplicationSource::new("my-source", config)?;
 
-// Delete the node
-handle.send_delete("user-1", vec!["User"]).await?;
-// ✗ NOT stored for bootstrap
-
-// Result: Bootstrap still includes the original insert
+// Configure bootstrap provider
+let bootstrap_provider = ApplicationBootstrapProvider::new();
+source.set_bootstrap_provider(Box::new(bootstrap_provider)).await;
 ```
 
-### Custom Bootstrap Provider
+### Common Bootstrap Provider Options
 
-For advanced scenarios, configure an external bootstrap provider:
+- `ApplicationBootstrapProvider` (`drasi-bootstrap-application`) - Replays stored insert events from shared state
+- `ScriptFileBootstrapProvider` (`drasi-bootstrap-scriptfile`) - Loads initial data from JSONL files
+- `NoopBootstrapProvider` (`drasi-bootstrap-noop`) - Skips bootstrap entirely
+- Custom implementations of the `BootstrapProvider` trait
 
-```rust
-use drasi_lib::bootstrap::BootstrapProviderConfig;
+### Bootstrap Behavior
 
-let bootstrap_config = BootstrapProviderConfig::Application {
-    // Configuration specific to ApplicationBootstrapProvider
-};
+When a query subscribes with `enable_bootstrap: true`:
+1. The source delegates to the configured bootstrap provider
+2. The provider sends initial data events to the query
+3. After bootstrap completes, the query receives streaming events
 
-let (source, handle) = ApplicationSource::with_bootstrap_provider(
-    "my-source",
-    config,
-    bootstrap_config
-)?;
-```
+If no bootstrap provider is configured, the query is informed that bootstrap is not available.
 
 ## Thread Safety and Concurrency
 
@@ -592,10 +563,10 @@ handle.send_batch(changes).await?;
 
 ### Memory Usage
 
-Bootstrap data is stored in memory:
-- Each `Insert` event is retained indefinitely
-- For applications with millions of inserts, consider memory implications
-- No automatic cleanup or compaction
+Memory usage depends on the configured bootstrap provider:
+- `ApplicationBootstrapProvider` stores events in memory
+- `ScriptFileBootstrapProvider` reads from disk on demand
+- Consider bootstrap provider memory implications for high-volume scenarios
 
 ## Comparison with Other Sources
 
@@ -605,19 +576,18 @@ Bootstrap data is stored in memory:
 | **Performance** | Highest (in-process) | Moderate | Moderate | Database-dependent |
 | **Language Support** | Rust only | Any | Any | Any (via database) |
 | **Network** | No | Yes | Yes | Yes |
-| **Bootstrap** | Stored inserts | Depends on impl | Depends on impl | Database snapshot |
+| **Bootstrap** | Pluggable provider | Pluggable provider | Pluggable provider | Pluggable provider |
 | **Use Case** | Embedded, testing | Cross-language | Microservices | DB integration |
 | **Setup Complexity** | Minimal | Moderate | Moderate | High |
 
 ## Known Limitations
 
-1. **Bootstrap is Insert-Only**: Bootstrap does not represent current state after updates/deletes, only creation events
-2. **No Persistence**: Bootstrap data is lost on application restart
-3. **No Deduplication**: Source does not prevent duplicate element IDs (query engine handles this)
-4. **Fixed Channel Size**: Default 1000-event capacity requires code changes to increase
-5. **Rust-Only**: No cross-language support (by design)
-6. **No Manual Timestamps**: Timestamps are auto-generated, cannot be manually set
-7. **No Reconnection**: Stopped sources cannot be reused, handles become permanently unusable
+1. **No Deduplication**: Source does not prevent duplicate element IDs (query engine handles this)
+2. **Fixed Channel Size**: Default 1000-event capacity requires code changes to increase
+3. **Rust-Only**: No cross-language support (by design)
+4. **No Manual Timestamps**: Timestamps are auto-generated, cannot be manually set
+5. **No Reconnection**: Stopped sources cannot be reused, handles become permanently unusable
+6. **Bootstrap Requires Provider**: No built-in bootstrap; requires configuring a bootstrap provider
 
 ## Advanced Topics
 
@@ -662,8 +632,8 @@ All handles (including the original) connect to the same source instance.
 | Method | Description |
 |--------|-------------|
 | `new(id, config)` | Create source and handle |
-| `with_bootstrap_provider(id, config, bootstrap_config)` | Create with external bootstrap provider |
 | `get_handle()` | Get an additional handle |
+| `set_bootstrap_provider(provider)` | Configure bootstrap provider |
 | `start()` | Start event processing |
 | `stop()` | Stop event processing |
 

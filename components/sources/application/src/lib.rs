@@ -61,9 +61,10 @@
 //!
 //! # Bootstrap Support
 //!
-//! The application source automatically tracks all insert events for bootstrap purposes.
-//! When a query subscribes with bootstrap enabled, it receives all previously inserted
-//! data. You can also configure an external bootstrap provider.
+//! The application source supports pluggable bootstrap providers via the `BootstrapProvider`
+//! trait. Configure a bootstrap provider using `set_bootstrap_provider()` or through the
+//! builder pattern. Common options include `ApplicationBootstrapProvider` for replaying
+//! stored events, or any other `BootstrapProvider` implementation.
 //!
 //! # Example Configuration (YAML)
 //!
@@ -150,9 +151,6 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
-use drasi_lib::bootstrap::{
-    BootstrapContext, BootstrapProviderConfig, BootstrapProviderFactory, BootstrapRequest,
-};
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ComponentType, *};
 use drasi_lib::plugin_core::Source;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
@@ -309,17 +307,14 @@ impl ApplicationSourceHandle {
 /// A source that allows applications to programmatically inject events.
 ///
 /// This source receives events from an [`ApplicationSourceHandle`] and forwards
-/// them to the Drasi query processing pipeline. It also maintains a record of
-/// all insert events for bootstrap purposes.
+/// them to the Drasi query processing pipeline.
 ///
 /// # Fields
 ///
-/// - `base`: Common source functionality (dispatchers, status, lifecycle)
+/// - `base`: Common source functionality (dispatchers, status, lifecycle, bootstrap)
 /// - `config`: Application source configuration
 /// - `app_rx`: Receiver for events from the handle
 /// - `app_tx`: Sender for creating additional handles
-/// - `bootstrap_data`: Accumulated insert events for bootstrap
-/// - `bootstrap_provider_config`: Optional external bootstrap provider configuration
 pub struct ApplicationSource {
     /// Base source implementation providing common functionality
     base: SourceBase,
@@ -329,10 +324,6 @@ pub struct ApplicationSource {
     app_rx: Arc<RwLock<Option<mpsc::Receiver<SourceChange>>>>,
     /// Sender for creating new handles
     app_tx: mpsc::Sender<SourceChange>,
-    /// Accumulated insert events for internal bootstrap
-    bootstrap_data: Arc<RwLock<Vec<SourceChange>>>,
-    /// Optional external bootstrap provider configuration
-    bootstrap_provider_config: Option<BootstrapProviderConfig>,
 }
 
 impl ApplicationSource {
@@ -381,46 +372,9 @@ impl ApplicationSource {
             config,
             app_rx: Arc::new(RwLock::new(Some(app_rx))),
             app_tx,
-            bootstrap_data: Arc::new(RwLock::new(Vec::new())),
-            bootstrap_provider_config: None,
         };
 
         Ok((source, handle))
-    }
-
-    /// Create a new application source with bootstrap provider
-    ///
-    /// The event channel is automatically injected when the source is added
-    /// to DrasiLib via `add_source()`.
-    pub fn with_bootstrap_provider(
-        id: impl Into<String>,
-        config: ApplicationSourceConfig,
-        bootstrap_provider_config: BootstrapProviderConfig,
-    ) -> Result<(Self, ApplicationSourceHandle)> {
-        let id = id.into();
-        let params = SourceBaseParams::new(id.clone());
-        let (app_tx, app_rx) = mpsc::channel(1000);
-
-        let handle = ApplicationSourceHandle {
-            tx: app_tx.clone(),
-            source_id: id.clone(),
-        };
-
-        let source = Self {
-            base: SourceBase::new(params)?,
-            config,
-            app_rx: Arc::new(RwLock::new(Some(app_rx))),
-            app_tx,
-            bootstrap_data: Arc::new(RwLock::new(Vec::new())),
-            bootstrap_provider_config: Some(bootstrap_provider_config),
-        };
-
-        Ok((source, handle))
-    }
-
-    /// Get a clone of the bootstrap data Arc for sharing with ApplicationBootstrapProvider
-    pub fn get_bootstrap_data(&self) -> Arc<RwLock<Vec<SourceChange>>> {
-        Arc::clone(&self.bootstrap_data)
     }
 
     /// Get a new handle for this source
@@ -443,7 +397,6 @@ impl ApplicationSource {
         let base_dispatchers = self.base.dispatchers.clone();
         let event_tx = self.base.event_tx();
         let status = self.base.status.clone();
-        let bootstrap_data = self.bootstrap_data.clone();
 
         let handle = tokio::spawn(async move {
             info!("ApplicationSource '{source_name}' event processor started");
@@ -464,10 +417,6 @@ impl ApplicationSource {
 
             while let Some(change) = rx.recv().await {
                 debug!("ApplicationSource '{source_name}' received event: {change:?}");
-
-                if matches!(change, SourceChange::Insert { .. }) {
-                    bootstrap_data.write().await.push(change.clone());
-                }
 
                 let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
                 profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
@@ -563,96 +512,15 @@ impl Source for ApplicationSource {
         node_labels: Vec<String>,
         relation_labels: Vec<String>,
     ) -> Result<SubscriptionResponse> {
-        info!(
-            "Query '{}' subscribing to ApplicationSource '{}' (bootstrap: {})",
-            query_id, self.base.id, enable_bootstrap
-        );
-
-        let receiver = self.base.create_streaming_receiver().await?;
-        let query_id_for_response = query_id.clone();
-
-        let bootstrap_receiver = if enable_bootstrap {
-            if let Some(ref provider_config) = self.bootstrap_provider_config {
-                info!(
-                    "Bootstrap enabled for query '{}' with {} node labels and {} relation labels, delegating to bootstrap provider",
-                    query_id,
-                    node_labels.len(),
-                    relation_labels.len()
-                );
-
-                let (tx, rx) = tokio::sync::mpsc::channel(1000);
-
-                let provider: Box<dyn drasi_lib::bootstrap::BootstrapProvider> =
-                    if matches!(provider_config, BootstrapProviderConfig::Application { .. }) {
-                        Box::new(
-                        drasi_bootstrap_application::ApplicationBootstrapProvider::with_shared_data(
-                            self.get_bootstrap_data()
-                        )
-                    )
-                    } else {
-                        BootstrapProviderFactory::create_provider(provider_config)?
-                    };
-
-                let context =
-                    BootstrapContext::new_minimal(self.base.id.clone(), self.base.id.clone());
-
-                let request = BootstrapRequest {
-                    query_id: query_id.clone(),
-                    node_labels,
-                    relation_labels,
-                    request_id: format!("{}-{}", query_id, uuid::Uuid::new_v4()),
-                };
-
-                tokio::spawn(async move {
-                    match provider.bootstrap(request, &context, tx).await {
-                        Ok(count) => {
-                            info!(
-                                "Bootstrap completed successfully for query '{query_id}', sent {count} events"
-                            );
-                        }
-                        Err(e) => {
-                            log::error!("Bootstrap failed for query '{query_id}': {e}");
-                        }
-                    }
-                });
-
-                Some(rx)
-            } else {
-                info!(
-                    "Bootstrap requested for query '{query_id}' but no bootstrap provider configured, using internal bootstrap"
-                );
-
-                let (tx, rx) = tokio::sync::mpsc::channel(1000);
-                let bootstrap_data = self.bootstrap_data.read().await;
-
-                info!(
-                    "Sending {} bootstrap events for ApplicationSource '{}' (internal)",
-                    bootstrap_data.len(),
-                    self.base.id
-                );
-
-                for (seq, change) in bootstrap_data.iter().enumerate() {
-                    let event = BootstrapEvent {
-                        source_id: self.base.id.clone(),
-                        change: change.clone(),
-                        timestamp: chrono::Utc::now(),
-                        sequence: seq as u64,
-                    };
-                    let _ = tx.send(event).await;
-                }
-
-                Some(rx)
-            }
-        } else {
-            None
-        };
-
-        Ok(SubscriptionResponse {
-            query_id: query_id_for_response,
-            source_id: self.base.id.clone(),
-            receiver,
-            bootstrap_receiver,
-        })
+        self.base
+            .subscribe_with_bootstrap(
+                query_id,
+                enable_bootstrap,
+                node_labels,
+                relation_labels,
+                "Application",
+            )
+            .await
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -661,5 +529,12 @@ impl Source for ApplicationSource {
 
     async fn inject_event_tx(&self, tx: ComponentEventSender) {
         self.base.inject_event_tx(tx).await;
+    }
+
+    async fn set_bootstrap_provider(
+        &self,
+        provider: Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>,
+    ) {
+        self.base.set_bootstrap_provider(provider).await;
     }
 }
