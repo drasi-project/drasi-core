@@ -30,10 +30,11 @@ The PostgreSQL source consists of several specialized modules:
 1. **Connection** (`connection.rs`): Manages the PostgreSQL replication protocol connection, authentication (including SCRAM-SHA-256), and message exchange
 2. **Stream** (`stream.rs`): Handles the continuous WAL streaming loop, message processing, and transaction coordination
 3. **Decoder** (`decoder.rs`): Decodes binary pgoutput messages into structured WAL events with full type support
-4. **Bootstrap** (`bootstrap.rs`): Performs consistent snapshots for initial data loading with primary key detection
-5. **Protocol** (`protocol.rs`): Implements PostgreSQL wire protocol encoding/decoding
-6. **SCRAM** (`scram.rs`): SCRAM-SHA-256 authentication implementation
-7. **Types** (`types.rs`): Type definitions for PostgreSQL values and WAL messages
+4. **Protocol** (`protocol.rs`): Implements PostgreSQL wire protocol encoding/decoding
+5. **SCRAM** (`scram.rs`): SCRAM-SHA-256 authentication implementation
+6. **Types** (`types.rs`): Type definitions for PostgreSQL values and WAL messages
+
+**Note**: Bootstrap functionality is provided by the separate `drasi-bootstrap-postgres` crate via the pluggable bootstrap provider pattern.
 
 ### Data Flow
 
@@ -46,11 +47,11 @@ PostgreSQL WAL → Connection → Decoder → Stream → SourceChange Events
                           Dispatcher → Queries
 ```
 
-**Bootstrap Flow**:
+**Bootstrap Flow** (via pluggable bootstrap provider):
 ```
-Bootstrap Request → Snapshot Transaction → Table Scan → SourceChange Events
-                          ↓
-                    Capture LSN → Coordinate with Streaming
+Bootstrap Request → Bootstrap Provider → SourceChange Events
+                                              ↓
+                                        Coordinate with Streaming
 ```
 
 ## Prerequisites
@@ -418,16 +419,27 @@ Changes are grouped by PostgreSQL transaction and dispatched atomically:
 - Changes are sent together when the transaction commits
 - Ensures transactional consistency in downstream processing
 
-### Bootstrap with LSN Coordination
+### Bootstrap Support
 
-Bootstrap operations capture a consistent snapshot:
-1. Opens a repeatable read transaction
-2. Captures current WAL LSN using `pg_current_wal_lsn()`
-3. Exports snapshot for consistency
-4. Scans tables and sends initial data
-5. Coordinates streaming to start from captured LSN
+The PostgreSQL source supports pluggable bootstrap providers via the `BootstrapProvider` trait. Any bootstrap provider implementation can be used with this source:
 
-This ensures no data is lost between bootstrap and streaming.
+```rust
+use drasi_source_postgres::PostgresReplicationSource;
+
+let source = PostgresReplicationSource::builder("pg-source")
+    .with_host("localhost")
+    .with_database("myapp")
+    .with_user("postgres")
+    .with_password("password")
+    .with_bootstrap_provider(my_bootstrap_provider)  // Any BootstrapProvider impl
+    .build()?;
+```
+
+Common bootstrap provider options include:
+- `PostgresBootstrapProvider` (`drasi-bootstrap-postgres`) - Snapshots directly from PostgreSQL
+- `ScriptFileBootstrapProvider` (`drasi-bootstrap-scriptfile`) - Loads initial data from JSONL files
+- `NoopBootstrapProvider` (`drasi-bootstrap-noop`) - Skips bootstrap entirely
+- Custom implementations of the `BootstrapProvider` trait
 
 ### Automatic Reconnection
 
@@ -446,7 +458,9 @@ The source handles connection failures gracefully:
 
 ### Primary Key Detection
 
-Bootstrap handler queries PostgreSQL system catalogs to detect primary keys:
+During WAL streaming, the source uses primary key information from the relation metadata provided by PostgreSQL's logical replication protocol. For bootstrap, the configured bootstrap provider is responsible for primary key detection.
+
+When using `PostgresBootstrapProvider`, it queries PostgreSQL system catalogs:
 ```sql
 SELECT n.nspname, c.relname, a.attname
 FROM pg_constraint con
@@ -458,7 +472,7 @@ WHERE con.contype = 'p'
 ORDER BY n.nspname, c.relname, array_position(con.conkey, a.attnum)
 ```
 
-Detected keys are cached and used for element ID generation during both bootstrap and streaming.
+User-configured `table_keys` override automatically detected primary keys in both streaming and bootstrap.
 
 ## Troubleshooting
 
