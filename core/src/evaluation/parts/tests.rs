@@ -32,9 +32,9 @@ mod multi_part;
 mod single_part_aggregating;
 mod single_part_non_aggregating;
 
-async fn process_solution<'a>(
+async fn process_solution(
     query: &Query,
-    evaluator: &'a QueryPartEvaluator,
+    evaluator: &QueryPartEvaluator,
     context: QueryPartEvaluationContext,
 ) -> Vec<QueryPartEvaluationContext> {
     let mut result = Vec::new();
