@@ -47,6 +47,7 @@ pub async fn setup_redis() -> RedisGuard {
 ///
 /// Internal use only. Prefer using `setup_redis()` which returns a `RedisGuard`
 /// for automatic cleanup.
+#[allow(clippy::unwrap_used)]
 async fn setup_redis_raw() -> (testcontainers::ContainerAsync<Redis>, String) {
     use testcontainers::runners::AsyncRunner;
 
@@ -230,38 +231,6 @@ pub async fn read_from_stream(
 
     Ok(events)
 }
-
-/// Create a consumer group on a Redis stream
-///
-/// # Arguments
-/// * `redis_url` - Redis connection URL
-/// * `stream_key` - Stream key
-/// * `group_name` - Consumer group name
-///
-/// # Returns
-/// Ok if successful, Err if group already exists or other error
-// #[allow(dead_code)]
-// pub async fn create_consumer_group(
-//     redis_url: &str,
-//     stream_key: &str,
-//     group_name: &str,
-// ) -> Result<()> {
-//     let client = redis::Client::open(redis_url)?;
-//     let mut conn = client.get_multiplexed_async_connection().await?;
-
-//     // Create consumer group with MKSTREAM flag
-//     let _: Result<String, redis::RedisError> = redis::cmd("XGROUP")
-//         .arg("CREATE")
-//         .arg(stream_key)
-//         .arg(group_name)
-//         .arg("0") // Start from beginning
-//         .arg("MKSTREAM") // Create stream if it doesn't exist
-//         .query_async(&mut conn)
-//         .await;
-
-//     // Ignore "BUSYGROUP" error if group already exists
-//     Ok(())
-// }
 
 /// Build a platform insert event in CloudEvent format
 ///
