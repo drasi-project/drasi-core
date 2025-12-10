@@ -70,7 +70,7 @@ impl PgOutputDecoder {
             b'T' => self.decode_truncate(payload),
             b'M' => self.decode_message_logical(payload),
             _ => {
-                warn!("Unknown pgoutput message type: 0x{:02x}", msg_type);
+                warn!("Unknown pgoutput message type: 0x{msg_type:02x}");
                 Ok(None)
             }
         }
@@ -94,7 +94,7 @@ impl PgOutputDecoder {
 
         self.current_transaction = Some(transaction.clone());
 
-        debug!("Begin transaction: xid={}, lsn={:x}", xid, final_lsn);
+        debug!("Begin transaction: xid={xid}, lsn={final_lsn:x}");
         Ok(Some(WalMessage::Begin(transaction)))
     }
 
@@ -120,7 +120,7 @@ impl PgOutputDecoder {
 
         self.current_transaction = None;
 
-        debug!("Commit transaction: lsn={:x}", commit_lsn);
+        debug!("Commit transaction: lsn={commit_lsn:x}");
         Ok(Some(WalMessage::Commit(transaction)))
     }
 
@@ -203,15 +203,14 @@ impl PgOutputDecoder {
 
         if tuple_type != b'N' {
             return Err(anyhow!(
-                "Expected 'N' tuple type for insert, got: {}",
-                tuple_type
+                "Expected 'N' tuple type for insert, got: {tuple_type}"
             ));
         }
 
         let relation = self
             .relations
             .get(&relation_id)
-            .ok_or_else(|| anyhow!("Unknown relation ID: {}", relation_id))?;
+            .ok_or_else(|| anyhow!("Unknown relation ID: {relation_id}"))?;
 
         debug!(
             "Insert for table: {}, expected columns: {}",
@@ -237,7 +236,7 @@ impl PgOutputDecoder {
         let relation = self
             .relations
             .get(&relation_id)
-            .ok_or_else(|| anyhow!("Unknown relation ID: {}", relation_id))?;
+            .ok_or_else(|| anyhow!("Unknown relation ID: {relation_id}"))?;
 
         let mut old_tuple = None;
         let new_tuple;
@@ -248,7 +247,7 @@ impl PgOutputDecoder {
                 old_tuple = Some(self.decode_tuple_data(&mut cursor, &relation.columns)?);
                 let next_type = cursor.read_u8()?;
                 if next_type != b'N' {
-                    return Err(anyhow!("Expected 'N' after old tuple, got: {}", next_type));
+                    return Err(anyhow!("Expected 'N' after old tuple, got: {next_type}"));
                 }
                 new_tuple = self.decode_tuple_data(&mut cursor, &relation.columns)?;
             }
@@ -257,7 +256,7 @@ impl PgOutputDecoder {
                 new_tuple = self.decode_tuple_data(&mut cursor, &relation.columns)?;
             }
             _ => {
-                return Err(anyhow!("Unknown tuple type for update: {}", tuple_type));
+                return Err(anyhow!("Unknown tuple type for update: {tuple_type}"));
             }
         }
 
@@ -281,15 +280,14 @@ impl PgOutputDecoder {
 
         if tuple_type != b'K' && tuple_type != b'O' {
             return Err(anyhow!(
-                "Expected 'K' or 'O' tuple type for delete, got: {}",
-                tuple_type
+                "Expected 'K' or 'O' tuple type for delete, got: {tuple_type}"
             ));
         }
 
         let relation = self
             .relations
             .get(&relation_id)
-            .ok_or_else(|| anyhow!("Unknown relation ID: {}", relation_id))?;
+            .ok_or_else(|| anyhow!("Unknown relation ID: {relation_id}"))?;
 
         let old_tuple = self.decode_tuple_data(&mut cursor, &relation.columns)?;
 
@@ -311,7 +309,7 @@ impl PgOutputDecoder {
             relation_ids.push(cursor.read_u32::<BigEndian>()?);
         }
 
-        debug!("Truncate: {} relations", relation_count);
+        debug!("Truncate: {relation_count} relations");
         Ok(Some(WalMessage::Truncate { relation_ids }))
     }
 
@@ -327,13 +325,10 @@ impl PgOutputDecoder {
     ) -> Result<Vec<PostgresValue>> {
         let start_pos = cursor.position();
         let total_len = cursor.get_ref().len();
-        debug!(
-            "decode_tuple_data: start position={}, total buffer length={}",
-            start_pos, total_len
-        );
+        debug!("decode_tuple_data: start position={start_pos}, total buffer length={total_len}");
 
         let column_count = cursor.read_u16::<BigEndian>()? as usize;
-        debug!("Decoding {} columns", column_count);
+        debug!("Decoding {column_count} columns");
 
         if column_count != columns.len() {
             warn!(
@@ -348,7 +343,7 @@ impl PgOutputDecoder {
         for i in 0..column_count {
             let column = columns
                 .get(i)
-                .ok_or_else(|| anyhow!("Column index out of bounds: {}", i))?;
+                .ok_or_else(|| anyhow!("Column index out of bounds: {i}"))?;
 
             let tuple_type = cursor.read_u8()?;
             debug!(
@@ -365,8 +360,7 @@ impl PgOutputDecoder {
                     let pos = cursor.position() as usize;
                     let available = cursor.get_ref().len() - pos;
                     debug!(
-                        "Column {} text value: length={}, pos={}, available={}",
-                        i, length, pos, available
+                        "Column {i} text value: length={length}, pos={pos}, available={available}"
                     );
                     if available < length {
                         return Err(anyhow!("Not enough data for column {} ({}): need {} bytes, have {} bytes at position {}", 
@@ -423,7 +417,7 @@ impl PgOutputDecoder {
                     let value = text
                         .trim()
                         .parse::<i16>()
-                        .map_err(|e| anyhow!("Failed to parse int2 from '{}': {}", text, e))?;
+                        .map_err(|e| anyhow!("Failed to parse int2 from '{text}': {e}"))?;
                     Ok(PostgresValue::Int2(value))
                 }
             }
@@ -439,7 +433,7 @@ impl PgOutputDecoder {
                     let value = text
                         .trim()
                         .parse::<i32>()
-                        .map_err(|e| anyhow!("Failed to parse int4 from '{}': {}", text, e))?;
+                        .map_err(|e| anyhow!("Failed to parse int4 from '{text}': {e}"))?;
                     Ok(PostgresValue::Int4(value))
                 }
             }
@@ -455,7 +449,7 @@ impl PgOutputDecoder {
                     let value = text
                         .trim()
                         .parse::<i64>()
-                        .map_err(|e| anyhow!("Failed to parse int8 from '{}': {}", text, e))?;
+                        .map_err(|e| anyhow!("Failed to parse int8 from '{text}': {e}"))?;
                     Ok(PostgresValue::Int8(value))
                 }
             }
@@ -471,7 +465,7 @@ impl PgOutputDecoder {
                     let value = text
                         .trim()
                         .parse::<f32>()
-                        .map_err(|e| anyhow!("Failed to parse float4 from '{}': {}", text, e))?;
+                        .map_err(|e| anyhow!("Failed to parse float4 from '{text}': {e}"))?;
                     Ok(PostgresValue::Float4(value))
                 }
             }
@@ -487,7 +481,7 @@ impl PgOutputDecoder {
                     let value = text
                         .trim()
                         .parse::<f64>()
-                        .map_err(|e| anyhow!("Failed to parse float8 from '{}': {}", text, e))?;
+                        .map_err(|e| anyhow!("Failed to parse float8 from '{text}': {e}"))?;
                     Ok(PostgresValue::Float8(value))
                 }
             }
@@ -501,7 +495,7 @@ impl PgOutputDecoder {
                     // Text format - parse as string
                     let text = String::from_utf8_lossy(data);
                     let value = Decimal::from_str_exact(text.trim())
-                        .map_err(|e| anyhow!("Failed to parse numeric from '{}': {}", text, e))?;
+                        .map_err(|e| anyhow!("Failed to parse numeric from '{text}': {e}"))?;
                     Ok(PostgresValue::Numeric(value))
                 } else {
                     // Binary format
@@ -543,9 +537,7 @@ impl PgOutputDecoder {
                             .or_else(|_| {
                                 NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S")
                             })
-                            .map_err(|e| {
-                                anyhow!("Failed to parse timestamp from '{}': {}", text, e)
-                            })?;
+                            .map_err(|e| anyhow!("Failed to parse timestamp from '{text}': {e}"))?;
                     Ok(PostgresValue::Timestamp(timestamp))
                 }
             }
@@ -565,7 +557,7 @@ impl PgOutputDecoder {
                         .or_else(|_| {
                             DateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f%z")
                         })
-                        .map_err(|e| anyhow!("Failed to parse timestamptz from '{}': {}", text, e))?
+                        .map_err(|e| anyhow!("Failed to parse timestamptz from '{text}': {e}"))?
                         .with_timezone(&Utc);
                     Ok(PostgresValue::TimestampTz(timestamp))
                 }
@@ -601,7 +593,7 @@ impl PgOutputDecoder {
             }
             _ => {
                 // Default to text representation for unknown types
-                warn!("Unknown type OID {}, treating as text", oid_value);
+                warn!("Unknown type OID {oid_value}, treating as text");
                 Ok(PostgresValue::Text(
                     String::from_utf8_lossy(data).to_string(),
                 ))

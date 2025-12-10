@@ -221,10 +221,7 @@ impl BootstrapProvider for PostgresBootstrapProvider {
         // Execute bootstrap
         let count = handler.execute(request, context, event_tx).await?;
 
-        info!(
-            "Completed PostgreSQL bootstrap for query {}: sent {} records",
-            query_id, count
-        );
+        info!("Completed PostgreSQL bootstrap for query {query_id}: sent {count} records");
 
         Ok(count)
     }
@@ -305,7 +302,7 @@ impl PostgresBootstrapHandler {
         // Start snapshot transaction and capture LSN
         let (transaction, lsn) = self.create_snapshot(&mut client).await?;
 
-        info!("Bootstrap snapshot created at LSN: {}", lsn);
+        info!("Bootstrap snapshot created at LSN: {lsn}");
 
         // Map labels to tables
         let tables = self.map_labels_to_tables(&request, &transaction).await?;
@@ -321,17 +318,14 @@ impl PostgresBootstrapHandler {
             let count = self
                 .bootstrap_table(&transaction, &label, &table_name, context, &event_tx)
                 .await?;
-            info!(
-                "Bootstrapped {} rows from table '{}' with label '{}'",
-                count, table_name, label
-            );
+            info!("Bootstrapped {count} rows from table '{table_name}' with label '{label}'");
             total_count += count;
         }
 
         // Commit transaction to release snapshot
         transaction.commit().await?;
 
-        info!("Bootstrap completed: {} total elements sent", total_count);
+        info!("Bootstrap completed: {total_count} total elements sent");
         Ok(total_count)
     }
 
@@ -351,7 +345,7 @@ impl PostgresBootstrapHandler {
         // Spawn connection handler
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                error!("PostgreSQL connection error: {}", e);
+                error!("PostgreSQL connection error: {e}");
             }
         });
 
@@ -405,10 +399,7 @@ impl PostgresBootstrapHandler {
             if exists {
                 tables.push((label, table_name));
             } else {
-                warn!(
-                    "Table '{}' for label '{}' does not exist, skipping",
-                    table_name, label
-                );
+                warn!("Table '{table_name}' for label '{label}' does not exist, skipping");
             }
         }
 
@@ -440,16 +431,13 @@ impl PostgresBootstrapHandler {
         context: &BootstrapContext,
         event_tx: &drasi_lib::channels::BootstrapEventSender,
     ) -> Result<usize> {
-        debug!(
-            "Starting bootstrap of table '{}' with label '{}'",
-            table_name, label
-        );
+        debug!("Starting bootstrap of table '{table_name}' with label '{label}'");
 
         // Get table columns for proper type handling
         let columns = self.get_table_columns(transaction, table_name).await?;
 
         // Use cursor for memory efficiency
-        let query = format!("SELECT * FROM {}", table_name);
+        let query = format!("SELECT * FROM {table_name}");
         let rows = transaction.query(&query, &[]).await?;
 
         let mut count = 0;
@@ -559,7 +547,7 @@ impl PostgresBootstrapHandler {
             let table_key = if schema == "public" {
                 table.to_string()
             } else {
-                format!("{}.{}", schema, table)
+                format!("{schema}.{table}")
             };
 
             primary_keys
@@ -567,10 +555,7 @@ impl PostgresBootstrapHandler {
                 .or_default()
                 .push(column.to_string());
 
-            debug!(
-                "Found primary key column '{}' for table '{}'",
-                column, table_key
-            );
+            debug!("Found primary key column '{column}' for table '{table_key}'");
         }
 
         // Add user-configured key columns (these override detected ones)
@@ -580,8 +565,7 @@ impl PostgresBootstrapHandler {
 
             if !key_columns.is_empty() {
                 info!(
-                    "Using user-configured key columns for table '{}': {:?}",
-                    table_name, key_columns
+                    "Using user-configured key columns for table '{table_name}': {key_columns:?}"
                 );
                 primary_keys.insert(table_name.clone(), key_columns.clone());
             }
@@ -592,7 +576,7 @@ impl PostgresBootstrapHandler {
 
         info!("Found primary keys for {} tables", primary_keys.len());
         for (table, keys) in &primary_keys {
-            info!("Table '{}' primary key columns: {:?}", table, keys);
+            info!("Table '{table}' primary key columns: {keys:?}");
         }
 
         Ok(())
@@ -705,7 +689,7 @@ impl PostgresBootstrapHandler {
                     drasi_core::models::ElementValue::Float(f) => f.to_string(),
                     drasi_core::models::ElementValue::String(s) => s.to_string(),
                     drasi_core::models::ElementValue::Bool(b) => b.to_string(),
-                    _ => format!("{:?}", element_value),
+                    _ => format!("{element_value:?}"),
                 };
                 pk_values.push(value_str);
             }
@@ -721,8 +705,7 @@ impl PostgresBootstrapHandler {
         } else if pk_columns.is_none() || pk_columns.map(|pks| pks.is_empty()).unwrap_or(true) {
             // No primary key defined and none configured - require user configuration
             warn!(
-                "No primary key found for table '{}'. Consider adding 'table_keys' configuration.",
-                table_name
+                "No primary key found for table '{table_name}'. Consider adding 'table_keys' configuration."
             );
             // Generate a UUID as fallback with table prefix
             format!("{}:{}", table_name, uuid::Uuid::new_v4())
@@ -763,10 +746,7 @@ impl PostgresBootstrapHandler {
                 sequence,
             };
             event_tx.send(bootstrap_event).await.map_err(|e| {
-                anyhow!(
-                    "Failed to send bootstrap event to channel (channel may be closed): {}",
-                    e
-                )
+                anyhow!("Failed to send bootstrap event to channel (channel may be closed): {e}")
             })?;
         }
         Ok(())

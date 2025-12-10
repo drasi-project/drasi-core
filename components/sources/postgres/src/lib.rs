@@ -361,7 +361,7 @@ impl Source for PostgresReplicationSource {
             )
             .await
             {
-                error!("Replication task failed for {}: {}", source_id, e);
+                error!("Replication task failed for {source_id}: {e}");
                 *status_clone.write().await = ComponentStatus::Error;
                 if let Some(ref tx) = *event_tx.read().await {
                     let _ = tx
@@ -370,7 +370,7 @@ impl Source for PostgresReplicationSource {
                             component_type: ComponentType::Source,
                             status: ComponentStatus::Error,
                             timestamp: chrono::Utc::now(),
-                            message: Some(format!("Replication failed: {}", e)),
+                            message: Some(format!("Replication failed: {e}")),
                         })
                         .await;
                 }
@@ -464,7 +464,7 @@ async fn run_replication(
     event_tx: Arc<RwLock<Option<ComponentEventSender>>>,
     status: Arc<RwLock<ComponentStatus>>,
 ) -> Result<()> {
-    info!("Starting replication for source {}", source_id);
+    info!("Starting replication for source {source_id}");
 
     let mut stream =
         stream::ReplicationStream::new(config, source_id, dispatchers, event_tx, status);
@@ -804,7 +804,7 @@ mod tests {
             let props = source.properties();
 
             // Password should not be exposed in properties
-            assert!(props.get("password").is_none());
+            assert!(!props.contains_key("password"));
         }
 
         #[test]

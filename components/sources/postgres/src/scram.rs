@@ -46,7 +46,7 @@ impl ScramClient {
         // SCRAM client-first-message format: n,,n=<username>,r=<nonce>
         let gs2_header = "n,,"; // No channel binding
         let client_first_bare = format!("n={},r={}", saslprep(&self.username), self.client_nonce);
-        format!("{}{}", gs2_header, client_first_bare)
+        format!("{gs2_header}{client_first_bare}")
     }
 
     pub fn process_server_first_message(&mut self, message: &str) -> Result<()> {
@@ -89,7 +89,7 @@ impl ScramClient {
 
         // Build client-final-message-without-proof
         let channel_binding = "c=biws"; // base64("n,,")
-        let client_final_without_proof = format!("{},r={}", channel_binding, server_nonce);
+        let client_final_without_proof = format!("{channel_binding},r={server_nonce}");
 
         // Build auth message
         let client_first_bare = format!("n={},r={}", saslprep(&self.username), self.client_nonce);
@@ -99,10 +99,8 @@ impl ScramClient {
             BASE64.encode(salt),
             iterations
         );
-        let auth_message = format!(
-            "{},{},{}",
-            client_first_bare, server_first, client_final_without_proof
-        );
+        let auth_message =
+            format!("{client_first_bare},{server_first},{client_final_without_proof}");
         self.auth_message = Some(auth_message.clone());
 
         // Calculate proof
@@ -128,7 +126,7 @@ impl ScramClient {
 
         // Check for error
         if let Some(error) = params.get("e") {
-            return Err(anyhow!("Server error: {}", error));
+            return Err(anyhow!("Server error: {error}"));
         }
 
         // Verify server signature
@@ -187,7 +185,7 @@ fn parse_scram_message(message: &str) -> Result<HashMap<String, String>> {
 fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32) -> Result<Vec<u8>> {
     let mut result = vec![0u8; 32];
     pbkdf2::pbkdf2::<hmac::Hmac<sha2::Sha256>>(password, salt, iterations, &mut result)
-        .map_err(|e| anyhow::anyhow!("PBKDF2 failed: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("PBKDF2 failed: {e:?}"))?;
     Ok(result)
 }
 
@@ -196,7 +194,7 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<Vec<u8>> {
     type HmacSha256 = Hmac<Sha256>;
 
     let mut mac = HmacSha256::new_from_slice(key)
-        .map_err(|e| anyhow::anyhow!("Invalid HMAC key length: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Invalid HMAC key length: {e}"))?;
     mac.update(data);
     Ok(mac.finalize().into_bytes().to_vec())
 }

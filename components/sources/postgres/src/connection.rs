@@ -45,7 +45,7 @@ impl ReplicationConnection {
         user: &str,
         password: &str,
     ) -> Result<Self> {
-        info!("Connecting to PostgreSQL at {}:{}", host, port);
+        info!("Connecting to PostgreSQL at {host}:{port}");
 
         let stream = TcpStream::connect((host, port)).await?;
         stream.set_nodelay(true)?;
@@ -143,7 +143,7 @@ impl ReplicationConnection {
                                             ));
                                         }
                                         _ => {
-                                            warn!("Unexpected message during SASL: {:?}", sasl_msg);
+                                            warn!("Unexpected message during SASL: {sasl_msg:?}");
                                         }
                                     }
                                 }
@@ -160,7 +160,7 @@ impl ReplicationConnection {
                     return Err(anyhow!("Authentication failed: {}", err.message));
                 }
                 _ => {
-                    warn!("Unexpected message during authentication: {:?}", msg);
+                    warn!("Unexpected message during authentication: {msg:?}");
                 }
             }
         }
@@ -175,15 +175,15 @@ impl ReplicationConnection {
                 } => {
                     self.process_id = Some(process_id);
                     self.secret_key = Some(secret_key);
-                    debug!("Received backend key data: pid={}", process_id);
+                    debug!("Received backend key data: pid={process_id}");
                 }
                 BackendMessage::ParameterStatus { name, value } => {
-                    debug!("Parameter: {} = {}", name, value);
+                    debug!("Parameter: {name} = {value}");
                     self.parameters.insert(name, value);
                 }
                 BackendMessage::ReadyForQuery(status) => {
                     self.transaction_status = status;
-                    debug!("Connection ready, status: {:?}", status);
+                    debug!("Connection ready, status: {status:?}");
                     break;
                 }
                 BackendMessage::ErrorResponse(err) => {
@@ -193,7 +193,7 @@ impl ReplicationConnection {
                     info!("Notice: {}", notice.message);
                 }
                 _ => {
-                    warn!("Unexpected message during startup: {:?}", msg);
+                    warn!("Unexpected message during startup: {msg:?}");
                 }
             }
         }
@@ -255,7 +255,7 @@ impl ReplicationConnection {
                     return Err(anyhow!("IDENTIFY_SYSTEM failed: {}", err.message));
                 }
                 _ => {
-                    warn!("Unexpected message during IDENTIFY_SYSTEM: {:?}", msg);
+                    warn!("Unexpected message during IDENTIFY_SYSTEM: {msg:?}");
                 }
             }
         }
@@ -268,15 +268,12 @@ impl ReplicationConnection {
         slot_name: &str,
         temporary: bool,
     ) -> Result<ReplicationSlotInfo> {
-        debug!("Creating replication slot: {}", slot_name);
+        debug!("Creating replication slot: {slot_name}");
 
         let query = if temporary {
-            format!(
-                "CREATE_REPLICATION_SLOT {} TEMPORARY LOGICAL pgoutput",
-                slot_name
-            )
+            format!("CREATE_REPLICATION_SLOT {slot_name} TEMPORARY LOGICAL pgoutput")
         } else {
-            format!("CREATE_REPLICATION_SLOT {} LOGICAL pgoutput", slot_name)
+            format!("CREATE_REPLICATION_SLOT {slot_name} LOGICAL pgoutput")
         };
 
         self.send_message(FrontendMessage::Query(query)).await?;
@@ -316,17 +313,14 @@ impl ReplicationConnection {
                 }
                 BackendMessage::ErrorResponse(err) => {
                     if err.message.contains("already exists") {
-                        debug!("Replication slot already exists: {}", slot_name);
+                        debug!("Replication slot already exists: {slot_name}");
                         // Try to get existing slot info
                         return self.get_replication_slot_info(slot_name).await;
                     }
                     return Err(anyhow!("CREATE_REPLICATION_SLOT failed: {}", err.message));
                 }
                 _ => {
-                    warn!(
-                        "Unexpected message during CREATE_REPLICATION_SLOT: {:?}",
-                        msg
-                    );
+                    warn!("Unexpected message during CREATE_REPLICATION_SLOT: {msg:?}");
                 }
             }
         }
@@ -340,7 +334,7 @@ impl ReplicationConnection {
     ) -> Result<ReplicationSlotInfo> {
         // For existing slots, we can assume they exist and use default values
         // The actual slot info will be retrieved when we start replication
-        debug!("Using existing replication slot: {}", slot_name);
+        debug!("Using existing replication slot: {slot_name}");
 
         Ok(ReplicationSlotInfo {
             slot_name: slot_name.to_string(),
@@ -356,9 +350,9 @@ impl ReplicationConnection {
         start_lsn: Option<u64>,
         options: HashMap<String, String>,
     ) -> Result<()> {
-        debug!("Starting replication from slot: {}", slot_name);
+        debug!("Starting replication from slot: {slot_name}");
 
-        let mut query = format!("START_REPLICATION SLOT {} LOGICAL", slot_name);
+        let mut query = format!("START_REPLICATION SLOT {slot_name} LOGICAL");
 
         if let Some(lsn) = start_lsn {
             query.push_str(&format!(" {}", format_lsn(lsn)));
@@ -368,10 +362,7 @@ impl ReplicationConnection {
 
         if !options.is_empty() {
             query.push_str(" (");
-            let opts: Vec<String> = options
-                .iter()
-                .map(|(k, v)| format!("{} '{}'", k, v))
-                .collect();
+            let opts: Vec<String> = options.iter().map(|(k, v)| format!("{k} '{v}'")).collect();
             query.push_str(&opts.join(", "));
             query.push(')');
         }
@@ -395,7 +386,7 @@ impl ReplicationConnection {
                     debug!("Received ReadyForQuery before entering COPY mode");
                 }
                 _ => {
-                    debug!("Message during START_REPLICATION: {:?}", msg);
+                    debug!("Message during START_REPLICATION: {msg:?}");
                 }
             }
         }
@@ -435,7 +426,7 @@ impl ReplicationConnection {
         self.stream.write_all(&self.write_buffer).await?;
         self.stream.flush().await?;
 
-        trace!("Sent message: {:?}", msg);
+        trace!("Sent message: {msg:?}");
         Ok(())
     }
 
@@ -456,7 +447,7 @@ impl ReplicationConnection {
         loop {
             // Try to parse a message from the buffer
             if let Some(msg) = self.try_parse_message()? {
-                trace!("Received message: {:?}", msg);
+                trace!("Received message: {msg:?}");
                 return Ok(msg);
             }
 
@@ -485,7 +476,7 @@ impl ReplicationConnection {
         ]) as usize;
 
         if length < 4 {
-            return Err(anyhow!("Invalid message length: {}", length));
+            return Err(anyhow!("Invalid message length: {length}"));
         }
 
         let total_length = 1 + length; // Type byte + length (includes self)
@@ -526,7 +517,7 @@ fn compute_md5_password(user: &str, password: &str, salt: &[u8; 4]) -> String {
     let mut hex_hash = String::with_capacity(32);
     for byte in pass_user_hash.iter() {
         // Writing to a String should never fail, but handle gracefully
-        let _ = write!(&mut hex_hash, "{:02x}", byte);
+        let _ = write!(&mut hex_hash, "{byte:02x}");
     }
 
     // Second MD5: hex_hash + salt
@@ -539,7 +530,7 @@ fn compute_md5_password(user: &str, password: &str, salt: &[u8; 4]) -> String {
     let mut result = String::from("md5");
     for byte in final_hash.iter() {
         // Writing to a String should never fail, but handle gracefully
-        let _ = write!(&mut result, "{:02x}", byte);
+        let _ = write!(&mut result, "{byte:02x}");
     }
 
     result
@@ -553,7 +544,7 @@ fn format_lsn(lsn: u64) -> String {
 fn parse_lsn(lsn_str: &str) -> Result<u64> {
     let parts: Vec<&str> = lsn_str.split('/').collect();
     if parts.len() != 2 {
-        return Err(anyhow!("Invalid LSN format: {}", lsn_str));
+        return Err(anyhow!("Invalid LSN format: {lsn_str}"));
     }
 
     let high = u64::from_str_radix(parts[0], 16)?;

@@ -119,10 +119,10 @@ impl ReplicationStream {
                     match result {
                         Ok(Some(msg)) => {
                             if let Err(e) = self.handle_message(msg).await {
-                                error!("Error handling message: {}", e);
+                                error!("Error handling message: {e}");
                                 // Attempt recovery
                                 if let Err(e) = self.recover_connection().await {
-                                    error!("Failed to recover connection: {}", e);
+                                    error!("Failed to recover connection: {e}");
                                     return Err(e);
                                 }
                             }
@@ -131,10 +131,10 @@ impl ReplicationStream {
                             // No message available
                         }
                         Err(e) => {
-                            error!("Error reading message: {}", e);
+                            error!("Error reading message: {e}");
                             // Attempt recovery
                             if let Err(e) = self.recover_connection().await {
-                                error!("Failed to recover connection: {}", e);
+                                error!("Failed to recover connection: {e}");
                                 return Err(e);
                             }
                         }
@@ -144,7 +144,7 @@ impl ReplicationStream {
                 // Send periodic keepalives
                 _ = keepalive_interval.tick() => {
                     if let Err(e) = self.send_feedback(false).await {
-                        warn!("Failed to send keepalive: {}", e);
+                        warn!("Failed to send keepalive: {e}");
                     }
                 }
             }
@@ -170,13 +170,13 @@ impl ReplicationStream {
 
         // Identify system
         let system_info = conn.identify_system().await?;
-        info!("Connected to PostgreSQL system: {:?}", system_info);
+        info!("Connected to PostgreSQL system: {system_info:?}");
 
         // Create or verify replication slot
         let slot_info = conn
             .create_replication_slot(&self.config.slot_name, false)
             .await?;
-        info!("Using replication slot: {:?}", slot_info);
+        info!("Using replication slot: {slot_info:?}");
 
         // Parse starting LSN
         if !slot_info.consistent_point.is_empty() && slot_info.consistent_point != "0/0" {
@@ -239,7 +239,7 @@ impl ReplicationStream {
                 return Err(anyhow!("Server error: {}", err.message));
             }
             _ => {
-                trace!("Ignoring message: {:?}", msg);
+                trace!("Ignoring message: {msg:?}");
             }
         }
         Ok(())
@@ -263,7 +263,7 @@ impl ReplicationStream {
                 self.handle_keepalive(&data[1..]).await?;
             }
             _ => {
-                warn!("Unknown copy data message type: 0x{:02x}", msg_type);
+                warn!("Unknown copy data message type: 0x{msg_type:02x}");
             }
         }
 
@@ -515,10 +515,7 @@ impl ReplicationStream {
                 }
             }
             WalMessage::Truncate { relation_ids } => {
-                warn!(
-                    "Truncate not yet implemented for relations: {:?}",
-                    relation_ids
-                );
+                warn!("Truncate not yet implemented for relations: {relation_ids:?}");
             }
         }
         Ok(())
@@ -533,12 +530,12 @@ impl ReplicationStream {
         let relation = self
             .decoder
             .get_relation(relation_id)
-            .ok_or_else(|| anyhow!("Unknown relation {}", relation_id))?;
+            .ok_or_else(|| anyhow!("Unknown relation {relation_id}"))?;
 
         let mapping = self
             .relations
             .get(&relation_id)
-            .ok_or_else(|| anyhow!("No mapping for relation {}", relation_id))?;
+            .ok_or_else(|| anyhow!("No mapping for relation {relation_id}"))?;
 
         // Convert tuple to properties
         let mut properties = drasi_core::models::ElementPropertyMap::new();
@@ -579,22 +576,19 @@ impl ReplicationStream {
         let relation = self
             .decoder
             .get_relation(relation_id)
-            .ok_or_else(|| anyhow!("Unknown relation {}", relation_id))?;
+            .ok_or_else(|| anyhow!("Unknown relation {relation_id}"))?;
 
         let mapping = self
             .relations
             .get(&relation_id)
-            .ok_or_else(|| anyhow!("No mapping for relation {}", relation_id))?;
+            .ok_or_else(|| anyhow!("No mapping for relation {relation_id}"))?;
 
         // Generate element ID (should be the same for both old and new tuples)
         let element_id = self.generate_element_id(relation, &new_tuple).await?;
 
         // If we don't have old_tuple, treat as INSERT
         let Some(_old_tuple) = old_tuple else {
-            warn!(
-                "UPDATE without old tuple for relation {}, treating as INSERT",
-                relation_id
-            );
+            warn!("UPDATE without old tuple for relation {relation_id}, treating as INSERT");
             return self.convert_insert(relation_id, new_tuple).await;
         };
 
@@ -641,12 +635,12 @@ impl ReplicationStream {
         let relation = self
             .decoder
             .get_relation(relation_id)
-            .ok_or_else(|| anyhow!("Unknown relation {}", relation_id))?;
+            .ok_or_else(|| anyhow!("Unknown relation {relation_id}"))?;
 
         let mapping = self
             .relations
             .get(&relation_id)
-            .ok_or_else(|| anyhow!("No mapping for relation {}", relation_id))?;
+            .ok_or_else(|| anyhow!("No mapping for relation {relation_id}"))?;
 
         let element_id = self.generate_element_id(relation, &old_tuple).await?;
 
@@ -721,7 +715,7 @@ impl ReplicationStream {
         }
 
         // No primary key found or all key values are NULL
-        warn!("No primary key value found for table '{}'. Consider adding 'table_keys' configuration.", table_name);
+        warn!("No primary key value found for table '{table_name}'. Consider adding 'table_keys' configuration.");
         // Still include table name prefix for consistency
         Ok(format!("{}:{}", table_name, uuid::Uuid::new_v4()))
     }
@@ -785,7 +779,7 @@ impl ReplicationStream {
 fn parse_lsn(lsn_str: &str) -> Result<u64> {
     let parts: Vec<&str> = lsn_str.split('/').collect();
     if parts.len() != 2 {
-        return Err(anyhow!("Invalid LSN format: {}", lsn_str));
+        return Err(anyhow!("Invalid LSN format: {lsn_str}"));
     }
 
     let high = u64::from_str_radix(parts[0], 16)?;

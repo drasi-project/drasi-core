@@ -343,7 +343,7 @@ fn parse_authentication(body: &[u8]) -> Result<BackendMessage> {
                 AuthenticationMessage::SASLFinal(vec![])
             }
         }
-        _ => return Err(anyhow!("Unsupported authentication type: {}", auth_type)),
+        _ => return Err(anyhow!("Unsupported authentication type: {auth_type}")),
     };
 
     Ok(BackendMessage::Authentication(auth))
