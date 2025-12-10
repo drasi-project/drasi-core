@@ -65,6 +65,3 @@ test-case = "3.3"
 # Additional testing dependencies
 futures = "0.3"
 rstest = "0.18"
-
-# For integration tests that remain in lib (config validation, examples)
-# Redis/testcontainers moved to shared-tests crate
