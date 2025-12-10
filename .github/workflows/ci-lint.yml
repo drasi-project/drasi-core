@@ -21,7 +21,7 @@ jobs:
       #   -A clippy::module_inception       # Allow module inception (module with same name as the file)
       #   -A clippy::ptr_arg                # Allow passing references as function parameters
       #   -A clippy::type_complexity        # Allow complex types without warning
-      RUSTFLAGS: |
+      RUSTFLAGS: >-
         -Dwarnings                        
         -W clippy::print_stdout       
         -W clippy::unwrap_used    
