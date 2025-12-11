@@ -39,6 +39,7 @@ use crate::config::{QueryConfig, QueryLanguage, QueryRuntime};
 use crate::managers::{
     is_operation_valid, log_component_error, log_component_start, log_component_stop, Operation,
 };
+use crate::queries::future_queue_consumer::FutureConsumer;
 use crate::queries::{PriorityQueue, QueryBase};
 // DataRouter no longer needed - queries subscribe directly to sources
 use crate::sources::SourceManager;
@@ -304,6 +305,9 @@ impl Query for DrasiQuery {
                 return Err(anyhow::anyhow!("Failed to build query: {e}"));
             }
         };
+
+        let future_consumer = Arc::new(FutureConsumer::new(self.priority_queue.clone()));
+        continuous_query.set_future_consumer(future_consumer).await;        
 
         // Extract labels from the query for bootstrap
         let labels = match crate::queries::LabelExtractor::extract_labels(
@@ -862,6 +866,7 @@ impl Query for DrasiQuery {
                 }
             }
 
+            continuous_query.terminate_future_consumer().await;
             info!("Query '{query_id}' processing task exited");
         });
 

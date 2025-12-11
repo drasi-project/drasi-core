@@ -16,6 +16,7 @@ pub mod base;
 pub mod label_extractor;
 pub mod manager;
 pub mod priority_queue;
+pub mod future_queue_consumer;
 
 #[cfg(test)]
 mod tests;
