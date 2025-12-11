@@ -49,7 +49,7 @@ impl FutureQueueConsumer for FutureConsumer {
             future_ref: future_ref.clone() 
         });
 
-        let timestamp = DateTime::from_timestamp_nanos(match future_ref.due_time.try_into() {
+        let timestamp = DateTime::from_timestamp_millis(match future_ref.due_time.try_into() {
             Ok(ts) => ts,
             Err(_) => {
                 log::warn!(
@@ -59,7 +59,7 @@ impl FutureQueueConsumer for FutureConsumer {
                 );
                 self.now() as i64
             }
-        });
+        }).unwrap();
        
         let wrapper = SourceEventWrapper::new(future_ref.element_ref.source_id.to_string(), evt, timestamp);
         
@@ -83,6 +83,6 @@ impl FutureQueueConsumer for FutureConsumer {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_secs()
-            * 1000000000
+            * 1000
     }
 }
