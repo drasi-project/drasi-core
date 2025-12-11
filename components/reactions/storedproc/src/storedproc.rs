@@ -1,0 +1,310 @@
+// Copyright 2025 The Drasi Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Stored Procedure reaction implementation.
+
+use anyhow::Result;
+use async_trait::async_trait;
+use log::{debug, error, info};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
+
+use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
+use drasi_lib::managers::log_component_start;
+use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
+use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
+
+use crate::config::StoredProcReactionConfig;
+use crate::executor::{create_executor, DatabaseExecutor};
+use crate::parser::ParameterParser;
+
+/// Stored Procedure reaction
+///
+/// Invokes SQL stored procedures when continuous query results change.
+/// Supports different procedures for ADD, UPDATE, and DELETE operations.
+pub struct StoredProcReaction {
+    base: ReactionBase,
+    config: StoredProcReactionConfig,
+    executor: Arc<dyn DatabaseExecutor>,
+    parser: ParameterParser,
+    task_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+}
+
+impl StoredProcReaction {
+    /// Create a builder for StoredProcReaction
+    pub fn builder(id: impl Into<String>) -> super::StoredProcReactionBuilder {
+        super::StoredProcReactionBuilder::new(id)
+    }
+
+    /// Create a new stored procedure reaction
+    ///
+    /// The event channel is automatically injected when the reaction is added
+    /// to DrasiLib via `add_reaction()`.
+    pub async fn new(
+        id: impl Into<String>,
+        queries: Vec<String>,
+        config: StoredProcReactionConfig,
+    ) -> Result<Self> {
+        Self::create_internal(id.into(), queries, config, None, true).await
+    }
+
+    /// Create a new stored procedure reaction with custom priority queue capacity
+    ///
+    /// The event channel is automatically injected when the reaction is added
+    /// to DrasiLib via `add_reaction()`.
+    pub async fn with_priority_queue_capacity(
+        id: impl Into<String>,
+        queries: Vec<String>,
+        config: StoredProcReactionConfig,
+        priority_queue_capacity: usize,
+    ) -> Result<Self> {
+        Self::create_internal(
+            id.into(),
+            queries,
+            config,
+            Some(priority_queue_capacity),
+            true,
+        )
+        .await
+    }
+
+    /// Create from builder (internal method)
+    pub(crate) async fn from_builder(
+        id: String,
+        queries: Vec<String>,
+        config: StoredProcReactionConfig,
+        priority_queue_capacity: Option<usize>,
+        auto_start: bool,
+    ) -> Result<Self> {
+        Self::create_internal(id, queries, config, priority_queue_capacity, auto_start).await
+    }
+
+    /// Internal constructor (async because we need to create DB connection)
+    async fn create_internal(
+        id: String,
+        queries: Vec<String>,
+        config: StoredProcReactionConfig,
+        priority_queue_capacity: Option<usize>,
+        auto_start: bool,
+    ) -> Result<Self> {
+        // Validate configuration
+        config.validate()?;
+
+        // Create database executor (async)
+        let executor = create_executor(&config).await?;
+
+        // Create reaction base
+        let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
+        if let Some(capacity) = priority_queue_capacity {
+            params = params.with_priority_queue_capacity(capacity);
+        }
+
+        Ok(Self {
+            base: ReactionBase::new(params),
+            config,
+            executor,
+            parser: ParameterParser::new(),
+            task_handle: Arc::new(Mutex::new(None)),
+        })
+    }
+
+    /// Spawn the processing task that handles query results
+    fn spawn_processing_task(&self) -> JoinHandle<()> {
+        let priority_queue = self.base.priority_queue.clone();
+        let executor = self.executor.clone();
+        let parser = self.parser.clone();
+        let config = self.config.clone();
+        let reaction_id = self.base.id.clone();
+
+        tokio::spawn(async move {
+            info!("[{}] Starting processing loop", reaction_id);
+
+            loop {
+                // Dequeue next result (blocks until available)
+                let query_result_arc = priority_queue.dequeue().await;
+                let query_result = (*query_result_arc).clone();
+
+                debug!(
+                    "[{}] Processing result from query: {}",
+                    reaction_id, query_result.query_id
+                );
+
+                // Process each result item in the batch
+                for result_item in &query_result.results {
+                    // Get the operation type from the result
+                    let result_type = result_item
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+
+                    // Determine which command to execute based on operation type
+                    let command = match result_type.to_lowercase().as_str() {
+                        "add" => &config.added_command,
+                        "update" => &config.updated_command,
+                        "delete" => &config.deleted_command,
+                        _ => {
+                            debug!(
+                                "[{}] Unknown operation type: {}, skipping",
+                                reaction_id, result_type
+                            );
+                            continue;
+                        }
+                    };
+
+                    // Execute the stored procedure if a command is configured
+                    if let Some(cmd) = command {
+                        // Get the data based on operation type
+                        // For ADD/UPDATE: use "data" field
+                        // For DELETE: use "data" field (contains deleted item)
+                        let data = result_item.get("data");
+
+                        if let Some(data_value) = data {
+                            // Parse command and extract parameters
+                            match parser.parse_command(cmd, data_value) {
+                                Ok((proc_name, params)) => {
+                                    debug!(
+                                        "[{}] Executing procedure: {} with {} parameters for {} operation",
+                                        reaction_id,
+                                        proc_name,
+                                        params.len(),
+                                        result_type
+                                    );
+
+                                    // Execute stored procedure
+                                    match executor.execute_procedure(&proc_name, params).await {
+                                        Ok(()) => {
+                                            debug!(
+                                                "[{}] Successfully executed {} for {} operation",
+                                                reaction_id, proc_name, result_type
+                                            );
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                "[{}] Failed to execute {}: {}",
+                                                reaction_id, proc_name, e
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("[{}] Failed to parse command: {}", reaction_id, e);
+                                }
+                            }
+                        } else {
+                            error!(
+                                "[{}] No data available for {} operation",
+                                reaction_id, result_type
+                            );
+                        }
+                    } else {
+                        debug!(
+                            "[{}] No command configured for {} operation, skipping",
+                            reaction_id, result_type
+                        );
+                    }
+                }
+            }
+        })
+    }
+}
+
+#[async_trait]
+impl Reaction for StoredProcReaction {
+    fn id(&self) -> &str {
+        &self.base.id
+    }
+
+    fn type_name(&self) -> &str {
+        "storedproc"
+    }
+
+    fn properties(&self) -> HashMap<String, serde_json::Value> {
+        let mut props = HashMap::new();
+        props.insert(
+            "database_client".to_string(),
+            serde_json::json!(self.config.database_client),
+        );
+        props.insert(
+            "hostname".to_string(),
+            serde_json::json!(self.config.hostname),
+        );
+        props.insert(
+            "database".to_string(),
+            serde_json::json!(self.config.database),
+        );
+        props.insert(
+            "ssl".to_string(),
+            serde_json::json!(self.config.ssl),
+        );
+        props
+    }
+
+    fn query_ids(&self) -> Vec<String> {
+        self.base.queries.clone()
+    }
+
+    fn auto_start(&self) -> bool {
+        self.base.get_auto_start()
+    }
+
+    async fn inject_query_subscriber(&self, query_subscriber: Arc<dyn QuerySubscriber>) {
+        self.base.inject_query_subscriber(query_subscriber).await;
+    }
+
+    async fn inject_event_tx(&self, tx: ComponentEventSender) {
+        self.base.inject_event_tx(tx).await;
+    }
+
+    async fn start(&self) -> Result<()> {
+        log_component_start("StoredProc Reaction", &self.base.id);
+
+        info!(
+            "[{}] Starting StoredProc reaction for {} ({})",
+            self.base.id,
+            self.executor.database_type(),
+            self.config.database
+        );
+
+        // Test database connection
+        self.executor.test_connection().await?;
+
+        // Subscribe to all queries
+        self.base.subscribe_to_queries().await?;
+
+        // Spawn processing task
+        let task = self.spawn_processing_task();
+        *self.task_handle.lock().await = Some(task);
+
+        info!("[{}] StoredProc reaction started successfully", self.base.id);
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        info!("[{}] Stopping StoredProc reaction", self.base.id);
+
+        // Abort the processing task
+        if let Some(handle) = self.task_handle.lock().await.take() {
+            handle.abort();
+        }
+
+        info!("[{}] StoredProc reaction stopped", self.base.id);
+        Ok(())
+    }
+
+    async fn status(&self) -> ComponentStatus {
+        self.base.get_status().await
+    }
+}
