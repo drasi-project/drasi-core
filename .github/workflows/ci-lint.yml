@@ -59,9 +59,9 @@ jobs:
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
       - name: Install specific Rust version
         run: |
-          rustup update nightly && rustup default nightly
+          rustup update 1.88.0 && rustup default 1.88.0
 
       - name: Run Cargo fmt
         run: |
-          rustup component add --toolchain nightly-x86_64-unknown-linux-gnu rustfmt
+          rustup component add rustfmt
           cargo fmt -- --check

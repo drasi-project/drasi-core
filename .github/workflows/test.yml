@@ -39,6 +39,10 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
 
+    - name: Install specific Rust version
+      run: |
+        rustup update 1.88.0 && rustup default 1.88.0
+
     - name: Cache Cargo registry
       uses: actions/cache@v4.2.2 # v4.0.2
       with:
@@ -96,6 +100,10 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+
+    - name: Install specific Rust version
+      run: |
+        rustup update 1.88.0 && rustup default 1.88.0
 
     - name: Cache Cargo registry
       uses: actions/cache@v4.2.2
