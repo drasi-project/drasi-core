@@ -41,8 +41,7 @@ members = [
   "components/reactions/storedproc-mysql",
   "components/reactions/storedproc-mssql",
 
-  # Internal
-  # "shared-tests",  # Temporarily excluded - needs migration to new storedproc crates
+  "shared-tests",
   "query-perf",
   "examples/query",
   ]
