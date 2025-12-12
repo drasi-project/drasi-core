@@ -139,22 +139,14 @@ pub trait Source: Send + Sync {
     /// a bootstrap receiver for initial data.
     ///
     /// # Arguments
-    /// * `query_id` - ID of the subscribing query
-    /// * `enable_bootstrap` - Whether to request initial data
-    /// * `node_labels` - Node labels the query is interested in (for filtering)
-    /// * `relation_labels` - Relation labels the query is interested in
+    /// * `settings` - Subscription settings including query ID, text, and labels of interest
     ///
     /// # Returns
     /// A SubscriptionResponse containing:
     /// * A receiver for streaming source events
     /// * Optionally a bootstrap receiver for initial data
-    async fn subscribe(
-        &self,
-        query_id: String,
-        enable_bootstrap: bool,
-        node_labels: Vec<String>,
-        relation_labels: Vec<String>,
-    ) -> Result<SubscriptionResponse>;
+    async fn subscribe(&self, settings: crate::config::SourceSubscriptionSettings)
+        -> Result<SubscriptionResponse>;
 
     /// Downcast helper for testing - allows access to concrete types
     fn as_any(&self) -> &dyn std::any::Any;
@@ -222,14 +214,9 @@ impl Source for Box<dyn Source + 'static> {
 
     async fn subscribe(
         &self,
-        query_id: String,
-        enable_bootstrap: bool,
-        node_labels: Vec<String>,
-        relation_labels: Vec<String>,
+        settings: crate::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
-        (**self)
-            .subscribe(query_id, enable_bootstrap, node_labels, relation_labels)
-            .await
+        (**self).subscribe(settings).await
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

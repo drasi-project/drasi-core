@@ -14,6 +14,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 use crate::channels::DispatchMode;
 use crate::indexes::{StorageBackendConfig, StorageBackendRef};
@@ -80,6 +81,8 @@ pub enum QueryLanguage {
 /// # Fields
 ///
 /// - **source_id**: ID of the source to subscribe to
+/// - **nodes**: Optional list of node labels to subscribe to from this source
+/// - **relations**: Optional list of relation labels to subscribe to from this source
 /// - **pipeline**: Optional list of middleware IDs to apply to changes from this source
 ///
 /// # Examples
@@ -99,11 +102,62 @@ pub enum QueryLanguage {
 ///   - source_id: raw_events
 ///     pipeline: [decoder, mapper, validator]
 /// ```
+///
+/// ## Subscription with Label Filtering
+///
+/// ```yaml
+/// source_subscriptions:
+///   - source_id: orders_db
+///     nodes: [Order, Customer]
+///     relations: [PLACED_BY]
+///     pipeline: []
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceSubscriptionConfig {
     pub source_id: String,
     #[serde(default)]
+    pub nodes: Vec<String>,
+    #[serde(default)]
+    pub relations: Vec<String>,
+    #[serde(default)]
     pub pipeline: Vec<String>,
+}
+
+/// Settings passed to a source when subscribing
+///
+/// `SourceSubscriptionSettings` contains all the information a source needs to
+/// intelligently handle bootstrap and subscription for a query, including the
+/// specific node and relation labels the query is interested in.
+///
+/// # Fields
+///
+/// - **enable_bootstrap**: Whether to request initial data
+/// - **query_id**: ID of the subscribing query
+/// - **query_text**: The full query text
+/// - **nodes**: Set of node labels the query is interested in from this source
+/// - **relations**: Set of relation labels the query is interested in from this source
+///
+/// # Example
+///
+/// ```ignore
+/// use drasi_lib::config::SourceSubscriptionSettings;
+/// use std::collections::HashSet;
+///
+/// let settings = SourceSubscriptionSettings {
+///     enable_bootstrap: true,
+///     query_id: "my-query".to_string(),
+///     query_text: "MATCH (o:Order)-[:PLACED_BY]->(c:Customer) RETURN o, c".to_string(),
+///     nodes: ["Order", "Customer"].iter().map(|s| s.to_string()).collect(),
+///     relations: ["PLACED_BY"].iter().map(|s| s.to_string()).collect(),
+/// };
+/// ```
+#[derive(Debug, Clone)]
+pub struct SourceSubscriptionSettings {
+    pub enable_bootstrap: bool,
+    pub query_id: String,
+    pub query_text: String,
+    pub nodes: HashSet<String>,
+    pub relations: HashSet<String>,
 }
 
 /// Root configuration for Drasi Server Core

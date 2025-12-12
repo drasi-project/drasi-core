@@ -307,25 +307,22 @@ impl SourceBase {
     /// - Returning the appropriate SubscriptionResponse
     pub async fn subscribe_with_bootstrap(
         &self,
-        query_id: String,
-        enable_bootstrap: bool,
-        node_labels: Vec<String>,
-        relation_labels: Vec<String>,
+        settings: &crate::config::SourceSubscriptionSettings,
         source_type: &str,
     ) -> Result<SubscriptionResponse> {
         info!(
             "Query '{}' subscribing to {} source '{}' (bootstrap: {})",
-            query_id, source_type, self.id, enable_bootstrap
+            settings.query_id, source_type, self.id, settings.enable_bootstrap
         );
 
         // Create streaming receiver using helper method
         let receiver = self.create_streaming_receiver().await?;
 
-        let query_id_for_response = query_id.clone();
+        let query_id_for_response = settings.query_id.clone();
 
         // Handle bootstrap if requested and bootstrap provider is configured
-        let bootstrap_receiver = if enable_bootstrap {
-            self.handle_bootstrap_subscription(query_id, node_labels, relation_labels, source_type)
+        let bootstrap_receiver = if settings.enable_bootstrap {
+            self.handle_bootstrap_subscription(settings, source_type)
                 .await?
         } else {
             None
@@ -342,9 +339,7 @@ impl SourceBase {
     /// Handle bootstrap subscription logic
     async fn handle_bootstrap_subscription(
         &self,
-        query_id: String,
-        node_labels: Vec<String>,
-        relation_labels: Vec<String>,
+        settings: &crate::config::SourceSubscriptionSettings,
         source_type: &str,
     ) -> Result<Option<BootstrapEventReceiver>> {
         let provider_guard = self.bootstrap_provider.read().await;
@@ -353,7 +348,7 @@ impl SourceBase {
 
             info!(
                 "Creating bootstrap for query '{}' on {} source '{}'",
-                query_id, source_type, self.id
+                settings.query_id, source_type, self.id
             );
 
             // Create bootstrap context
@@ -365,24 +360,32 @@ impl SourceBase {
             // Create bootstrap channel
             let (bootstrap_tx, bootstrap_rx) = tokio::sync::mpsc::channel(1000);
 
+            // Convert HashSet to Vec for backward compatibility with BootstrapRequest
+            let node_labels: Vec<String> = settings.nodes.iter().cloned().collect();
+            let relation_labels: Vec<String> = settings.relations.iter().cloned().collect();
+
             // Create bootstrap request with request_id
             let request = BootstrapRequest {
-                query_id: query_id.clone(),
+                query_id: settings.query_id.clone(),
                 node_labels,
                 relation_labels,
-                request_id: format!("{}-{}", query_id, uuid::Uuid::new_v4()),
+                request_id: format!("{}-{}", settings.query_id, uuid::Uuid::new_v4()),
             };
+
+            // Clone settings for the async task
+            let settings_clone = settings.clone();
 
             // Spawn bootstrap task
             tokio::spawn(async move {
-                match provider.bootstrap(request, &context, bootstrap_tx).await {
+                match provider.bootstrap(request, &context, bootstrap_tx, Some(&settings_clone)).await {
                     Ok(count) => {
                         info!(
-                            "Bootstrap completed successfully for query '{query_id}', sent {count} events"
+                            "Bootstrap completed successfully for query '{}', sent {count} events",
+                            settings_clone.query_id
                         );
                     }
                     Err(e) => {
-                        error!("Bootstrap failed for query '{query_id}': {e}");
+                        error!("Bootstrap failed for query '{}': {e}", settings_clone.query_id);
                     }
                 }
             });
@@ -391,7 +394,7 @@ impl SourceBase {
         } else {
             info!(
                 "Bootstrap requested for query '{}' but no bootstrap provider configured for {} source '{}'",
-                query_id, source_type, self.id
+                settings.query_id, source_type, self.id
             );
             Ok(None)
         }

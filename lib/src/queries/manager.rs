@@ -321,6 +321,32 @@ impl Query for DrasiQuery {
             }
         };
 
+        // Build subscription settings for each source
+        let subscription_settings = match crate::queries::SubscriptionSettingsBuilder::build_subscription_settings(
+            &self.base.config,
+            &labels,
+        ) {
+            Ok(settings) => settings,
+            Err(e) => {
+                error!("Failed to build subscription settings for query '{}': {}", self.base.config.id, e);
+                *self.base.status.write().await = ComponentStatus::Error;
+
+                let event = ComponentEvent {
+                    component_id: self.base.config.id.clone(),
+                    component_type: ComponentType::Query,
+                    status: ComponentStatus::Error,
+                    timestamp: chrono::Utc::now(),
+                    message: Some(format!("Failed to build subscription settings: {e}")),
+                };
+
+                if let Err(e) = self.base.event_tx.send(event).await {
+                    error!("Failed to send component event: {e}");
+                }
+
+                return Err(anyhow::anyhow!("Failed to build subscription settings: {e}"));
+            }
+        };
+
         // NEW: Subscribe to each source sequentially
         info!(
             "Query '{}' subscribing to {} sources: {:?}",
@@ -337,7 +363,7 @@ impl Query for DrasiQuery {
         let mut bootstrap_channels = Vec::new();
         let mut subscription_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
-        for subscription in &self.base.config.sources {
+        for (idx, subscription) in self.base.config.sources.iter().enumerate() {
             let source_id = &subscription.source_id;
             // Get source from SourceManager
             let source = match self.source_manager.get_source_instance(source_id).await {
@@ -357,15 +383,12 @@ impl Query for DrasiQuery {
                 }
             };
 
-            // Subscribe to the source with bootstrap enabled
-            let enable_bootstrap = true;
+            // Get the corresponding subscription settings
+            let settings = &subscription_settings[idx];
+
+            // Subscribe to the source with settings
             let subscription_response = match source
-                .subscribe(
-                    self.base.config.id.clone(),
-                    enable_bootstrap,
-                    labels.node_labels.clone(),
-                    labels.relation_labels.clone(),
-                )
+                .subscribe(settings.clone())
                 .await
             {
                 Ok(response) => response,
