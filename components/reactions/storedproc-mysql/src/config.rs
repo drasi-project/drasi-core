@@ -12,53 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Configuration for the Stored Procedure reaction.
+//! Configuration for the MySQL Stored Procedure reaction.
 
 use serde::{Deserialize, Serialize};
 
-/// Database client type
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum DatabaseClient {
-    /// PostgreSQL database
-    #[serde(rename = "pg")]
-    PostgreSQL,
-    /// MySQL database
-    #[serde(rename = "mysql")]
-    MySQL,
-    /// Microsoft SQL Server
-    #[serde(rename = "mssql")]
-    MsSQL,
-}
-
-impl Default for DatabaseClient {
-    fn default() -> Self {
-        Self::PostgreSQL
-    }
-}
-
-impl std::fmt::Display for DatabaseClient {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::PostgreSQL => write!(f, "PostgreSQL"),
-            Self::MySQL => write!(f, "MySQL"),
-            Self::MsSQL => write!(f, "MS SQL Server"),
-        }
-    }
-}
-
-/// Configuration for the Stored Procedure reaction
+/// Configuration for the MySQL Stored Procedure reaction
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoredProcReactionConfig {
-    /// Database client type (pg, mysql, mssql)
-    #[serde(default)]
-    pub database_client: DatabaseClient,
-
+pub struct MySqlStoredProcReactionConfig {
     /// Database hostname or IP address
     #[serde(default = "default_hostname")]
     pub hostname: String,
 
-    /// Database port (defaults: PostgreSQL=5432, MySQL=3306, MsSQL=1433)
+    /// Database port (default: 3306)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
 
@@ -93,10 +58,6 @@ pub struct StoredProcReactionConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deleted_command: Option<String>,
 
-    /// Connection pool size
-    #[serde(default = "default_pool_size")]
-    pub connection_pool_size: usize,
-
     /// Command timeout in milliseconds
     #[serde(default = "default_timeout_ms")]
     pub command_timeout_ms: u64,
@@ -106,10 +67,9 @@ pub struct StoredProcReactionConfig {
     pub retry_attempts: u32,
 }
 
-impl Default for StoredProcReactionConfig {
+impl Default for MySqlStoredProcReactionConfig {
     fn default() -> Self {
         Self {
-            database_client: DatabaseClient::PostgreSQL,
             hostname: default_hostname(),
             port: None,
             user: String::new(),
@@ -119,7 +79,6 @@ impl Default for StoredProcReactionConfig {
             added_command: None,
             updated_command: None,
             deleted_command: None,
-            connection_pool_size: default_pool_size(),
             command_timeout_ms: default_timeout_ms(),
             retry_attempts: default_retry_attempts(),
         }
@@ -130,10 +89,6 @@ fn default_hostname() -> String {
     "localhost".to_string()
 }
 
-fn default_pool_size() -> usize {
-    10
-}
-
 fn default_timeout_ms() -> u64 {
     30000
 }
@@ -142,14 +97,10 @@ fn default_retry_attempts() -> u32 {
     3
 }
 
-impl StoredProcReactionConfig {
+impl MySqlStoredProcReactionConfig {
     /// Get the port for the database, using the default if not specified
     pub fn get_port(&self) -> u16 {
-        self.port.unwrap_or_else(|| match self.database_client {
-            DatabaseClient::PostgreSQL => 5432,
-            DatabaseClient::MySQL => 3306,
-            DatabaseClient::MsSQL => 1433,
-        })
+        self.port.unwrap_or(3306)
     }
 
     /// Validate the configuration

@@ -67,13 +67,6 @@ impl ParameterParser {
     fn extract_procedure_name(&self, command: &str) -> Result<String> {
         let trimmed = command.trim();
         let upper = trimmed.to_uppercase();
-
-        // Handle different formats:
-        // "CALL procedure_name(...)"
-        // "EXEC procedure_name(...)"
-        // "procedure_name(...)"
-        // "schema.procedure_name(...)"
-
         let name_part = if upper.starts_with("CALL ") {
             &trimmed[5..] // Skip "CALL " (case-insensitive)
         } else if upper.starts_with("EXEC ") {

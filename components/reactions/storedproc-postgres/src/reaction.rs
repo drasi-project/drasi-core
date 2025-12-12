@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Stored Procedure reaction implementation.
+//! PostgreSQL Stored Procedure reaction implementation.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -27,58 +27,51 @@ use drasi_lib::managers::log_component_start;
 use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 
-use crate::config::StoredProcReactionConfig;
-use crate::executor::{create_executor, DatabaseExecutor};
+use crate::config::PostgresStoredProcReactionConfig;
+use crate::executor::PostgresExecutor;
 use crate::parser::ParameterParser;
 
-/// Stored Procedure reaction
+/// PostgreSQL Stored Procedure reaction
 ///
-/// Invokes SQL stored procedures when continuous query results change.
+/// Invokes PostgreSQL stored procedures when continuous query results change.
 /// Supports different procedures for ADD, UPDATE, and DELETE operations.
-pub struct StoredProcReaction {
+pub struct PostgresStoredProcReaction {
     base: ReactionBase,
-    config: StoredProcReactionConfig,
-    executor: Arc<dyn DatabaseExecutor>,
+    config: PostgresStoredProcReactionConfig,
+    executor: Arc<PostgresExecutor>,
     parser: ParameterParser,
     task_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
-impl std::fmt::Debug for StoredProcReaction {
+impl std::fmt::Debug for PostgresStoredProcReaction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StoredProcReaction")
+        f.debug_struct("PostgresStoredProcReaction")
             .field("config", &self.config)
             .field("parser", &self.parser)
-            .field("executor_type", &self.executor.database_type())
             .finish()
     }
 }
 
-impl StoredProcReaction {
-    /// Create a builder for StoredProcReaction
-    pub fn builder(id: impl Into<String>) -> super::StoredProcReactionBuilder {
-        super::StoredProcReactionBuilder::new(id)
+impl PostgresStoredProcReaction {
+    /// Create a builder for PostgresStoredProcReaction
+    pub fn builder(id: impl Into<String>) -> PostgresStoredProcReactionBuilder {
+        PostgresStoredProcReactionBuilder::new(id)
     }
 
-    /// Create a new stored procedure reaction
-    ///
-    /// The event channel is automatically injected when the reaction is added
-    /// to DrasiLib via `add_reaction()`.
+    /// Create a new PostgreSQL stored procedure reaction
     pub async fn new(
         id: impl Into<String>,
         queries: Vec<String>,
-        config: StoredProcReactionConfig,
+        config: PostgresStoredProcReactionConfig,
     ) -> Result<Self> {
         Self::create_internal(id.into(), queries, config, None, true).await
     }
 
-    /// Create a new stored procedure reaction with custom priority queue capacity
-    ///
-    /// The event channel is automatically injected when the reaction is added
-    /// to DrasiLib via `add_reaction()`.
+    /// Create a new PostgreSQL stored procedure reaction with custom priority queue capacity
     pub async fn with_priority_queue_capacity(
         id: impl Into<String>,
         queries: Vec<String>,
-        config: StoredProcReactionConfig,
+        config: PostgresStoredProcReactionConfig,
         priority_queue_capacity: usize,
     ) -> Result<Self> {
         Self::create_internal(
@@ -95,26 +88,26 @@ impl StoredProcReaction {
     pub(crate) async fn from_builder(
         id: String,
         queries: Vec<String>,
-        config: StoredProcReactionConfig,
+        config: PostgresStoredProcReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
     ) -> Result<Self> {
         Self::create_internal(id, queries, config, priority_queue_capacity, auto_start).await
     }
 
-    /// Internal constructor (async because we need to create DB connection)
+    /// Internal constructor
     async fn create_internal(
         id: String,
         queries: Vec<String>,
-        config: StoredProcReactionConfig,
+        config: PostgresStoredProcReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
     ) -> Result<Self> {
         // Validate configuration
         config.validate()?;
 
-        // Create database executor (async)
-        let executor = create_executor(&config).await?;
+        // Create database executor
+        let executor = Arc::new(PostgresExecutor::new(&config).await?);
 
         // Create reaction base
         let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
@@ -176,9 +169,6 @@ impl StoredProcReaction {
 
                     // Execute the stored procedure if a command is configured
                     if let Some(cmd) = command {
-                        // Get the data based on operation type
-                        // For ADD/UPDATE: use "data" field
-                        // For DELETE: use "data" field (contains deleted item)
                         let data = result_item.get("data");
 
                         if let Some(data_value) = data {
@@ -232,27 +222,27 @@ impl StoredProcReaction {
 }
 
 #[async_trait]
-impl Reaction for StoredProcReaction {
+impl Reaction for PostgresStoredProcReaction {
     fn id(&self) -> &str {
         &self.base.id
     }
 
     fn type_name(&self) -> &str {
-        "storedproc"
+        "storedproc-postgres"
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
         let mut props = HashMap::new();
         props.insert(
-            "database_client".to_string(),
-            serde_json::json!(self.config.database_client),
+            "database".to_string(),
+            serde_json::json!("PostgreSQL"),
         );
         props.insert(
             "hostname".to_string(),
             serde_json::json!(self.config.hostname),
         );
         props.insert(
-            "database".to_string(),
+            "database_name".to_string(),
             serde_json::json!(self.config.database),
         );
         props.insert(
@@ -279,13 +269,11 @@ impl Reaction for StoredProcReaction {
     }
 
     async fn start(&self) -> Result<()> {
-        log_component_start("StoredProc Reaction", &self.base.id);
+        log_component_start("PostgreSQL StoredProc Reaction", &self.base.id);
 
         info!(
-            "[{}] Starting StoredProc reaction for {} ({})",
-            self.base.id,
-            self.executor.database_type(),
-            self.config.database
+            "[{}] Starting PostgreSQL StoredProc reaction for {}",
+            self.base.id, self.config.database
         );
 
         // Test database connection
@@ -298,23 +286,170 @@ impl Reaction for StoredProcReaction {
         let task = self.spawn_processing_task();
         *self.task_handle.lock().await = Some(task);
 
-        info!("[{}] StoredProc reaction started successfully", self.base.id);
+        info!("[{}] PostgreSQL StoredProc reaction started successfully", self.base.id);
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        info!("[{}] Stopping StoredProc reaction", self.base.id);
+        info!("[{}] Stopping PostgreSQL StoredProc reaction", self.base.id);
 
         // Abort the processing task
         if let Some(handle) = self.task_handle.lock().await.take() {
             handle.abort();
         }
 
-        info!("[{}] StoredProc reaction stopped", self.base.id);
+        info!("[{}] PostgreSQL StoredProc reaction stopped", self.base.id);
         Ok(())
     }
 
     async fn status(&self) -> ComponentStatus {
         self.base.get_status().await
+    }
+}
+
+/// Builder for PostgresStoredProcReaction
+pub struct PostgresStoredProcReactionBuilder {
+    id: String,
+    queries: Vec<String>,
+    config: PostgresStoredProcReactionConfig,
+    priority_queue_capacity: Option<usize>,
+    auto_start: bool,
+}
+
+impl PostgresStoredProcReactionBuilder {
+    /// Create a new builder with the given reaction ID
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            queries: Vec::new(),
+            config: PostgresStoredProcReactionConfig::default(),
+            priority_queue_capacity: None,
+            auto_start: true,
+        }
+    }
+
+    /// Set the database connection parameters
+    pub fn with_connection(
+        mut self,
+        hostname: impl Into<String>,
+        port: u16,
+        database: impl Into<String>,
+        user: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.config.hostname = hostname.into();
+        self.config.port = Some(port);
+        self.config.database = database.into();
+        self.config.user = user.into();
+        self.config.password = password.into();
+        self
+    }
+
+    /// Set the database hostname
+    pub fn with_hostname(mut self, hostname: impl Into<String>) -> Self {
+        self.config.hostname = hostname.into();
+        self
+    }
+
+    /// Set the database port
+    pub fn with_port(mut self, port: u16) -> Self {
+        self.config.port = Some(port);
+        self
+    }
+
+    /// Set the database name
+    pub fn with_database(mut self, database: impl Into<String>) -> Self {
+        self.config.database = database.into();
+        self
+    }
+
+    /// Set the database user
+    pub fn with_user(mut self, user: impl Into<String>) -> Self {
+        self.config.user = user.into();
+        self
+    }
+
+    /// Set the database password
+    pub fn with_password(mut self, password: impl Into<String>) -> Self {
+        self.config.password = password.into();
+        self
+    }
+
+    /// Enable or disable SSL/TLS
+    pub fn with_ssl(mut self, enable: bool) -> Self {
+        self.config.ssl = enable;
+        self
+    }
+
+    /// Set the stored procedure command for added results
+    pub fn with_added_command(mut self, command: impl Into<String>) -> Self {
+        self.config.added_command = Some(command.into());
+        self
+    }
+
+    /// Set the stored procedure command for updated results
+    pub fn with_updated_command(mut self, command: impl Into<String>) -> Self {
+        self.config.updated_command = Some(command.into());
+        self
+    }
+
+    /// Set the stored procedure command for deleted results
+    pub fn with_deleted_command(mut self, command: impl Into<String>) -> Self {
+        self.config.deleted_command = Some(command.into());
+        self
+    }
+
+    /// Add a query to subscribe to
+    pub fn with_query(mut self, query_id: impl Into<String>) -> Self {
+        self.queries.push(query_id.into());
+        self
+    }
+
+    /// Set all queries to subscribe to
+    pub fn with_queries(mut self, queries: Vec<String>) -> Self {
+        self.queries = queries;
+        self
+    }
+
+    /// Set the command timeout in milliseconds
+    pub fn with_command_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.config.command_timeout_ms = timeout_ms;
+        self
+    }
+
+    /// Set the number of retry attempts on failure
+    pub fn with_retry_attempts(mut self, attempts: u32) -> Self {
+        self.config.retry_attempts = attempts;
+        self
+    }
+
+    /// Set the priority queue capacity
+    pub fn with_priority_queue_capacity(mut self, capacity: usize) -> Self {
+        self.priority_queue_capacity = Some(capacity);
+        self
+    }
+
+    /// Set whether the reaction should auto-start
+    pub fn with_auto_start(mut self, auto_start: bool) -> Self {
+        self.auto_start = auto_start;
+        self
+    }
+
+    /// Set the full configuration at once
+    pub fn with_config(mut self, config: PostgresStoredProcReactionConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Build the PostgresStoredProcReaction
+    pub async fn build(self) -> Result<PostgresStoredProcReaction> {
+        PostgresStoredProcReaction::from_builder(
+            self.id,
+            self.queries,
+            self.config,
+            self.priority_queue_capacity,
+            self.auto_start,
+        )
+        .await
     }
 }

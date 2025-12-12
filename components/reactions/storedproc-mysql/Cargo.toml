@@ -13,14 +13,14 @@
 # limitations under the License.
 
 [package]
-name = "drasi-reaction-storedproc"
+name = "drasi-reaction-storedproc-mysql"
 version = "0.1.0"
 edition = "2021"
 authors = ["Drasi Project"]
-description = "Stored Procedure reaction plugin for Drasi"
+description = "MySQL Stored Procedure reaction plugin for Drasi"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
-keywords = ["drasi", "plugin", "reaction", "sql", "storedproc"]
+keywords = ["drasi", "plugin", "reaction", "mysql", "storedproc"]
 categories = ["database"]
 
 [dependencies]
@@ -30,16 +30,8 @@ drasi-lib = { path = "../../../lib" }
 tokio = { version = "1.0", features = ["full"] }
 async-trait = "0.1"
 
-# PostgreSQL
-tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4"] }
-postgres-types = { version = "0.2", features = ["derive"] }
-
 # MySQL
 mysql_async = { version = "0.34", default-features = false, features = ["default"] }
-
-# MS SQL Server
-tiberius = { version = "0.12", default-features = false, features = ["tds73", "chrono"] }
-tokio-util = { version = "0.7", features = ["compat"] }
 
 # Utilities
 serde = { version = "1.0", features = ["derive"] }
@@ -47,13 +39,6 @@ serde_json = "1.0"
 regex = "1.10"
 log = "0.4"
 anyhow = "1.0"
-chrono = "0.4"
-
-[features]
-default = ["postgresql", "mysql", "mssql"]
-postgresql = []
-mysql = []
-mssql = []
 
 [dev-dependencies]
 tokio-test = "0.4"
