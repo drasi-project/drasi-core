@@ -41,6 +41,7 @@ members = [
   "components/reactions/storedproc-mysql",
   "components/reactions/storedproc-mssql",
 
+  # Internal
   "shared-tests",
   "query-perf",
   "examples/query",
