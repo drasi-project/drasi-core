@@ -34,6 +34,13 @@ async-trait = "0.1"
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4"] }
 postgres-types = { version = "0.2", features = ["derive"] }
 
+# MySQL
+mysql_async = { version = "0.34", default-features = false, features = ["default"] }
+
+# MS SQL Server
+tiberius = { version = "0.12", default-features = false, features = ["tds73", "chrono"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+
 # Utilities
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -43,8 +50,10 @@ anyhow = "1.0"
 chrono = "0.4"
 
 [features]
-default = ["postgresql"]
+default = ["postgresql", "mysql", "mssql"]
 postgresql = []
+mysql = []
+mssql = []
 
 [dev-dependencies]
 tokio-test = "0.4"

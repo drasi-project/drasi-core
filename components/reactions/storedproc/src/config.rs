@@ -58,9 +58,9 @@ pub struct StoredProcReactionConfig {
     #[serde(default = "default_hostname")]
     pub hostname: String,
 
-    /// Database port
-    #[serde(default = "default_port")]
-    pub port: u16,
+    /// Database port (defaults: PostgreSQL=5432, MySQL=3306, MsSQL=1433)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
 
     /// Database user
     pub user: String,
@@ -111,7 +111,7 @@ impl Default for StoredProcReactionConfig {
         Self {
             database_client: DatabaseClient::PostgreSQL,
             hostname: default_hostname(),
-            port: default_port(),
+            port: None,
             user: String::new(),
             password: String::new(),
             database: String::new(),
@@ -130,10 +130,6 @@ fn default_hostname() -> String {
     "localhost".to_string()
 }
 
-fn default_port() -> u16 {
-    5432
-}
-
 fn default_pool_size() -> usize {
     10
 }
@@ -147,6 +143,15 @@ fn default_retry_attempts() -> u32 {
 }
 
 impl StoredProcReactionConfig {
+    /// Get the port for the database, using the default if not specified
+    pub fn get_port(&self) -> u16 {
+        self.port.unwrap_or_else(|| match self.database_client {
+            DatabaseClient::PostgreSQL => 5432,
+            DatabaseClient::MySQL => 3306,
+            DatabaseClient::MsSQL => 1433,
+        })
+    }
+
     /// Validate the configuration
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.user.is_empty() {

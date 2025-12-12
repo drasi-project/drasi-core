@@ -15,6 +15,7 @@
 #[cfg(test)]
 mod tests {
     use crate::{DatabaseClient, StoredProcReaction};
+    use drasi_lib::plugin_core::Reaction;
 
     // Note: These tests will fail if PostgreSQL is not available
     // They validate the configuration and builder patterns, but skip actual DB connection

@@ -78,7 +78,7 @@ impl StoredProcReactionBuilder {
         password: impl Into<String>,
     ) -> Self {
         self.config.hostname = hostname.into();
-        self.config.port = port;
+        self.config.port = Some(port);
         self.config.database = database.into();
         self.config.user = user.into();
         self.config.password = password.into();
@@ -93,7 +93,7 @@ impl StoredProcReactionBuilder {
 
     /// Set the database port
     pub fn with_port(mut self, port: u16) -> Self {
-        self.config.port = port;
+        self.config.port = Some(port);
         self
     }
 

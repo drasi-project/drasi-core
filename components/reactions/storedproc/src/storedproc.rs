@@ -43,6 +43,16 @@ pub struct StoredProcReaction {
     task_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
+impl std::fmt::Debug for StoredProcReaction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredProcReaction")
+            .field("config", &self.config)
+            .field("parser", &self.parser)
+            .field("executor_type", &self.executor.database_type())
+            .finish()
+    }
+}
+
 impl StoredProcReaction {
     /// Create a builder for StoredProcReaction
     pub fn builder(id: impl Into<String>) -> super::StoredProcReactionBuilder {
