@@ -98,7 +98,7 @@ Specification for SSE event output with custom templates.
 
 | Name | Description | Type | Default | Required |
 |------|-------------|------|---------|----------|
-| `endpoint` | Optional custom endpoint path for this template. If provided, events use this path instead of the default sse_path. Supports Handlebars templates. | Option&lt;String&gt; | None | No |
+| `endpoint` | Optional custom endpoint path for this template. **Note:** Currently reserved for future use; all events use the configured sse_path. | Option&lt;String&gt; | None | No |
 | `template` | Event data template as a Handlebars template. If empty, uses default JSON format. | String | Empty | No |
 
 #### Template Variables

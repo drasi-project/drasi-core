@@ -40,7 +40,8 @@ fn default_sse_host() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TemplateSpec {
     /// Optional custom endpoint path for this specific template.
-    /// If provided, events will be sent to this path instead of the default sse_path.
+    /// NOTE: This field is reserved for future use. Currently, all SSE events are sent to the configured sse_path.
+    /// Future versions may support routing different events to different SSE endpoints.
     /// Supports Handlebars templates for dynamic paths.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
