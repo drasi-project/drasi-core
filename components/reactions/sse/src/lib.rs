@@ -28,10 +28,12 @@
 //!     .build()?;
 //! ```
 
+use std::collections::HashMap;
+
 pub mod config;
 pub mod sse;
 
-pub use config::SseReactionConfig;
+pub use config::{QueryConfig, SseReactionConfig, TemplateSpec};
 pub use sse::SseReaction;
 
 /// Builder for SSE reaction
@@ -44,6 +46,7 @@ pub struct SseReactionBuilder {
     heartbeat_interval_ms: u64,
     priority_queue_capacity: Option<usize>,
     auto_start: bool,
+    routes: HashMap<String, QueryConfig>,
 }
 
 impl SseReactionBuilder {
@@ -58,6 +61,7 @@ impl SseReactionBuilder {
             heartbeat_interval_ms: 30000,
             priority_queue_capacity: None,
             auto_start: true,
+            routes: HashMap::new(),
         }
     }
 
@@ -109,12 +113,19 @@ impl SseReactionBuilder {
         self
     }
 
+    /// Add a route configuration for a specific query
+    pub fn with_route(mut self, query_id: impl Into<String>, config: QueryConfig) -> Self {
+        self.routes.insert(query_id.into(), config);
+        self
+    }
+
     /// Set the full configuration at once
     pub fn with_config(mut self, config: SseReactionConfig) -> Self {
         self.host = config.host;
         self.port = config.port;
         self.sse_path = config.sse_path;
         self.heartbeat_interval_ms = config.heartbeat_interval_ms;
+        self.routes = config.routes;
         self
     }
 
@@ -125,6 +136,7 @@ impl SseReactionBuilder {
             port: self.port,
             sse_path: self.sse_path,
             heartbeat_interval_ms: self.heartbeat_interval_ms,
+            routes: self.routes,
         };
 
         Ok(SseReaction::from_builder(

@@ -15,6 +15,7 @@
 //! Configuration types for SSE (Server-Sent Events) reactions.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 fn default_sse_path() -> String {
     "/events".to_string()
@@ -30,6 +31,43 @@ fn default_sse_port() -> u16 {
 
 fn default_sse_host() -> String {
     "0.0.0.0".to_string()
+}
+
+/// Specification for SSE output template and endpoint.
+///
+/// This type is used to configure SSE templates for different operation types (added, updated, deleted).
+/// All template fields support Handlebars template syntax for dynamic content generation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TemplateSpec {
+    /// Optional custom endpoint path for this specific template.
+    /// If provided, events will be sent to this path instead of the default sse_path.
+    /// Supports Handlebars templates for dynamic paths.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+
+    /// Event data template as a Handlebars template.
+    /// If empty, sends the default JSON format with queryId, results, and timestamp.
+    #[serde(default)]
+    pub template: String,
+}
+
+/// Configuration for query-specific SSE output.
+///
+/// Defines different template specifications for each operation type (added, updated, deleted).
+/// Each operation type can have its own template and optionally its own endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QueryConfig {
+    /// Template specification for ADD operations (new rows in query results).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub added: Option<TemplateSpec>,
+
+    /// Template specification for UPDATE operations (modified rows in query results).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated: Option<TemplateSpec>,
+
+    /// Template specification for DELETE operations (removed rows from query results).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted: Option<TemplateSpec>,
 }
 
 /// SSE (Server-Sent Events) reaction configuration
@@ -50,6 +88,10 @@ pub struct SseReactionConfig {
     /// Heartbeat interval in milliseconds
     #[serde(default = "default_heartbeat_interval_ms")]
     pub heartbeat_interval_ms: u64,
+
+    /// Query-specific template configurations
+    #[serde(default)]
+    pub routes: HashMap<String, QueryConfig>,
 }
 
 impl Default for SseReactionConfig {
@@ -59,6 +101,7 @@ impl Default for SseReactionConfig {
             port: default_sse_port(),
             sse_path: default_sse_path(),
             heartbeat_interval_ms: default_heartbeat_interval_ms(),
+            routes: HashMap::new(),
         }
     }
 }

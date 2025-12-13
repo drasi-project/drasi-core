@@ -16,8 +16,9 @@ use async_trait::async_trait;
 use axum::http::Method;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::{routing::get, Router};
+use handlebars::Handlebars;
 use log::{debug, error, info};
-use serde_json::json;
+use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -177,8 +178,32 @@ impl Reaction for SseReaction {
         let broadcaster = self.broadcaster.clone();
         let reaction_id = self.base.id.clone();
         let priority_queue = self.base.priority_queue.clone();
+        let query_configs = self.config.routes.clone();
         let processing_handle = tokio::spawn(async move {
             info!("[{reaction_id}] SSE result processing task started");
+
+            let mut handlebars = Handlebars::new();
+
+            // Register the json helper to serialize values as JSON
+            handlebars.register_helper(
+                "json",
+                Box::new(
+                    |h: &handlebars::Helper,
+                     _: &Handlebars,
+                     _: &handlebars::Context,
+                     _: &mut handlebars::RenderContext,
+                     out: &mut dyn handlebars::Output|
+                     -> handlebars::HelperResult {
+                        if let Some(value) = h.param(0) {
+                            let json_str = serde_json::to_string(&value.value())
+                                .unwrap_or_else(|_| "null".to_string());
+                            out.write(&json_str)?;
+                        }
+                        Ok(())
+                    },
+                ),
+            );
+
             loop {
                 if !matches!(*status.read().await, ComponentStatus::Running) {
                     info!("[{reaction_id}] SSE reaction not running, breaking loop");
@@ -204,18 +229,118 @@ impl Reaction for SseReaction {
                     query_result.results.len()
                 );
 
-                let payload = json!({
-                    "queryId": query_result.query_id,
-                    "results": query_result.results,
-                    "timestamp": chrono::Utc::now().timestamp_millis()
-                })
-                .to_string();
+                let query_name = &query_result.query_id;
 
-                match broadcaster.send(payload.clone()) {
-                    Ok(count) => {
-                        info!("[{reaction_id}] Broadcast query result to {count} SSE listeners")
+                // Check if we have configuration for this query
+                let query_config = query_configs.get(query_name).or_else(|| {
+                    // Try without source prefix if format is "source.query"
+                    query_name
+                        .split('.')
+                        .next_back()
+                        .and_then(|name| query_configs.get(name))
+                });
+
+                // Process results based on query-specific configuration
+                if let Some(config) = query_config {
+                    // Per-query custom templates
+                    for result in &query_result.results {
+                        if let Some(result_type) = result.get("type").and_then(|v| v.as_str()) {
+                            let template_spec = match result_type {
+                                "ADD" => config.added.as_ref(),
+                                "UPDATE" => config.updated.as_ref(),
+                                "DELETE" => config.deleted.as_ref(),
+                                _ => None,
+                            };
+
+                            if let Some(spec) = template_spec {
+                                // Prepare context for template
+                                let mut context = Map::new();
+
+                                match result_type {
+                                    "ADD" => {
+                                        if let Some(data) = result.get("data") {
+                                            context.insert("after".to_string(), data.clone());
+                                        }
+                                    }
+                                    "UPDATE" => {
+                                        if let Some(data) = result.get("data") {
+                                            if let Some(obj) = data.as_object() {
+                                                if let Some(before) = obj.get("before") {
+                                                    context
+                                                        .insert("before".to_string(), before.clone());
+                                                }
+                                                if let Some(after) = obj.get("after") {
+                                                    context.insert("after".to_string(), after.clone());
+                                                }
+                                            }
+                                        }
+                                    }
+                                    "DELETE" => {
+                                        if let Some(data) = result.get("data") {
+                                            context.insert("before".to_string(), data.clone());
+                                        }
+                                    }
+                                    _ => {}
+                                }
+
+                                context.insert(
+                                    "query_name".to_string(),
+                                    Value::String(query_name.to_string()),
+                                );
+                                context.insert(
+                                    "operation".to_string(),
+                                    Value::String(result_type.to_string()),
+                                );
+                                context.insert(
+                                    "timestamp".to_string(),
+                                    Value::Number(chrono::Utc::now().timestamp_millis().into()),
+                                );
+
+                                // Render template if provided
+                                let payload = if !spec.template.is_empty() {
+                                    match handlebars.render_template(&spec.template, &context) {
+                                        Ok(rendered) => rendered,
+                                        Err(e) => {
+                                            error!(
+                                                "[{reaction_id}] Failed to render template: {e}"
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                } else {
+                                    // Default format if no template
+                                    json!({
+                                        "queryId": query_name,
+                                        "result": result,
+                                        "timestamp": chrono::Utc::now().timestamp_millis()
+                                    })
+                                    .to_string()
+                                };
+
+                                match broadcaster.send(payload.clone()) {
+                                    Ok(count) => {
+                                        debug!("[{reaction_id}] Broadcast to {count} SSE listeners")
+                                    }
+                                    Err(e) => debug!("[{reaction_id}] no SSE listeners: {e}"),
+                                }
+                            }
+                        }
                     }
-                    Err(e) => debug!("[{reaction_id}] no SSE listeners: {e}"),
+                } else {
+                    // Default behavior - send all results together
+                    let payload = json!({
+                        "queryId": query_result.query_id,
+                        "results": query_result.results,
+                        "timestamp": chrono::Utc::now().timestamp_millis()
+                    })
+                    .to_string();
+
+                    match broadcaster.send(payload.clone()) {
+                        Ok(count) => {
+                            info!("[{reaction_id}] Broadcast query result to {count} SSE listeners")
+                        }
+                        Err(e) => debug!("[{reaction_id}] no SSE listeners: {e}"),
+                    }
                 }
             }
             info!("[{reaction_id}] SSE result processing task ended");
