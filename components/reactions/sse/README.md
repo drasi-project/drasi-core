@@ -173,6 +173,15 @@ let template_spec = TemplateSpec {
 
 This ensures the entire `after` object is properly JSON-serialized.
 
+#### Query ID Matching
+
+The SSE Reaction supports flexible query ID matching:
+- **Exact match**: Configuration key `"my-query"` matches query ID `"my-query"`
+- **Fallback match**: If query ID is `"source.my-query"`, it will also match configuration key `"my-query"`
+- **Disambiguation**: If multiple queries share the same final segment, use full query IDs as configuration keys to avoid ambiguity
+
+This is useful when queries are namespaced by source or other prefixes.
+
 #### Default Behavior
 
 If no route configuration is provided for a query, the SSE Reaction uses the default behavior:

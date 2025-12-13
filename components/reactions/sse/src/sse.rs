@@ -240,8 +240,10 @@ impl Reaction for SseReaction {
                 let timestamp = chrono::Utc::now().timestamp_millis();
 
                 // Check if we have configuration for this query
+                // First, try exact match on full query ID
                 // If the query ID is in dotted format (e.g., "source.query" or "namespace.source.query"),
-                // try matching both the full ID and just the last segment for flexibility
+                // also try matching just the last segment for flexibility with source-prefixed queries
+                // Note: If multiple queries share the same final segment, configure using full IDs to avoid ambiguity
                 let query_config = query_configs.get(query_name).or_else(|| {
                     query_name
                         .split('.')
