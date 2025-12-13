@@ -195,9 +195,13 @@ impl Reaction for SseReaction {
                      out: &mut dyn handlebars::Output|
                      -> handlebars::HelperResult {
                         if let Some(value) = h.param(0) {
-                            let json_str = serde_json::to_string(&value.value())
-                                .unwrap_or_else(|_| "null".to_string());
-                            out.write(&json_str)?;
+                            match serde_json::to_string(&value.value()) {
+                                Ok(json_str) => out.write(&json_str)?,
+                                Err(e) => {
+                                    debug!("[{reaction_id}] JSON serialization error in template: {e}");
+                                    out.write("null")?;
+                                }
+                            }
                         }
                         Ok(())
                     },
@@ -233,8 +237,9 @@ impl Reaction for SseReaction {
                 let timestamp = chrono::Utc::now().timestamp_millis();
 
                 // Check if we have configuration for this query
+                // If the query ID is in dotted format (e.g., "source.query" or "namespace.source.query"),
+                // try matching both the full ID and just the last segment for flexibility
                 let query_config = query_configs.get(query_name).or_else(|| {
-                    // Try matching the last segment if query ID is in dotted format (e.g., "source.query" or "a.b.c")
                     query_name
                         .split('.')
                         .last()
@@ -303,9 +308,15 @@ impl Reaction for SseReaction {
                                         Ok(rendered) => rendered,
                                         Err(e) => {
                                             error!(
-                                                "[{reaction_id}] Failed to render template: {e}"
+                                                "[{reaction_id}] Failed to render template for query '{query_name}': {e}. Falling back to default format."
                                             );
-                                            continue;
+                                            // Fallback to default format instead of skipping the event
+                                            json!({
+                                                "queryId": query_name,
+                                                "result": result,
+                                                "timestamp": timestamp
+                                            })
+                                            .to_string()
                                         }
                                     }
                                 } else {
