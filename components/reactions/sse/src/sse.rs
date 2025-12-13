@@ -230,6 +230,7 @@ impl Reaction for SseReaction {
                 );
 
                 let query_name = &query_result.query_id;
+                let timestamp = chrono::Utc::now().timestamp_millis();
 
                 // Check if we have configuration for this query
                 let query_config = query_configs.get(query_name).or_else(|| {
@@ -291,7 +292,6 @@ impl Reaction for SseReaction {
                                     "operation".to_string(),
                                     Value::String(result_type.to_string()),
                                 );
-                                let timestamp = chrono::Utc::now().timestamp_millis();
                                 context.insert(
                                     "timestamp".to_string(),
                                     Value::Number(timestamp.into()),
@@ -332,7 +332,7 @@ impl Reaction for SseReaction {
                     let payload = json!({
                         "queryId": query_result.query_id,
                         "results": query_result.results,
-                        "timestamp": chrono::Utc::now().timestamp_millis()
+                        "timestamp": timestamp
                     })
                     .to_string();
 
