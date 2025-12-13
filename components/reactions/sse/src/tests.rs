@@ -113,3 +113,99 @@ fn test_sse_type_name() {
     let reaction = SseReaction::builder("test").build().unwrap();
     assert_eq!(reaction.type_name(), "sse");
 }
+
+#[test]
+fn test_sse_builder_with_routes() {
+    let query_config = QueryConfig {
+        added: Some(TemplateSpec {
+            endpoint: Some("/custom/added".to_string()),
+            template: r#"{"event": "add", "data": {{json after}}}"#.to_string(),
+        }),
+        updated: Some(TemplateSpec {
+            endpoint: None,
+            template: r#"{"event": "update", "before": {{json before}}, "after": {{json after}}}"#
+                .to_string(),
+        }),
+        deleted: Some(TemplateSpec {
+            endpoint: Some("/custom/deleted".to_string()),
+            template: r#"{"event": "delete", "data": {{json before}}}"#.to_string(),
+        }),
+    };
+
+    let reaction = SseReaction::builder("test-reaction")
+        .with_query("query1")
+        .with_route("query1", query_config)
+        .build()
+        .unwrap();
+
+    assert_eq!(reaction.id(), "test-reaction");
+    assert_eq!(reaction.query_ids(), vec!["query1"]);
+}
+
+#[test]
+fn test_sse_config_with_routes_serialization() {
+    let mut routes = std::collections::HashMap::new();
+    routes.insert(
+        "test-query".to_string(),
+        QueryConfig {
+            added: Some(TemplateSpec {
+                endpoint: None,
+                template: r#"{"type": "added", "data": {{json after}}}"#.to_string(),
+            }),
+            updated: None,
+            deleted: None,
+        },
+    );
+
+    let config = SseReactionConfig {
+        host: "0.0.0.0".to_string(),
+        port: 8080,
+        sse_path: "/events".to_string(),
+        heartbeat_interval_ms: 30000,
+        routes,
+    };
+
+    let serialized = serde_json::to_string(&config).unwrap();
+    let deserialized: SseReactionConfig = serde_json::from_str(&serialized).unwrap();
+
+    assert_eq!(config, deserialized);
+}
+
+#[test]
+fn test_template_spec_creation() {
+    let spec = TemplateSpec {
+        endpoint: Some("/custom/path".to_string()),
+        template: r#"{"message": "test"}"#.to_string(),
+    };
+
+    assert_eq!(spec.endpoint, Some("/custom/path".to_string()));
+    assert_eq!(spec.template, r#"{"message": "test"}"#);
+}
+
+#[test]
+fn test_query_config_all_operations() {
+    let config = QueryConfig {
+        added: Some(TemplateSpec {
+            endpoint: None,
+            template: "add template".to_string(),
+        }),
+        updated: Some(TemplateSpec {
+            endpoint: None,
+            template: "update template".to_string(),
+        }),
+        deleted: Some(TemplateSpec {
+            endpoint: None,
+            template: "delete template".to_string(),
+        }),
+    };
+
+    assert!(config.added.is_some());
+    assert!(config.updated.is_some());
+    assert!(config.deleted.is_some());
+}
+
+#[test]
+fn test_config_default_routes_empty() {
+    let config = SseReactionConfig::default();
+    assert!(config.routes.is_empty());
+}

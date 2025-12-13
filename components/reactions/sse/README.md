@@ -76,6 +76,111 @@ let reaction = SseReaction::new(
 | `queries` | List of query IDs to subscribe to | Vec&lt;String&gt; | Valid query identifiers | `[]` |
 | `priority_queue_capacity` | Custom capacity for priority queue (optional) | usize | > 0 | Auto-configured |
 | `auto_start` | Whether to start automatically when added | bool | true/false | `true` |
+| `routes` | Query-specific template configurations | HashMap&lt;String, QueryConfig&gt; | Query-specific configs | `{}` |
+
+### Per-Query Configuration
+
+The SSE Reaction supports per-query configuration, allowing you to customize templates and endpoints for each query. This feature enables fine-grained control over the output format for different queries and operation types.
+
+#### QueryConfig
+
+Defines template specifications for each operation type within a query.
+
+| Name | Description | Type | Required |
+|------|-------------|------|----------|
+| `added` | Template specification for ADD operations (new rows). | Option&lt;TemplateSpec&gt; | No |
+| `updated` | Template specification for UPDATE operations (modified rows). | Option&lt;TemplateSpec&gt; | No |
+| `deleted` | Template specification for DELETE operations (removed rows). | Option&lt;TemplateSpec&gt; | No |
+
+#### TemplateSpec
+
+Specification for SSE event output with custom templates.
+
+| Name | Description | Type | Default | Required |
+|------|-------------|------|---------|----------|
+| `endpoint` | Optional custom endpoint path for this template. If provided, events use this path instead of the default sse_path. Supports Handlebars templates. | Option&lt;String&gt; | None | No |
+| `template` | Event data template as a Handlebars template. If empty, uses default JSON format. | String | Empty | No |
+
+#### Template Variables
+
+When using Handlebars templates, the following variables are available:
+
+| Variable | Description | Available Operations |
+|----------|-------------|---------------------|
+| `after` | The new/current state of the data | ADD, UPDATE |
+| `before` | The previous state of the data | UPDATE, DELETE |
+| `query_name` | The ID of the query that triggered the change | ALL |
+| `operation` | The operation type: "ADD", "UPDATE", or "DELETE" | ALL |
+| `timestamp` | Unix timestamp in milliseconds | ALL |
+
+#### Example: Per-Query Templates
+
+```rust
+use drasi_reaction_sse::{SseReaction, QueryConfig, TemplateSpec};
+
+let query_config = QueryConfig {
+    added: Some(TemplateSpec {
+        endpoint: None,
+        template: r#"{
+            "event": "sensor_added",
+            "sensor_id": "{{after.id}}",
+            "temperature": {{after.temperature}},
+            "timestamp": {{timestamp}}
+        }"#.to_string(),
+    }),
+    updated: Some(TemplateSpec {
+        endpoint: None,
+        template: r#"{
+            "event": "sensor_updated",
+            "sensor_id": "{{after.id}}",
+            "old_temp": {{before.temperature}},
+            "new_temp": {{after.temperature}},
+            "timestamp": {{timestamp}}
+        }"#.to_string(),
+    }),
+    deleted: Some(TemplateSpec {
+        endpoint: Some("/sensors/deleted".to_string()),
+        template: r#"{
+            "event": "sensor_removed",
+            "sensor_id": "{{before.id}}",
+            "timestamp": {{timestamp}}
+        }"#.to_string(),
+    }),
+};
+
+let reaction = SseReaction::builder("sensor-sse")
+    .with_query("sensor-data")
+    .with_route("sensor-data", query_config)
+    .build()?;
+```
+
+#### Example: Using the json Helper
+
+The `json` Handlebars helper serializes complex objects:
+
+```rust
+use drasi_reaction_sse::{TemplateSpec};
+
+let template_spec = TemplateSpec {
+    endpoint: None,
+    template: r#"{
+        "event": "{{operation}}",
+        "query": "{{query_name}}",
+        "data": {{json after}}
+    }"#.to_string(),
+};
+```
+
+This ensures the entire `after` object is properly JSON-serialized.
+
+#### Default Behavior
+
+If no route configuration is provided for a query, the SSE Reaction uses the default behavior:
+- Sends all results from a query in a single event
+- Uses the default JSON format: `{"queryId": "...", "results": [...], "timestamp": ...}`
+- All events are sent to the configured `sse_path`
+
+This maintains backward compatibility with existing configurations.
 
 ## Output Schema
 
@@ -170,6 +275,55 @@ let reaction = SseReaction::builder("high-volume-sse")
     .with_query("rapid-events")
     .with_priority_queue_capacity(10000)
     .build()?;
+```
+
+### Per-Query Custom Templates
+
+```rust
+use drasi_reaction_sse::{SseReaction, QueryConfig, TemplateSpec};
+
+// Define custom templates for different operation types
+let sensor_config = QueryConfig {
+    added: Some(TemplateSpec {
+        endpoint: None,
+        template: r#"{
+            "type": "new_sensor",
+            "id": "{{after.sensor_id}}",
+            "name": "{{after.name}}",
+            "initial_temp": {{after.temperature}},
+            "timestamp": {{timestamp}}
+        }"#.to_string(),
+    }),
+    updated: Some(TemplateSpec {
+        endpoint: None,
+        template: r#"{
+            "type": "sensor_update",
+            "id": "{{after.sensor_id}}",
+            "temp_change": {
+                "from": {{before.temperature}},
+                "to": {{after.temperature}}
+            },
+            "timestamp": {{timestamp}}
+        }"#.to_string(),
+    }),
+    deleted: Some(TemplateSpec {
+        endpoint: None,
+        template: r#"{
+            "type": "sensor_removed",
+            "id": "{{before.sensor_id}}",
+            "last_temp": {{before.temperature}},
+            "timestamp": {{timestamp}}
+        }"#.to_string(),
+    }),
+};
+
+let reaction = SseReaction::builder("sensor-stream")
+    .with_query("sensor-readings")
+    .with_route("sensor-readings", sensor_config)
+    .with_port(8080)
+    .build()?;
+
+// Clients will receive formatted events based on operation type
 ```
 
 ### Integration with DrasiLib
