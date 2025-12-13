@@ -233,10 +233,10 @@ impl Reaction for SseReaction {
 
                 // Check if we have configuration for this query
                 let query_config = query_configs.get(query_name).or_else(|| {
-                    // Try without source prefix if format is "source.query"
+                    // Try matching the last segment if query ID is in dotted format (e.g., "source.query" or "a.b.c")
                     query_name
                         .split('.')
-                        .next_back()
+                        .last()
                         .and_then(|name| query_configs.get(name))
                 });
 
@@ -291,9 +291,10 @@ impl Reaction for SseReaction {
                                     "operation".to_string(),
                                     Value::String(result_type.to_string()),
                                 );
+                                let timestamp = chrono::Utc::now().timestamp_millis();
                                 context.insert(
                                     "timestamp".to_string(),
-                                    Value::Number(chrono::Utc::now().timestamp_millis().into()),
+                                    Value::Number(timestamp.into()),
                                 );
 
                                 // Render template if provided
@@ -312,7 +313,7 @@ impl Reaction for SseReaction {
                                     json!({
                                         "queryId": query_name,
                                         "result": result,
-                                        "timestamp": chrono::Utc::now().timestamp_millis()
+                                        "timestamp": timestamp
                                     })
                                     .to_string()
                                 };
