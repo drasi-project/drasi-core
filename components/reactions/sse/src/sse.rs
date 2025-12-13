@@ -202,6 +202,9 @@ impl Reaction for SseReaction {
                                     out.write("null")?;
                                 }
                             }
+                        } else {
+                            // No parameter provided to json helper
+                            out.write("null")?;
                         }
                         Ok(())
                     },
