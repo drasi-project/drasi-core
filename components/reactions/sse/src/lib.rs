@@ -139,11 +139,10 @@ impl SseReactionBuilder {
     }
 
     /// Validate a template by attempting to compile it with Handlebars
-    fn validate_template(template: &str) -> anyhow::Result<()> {
+    fn validate_template(handlebars: &handlebars::Handlebars, template: &str) -> anyhow::Result<()> {
         if template.is_empty() {
             return Ok(());
         }
-        let handlebars = handlebars::Handlebars::new();
         handlebars
             .render_template(template, &serde_json::json!({}))
             .map_err(|e| anyhow::anyhow!("Invalid template: {}", e))?;
@@ -151,30 +150,33 @@ impl SseReactionBuilder {
     }
 
     /// Validate all templates in a QueryConfig
-    fn validate_query_config(config: &QueryConfig) -> anyhow::Result<()> {
+    fn validate_query_config(handlebars: &handlebars::Handlebars, config: &QueryConfig) -> anyhow::Result<()> {
         if let Some(added) = &config.added {
-            Self::validate_template(&added.template)?;
+            Self::validate_template(handlebars, &added.template)?;
         }
         if let Some(updated) = &config.updated {
-            Self::validate_template(&updated.template)?;
+            Self::validate_template(handlebars, &updated.template)?;
         }
         if let Some(deleted) = &config.deleted {
-            Self::validate_template(&deleted.template)?;
+            Self::validate_template(handlebars, &deleted.template)?;
         }
         Ok(())
     }
 
     /// Build the SSE reaction
     pub fn build(self) -> anyhow::Result<SseReaction> {
+        // Create a single Handlebars instance for all validation
+        let handlebars = handlebars::Handlebars::new();
+
         // Validate all templates in routes
         for (query_id, config) in &self.routes {
-            Self::validate_query_config(config)
+            Self::validate_query_config(&handlebars, config)
                 .map_err(|e| anyhow::anyhow!("Invalid template in route '{}': {}", query_id, e))?;
         }
 
         // Validate default template if provided
         if let Some(default_template) = &self.default_template {
-            Self::validate_query_config(default_template)
+            Self::validate_query_config(&handlebars, default_template)
                 .map_err(|e| anyhow::anyhow!("Invalid default template: {}", e))?;
         }
 
