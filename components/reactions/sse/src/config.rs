@@ -93,6 +93,11 @@ pub struct SseReactionConfig {
     /// Query-specific template configurations
     #[serde(default)]
     pub routes: HashMap<String, QueryConfig>,
+
+    /// Default template configuration used when no query-specific route is defined.
+    /// If not set, falls back to the built-in default format.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_template: Option<QueryConfig>,
 }
 
 impl Default for SseReactionConfig {
@@ -103,6 +108,7 @@ impl Default for SseReactionConfig {
             sse_path: default_sse_path(),
             heartbeat_interval_ms: default_heartbeat_interval_ms(),
             routes: HashMap::new(),
+            default_template: None,
         }
     }
 }

@@ -179,6 +179,7 @@ impl Reaction for SseReaction {
         let reaction_id = self.base.id.clone();
         let priority_queue = self.base.priority_queue.clone();
         let query_configs = self.config.routes.clone();
+        let default_template = self.config.default_template.clone();
         let processing_handle = tokio::spawn(async move {
             info!("[{reaction_id}] SSE result processing task started");
 
@@ -249,9 +250,9 @@ impl Reaction for SseReaction {
                         .split('.')
                         .last()
                         .and_then(|name| query_configs.get(name))
-                });
+                }).or(default_template.as_ref());
 
-                // Process results based on query-specific configuration
+                // Process results based on query-specific configuration or default template
                 if let Some(config) = query_config {
                     // Per-query custom templates
                     for result in &query_result.results {

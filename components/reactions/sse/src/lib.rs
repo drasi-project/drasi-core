@@ -47,6 +47,7 @@ pub struct SseReactionBuilder {
     priority_queue_capacity: Option<usize>,
     auto_start: bool,
     routes: HashMap<String, QueryConfig>,
+    default_template: Option<QueryConfig>,
 }
 
 impl SseReactionBuilder {
@@ -62,6 +63,7 @@ impl SseReactionBuilder {
             priority_queue_capacity: None,
             auto_start: true,
             routes: HashMap::new(),
+            default_template: None,
         }
     }
 
@@ -119,6 +121,12 @@ impl SseReactionBuilder {
         self
     }
 
+    /// Set the default template configuration used when no query-specific route is defined
+    pub fn with_default_template(mut self, config: QueryConfig) -> Self {
+        self.default_template = Some(config);
+        self
+    }
+
     /// Set the full configuration at once
     pub fn with_config(mut self, config: SseReactionConfig) -> Self {
         self.host = config.host;
@@ -126,17 +134,74 @@ impl SseReactionBuilder {
         self.sse_path = config.sse_path;
         self.heartbeat_interval_ms = config.heartbeat_interval_ms;
         self.routes = config.routes;
+        self.default_template = config.default_template;
         self
+    }
+
+    /// Validate a template by attempting to compile it with Handlebars
+    fn validate_template(template: &str) -> anyhow::Result<()> {
+        if template.is_empty() {
+            return Ok(());
+        }
+        let handlebars = handlebars::Handlebars::new();
+        handlebars
+            .render_template(template, &serde_json::json!({}))
+            .map_err(|e| anyhow::anyhow!("Invalid template: {}", e))?;
+        Ok(())
+    }
+
+    /// Validate all templates in a QueryConfig
+    fn validate_query_config(config: &QueryConfig) -> anyhow::Result<()> {
+        if let Some(added) = &config.added {
+            Self::validate_template(&added.template)?;
+        }
+        if let Some(updated) = &config.updated {
+            Self::validate_template(&updated.template)?;
+        }
+        if let Some(deleted) = &config.deleted {
+            Self::validate_template(&deleted.template)?;
+        }
+        Ok(())
     }
 
     /// Build the SSE reaction
     pub fn build(self) -> anyhow::Result<SseReaction> {
+        // Validate all templates in routes
+        for (query_id, config) in &self.routes {
+            Self::validate_query_config(config)
+                .map_err(|e| anyhow::anyhow!("Invalid template in route '{}': {}", query_id, e))?;
+        }
+
+        // Validate default template if provided
+        if let Some(default_template) = &self.default_template {
+            Self::validate_query_config(default_template)
+                .map_err(|e| anyhow::anyhow!("Invalid default template: {}", e))?;
+        }
+
+        // Validate that all routes correspond to subscribed queries
+        if !self.routes.is_empty() && !self.queries.is_empty() {
+            for route_query in self.routes.keys() {
+                // Check exact match or if the query ends with the route (for dotted notation)
+                let matches = self.queries.iter().any(|q| {
+                    q == route_query || q.ends_with(&format!(".{}", route_query))
+                });
+                if !matches {
+                    return Err(anyhow::anyhow!(
+                        "Route '{}' does not match any subscribed query. Subscribed queries: {:?}",
+                        route_query,
+                        self.queries
+                    ));
+                }
+            }
+        }
+
         let config = SseReactionConfig {
             host: self.host,
             port: self.port,
             sse_path: self.sse_path,
             heartbeat_interval_ms: self.heartbeat_interval_ms,
             routes: self.routes,
+            default_template: self.default_template,
         };
 
         Ok(SseReaction::from_builder(
