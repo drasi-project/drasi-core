@@ -143,8 +143,9 @@ impl SseReactionBuilder {
         if template.is_empty() {
             return Ok(());
         }
+        // Compile the template to validate syntax without requiring data
         handlebars
-            .render_template(template, &serde_json::json!({}))
+            .compile_template(template)
             .map_err(|e| anyhow::anyhow!("Invalid template: {}", e))?;
         Ok(())
     }
