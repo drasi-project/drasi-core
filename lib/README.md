@@ -29,7 +29,6 @@ Data In    Change Detection    Actions Out
 [dependencies]
 drasi-lib = { path = "path/to/drasi-lib" }
 tokio = { version = "1", features = ["full"] }
-env_logger = "0.10"  # Required to see LogReaction output
 ```
 
 ## Initialization Methods
@@ -53,11 +52,6 @@ use drasi_reaction_log::{LogReaction, LogReactionConfig};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize logging to see LogReaction output
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info")
-    ).init();
-
     // 1. Create source plugin instance
     let source = MockSource::new("sensors", MockSourceConfig {
         data_type: "sensor".to_string(),
@@ -537,18 +531,6 @@ For detailed information on building plugins:
 ---
 
 ## Troubleshooting
-
-### LogReaction not producing output
-
-If you're using `LogReaction` but not seeing any output in the console, you need to initialize a logger backend. Add this at the start of your `main()` function:
-
-```rust
-env_logger::Builder::from_env(
-    env_logger::Env::default().default_filter_or("info")
-).init();
-```
-
-And add `env_logger = "0.10"` to your `Cargo.toml` dependencies. LogReaction uses Rust's standard `log` crate, which requires a logger implementation to output messages.
 
 ### "Source/Reaction not found"
 

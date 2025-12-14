@@ -16,7 +16,7 @@ use super::config::LogReactionConfig;
 use anyhow::Result;
 use async_trait::async_trait;
 use handlebars::Handlebars;
-use log::{debug, info};
+use log::debug;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -64,8 +64,9 @@ impl LogReaction {
         }
     }
 
+    #[allow(clippy::print_stdout)]
     fn log_result(&self, message: &str) {
-        info!("[{}] {}", self.base.id, message);
+        println!("[{}] {}", self.base.id, message);
     }
 
     /// Create a builder for LogReaction
@@ -280,12 +281,15 @@ impl Reaction for LogReaction {
                     continue;
                 }
 
-                info!(
-                    "[{}] Query '{}' ({} items):",
-                    reaction_name,
-                    query_result.query_id,
-                    query_result.results.len()
-                );
+                #[allow(clippy::print_stdout)]
+                {
+                    println!(
+                        "[{}] Query '{}' ({} items):",
+                        reaction_name,
+                        query_result.query_id,
+                        query_result.results.len()
+                    );
+                }
 
                 for result in &query_result.results {
                     if let Some(result_type) = result.get("type").and_then(|v| v.as_str()) {
@@ -312,19 +316,28 @@ impl Reaction for LogReaction {
                                         // Use template
                                         match handlebars.render_template(template, &context) {
                                             Ok(rendered) => {
-                                                info!("[{reaction_name}]   {rendered}");
+                                                #[allow(clippy::print_stdout)]
+                                                {
+                                                    println!("[{reaction_name}]   {rendered}");
+                                                }
                                             }
                                             Err(e) => {
                                                 debug!(
                                                     "[{reaction_name}] Template render error: {e}"
                                                 );
                                                 // Fall back to JSON output
-                                                info!("[{reaction_name}]   [ADD] {data}");
+                                                #[allow(clippy::print_stdout)]
+                                                {
+                                                    println!("[{reaction_name}]   [ADD] {data}");
+                                                }
                                             }
                                         }
                                     } else {
                                         // Default: show full JSON
-                                        info!("[{reaction_name}]   [ADD] {data}");
+                                        #[allow(clippy::print_stdout)]
+                                        {
+                                            println!("[{reaction_name}]   [ADD] {data}");
+                                        }
                                     }
                                 }
                             }
@@ -336,19 +349,28 @@ impl Reaction for LogReaction {
                                         // Use template
                                         match handlebars.render_template(template, &context) {
                                             Ok(rendered) => {
-                                                info!("[{reaction_name}]   {rendered}");
+                                                #[allow(clippy::print_stdout)]
+                                                {
+                                                    println!("[{reaction_name}]   {rendered}");
+                                                }
                                             }
                                             Err(e) => {
                                                 debug!(
                                                     "[{reaction_name}] Template render error: {e}"
                                                 );
                                                 // Fall back to JSON output
-                                                info!("[{reaction_name}]   [DELETE] {data}");
+                                                #[allow(clippy::print_stdout)]
+                                                {
+                                                    println!("[{reaction_name}]   [DELETE] {data}");
+                                                }
                                             }
                                         }
                                     } else {
                                         // Default: show full JSON
-                                        info!("[{reaction_name}]   [DELETE] {data}");
+                                        #[allow(clippy::print_stdout)]
+                                        {
+                                            println!("[{reaction_name}]   [DELETE] {data}");
+                                        }
                                     }
                                 }
                             }
@@ -366,31 +388,43 @@ impl Reaction for LogReaction {
                                         // Use template
                                         match handlebars.render_template(template, &context) {
                                             Ok(rendered) => {
-                                                info!("[{reaction_name}]   {rendered}");
+                                                #[allow(clippy::print_stdout)]
+                                                {
+                                                    println!("[{reaction_name}]   {rendered}");
+                                                }
                                             }
                                             Err(e) => {
                                                 debug!(
                                                     "[{reaction_name}] Template render error: {e}"
                                                 );
                                                 // Fall back to JSON output
-                                                info!(
-                                                    "[{reaction_name}]   [UPDATE] {before} -> {after}"
-                                                );
+                                                #[allow(clippy::print_stdout)]
+                                                {
+                                                    println!(
+                                                        "[{reaction_name}]   [UPDATE] {before} -> {after}"
+                                                    );
+                                                }
                                             }
                                         }
                                     } else {
                                         // Default: show full JSON
-                                        info!("[{reaction_name}]   [UPDATE] {before} -> {after}");
+                                        #[allow(clippy::print_stdout)]
+                                        {
+                                            println!("[{reaction_name}]   [UPDATE] {before} -> {after}");
+                                        }
                                     }
                                 }
                             }
                             _ => {
-                                info!(
-                                    "[{}]   [{}] {}",
-                                    reaction_name,
-                                    result_type.to_uppercase(),
-                                    result
-                                );
+                                #[allow(clippy::print_stdout)]
+                                {
+                                    println!(
+                                        "[{}]   [{}] {}",
+                                        reaction_name,
+                                        result_type.to_uppercase(),
+                                        result
+                                    );
+                                }
                             }
                         }
                     }

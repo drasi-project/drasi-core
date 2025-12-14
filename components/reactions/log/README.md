@@ -4,7 +4,9 @@ A development and debugging reaction that outputs query results to the console f
 
 ## Overview
 
-The Log Reaction provides console logging of continuous query results, making it ideal for development, debugging, and low-volume monitoring scenarios. It subscribes to one or more queries and prints formatted output to stdout showing how data changes over time.
+The Log Reaction provides console logging of continuous query results, making it ideal for development, debugging, and low-volume monitoring scenarios. It subscribes to one or more queries and prints formatted output directly to stdout (console) showing how data changes over time.
+
+**Output Method**: Uses `println!` to write directly to stdout without requiring logger initialization. All output appears immediately in the terminal where the application is running.
 
 ### Key Capabilities
 
@@ -305,11 +307,13 @@ The LogReaction automatically captures performance metrics when profiling is ena
 
 ### Enable Profiling
 
-Set the Rust log level to debug:
+Set the Rust log level to debug to see latency metrics:
 
 ```bash
 RUST_LOG=debug cargo run
 ```
+
+**Note**: Query results are always printed to stdout. Debug logging only enables additional internal diagnostics and latency measurements.
 
 ### Metrics Captured
 
@@ -339,7 +343,10 @@ RUST_LOG=debug cargo run
 1. Check query is producing results
 2. Verify reaction is subscribed to correct query IDs
 3. Check reaction status: `drasi.get_reaction_status("my-logger").await`
-4. Enable debug logging: `RUST_LOG=debug`
+4. Verify console output is being captured (LogReaction writes directly to stdout)
+5. Enable debug logging for internal diagnostics: `RUST_LOG=debug`
+
+**Note**: LogReaction outputs directly to stdout using `println!` and does not require any logger initialization (like `env_logger`). If you see startup messages but no query results, the query itself may not be producing results.
 
 ### Template Rendering Errors
 
