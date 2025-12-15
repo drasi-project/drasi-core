@@ -24,7 +24,7 @@ mod tests {
     async fn test_log_reaction_creation() {
         let config = LogReactionConfig::default();
 
-        let reaction = LogReaction::new("test-log", vec!["query1".to_string()], config);
+        let reaction = LogReaction::new("test-log", vec!["query1".to_string()], config).unwrap();
         assert_eq!(reaction.status().await, ComponentStatus::Stopped);
     }
 
@@ -47,7 +47,7 @@ mod tests {
             default_template: Some(default_template),
         };
 
-        let reaction = LogReaction::new("test-log-templates", vec!["query1".to_string()], config);
+        let reaction = LogReaction::new("test-log-templates", vec!["query1".to_string()], config).unwrap();
         assert_eq!(reaction.status().await, ComponentStatus::Stopped);
     }
 
@@ -83,7 +83,7 @@ mod tests {
             "test-log-per-query",
             vec!["sensor-query".to_string(), "other-query".to_string()],
             config,
-        );
+        ).unwrap();
         assert_eq!(reaction.status().await, ComponentStatus::Stopped);
         assert_eq!(
             reaction.query_ids(),
@@ -108,7 +108,8 @@ mod tests {
         let reaction = LogReaction::builder("test-log-builder")
             .with_query("query1")
             .with_default_template(default_template)
-            .build();
+            .build()
+            .unwrap();
 
         assert_eq!(reaction.id(), "test-log-builder");
         assert_eq!(reaction.query_ids(), vec!["query1".to_string()]);
@@ -120,7 +121,8 @@ mod tests {
         let reaction = LogReaction::builder("test-log-no-templates")
             .with_query("query1")
             .with_query("query2")
-            .build();
+            .build()
+            .unwrap();
 
         assert_eq!(reaction.id(), "test-log-no-templates");
         assert_eq!(
@@ -159,7 +161,8 @@ mod tests {
             .with_query("user-query")
             .with_default_template(default_template)
             .with_route("sensor-query", sensor_config)
-            .build();
+            .build()
+            .unwrap();
 
         assert_eq!(reaction.id(), "test-per-query-templates");
         assert_eq!(
@@ -199,5 +202,155 @@ mod tests {
         // Test deserialization
         let deserialized: LogReactionConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, config);
+    }
+
+    #[tokio::test]
+    async fn test_invalid_template_syntax() {
+        let default_template = QueryConfig {
+            added: Some(TemplateSpec {
+                template: "[ADD] {{after.id".to_string(), // Missing closing brace
+            }),
+            updated: None,
+            deleted: None,
+        };
+
+        let config = LogReactionConfig {
+            routes: HashMap::new(),
+            default_template: Some(default_template),
+        };
+
+        let result = LogReaction::new("test-invalid-template", vec!["query1".to_string()], config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid"));
+    }
+
+    #[tokio::test]
+    async fn test_route_without_matching_query() {
+        let mut routes = HashMap::new();
+        routes.insert("non-existent-query".to_string(), QueryConfig {
+            added: Some(TemplateSpec {
+                template: "[ADD] {{after.id}}".to_string(),
+            }),
+            updated: None,
+            deleted: None,
+        });
+
+        let config = LogReactionConfig {
+            routes,
+            default_template: None,
+        };
+
+        let result = LogReaction::new(
+            "test-invalid-route",
+            vec!["query1".to_string(), "query2".to_string()],
+            config,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("does not match any subscribed query"));
+    }
+
+    #[tokio::test]
+    async fn test_route_with_dotted_notation() {
+        let mut routes = HashMap::new();
+        routes.insert("sensor-data".to_string(), QueryConfig {
+            added: Some(TemplateSpec {
+                template: "[SENSOR] {{after.id}}".to_string(),
+            }),
+            updated: None,
+            deleted: None,
+        });
+
+        let config = LogReactionConfig {
+            routes,
+            default_template: None,
+        };
+
+        // Should match "source.sensor-data" with route "sensor-data"
+        let result = LogReaction::new(
+            "test-dotted-route",
+            vec!["source.sensor-data".to_string()],
+            config,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_builder_invalid_template() {
+        let invalid_template = QueryConfig {
+            added: Some(TemplateSpec {
+                template: "{{unclosed".to_string(),
+            }),
+            updated: None,
+            deleted: None,
+        };
+
+        let result = LogReaction::builder("test-builder-invalid")
+            .with_query("query1")
+            .with_default_template(invalid_template)
+            .build();
+        
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid"));
+    }
+
+    #[tokio::test]
+    async fn test_builder_route_validation() {
+        let sensor_config = QueryConfig {
+            added: Some(TemplateSpec {
+                template: "[SENSOR] {{after.id}}".to_string(),
+            }),
+            updated: None,
+            deleted: None,
+        };
+
+        let result = LogReaction::builder("test-builder-route-validation")
+            .with_query("query1")
+            .with_route("unsubscribed-query", sensor_config)
+            .build();
+        
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("does not match any subscribed query"));
+    }
+
+    #[tokio::test]
+    async fn test_valid_complex_template() {
+        let complex_template = QueryConfig {
+            added: Some(TemplateSpec {
+                template: r#"{"event": "added", "id": "{{after.id}}", "data": {{json after}}}"#.to_string(),
+            }),
+            updated: Some(TemplateSpec {
+                template: r#"{"event": "updated", "before": {{json before}}, "after": {{json after}}}"#.to_string(),
+            }),
+            deleted: Some(TemplateSpec {
+                template: r#"{"event": "deleted", "id": "{{before.id}}"}"#.to_string(),
+            }),
+        };
+
+        let config = LogReactionConfig {
+            routes: HashMap::new(),
+            default_template: Some(complex_template),
+        };
+
+        let result = LogReaction::new("test-complex-template", vec!["query1".to_string()], config);
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_empty_template_is_valid() {
+        let empty_template = QueryConfig {
+            added: Some(TemplateSpec {
+                template: String::new(), // Empty template should be valid
+            }),
+            updated: None,
+            deleted: None,
+        };
+
+        let config = LogReactionConfig {
+            routes: HashMap::new(),
+            default_template: Some(empty_template),
+        };
+
+        let result = LogReaction::new("test-empty-template", vec!["query1".to_string()], config);
+        assert!(result.is_ok());
     }
 }
