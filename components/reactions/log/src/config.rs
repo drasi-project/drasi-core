@@ -17,23 +17,35 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Configuration for query-specific templates.
+/// Specification for log output template.
 ///
-/// Defines different template strings for each operation type (added, updated, deleted).
+/// This type is used to configure log templates for different operation types (added, updated, deleted).
+/// All template fields support Handlebars template syntax for dynamic content generation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TemplateSpec {
+    /// Output template as a Handlebars template.
+    /// If empty, displays the raw JSON data.
+    #[serde(default)]
+    pub template: String,
+}
+
+/// Configuration for query-specific log output.
+///
+/// Defines different template specifications for each operation type (added, updated, deleted).
 /// Each operation type can have its own formatting template.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct QueryTemplates {
-    /// Template for ADD operations (new rows in query results).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QueryConfig {
+    /// Template specification for ADD operations (new rows in query results).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub added: Option<String>,
+    pub added: Option<TemplateSpec>,
 
-    /// Template for UPDATE operations (modified rows in query results).
+    /// Template specification for UPDATE operations (modified rows in query results).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub updated: Option<String>,
+    pub updated: Option<TemplateSpec>,
 
-    /// Template for DELETE operations (removed rows from query results).
+    /// Template specification for DELETE operations (removed rows from query results).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub deleted: Option<String>,
+    pub deleted: Option<TemplateSpec>,
 }
 
 /// Log reaction configuration
@@ -42,8 +54,8 @@ pub struct QueryTemplates {
 /// When a template is not provided, the full JSON representation is shown.
 ///
 /// Templates can be configured at two levels:
-/// 1. **Default templates**: Applied to all queries unless overridden
-/// 2. **Per-query templates**: Override defaults for specific queries
+/// 1. **Default template**: Applied to all queries unless overridden
+/// 2. **Per-query templates**: Override default for specific queries
 ///
 /// ## Template Variables
 ///
@@ -54,14 +66,24 @@ pub struct QueryTemplates {
 /// - `query_name` - The name of the query that produced the result
 /// - `operation` - The operation type ("ADD", "UPDATE", or "DELETE")
 ///
-/// ## Example with Default Templates
+/// ## Example with Default Template
 ///
 /// ```rust,ignore
+/// let default_template = QueryConfig {
+///     added: Some(TemplateSpec {
+///         template: "[NEW] {{after.id}}".to_string(),
+///     }),
+///     updated: Some(TemplateSpec {
+///         template: "[CHG] {{after.id}}".to_string(),
+///     }),
+///     deleted: Some(TemplateSpec {
+///         template: "[DEL] {{before.id}}".to_string(),
+///     }),
+/// };
+///
 /// let config = LogReactionConfig {
-///     added_template: Some("[NEW] Sensor {{after.id}}: temp={{after.temperature}}".to_string()),
-///     updated_template: Some("[CHG] {{after.id}}: {{before.temperature}} -> {{after.temperature}}".to_string()),
-///     deleted_template: Some("[DEL] Sensor {{before.id}} removed".to_string()),
-///     query_templates: HashMap::new(),
+///     routes: HashMap::new(),
+///     default_template: Some(default_template),
 /// };
 /// ```
 ///
@@ -70,43 +92,28 @@ pub struct QueryTemplates {
 /// ```rust,ignore
 /// use std::collections::HashMap;
 ///
-/// let mut query_templates = HashMap::new();
-/// query_templates.insert("sensor-query".to_string(), QueryTemplates {
-///     added: Some("[SENSOR] New: {{after.id}}".to_string()),
+/// let mut routes = HashMap::new();
+/// routes.insert("sensor-query".to_string(), QueryConfig {
+///     added: Some(TemplateSpec {
+///         template: "[SENSOR] New: {{after.id}}".to_string(),
+///     }),
 ///     updated: None,  // Falls back to default
 ///     deleted: None,  // Falls back to default
 /// });
 ///
 /// let config = LogReactionConfig {
-///     added_template: Some("[DEFAULT] {{after.id}}".to_string()),
-///     updated_template: None,
-///     deleted_template: None,
-///     query_templates,
+///     routes,
+///     default_template: None,
 /// };
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct LogReactionConfig {
-    /// Default Handlebars template for ADD events across all queries.
-    /// Available variables: `after`, `query_name`, `operation`
-    /// Falls back to JSON output if not provided.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub added_template: Option<String>,
-
-    /// Default Handlebars template for UPDATE events across all queries.
-    /// Available variables: `before`, `after`, `data`, `query_name`, `operation`
-    /// Falls back to JSON output if not provided.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub updated_template: Option<String>,
-
-    /// Default Handlebars template for DELETE events across all queries.
-    /// Available variables: `before`, `query_name`, `operation`
-    /// Falls back to JSON output if not provided.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deleted_template: Option<String>,
-
-    /// Per-query template overrides.
-    /// Maps query IDs to their specific template configurations.
-    /// Query-specific templates override the default templates.
+    /// Query-specific template configurations
     #[serde(default)]
-    pub query_templates: HashMap<String, QueryTemplates>,
+    pub routes: HashMap<String, QueryConfig>,
+
+    /// Default template configuration used when no query-specific route is defined.
+    /// If not set, falls back to raw JSON output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_template: Option<QueryConfig>,
 }
