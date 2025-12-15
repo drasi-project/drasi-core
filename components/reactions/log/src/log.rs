@@ -217,7 +217,7 @@ impl LogReactionBuilder {
         query_id: impl Into<String>,
         template: impl Into<String>,
     ) -> Self {
-        use crate::config::{TemplateSpec};
+        use crate::config::TemplateSpec;
         
         let query_id = query_id.into();
         let entry = self.config.query_templates.entry(query_id).or_default();
@@ -235,7 +235,7 @@ impl LogReactionBuilder {
         query_id: impl Into<String>,
         template: impl Into<String>,
     ) -> Self {
-        use crate::config::{TemplateSpec};
+        use crate::config::TemplateSpec;
         
         let query_id = query_id.into();
         let entry = self.config.query_templates.entry(query_id).or_default();
@@ -253,7 +253,7 @@ impl LogReactionBuilder {
         query_id: impl Into<String>,
         template: impl Into<String>,
     ) -> Self {
-        use crate::config::{TemplateSpec};
+        use crate::config::TemplateSpec;
         
         let query_id = query_id.into();
         let entry = self.config.query_templates.entry(query_id).or_default();
