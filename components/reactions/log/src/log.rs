@@ -191,18 +191,12 @@ impl LogReactionBuilder {
         updated: Option<impl Into<String>>,
         deleted: Option<impl Into<String>>,
     ) -> Self {
-        use crate::config::{QueryTemplates, TemplateSpec};
+        use crate::config::QueryTemplates;
         
         let templates = QueryTemplates {
-            added: added.map(|t| TemplateSpec {
-                template: t.into(),
-            }),
-            updated: updated.map(|t| TemplateSpec {
-                template: t.into(),
-            }),
-            deleted: deleted.map(|t| TemplateSpec {
-                template: t.into(),
-            }),
+            added: added.map(|t| t.into()),
+            updated: updated.map(|t| t.into()),
+            deleted: deleted.map(|t| t.into()),
         };
         
         self.config.query_templates.insert(query_id.into(), templates);
@@ -217,13 +211,9 @@ impl LogReactionBuilder {
         query_id: impl Into<String>,
         template: impl Into<String>,
     ) -> Self {
-        use crate::config::TemplateSpec;
-        
         let query_id = query_id.into();
         let entry = self.config.query_templates.entry(query_id).or_default();
-        entry.added = Some(TemplateSpec {
-            template: template.into(),
-        });
+        entry.added = Some(template.into());
         self
     }
 
@@ -235,13 +225,9 @@ impl LogReactionBuilder {
         query_id: impl Into<String>,
         template: impl Into<String>,
     ) -> Self {
-        use crate::config::TemplateSpec;
-        
         let query_id = query_id.into();
         let entry = self.config.query_templates.entry(query_id).or_default();
-        entry.updated = Some(TemplateSpec {
-            template: template.into(),
-        });
+        entry.updated = Some(template.into());
         self
     }
 
@@ -253,13 +239,9 @@ impl LogReactionBuilder {
         query_id: impl Into<String>,
         template: impl Into<String>,
     ) -> Self {
-        use crate::config::TemplateSpec;
-        
         let query_id = query_id.into();
         let entry = self.config.query_templates.entry(query_id).or_default();
-        entry.deleted = Some(TemplateSpec {
-            template: template.into(),
-        });
+        entry.deleted = Some(template.into());
         self
     }
 
@@ -424,8 +406,7 @@ impl Reaction for LogReaction {
 
                                     // Check for query-specific template first, then default
                                     let template = query_templates
-                                        .and_then(|qt| qt.added.as_ref())
-                                        .map(|ts| ts.template.as_str())
+                                        .and_then(|qt| qt.added.as_deref())
                                         .or(config.added_template.as_deref());
 
                                     if let Some(template_str) = template {
@@ -463,8 +444,7 @@ impl Reaction for LogReaction {
 
                                     // Check for query-specific template first, then default
                                     let template = query_templates
-                                        .and_then(|qt| qt.deleted.as_ref())
-                                        .map(|ts| ts.template.as_str())
+                                        .and_then(|qt| qt.deleted.as_deref())
                                         .or(config.deleted_template.as_deref());
 
                                     if let Some(template_str) = template {
@@ -508,8 +488,7 @@ impl Reaction for LogReaction {
 
                                     // Check for query-specific template first, then default
                                     let template = query_templates
-                                        .and_then(|qt| qt.updated.as_ref())
-                                        .map(|ts| ts.template.as_str())
+                                        .and_then(|qt| qt.updated.as_deref())
                                         .or(config.updated_template.as_deref());
 
                                     if let Some(template_str) = template {

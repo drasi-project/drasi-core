@@ -115,14 +115,12 @@ drasi.add_reaction(Arc::new(reaction)).await?;
 
 ```rust
 use drasi_reaction_log::{LogReaction, LogReactionConfig};
-use drasi_reaction_log::config::{QueryTemplates, TemplateSpec};
+use drasi_reaction_log::config::QueryTemplates;
 use std::collections::HashMap;
 
 let mut query_templates = HashMap::new();
 query_templates.insert("sensor-query".to_string(), QueryTemplates {
-    added: Some(TemplateSpec {
-        template: "[SENSOR] {{after.id}}: {{after.temperature}}°C".to_string(),
-    }),
+    added: Some("[SENSOR] {{after.id}}: {{after.temperature}}°C".to_string()),
     updated: None,  // Falls back to default
     deleted: None,  // Falls back to default
 });
@@ -169,9 +167,9 @@ Templates can be configured at two levels:
 | `query_templates` | Per-query template overrides | `HashMap<String, QueryTemplates>` | Map of query ID to templates | `{}` (empty) |
 
 **QueryTemplates Structure:**
-- `added`: Optional template for ADD operations from this query
-- `updated`: Optional template for UPDATE operations from this query
-- `deleted`: Optional template for DELETE operations from this query
+- `added`: Optional String template for ADD operations from this query
+- `updated`: Optional String template for UPDATE operations from this query
+- `deleted`: Optional String template for DELETE operations from this query
 
 ### Template Variables
 

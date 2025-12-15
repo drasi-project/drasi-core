@@ -15,7 +15,7 @@
 #[cfg(test)]
 mod tests {
     use crate::{LogReaction, LogReactionConfig};
-    use crate::config::{QueryTemplates, TemplateSpec};
+    use crate::config::QueryTemplates;
     use drasi_lib::channels::ComponentStatus;
     use drasi_lib::plugin_core::Reaction;
     use std::collections::HashMap;
@@ -45,12 +45,8 @@ mod tests {
     async fn test_log_reaction_with_per_query_templates() {
         let mut query_templates = HashMap::new();
         query_templates.insert("sensor-query".to_string(), QueryTemplates {
-            added: Some(TemplateSpec {
-                template: "[SENSOR] New: {{after.id}}".to_string(),
-            }),
-            updated: Some(TemplateSpec {
-                template: "[SENSOR-UPD] {{after.id}}".to_string(),
-            }),
+            added: Some("[SENSOR] New: {{after.id}}".to_string()),
+            updated: Some("[SENSOR-UPD] {{after.id}}".to_string()),
             deleted: None,
         });
 
@@ -167,9 +163,7 @@ mod tests {
     async fn test_log_reaction_config_serialization() {
         let mut query_templates = HashMap::new();
         query_templates.insert("test-query".to_string(), QueryTemplates {
-            added: Some(TemplateSpec {
-                template: "Test {{after.id}}".to_string(),
-            }),
+            added: Some("Test {{after.id}}".to_string()),
             updated: None,
             deleted: None,
         });

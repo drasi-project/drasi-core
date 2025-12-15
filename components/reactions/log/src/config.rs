@@ -17,33 +17,23 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Template specification for a specific operation type (added, updated, deleted).
-///
-/// This type allows customizing output format for each operation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct TemplateSpec {
-    /// Handlebars template string for formatting the output.
-    /// If empty or not provided, displays the raw JSON data.
-    pub template: String,
-}
-
 /// Configuration for query-specific templates.
 ///
-/// Defines different template specifications for each operation type (added, updated, deleted).
+/// Defines different template strings for each operation type (added, updated, deleted).
 /// Each operation type can have its own formatting template.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct QueryTemplates {
     /// Template for ADD operations (new rows in query results).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub added: Option<TemplateSpec>,
+    pub added: Option<String>,
 
     /// Template for UPDATE operations (modified rows in query results).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub updated: Option<TemplateSpec>,
+    pub updated: Option<String>,
 
     /// Template for DELETE operations (removed rows from query results).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub deleted: Option<TemplateSpec>,
+    pub deleted: Option<String>,
 }
 
 /// Log reaction configuration
@@ -82,7 +72,7 @@ pub struct QueryTemplates {
 ///
 /// let mut query_templates = HashMap::new();
 /// query_templates.insert("sensor-query".to_string(), QueryTemplates {
-///     added: Some(TemplateSpec { template: "[SENSOR] New: {{after.id}}".to_string() }),
+///     added: Some("[SENSOR] New: {{after.id}}".to_string()),
 ///     updated: None,  // Falls back to default
 ///     deleted: None,  // Falls back to default
 /// });
