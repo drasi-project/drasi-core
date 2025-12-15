@@ -233,10 +233,7 @@ impl Reaction for PostgresStoredProcReaction {
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
         let mut props = HashMap::new();
-        props.insert(
-            "database".to_string(),
-            serde_json::json!("PostgreSQL"),
-        );
+        props.insert("database".to_string(), serde_json::json!("PostgreSQL"));
         props.insert(
             "hostname".to_string(),
             serde_json::json!(self.config.hostname),
@@ -245,10 +242,7 @@ impl Reaction for PostgresStoredProcReaction {
             "database_name".to_string(),
             serde_json::json!(self.config.database),
         );
-        props.insert(
-            "ssl".to_string(),
-            serde_json::json!(self.config.ssl),
-        );
+        props.insert("ssl".to_string(), serde_json::json!(self.config.ssl));
         props
     }
 
@@ -286,7 +280,10 @@ impl Reaction for PostgresStoredProcReaction {
         let task = self.spawn_processing_task();
         *self.task_handle.lock().await = Some(task);
 
-        info!("[{}] PostgreSQL StoredProc reaction started successfully", self.base.id);
+        info!(
+            "[{}] PostgreSQL StoredProc reaction started successfully",
+            self.base.id
+        );
         Ok(())
     }
 

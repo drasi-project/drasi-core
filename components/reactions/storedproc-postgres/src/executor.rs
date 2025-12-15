@@ -103,9 +103,8 @@ impl PostgresExecutor {
 
             // Build the CALL statement
             // For tokio-postgres, we need to use parameterized queries with $1, $2, etc.
-            let param_placeholders: Vec<String> = (1..=params.len())
-                .map(|i| format!("${}", i))
-                .collect();
+            let param_placeholders: Vec<String> =
+                (1..=params.len()).map(|i| format!("${}", i)).collect();
 
             let query = if param_placeholders.is_empty() {
                 format!("CALL {}()", proc_name)
@@ -147,12 +146,7 @@ impl PostgresExecutor {
             // Execute the stored procedure
             let result = timeout(cmd_timeout, client.execute(&query, &param_refs[..]))
                 .await
-                .map_err(|_| {
-                    anyhow!(
-                        "Procedure execution timed out after {:?}",
-                        cmd_timeout
-                    )
-                })?
+                .map_err(|_| anyhow!("Procedure execution timed out after {:?}", cmd_timeout))?
                 .map_err(|e| anyhow!("Failed to execute procedure: {}", e))?;
 
             debug!("Procedure executed successfully, rows affected: {}", result);
