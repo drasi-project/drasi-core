@@ -61,11 +61,15 @@ let reaction = LogReaction::builder("my-logger")
         "system-metrics".to_string(),
     ])
     .with_default_template(default_template)
-    .build();
+    .build()?; // Returns Result - validates templates
 
 // Add to DrasiLib (event channel is automatically injected)
 drasi.add_reaction(Arc::new(reaction)).await?;
 ```
+
+**Validation**: The `build()` method validates all templates and ensures routes match subscribed queries. Returns `Err` if:
+- Any template has invalid Handlebars syntax
+- A route query ID doesn't match any subscribed query
 
 #### Per-Query Custom Templates
 
@@ -90,10 +94,12 @@ let sensor_config = QueryConfig {
 let reaction = LogReaction::builder("sensor-logger")
     .with_query("sensor-readings")
     .with_route("sensor-readings", sensor_config)
-    .build();
+    .build()?; // Validates templates and routes
 
 drasi.add_reaction(Arc::new(reaction)).await?;
 ```
+
+**Route Validation**: Routes must match subscribed queries (supports dotted notation: `source.query` matches route `query`).
 
 **Template Priority:**
 1. Query-specific routes (highest priority)
@@ -171,9 +177,46 @@ let reaction = LogReaction::new(
     "my-logger",
     vec!["sensor-query".to_string(), "other-query".to_string()],
     config
-);
+)?; // Returns Result - validates templates and routes
 
 drasi.add_reaction(Arc::new(reaction)).await?;
+```
+
+## Validation
+
+Both `new()` constructor and `build()` builder method validate configuration at creation time:
+
+**Template Validation**:
+- All Handlebars templates are compiled to check syntax
+- Invalid templates return `Err` with detailed error message
+- Empty templates are valid (will use JSON output)
+
+**Route Validation**:
+- All route query IDs must match subscribed queries
+- Supports exact match or dotted notation (`source.query` matches route `query`)
+- Unmatched routes return `Err` listing subscribed queries
+
+**Example**:
+```rust
+// ❌ Error: Invalid template syntax
+let result = LogReaction::builder("test")
+    .with_query("q1")
+    .with_default_template(QueryConfig {
+        added: Some(TemplateSpec {
+            template: "{{unclosed".to_string(), // Missing }}
+        }),
+        updated: None,
+        deleted: None,
+    })
+    .build()?;
+// Returns: Err("Invalid default template: Invalid template...")
+
+// ❌ Error: Route doesn't match query
+let result = LogReaction::builder("test")
+    .with_query("sensor-data")
+    .with_route("wrong-query", sensor_config)
+    .build()?;
+// Returns: Err("Route 'wrong-query' does not match any subscribed query...")
 ```
 
 ## Configuration Options
@@ -287,7 +330,7 @@ let default_template = QueryConfig {
 let reaction = LogReaction::builder("sensor-logger")
     .with_query("sensor-monitor")
     .with_default_template(default_template)
-    .build();
+    .build()?;
 ```
 
 Output:
@@ -322,7 +365,7 @@ use std::sync::Arc;
 
 let reaction = LogReaction::builder("basic-logger")
     .from_query("my-query")
-    .build();
+    .build()?;
 
 drasi.add_reaction(Arc::new(reaction)).await?;
 ```
@@ -338,7 +381,7 @@ let reaction = LogReaction::builder("multi-logger")
         "user-activity".to_string(),
         "system-alerts".to_string(),
     ])
-    .build();
+    .build()?;
 
 drasi.add_reaction(Arc::new(reaction)).await?;
 ```
@@ -365,7 +408,7 @@ let inventory_template = QueryConfig {
 let reaction = LogReaction::builder("formatted-logger")
     .with_query("inventory")
     .with_default_template(inventory_template)
-    .build();
+    .build()?;
 
 drasi.add_reaction(Arc::new(reaction)).await?;
 ```
@@ -378,7 +421,7 @@ Adjust queue capacity for high-volume scenarios:
 let reaction = LogReaction::builder("high-volume-logger")
     .with_query("events")
     .with_priority_queue_capacity(50000)  // Increased buffer
-    .build();
+    .build()?;
 
 drasi.add_reaction(Arc::new(reaction)).await?;
 ```
@@ -391,7 +434,7 @@ Create but don't start immediately:
 let reaction = LogReaction::builder("manual-logger")
     .with_query("debug-query")
     .with_auto_start(false)  // Don't start automatically
-    .build();
+    .build()?;
 
 drasi.add_reaction(Arc::new(reaction)).await?;
 
@@ -420,7 +463,7 @@ let user_template = QueryConfig {
 let reaction = LogReaction::builder("complex-logger")
     .with_query("user-events")
     .with_default_template(user_template)
-    .build();
+    .build()?;
 
 drasi.add_reaction(Arc::new(reaction)).await?;
 ```
@@ -486,7 +529,7 @@ let reaction = LogReaction::builder("multi-source-logger")
     .with_route("sensor-data", sensor_config)
     .with_route("user-activity", user_config)
     .with_route("system-alerts", alert_config)
-    .build();
+    .build()?;
 
 drasi.add_reaction(Arc::new(reaction)).await?;
 ```
