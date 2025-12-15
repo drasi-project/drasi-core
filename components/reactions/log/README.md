@@ -34,6 +34,10 @@ The Log Reaction provides console logging of continuous query results, making it
 
 The builder pattern provides a fluent, type-safe API for creating LogReaction instances:
 
+#### Default Templates
+
+Set default templates that apply to all queries:
+
 ```rust
 use drasi_reaction_log::LogReaction;
 
@@ -51,9 +55,42 @@ let reaction = LogReaction::builder("my-logger")
 drasi.add_reaction(Arc::new(reaction)).await?;
 ```
 
+#### Per-Query Templates
+
+Override default templates for specific queries:
+
+```rust
+let reaction = LogReaction::builder("multi-logger")
+    .from_query("sensor-query")
+    .from_query("user-query")
+    // Default templates for all queries
+    .with_added_template("[DEFAULT] {{after.id}}")
+    .with_updated_template("[DEFAULT] {{after.id}} updated")
+    .with_deleted_template("[DEFAULT] {{before.id}} deleted")
+    // Query-specific templates override defaults
+    .with_query_templates(
+        "sensor-query",
+        Some("[SENSOR] {{after.id}}: {{after.temperature}}°C"),
+        Some("[SENSOR-UPD] {{after.id}}: {{before.temperature}}°C -> {{after.temperature}}°C"),
+        Some("[SENSOR-DEL] {{before.id}}")
+    )
+    // Individual template methods for fine-grained control
+    .with_query_added_template("user-query", "[USER] New user: {{after.name}} ({{after.email}})")
+    .build();
+
+drasi.add_reaction(Arc::new(reaction)).await?;
+```
+
+**Template Priority:**
+1. Query-specific templates (highest priority)
+2. Default templates (fallback)
+3. Raw JSON output (when no template provided)
+
 ### Config Struct Approach
 
 For programmatic configuration or deserialization scenarios:
+
+#### Basic Configuration
 
 ```rust
 use drasi_reaction_log::{LogReaction, LogReactionConfig};
@@ -62,11 +99,44 @@ let config = LogReactionConfig {
     added_template: Some("[ADD] {{after.name}}".to_string()),
     updated_template: Some("[UPD] {{before.value}} -> {{after.value}}".to_string()),
     deleted_template: Some("[DEL] {{before.name}}".to_string()),
+    query_templates: HashMap::new(),
 };
 
 let reaction = LogReaction::new(
     "my-logger",
     vec!["query1".to_string(), "query2".to_string()],
+    config
+);
+
+drasi.add_reaction(Arc::new(reaction)).await?;
+```
+
+#### With Per-Query Templates
+
+```rust
+use drasi_reaction_log::{LogReaction, LogReactionConfig};
+use drasi_reaction_log::config::{QueryTemplates, TemplateSpec};
+use std::collections::HashMap;
+
+let mut query_templates = HashMap::new();
+query_templates.insert("sensor-query".to_string(), QueryTemplates {
+    added: Some(TemplateSpec {
+        template: "[SENSOR] {{after.id}}: {{after.temperature}}°C".to_string(),
+    }),
+    updated: None,  // Falls back to default
+    deleted: None,  // Falls back to default
+});
+
+let config = LogReactionConfig {
+    added_template: Some("[DEFAULT] {{after.id}}".to_string()),
+    updated_template: Some("[DEFAULT-UPD] {{after.id}}".to_string()),
+    deleted_template: Some("[DEFAULT-DEL] {{before.id}}".to_string()),
+    query_templates,
+};
+
+let reaction = LogReaction::new(
+    "my-logger",
+    vec!["sensor-query".to_string(), "other-query".to_string()],
     config
 );
 
@@ -86,11 +156,22 @@ drasi.add_reaction(Arc::new(reaction)).await?;
 
 ### Template Options
 
+Templates can be configured at two levels:
+
+1. **Default Templates**: Applied to all queries unless overridden
+2. **Per-Query Templates**: Override defaults for specific queries
+
 | Name | Description | Data Type | Valid Values | Default |
 |------|-------------|-----------|--------------|---------|
-| `added_template` | Handlebars template for ADD events | `Option<String>` | Valid Handlebars template | `None` (JSON output) |
-| `updated_template` | Handlebars template for UPDATE events | `Option<String>` | Valid Handlebars template | `None` (JSON output) |
-| `deleted_template` | Handlebars template for DELETE events | `Option<String>` | Valid Handlebars template | `None` (JSON output) |
+| `added_template` | Default Handlebars template for ADD events | `Option<String>` | Valid Handlebars template | `None` (JSON output) |
+| `updated_template` | Default Handlebars template for UPDATE events | `Option<String>` | Valid Handlebars template | `None` (JSON output) |
+| `deleted_template` | Default Handlebars template for DELETE events | `Option<String>` | Valid Handlebars template | `None` (JSON output) |
+| `query_templates` | Per-query template overrides | `HashMap<String, QueryTemplates>` | Map of query ID to templates | `{}` (empty) |
+
+**QueryTemplates Structure:**
+- `added`: Optional template for ADD operations from this query
+- `updated`: Optional template for UPDATE operations from this query
+- `deleted`: Optional template for DELETE operations from this query
 
 ### Template Variables
 
@@ -277,6 +358,83 @@ User {{after.id}} changed:
 drasi.add_reaction(Arc::new(reaction)).await?;
 ```
 
+### Per-Query Templates
+
+Different formatting for different queries:
+
+```rust
+let reaction = LogReaction::builder("multi-source-logger")
+    .from_query("sensor-data")
+    .from_query("user-activity")
+    .from_query("system-alerts")
+    // Default templates for all queries
+    .with_added_template("[DEFAULT] {{after.id}}")
+    .with_updated_template("[DEFAULT] {{after.id}} updated")
+    // Sensor-specific formatting
+    .with_query_templates(
+        "sensor-data",
+        Some("🌡️  Sensor {{after.id}}: {{after.temperature}}°C, {{after.humidity}}%"),
+        Some("🌡️  Sensor {{after.id}}: {{before.temperature}}°C → {{after.temperature}}°C"),
+        Some("🌡️  Sensor {{before.id}} offline")
+    )
+    // User-specific formatting
+    .with_query_added_template(
+        "user-activity",
+        "👤 New login: {{after.username}} from {{after.ip_address}}"
+    )
+    .with_query_deleted_template(
+        "user-activity",
+        "👤 Logout: {{before.username}}"
+    )
+    // System alert formatting
+    .with_query_added_template(
+        "system-alerts",
+        "⚠️  ALERT: {{after.severity}} - {{after.message}}"
+    )
+    .build();
+
+drasi.add_reaction(Arc::new(reaction)).await?;
+```
+
+**Output:**
+```
+[multi-source-logger] Query 'sensor-data' (2 items):
+[multi-source-logger]   🌡️  Sensor sensor_01: 25.5°C, 60%
+[multi-source-logger]   🌡️  Sensor sensor_02: 22.3°C, 55%
+[multi-source-logger] Query 'user-activity' (1 items):
+[multi-source-logger]   👤 New login: john_doe from 192.168.1.10
+[multi-source-logger] Query 'system-alerts' (1 items):
+[multi-source-logger]   ⚠️  ALERT: HIGH - Database connection pool exhausted
+```
+
+### Query-Specific Overrides
+
+Fine-grained control using individual template methods:
+
+```rust
+let reaction = LogReaction::builder("targeted-logger")
+    .from_query("orders")
+    .from_query("inventory")
+    // Set defaults
+    .with_added_template("[ADD] {{after.id}}")
+    .with_updated_template("[UPD] {{after.id}}")
+    .with_deleted_template("[DEL] {{before.id}}")
+    // Override only ADD for orders
+    .with_query_added_template(
+        "orders",
+        "📦 New Order #{{after.order_id}}: ${{after.total}} ({{after.item_count}} items)"
+    )
+    // Override only UPDATE for inventory
+    .with_query_updated_template(
+        "inventory",
+        "📊 Stock change: {{after.product_name}} - {{before.quantity}} → {{after.quantity}} units"
+    )
+    // Other operations use defaults
+    .build();
+
+drasi.add_reaction(Arc::new(reaction)).await?;
+```
+
 ## Performance Considerations
 
 ### Throughput Limits
@@ -357,6 +515,30 @@ RUST_LOG=debug cargo run
 2. Verify variable names match available context
 3. Look for error logs: `RUST_LOG=debug`
 4. Test template with simple expressions first
+5. For per-query templates, verify the query ID matches exactly
+
+**Template Priority**: Query-specific templates override defaults. If a query-specific template is set but produces errors, it won't fall back to the default template - it will fall back to JSON output.
+
+### Unexpected Template Output
+
+**Symptoms**: Wrong template being used for a query
+
+**Solutions**:
+1. Verify query ID spelling - template lookups are case-sensitive
+2. Check that per-query templates are being set for the correct query ID
+3. Use `RUST_LOG=debug` to see which templates are being applied
+4. Remember the template priority: Query-specific > Default > JSON
+
+**Example**:
+```rust
+// ❌ Wrong - template won't match due to ID mismatch
+.from_query("sensor-data")
+.with_query_added_template("sensor_data", "...") // Uses underscore instead of hyphen
+
+// ✅ Correct - IDs match
+.from_query("sensor-data")
+.with_query_added_template("sensor-data", "...")
+```
 
 ### Performance Degradation
 
