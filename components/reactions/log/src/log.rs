@@ -156,6 +156,113 @@ impl LogReactionBuilder {
         self
     }
 
+    /// Set templates for a specific query
+    ///
+    /// This allows different formatting for different queries. Query-specific templates
+    /// override the default templates set via `with_added_template`, `with_updated_template`,
+    /// and `with_deleted_template`.
+    ///
+    /// # Arguments
+    ///
+    /// * `query_id` - The ID of the query to configure
+    /// * `added` - Optional template for ADD operations from this query
+    /// * `updated` - Optional template for UPDATE operations from this query
+    /// * `deleted` - Optional template for DELETE operations from this query
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let reaction = LogReaction::builder("my-logger")
+    ///     .from_query("sensor-query")
+    ///     .from_query("user-query")
+    ///     .with_added_template("[DEFAULT] {{after.id}}")  // Default for all queries
+    ///     .with_query_templates(
+    ///         "sensor-query",
+    ///         Some("[SENSOR] {{after.id}}: {{after.temperature}}°C"),
+    ///         Some("[SENSOR-UPD] {{after.id}}: {{before.temperature}}°C -> {{after.temperature}}°C"),
+    ///         Some("[SENSOR-DEL] {{before.id}}")
+    ///     )
+    ///     .build();
+    /// ```
+    pub fn with_query_templates(
+        mut self,
+        query_id: impl Into<String>,
+        added: Option<impl Into<String>>,
+        updated: Option<impl Into<String>>,
+        deleted: Option<impl Into<String>>,
+    ) -> Self {
+        use crate::config::{QueryTemplates, TemplateSpec};
+        
+        let templates = QueryTemplates {
+            added: added.map(|t| TemplateSpec {
+                template: t.into(),
+            }),
+            updated: updated.map(|t| TemplateSpec {
+                template: t.into(),
+            }),
+            deleted: deleted.map(|t| TemplateSpec {
+                template: t.into(),
+            }),
+        };
+        
+        self.config.query_templates.insert(query_id.into(), templates);
+        self
+    }
+
+    /// Set ADD template for a specific query
+    ///
+    /// Convenience method to set only the ADD template for a query.
+    pub fn with_query_added_template(
+        mut self,
+        query_id: impl Into<String>,
+        template: impl Into<String>,
+    ) -> Self {
+        use crate::config::{TemplateSpec};
+        
+        let query_id = query_id.into();
+        let entry = self.config.query_templates.entry(query_id).or_default();
+        entry.added = Some(TemplateSpec {
+            template: template.into(),
+        });
+        self
+    }
+
+    /// Set UPDATE template for a specific query
+    ///
+    /// Convenience method to set only the UPDATE template for a query.
+    pub fn with_query_updated_template(
+        mut self,
+        query_id: impl Into<String>,
+        template: impl Into<String>,
+    ) -> Self {
+        use crate::config::{TemplateSpec};
+        
+        let query_id = query_id.into();
+        let entry = self.config.query_templates.entry(query_id).or_default();
+        entry.updated = Some(TemplateSpec {
+            template: template.into(),
+        });
+        self
+    }
+
+    /// Set DELETE template for a specific query
+    ///
+    /// Convenience method to set only the DELETE template for a query.
+    pub fn with_query_deleted_template(
+        mut self,
+        query_id: impl Into<String>,
+        template: impl Into<String>,
+    ) -> Self {
+        use crate::config::{TemplateSpec};
+        
+        let query_id = query_id.into();
+        let entry = self.config.query_templates.entry(query_id).or_default();
+        entry.deleted = Some(TemplateSpec {
+            template: template.into(),
+        });
+        self
+    }
+
     /// Build the LogReaction
     pub fn build(self) -> LogReaction {
         let mut params =
@@ -307,14 +414,23 @@ impl Reaction for LogReaction {
                             Value::String(result_type.to_uppercase()),
                         );
 
+                        // Get query-specific templates if available
+                        let query_templates = config.query_templates.get(&query_result.query_id);
+
                         match result_type_lower.as_str() {
                             "add" => {
                                 if let Some(data) = result.get("data") {
                                     context.insert("after".to_string(), data.clone());
 
-                                    if let Some(ref template) = config.added_template {
+                                    // Check for query-specific template first, then default
+                                    let template = query_templates
+                                        .and_then(|qt| qt.added.as_ref())
+                                        .map(|ts| ts.template.as_str())
+                                        .or(config.added_template.as_deref());
+
+                                    if let Some(template_str) = template {
                                         // Use template
-                                        match handlebars.render_template(template, &context) {
+                                        match handlebars.render_template(template_str, &context) {
                                             Ok(rendered) => {
                                                 #[allow(clippy::print_stdout)]
                                                 {
@@ -345,9 +461,15 @@ impl Reaction for LogReaction {
                                 if let Some(data) = result.get("data") {
                                     context.insert("before".to_string(), data.clone());
 
-                                    if let Some(ref template) = config.deleted_template {
+                                    // Check for query-specific template first, then default
+                                    let template = query_templates
+                                        .and_then(|qt| qt.deleted.as_ref())
+                                        .map(|ts| ts.template.as_str())
+                                        .or(config.deleted_template.as_deref());
+
+                                    if let Some(template_str) = template {
                                         // Use template
-                                        match handlebars.render_template(template, &context) {
+                                        match handlebars.render_template(template_str, &context) {
                                             Ok(rendered) => {
                                                 #[allow(clippy::print_stdout)]
                                                 {
@@ -384,9 +506,15 @@ impl Reaction for LogReaction {
                                         context.insert("data".to_string(), data.clone());
                                     }
 
-                                    if let Some(ref template) = config.updated_template {
+                                    // Check for query-specific template first, then default
+                                    let template = query_templates
+                                        .and_then(|qt| qt.updated.as_ref())
+                                        .map(|ts| ts.template.as_str())
+                                        .or(config.updated_template.as_deref());
+
+                                    if let Some(template_str) = template {
                                         // Use template
-                                        match handlebars.render_template(template, &context) {
+                                        match handlebars.render_template(template_str, &context) {
                                             Ok(rendered) => {
                                                 #[allow(clippy::print_stdout)]
                                                 {

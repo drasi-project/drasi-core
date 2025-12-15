@@ -15,11 +15,45 @@
 //! Configuration types for log reaction.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// Template specification for a specific operation type (added, updated, deleted).
+///
+/// This type allows customizing output format for each operation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TemplateSpec {
+    /// Handlebars template string for formatting the output.
+    /// If empty or not provided, displays the raw JSON data.
+    pub template: String,
+}
+
+/// Configuration for query-specific templates.
+///
+/// Defines different template specifications for each operation type (added, updated, deleted).
+/// Each operation type can have its own formatting template.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct QueryTemplates {
+    /// Template for ADD operations (new rows in query results).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub added: Option<TemplateSpec>,
+
+    /// Template for UPDATE operations (modified rows in query results).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated: Option<TemplateSpec>,
+
+    /// Template for DELETE operations (removed rows from query results).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted: Option<TemplateSpec>,
+}
 
 /// Log reaction configuration
 ///
 /// Supports Handlebars templates for formatting each event type.
 /// When a template is not provided, the full JSON representation is shown.
+///
+/// Templates can be configured at two levels:
+/// 1. **Default templates**: Applied to all queries unless overridden
+/// 2. **Per-query templates**: Override defaults for specific queries
 ///
 /// ## Template Variables
 ///
@@ -30,29 +64,59 @@ use serde::{Deserialize, Serialize};
 /// - `query_name` - The name of the query that produced the result
 /// - `operation` - The operation type ("ADD", "UPDATE", or "DELETE")
 ///
-/// ## Example
+/// ## Example with Default Templates
 ///
 /// ```rust,ignore
 /// let config = LogReactionConfig {
 ///     added_template: Some("[NEW] Sensor {{after.id}}: temp={{after.temperature}}".to_string()),
 ///     updated_template: Some("[CHG] {{after.id}}: {{before.temperature}} -> {{after.temperature}}".to_string()),
 ///     deleted_template: Some("[DEL] Sensor {{before.id}} removed".to_string()),
+///     query_templates: HashMap::new(),
+/// };
+/// ```
+///
+/// ## Example with Per-Query Templates
+///
+/// ```rust,ignore
+/// use std::collections::HashMap;
+///
+/// let mut query_templates = HashMap::new();
+/// query_templates.insert("sensor-query".to_string(), QueryTemplates {
+///     added: Some(TemplateSpec { template: "[SENSOR] New: {{after.id}}".to_string() }),
+///     updated: None,  // Falls back to default
+///     deleted: None,  // Falls back to default
+/// });
+///
+/// let config = LogReactionConfig {
+///     added_template: Some("[DEFAULT] {{after.id}}".to_string()),
+///     updated_template: None,
+///     deleted_template: None,
+///     query_templates,
 /// };
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct LogReactionConfig {
-    /// Handlebars template for ADD events.
+    /// Default Handlebars template for ADD events across all queries.
     /// Available variables: `after`, `query_name`, `operation`
+    /// Falls back to JSON output if not provided.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub added_template: Option<String>,
 
-    /// Handlebars template for UPDATE events.
+    /// Default Handlebars template for UPDATE events across all queries.
     /// Available variables: `before`, `after`, `data`, `query_name`, `operation`
+    /// Falls back to JSON output if not provided.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_template: Option<String>,
 
-    /// Handlebars template for DELETE events.
+    /// Default Handlebars template for DELETE events across all queries.
     /// Available variables: `before`, `query_name`, `operation`
+    /// Falls back to JSON output if not provided.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deleted_template: Option<String>,
+
+    /// Per-query template overrides.
+    /// Maps query IDs to their specific template configurations.
+    /// Query-specific templates override the default templates.
+    #[serde(default)]
+    pub query_templates: HashMap<String, QueryTemplates>,
 }
