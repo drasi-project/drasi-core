@@ -27,4 +27,13 @@ uuid = { version = "1.0", features = ["v4"] }
 # Redis testing utilities
 redis = { version = "0.27", features = ["tokio-comp"] }
 testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["redis"] }
+testcontainers-modules = { version = "0.11", features = ["redis", "postgres"] }
+
+# PostgreSQL testing utilities
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4"] }
+drasi-reaction-storedproc-postgres = { path = "../components/reactions/storedproc-postgres", optional = true }
+
+[dev-dependencies]
+drasi-lib = { path = "../lib" }
+drasi-reaction-storedproc-postgres = { path = "../components/reactions/storedproc-postgres" }
+serial_test = "3.0"
