@@ -39,9 +39,10 @@ use crate::config::{QueryConfig, QueryLanguage, QueryRuntime};
 use crate::managers::{
     is_operation_valid, log_component_error, log_component_start, log_component_stop, Operation,
 };
+use crate::plugin_core::Source;
 use crate::queries::PriorityQueue;
 use crate::queries::QueryBase;
-use crate::sources::{FutureQueueSource, SourceManager};
+use crate::sources::{FutureQueueSource, SourceManager, FUTURE_QUEUE_SOURCE_ID};
 
 /// Default query configuration
 struct DefaultQueryConfig;
@@ -335,6 +336,40 @@ impl Query for DrasiQuery {
         };
 
         // NEW: Subscribe to each source sequentially
+        // Also includes FutureQueueSource for temporal query support
+        
+        // Set up FutureQueueSource for temporal query support
+        // This creates a virtual source that polls the future queue and emits due elements
+        // as source events, integrating temporal queries into the standard source subscription
+        // mechanism. Events preserve their original source_id from the FutureElementRef.
+        debug!(
+            "Query '{}' setting up FutureQueueSource for temporal queries",
+            self.base.config.id
+        );
+
+        let future_queue_source = Arc::new(FutureQueueSource::new(
+            future_queue,
+            self.base.config.id.clone(),
+        ));
+
+        // Start the FutureQueueSource
+        if let Err(e) = future_queue_source.start().await {
+            error!(
+                "Query '{}' failed to start FutureQueueSource: {}",
+                self.base.config.id, e
+            );
+            *self.base.status.write().await = ComponentStatus::Error;
+            return Err(anyhow::anyhow!("Failed to start FutureQueueSource: {e}"));
+        }
+
+        info!(
+            "Query '{}' FutureQueueSource started successfully",
+            self.base.config.id
+        );
+
+        // Store the FutureQueueSource for cleanup
+        *self.future_queue_source.write().await = Some(future_queue_source.clone());
+
         info!(
             "Query '{}' subscribing to {} sources: {:?}",
             self.base.config.id,
@@ -350,11 +385,16 @@ impl Query for DrasiQuery {
         let mut bootstrap_channels = Vec::new();
         let mut subscription_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
+        // Build list of sources to subscribe to (regular sources + FutureQueueSource)
+        let mut sources_to_subscribe: Vec<(Arc<dyn Source>, String)> = Vec::new();
+        
+        // Add regular sources from SourceManager
         for subscription in &self.base.config.sources {
             let source_id = &subscription.source_id;
-            // Get source from SourceManager
-            let source = match self.source_manager.get_source_instance(source_id).await {
-                Some(src) => src,
+            match self.source_manager.get_source_instance(source_id).await {
+                Some(src) => {
+                    sources_to_subscribe.push((src, source_id.clone()));
+                }
                 None => {
                     error!(
                         "Query '{}' failed to find source '{}' in SourceManager",
@@ -368,8 +408,16 @@ impl Query for DrasiQuery {
                     *self.base.status.write().await = ComponentStatus::Error;
                     return Err(anyhow::anyhow!("Source '{source_id}' not found"));
                 }
-            };
+            }
+        }
+        
+        // Add FutureQueueSource
+        sources_to_subscribe.push((
+            future_queue_source as Arc<dyn Source>,
+            FUTURE_QUEUE_SOURCE_ID.to_string(),
+        ));
 
+        for (source, source_id) in sources_to_subscribe {
             // Subscribe to the source with bootstrap enabled
             let enable_bootstrap = true;
             let subscription_response = match source
@@ -405,15 +453,14 @@ impl Query for DrasiQuery {
             );
 
             // Store bootstrap channel if provided
+            // Also initialize bootstrap state only for sources that support bootstrap
             if let Some(bootstrap_rx) = subscription_response.bootstrap_receiver {
                 bootstrap_channels.push((source_id.clone(), bootstrap_rx));
+                self.bootstrap_state
+                    .write()
+                    .await
+                    .insert(source_id.to_string(), BootstrapPhase::NotStarted);
             }
-
-            // Initialize bootstrap state
-            self.bootstrap_state
-                .write()
-                .await
-                .insert(source_id.to_string(), BootstrapPhase::NotStarted);
 
             // Spawn task to forward events from receiver to priority queue
             let mut receiver = subscription_response.receiver;
@@ -469,83 +516,6 @@ impl Query for DrasiQuery {
 
         // Store subscription tasks
         *self.subscription_tasks.write().await = subscription_tasks;
-
-        // Set up FutureQueueSource for temporal query support
-        // This creates a virtual source that polls the future queue and emits due elements
-        // as source events, integrating temporal queries into the standard source subscription
-        // mechanism. Events preserve their original source_id from the FutureElementRef.
-        debug!(
-            "Query '{}' setting up FutureQueueSource for temporal queries",
-            self.base.config.id
-        );
-
-        let future_queue_source = Arc::new(FutureQueueSource::new(
-            future_queue,
-            self.base.config.id.clone(),
-        ));
-
-        // Start the FutureQueueSource with a dispatcher
-        let dispatcher = crate::channels::ChannelChangeDispatcher::<SourceEventWrapper>::new(1000);
-
-        let mut receiver = dispatcher
-            .create_receiver()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to create receiver for FutureQueueSource: {e}"))?;
-
-        if let Err(e) = future_queue_source.start(Box::new(dispatcher)).await {
-            error!(
-                "Query '{}' failed to start FutureQueueSource: {}",
-                self.base.config.id, e
-            );
-            *self.base.status.write().await = ComponentStatus::Error;
-            return Err(anyhow::anyhow!("Failed to start FutureQueueSource: {e}"));
-        }
-
-        info!(
-            "Query '{}' FutureQueueSource started successfully",
-            self.base.config.id
-        );
-
-        // Spawn task to forward future queue events to priority queue
-        let priority_queue = self.priority_queue.clone();
-        let query_id = self.base.config.id.clone();
-        let dispatch_mode = future_queue_source.dispatch_mode();
-        let use_blocking_enqueue = matches!(dispatch_mode, DispatchMode::Channel);
-
-        let task = tokio::spawn(async move {
-            debug!(
-                "Query '{query_id}' started FutureQueueSource event forwarder (dispatch_mode: {dispatch_mode:?}, blocking_enqueue: {use_blocking_enqueue})"
-            );
-
-            loop {
-                match receiver.recv().await {
-                    Ok(arc_event) => {
-                        if use_blocking_enqueue {
-                            priority_queue.enqueue_wait(arc_event).await;
-                        } else {
-                            if !priority_queue.enqueue(arc_event).await {
-                                warn!(
-                                    "Query '{query_id}' priority queue at capacity, dropping future queue event"
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!("Query '{query_id}' FutureQueueSource receiver error: {e}");
-                        info!("Query '{query_id}' FutureQueueSource channel closed");
-                        break;
-                    }
-                }
-            }
-
-            debug!("Query '{query_id}' FutureQueueSource event forwarder exited");
-        });
-
-        // Add to subscription tasks for cleanup
-        self.subscription_tasks.write().await.push(task);
-
-        // Store the FutureQueueSource for cleanup
-        *self.future_queue_source.write().await = Some(future_queue_source);
 
         // Wrap continuous_query in Arc for sharing across tasks
         let continuous_query = Arc::new(continuous_query);

@@ -21,7 +21,8 @@ use std::time::SystemTime;
 use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
 
-use crate::channels::{ChangeDispatcher, DispatchMode, SourceEvent, SourceEventWrapper};
+use crate::channels::{ComponentEventSender, DispatchMode, SourceEvent, SourceEventWrapper};
+use crate::ComponentStatus;
 
 /// Internal source ID for the future queue source (used for lifecycle management only)
 pub const FUTURE_QUEUE_SOURCE_ID: &str = "__future_queue__";
@@ -67,11 +68,8 @@ impl FutureQueueSource {
         }
     }
 
-    /// Start the future queue polling task
-    pub async fn start(
-        &self,
-        dispatcher: Box<dyn crate::channels::ChangeDispatcher<SourceEventWrapper>>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    /// Start the future queue polling task (internal implementation)
+    async fn start_internal(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut status = self.status.write().await;
         if *status == FutureQueueSourceStatus::Running {
             return Err("FutureQueueSource is already running".into());
@@ -79,8 +77,10 @@ impl FutureQueueSource {
 
         info!("Starting FutureQueueSource for query '{}'", self.query_id);
 
-        // Store the dispatcher
-        *self.dispatcher.write().await = Some(dispatcher);
+        // Create dispatcher internally
+        let dispatcher =
+            crate::channels::ChannelChangeDispatcher::<SourceEventWrapper>::new(1000);
+        *self.dispatcher.write().await = Some(Box::new(dispatcher));
 
         *status = FutureQueueSourceStatus::Running;
         drop(status);
@@ -218,8 +218,8 @@ impl FutureQueueSource {
         Ok(())
     }
 
-    /// Stop the future queue polling task
-    pub async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    /// Stop the future queue polling task (internal implementation)
+    async fn stop_internal(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut status = self.status.write().await;
         if *status != FutureQueueSourceStatus::Running {
             return Ok(());
@@ -255,10 +255,20 @@ impl FutureQueueSource {
     }
 
     /// Subscribe to future queue events (for query consumption)
+    /// 
+    /// # Arguments
+    /// * `query_id` - ID of the subscribing query (unused, kept for API compatibility)
+    /// * `enable_bootstrap` - Whether to request initial data (unused, FutureQueueSource doesn't support bootstrap)
+    /// * `node_labels` - Node labels the query is interested in (unused)
+    /// * `relation_labels` - Relation labels the query is interested in (unused)
     pub async fn subscribe(
         &self,
+        _query_id: String,
+        _enable_bootstrap: bool,
+        _node_labels: Vec<String>,
+        _relation_labels: Vec<String>,
     ) -> Result<
-        Box<dyn crate::channels::ChangeReceiver<SourceEventWrapper>>,
+        crate::channels::SubscriptionResponse,
         Box<dyn std::error::Error + Send + Sync>,
     > {
         let status = self.status.read().await;
@@ -266,8 +276,11 @@ impl FutureQueueSource {
             return Err("FutureQueueSource is not running".into());
         }
 
-        // Create a channel dispatcher for this subscription
-        let dispatcher = crate::channels::ChannelChangeDispatcher::<SourceEventWrapper>::new(1000);
+        // Get the dispatcher that was created during start()
+        let dispatcher_guard = self.dispatcher.read().await;
+        let dispatcher = dispatcher_guard
+            .as_ref()
+            .ok_or("FutureQueueSource dispatcher not initialized")?;
 
         let receiver = dispatcher.create_receiver().await.map_err(
             |e| -> Box<dyn std::error::Error + Send + Sync> {
@@ -278,10 +291,12 @@ impl FutureQueueSource {
             },
         )?;
 
-        // Store the dispatcher
-        *self.dispatcher.write().await = Some(Box::new(dispatcher));
-
-        Ok(receiver)
+        Ok(crate::channels::SubscriptionResponse {
+            query_id: self.query_id.clone(),
+            source_id: FUTURE_QUEUE_SOURCE_ID.to_string(),
+            receiver,
+            bootstrap_receiver: None,
+        })
     }
 
     /// Get the dispatch mode (always Channel for future queue source)
@@ -289,6 +304,74 @@ impl FutureQueueSource {
         DispatchMode::Channel
     }
 }
+
+// Implement the Source trait for FutureQueueSource
+#[async_trait::async_trait]
+impl crate::plugin_core::Source for FutureQueueSource {
+    fn id(&self) -> &str {
+        FUTURE_QUEUE_SOURCE_ID
+    }
+
+    fn type_name(&self) -> &str {
+        "future-queue"
+    }
+
+    fn properties(&self) -> std::collections::HashMap<String, serde_json::Value> {
+        let mut props = std::collections::HashMap::new();
+        props.insert("query_id".to_string(), serde_json::json!(self.query_id));
+        props
+    }
+
+    fn dispatch_mode(&self) -> DispatchMode {
+        DispatchMode::Channel
+    }
+
+    fn auto_start(&self) -> bool {
+        false // FutureQueueSource is managed by the query, not auto-started
+    }
+
+    async fn start(&self) -> anyhow::Result<()> {
+        self.start_internal()
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))
+    }
+
+    async fn stop(&self) -> anyhow::Result<()> {
+        self.stop_internal()
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))
+    }
+
+    async fn status(&self) -> ComponentStatus {
+        let status = self.status.read().await;
+        match *status {
+            FutureQueueSourceStatus::Running => ComponentStatus::Running,
+            FutureQueueSourceStatus::Stopped => ComponentStatus::Stopped,
+            FutureQueueSourceStatus::Stopping => ComponentStatus::Stopped,
+        }
+    }
+
+    async fn subscribe(
+        &self,
+        query_id: String,
+        enable_bootstrap: bool,
+        node_labels: Vec<String>,
+        relation_labels: Vec<String>,
+    ) -> anyhow::Result<crate::channels::SubscriptionResponse> {
+        self.subscribe(query_id, enable_bootstrap, node_labels, relation_labels)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    async fn inject_event_tx(&self, _tx: ComponentEventSender) {
+        // FutureQueueSource doesn't emit lifecycle events
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -299,6 +382,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_future_queue_source_lifecycle() {
+        use crate::plugin_core::Source;
+        
         let future_queue = Arc::new(InMemoryFutureQueue::new());
         let source = FutureQueueSource::new(future_queue, "test-query".to_string());
 
@@ -309,8 +394,7 @@ mod tests {
         );
 
         // Start the source
-        let dispatcher = crate::channels::ChannelChangeDispatcher::<SourceEventWrapper>::new(10);
-        source.start(Box::new(dispatcher)).await.unwrap();
+        source.start().await.unwrap();
         assert_eq!(
             *source.status.read().await,
             FutureQueueSourceStatus::Running
@@ -326,6 +410,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_future_queue_source_emits_events() {
+        use crate::plugin_core::Source;
+        
         let future_queue = Arc::new(InMemoryFutureQueue::new());
         let source = FutureQueueSource::new(future_queue.clone(), "test-query".to_string());
 
@@ -346,10 +432,17 @@ mod tests {
             .await
             .unwrap();
 
-        // Start the source with a channel dispatcher
-        let dispatcher = crate::channels::ChannelChangeDispatcher::<SourceEventWrapper>::new(10);
-        let mut receiver = dispatcher.create_receiver().await.unwrap();
-        source.start(Box::new(dispatcher)).await.unwrap();
+        // Start the source
+        source.start().await.unwrap();
+        
+        // Subscribe to get events
+        let response = source.subscribe(
+            "test-query".to_string(),
+            false,
+            vec![],
+            vec![]
+        ).await.unwrap();
+        let mut receiver = response.receiver;
 
         // Wait for the event
         let event = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
@@ -371,6 +464,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_future_queue_source_waits_for_due_time() {
+        use crate::plugin_core::Source;
+        
         let future_queue = Arc::new(InMemoryFutureQueue::new());
         let source = FutureQueueSource::new(future_queue.clone(), "test-query".to_string());
 
@@ -387,9 +482,16 @@ mod tests {
         let start = tokio::time::Instant::now();
 
         // Start the source
-        let dispatcher = crate::channels::ChannelChangeDispatcher::<SourceEventWrapper>::new(10);
-        let mut receiver = dispatcher.create_receiver().await.unwrap();
-        source.start(Box::new(dispatcher)).await.unwrap();
+        source.start().await.unwrap();
+        
+        // Subscribe to get events
+        let response = source.subscribe(
+            "test-query".to_string(),
+            false,
+            vec![],
+            vec![]
+        ).await.unwrap();
+        let mut receiver = response.receiver;
 
         // Wait for the event
         let event = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
@@ -414,6 +516,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_future_queue_source_preserves_source_id() {
+        use crate::plugin_core::Source;
+        
         let future_queue = Arc::new(InMemoryFutureQueue::new());
         let source = FutureQueueSource::new(future_queue.clone(), "test-query".to_string());
 
@@ -431,9 +535,16 @@ mod tests {
         }
 
         // Start the source
-        let dispatcher = crate::channels::ChannelChangeDispatcher::<SourceEventWrapper>::new(10);
-        let mut receiver = dispatcher.create_receiver().await.unwrap();
-        source.start(Box::new(dispatcher)).await.unwrap();
+        source.start().await.unwrap();
+        
+        // Subscribe to get events
+        let response = source.subscribe(
+            "test-query".to_string(),
+            false,
+            vec![],
+            vec![]
+        ).await.unwrap();
+        let mut receiver = response.receiver;
 
         // Collect events
         let mut received_source_ids = vec![];
