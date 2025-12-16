@@ -39,10 +39,9 @@ use crate::config::{QueryConfig, QueryLanguage, QueryRuntime};
 use crate::managers::{
     is_operation_valid, log_component_error, log_component_start, log_component_stop, Operation,
 };
-use crate::queries::future_queue_consumer::FutureConsumer;
-use crate::queries::{PriorityQueue, QueryBase};
-// DataRouter no longer needed - queries subscribe directly to sources
-use crate::sources::SourceManager;
+use crate::queries::PriorityQueue;
+use crate::queries::QueryBase;
+use crate::sources::{FutureQueueSource, SourceManager};
 
 /// Default query configuration
 struct DefaultQueryConfig;
@@ -140,6 +139,8 @@ pub struct DrasiQuery {
     index_factory: Arc<crate::indexes::IndexFactory>,
     // Middleware registry for query middleware
     middleware_registry: Arc<MiddlewareTypeRegistry>,
+    // Future queue source (if using temporal queries)
+    future_queue_source: Arc<RwLock<Option<Arc<FutureQueueSource>>>>,
 }
 
 impl DrasiQuery {
@@ -167,6 +168,7 @@ impl DrasiQuery {
             bootstrap_state: Arc::new(RwLock::new(HashMap::new())),
             index_factory,
             middleware_registry,
+            future_queue_source: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -259,8 +261,8 @@ impl Query for DrasiQuery {
             builder = builder.with_joins(drasi_joins);
         }
 
-        // Build indexes if storage backend configured
-        if let Some(backend_ref) = &self.base.config.storage_backend {
+        // Build indexes - either from configured backend or default in-memory
+        let future_queue = if let Some(backend_ref) = &self.base.config.storage_backend {
             debug!(
                 "Query '{}' using storage backend: {:?}",
                 self.base.config.id, backend_ref
@@ -272,17 +274,27 @@ impl Query for DrasiQuery {
                 .await
                 .context("Failed to build index set")?;
 
+            let future_queue = index_set.future_queue.clone();
+
             builder = builder
                 .with_element_index(index_set.element_index)
                 .with_archive_index(index_set.archive_index)
                 .with_result_index(index_set.result_index)
                 .with_future_queue(index_set.future_queue);
+
+            future_queue
         } else {
             debug!(
                 "Query '{}' using default in-memory indexes",
                 self.base.config.id
             );
-        }
+            // Create explicit in-memory future queue so we can access it for FutureQueueSource
+            let future_queue = Arc::new(
+                drasi_core::in_memory_index::in_memory_future_queue::InMemoryFutureQueue::new(),
+            );
+            builder = builder.with_future_queue(future_queue.clone());
+            future_queue
+        };
 
         let continuous_query = match builder.try_build().await {
             Ok(query) => query,
@@ -305,9 +317,6 @@ impl Query for DrasiQuery {
                 return Err(anyhow::anyhow!("Failed to build query: {e}"));
             }
         };
-
-        let future_consumer = Arc::new(FutureConsumer::new(self.priority_queue.clone()));
-        continuous_query.set_future_consumer(future_consumer).await;        
 
         // Extract labels from the query for bootstrap
         let labels = match crate::queries::LabelExtractor::extract_labels(
@@ -460,6 +469,83 @@ impl Query for DrasiQuery {
 
         // Store subscription tasks
         *self.subscription_tasks.write().await = subscription_tasks;
+
+        // Set up FutureQueueSource for temporal query support
+        // This creates a virtual source that polls the future queue and emits due elements
+        // as source events, integrating temporal queries into the standard source subscription
+        // mechanism. Events preserve their original source_id from the FutureElementRef.
+        debug!(
+            "Query '{}' setting up FutureQueueSource for temporal queries",
+            self.base.config.id
+        );
+
+        let future_queue_source = Arc::new(FutureQueueSource::new(
+            future_queue,
+            self.base.config.id.clone(),
+        ));
+
+        // Start the FutureQueueSource with a dispatcher
+        let dispatcher = crate::channels::ChannelChangeDispatcher::<SourceEventWrapper>::new(1000);
+
+        let mut receiver = dispatcher
+            .create_receiver()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create receiver for FutureQueueSource: {e}"))?;
+
+        if let Err(e) = future_queue_source.start(Box::new(dispatcher)).await {
+            error!(
+                "Query '{}' failed to start FutureQueueSource: {}",
+                self.base.config.id, e
+            );
+            *self.base.status.write().await = ComponentStatus::Error;
+            return Err(anyhow::anyhow!("Failed to start FutureQueueSource: {e}"));
+        }
+
+        info!(
+            "Query '{}' FutureQueueSource started successfully",
+            self.base.config.id
+        );
+
+        // Spawn task to forward future queue events to priority queue
+        let priority_queue = self.priority_queue.clone();
+        let query_id = self.base.config.id.clone();
+        let dispatch_mode = future_queue_source.dispatch_mode();
+        let use_blocking_enqueue = matches!(dispatch_mode, DispatchMode::Channel);
+
+        let task = tokio::spawn(async move {
+            debug!(
+                "Query '{query_id}' started FutureQueueSource event forwarder (dispatch_mode: {dispatch_mode:?}, blocking_enqueue: {use_blocking_enqueue})"
+            );
+
+            loop {
+                match receiver.recv().await {
+                    Ok(arc_event) => {
+                        if use_blocking_enqueue {
+                            priority_queue.enqueue_wait(arc_event).await;
+                        } else {
+                            if !priority_queue.enqueue(arc_event).await {
+                                warn!(
+                                    "Query '{query_id}' priority queue at capacity, dropping future queue event"
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Query '{query_id}' FutureQueueSource receiver error: {e}");
+                        info!("Query '{query_id}' FutureQueueSource channel closed");
+                        break;
+                    }
+                }
+            }
+
+            debug!("Query '{query_id}' FutureQueueSource event forwarder exited");
+        });
+
+        // Add to subscription tasks for cleanup
+        self.subscription_tasks.write().await.push(task);
+
+        // Store the FutureQueueSource for cleanup
+        *self.future_queue_source.write().await = Some(future_queue_source);
 
         // Wrap continuous_query in Arc for sharing across tasks
         let continuous_query = Arc::new(continuous_query);
@@ -866,7 +952,6 @@ impl Query for DrasiQuery {
                 }
             }
 
-            continuous_query.terminate_future_consumer().await;
             info!("Query '{query_id}' processing task exited");
         });
 
@@ -882,6 +967,17 @@ impl Query for DrasiQuery {
         self.base
             .emit_status_event(ComponentStatus::Stopping, Some("Stopping query"))
             .await;
+
+        // Stop the FutureQueueSource if it exists
+        if let Some(future_queue_source) = self.future_queue_source.write().await.take() {
+            debug!("Query '{}' stopping FutureQueueSource", self.base.config.id);
+            if let Err(e) = future_queue_source.stop().await {
+                error!(
+                    "Query '{}' failed to stop FutureQueueSource: {}",
+                    self.base.config.id, e
+                );
+            }
+        }
 
         // Drain and abort source subscription forwarders so they don't leak across restarts
         let subscription_handles: Vec<_> = {
