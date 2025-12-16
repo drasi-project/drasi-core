@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Integration tests for the PostgreSQL Stored Procedure Reaction
+//! Tests for the PostgreSQL Stored Procedure Reaction
 //!
 //! These tests validate the end-to-end behavior of the PostgreSQL-specific
 //! stored procedure reaction using testcontainers to provide a real PostgreSQL database.
@@ -24,7 +24,7 @@ use drasi_reaction_storedproc_postgres::parser::ParameterParser;
 use drasi_reaction_storedproc_postgres::PostgresStoredProcReaction;
 use serde_json::json;
 use serial_test::serial;
-use shared_tests::postgres_helpers::{setup_postgres, PostgresConfig};
+use crate::postgres_helpers::{setup_postgres, PostgresConfig};
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -157,6 +157,266 @@ async fn get_log_count(config: &PostgresConfig) -> i64 {
 
     row.get(0)
 }
+
+// ============================================================================
+// Unit Tests for Config Module
+// ============================================================================
+
+#[test]
+fn test_config_default_values() {
+    let config = PostgresStoredProcReactionConfig::default();
+    
+    assert_eq!(config.hostname, "localhost");
+    assert_eq!(config.port, None);
+    assert_eq!(config.get_port(), 5432); // Default port
+    assert_eq!(config.user, "");
+    assert_eq!(config.password, "");
+    assert_eq!(config.database, "");
+    assert!(!config.ssl);
+    assert_eq!(config.added_command, None);
+    assert_eq!(config.updated_command, None);
+    assert_eq!(config.deleted_command, None);
+    assert_eq!(config.command_timeout_ms, 30000);
+    assert_eq!(config.retry_attempts, 3);
+}
+
+#[test]
+fn test_config_custom_port() {
+    let config = PostgresStoredProcReactionConfig {
+        port: Some(5433),
+        ..Default::default()
+    };
+    
+    assert_eq!(config.get_port(), 5433);
+}
+
+#[test]
+fn test_config_validation_no_commands() {
+    let config = PostgresStoredProcReactionConfig {
+        user: "testuser".to_string(),
+        database: "testdb".to_string(),
+        ..Default::default()
+    };
+    
+    let result = config.validate();
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("At least one command"));
+}
+
+#[test]
+fn test_config_validation_empty_user() {
+    let config = PostgresStoredProcReactionConfig {
+        user: "".to_string(),
+        database: "testdb".to_string(),
+        added_command: Some("CALL test()".to_string()),
+        ..Default::default()
+    };
+    
+    let result = config.validate();
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("user is required"));
+}
+
+#[test]
+fn test_config_validation_empty_database() {
+    let config = PostgresStoredProcReactionConfig {
+        user: "testuser".to_string(),
+        database: "".to_string(),
+        added_command: Some("CALL test()".to_string()),
+        ..Default::default()
+    };
+    
+    let result = config.validate();
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("Database name is required"));
+}
+
+#[test]
+fn test_config_validation_valid_with_added_command() {
+    let config = PostgresStoredProcReactionConfig {
+        user: "testuser".to_string(),
+        database: "testdb".to_string(),
+        added_command: Some("CALL add_item(@id)".to_string()),
+        ..Default::default()
+    };
+    
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn test_config_validation_valid_with_updated_command() {
+    let config = PostgresStoredProcReactionConfig {
+        user: "testuser".to_string(),
+        database: "testdb".to_string(),
+        updated_command: Some("CALL update_item(@id)".to_string()),
+        ..Default::default()
+    };
+    
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn test_config_validation_valid_with_deleted_command() {
+    let config = PostgresStoredProcReactionConfig {
+        user: "testuser".to_string(),
+        database: "testdb".to_string(),
+        deleted_command: Some("CALL delete_item(@id)".to_string()),
+        ..Default::default()
+    };
+    
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn test_config_validation_valid_with_all_commands() {
+    let config = PostgresStoredProcReactionConfig {
+        user: "testuser".to_string(),
+        database: "testdb".to_string(),
+        added_command: Some("CALL add_item(@id)".to_string()),
+        updated_command: Some("CALL update_item(@id)".to_string()),
+        deleted_command: Some("CALL delete_item(@id)".to_string()),
+        ..Default::default()
+    };
+    
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn test_config_serialization() {
+    let config = PostgresStoredProcReactionConfig {
+        hostname: "db.example.com".to_string(),
+        port: Some(5433),
+        user: "admin".to_string(),
+        password: "secret".to_string(),
+        database: "mydb".to_string(),
+        ssl: true,
+        added_command: Some("CALL add_user(@id, @name)".to_string()),
+        updated_command: Some("CALL update_user(@id, @name)".to_string()),
+        deleted_command: Some("CALL delete_user(@id)".to_string()),
+        command_timeout_ms: 10000,
+        retry_attempts: 5,
+    };
+    
+    let json = serde_json::to_string(&config).unwrap();
+    let deserialized: PostgresStoredProcReactionConfig = serde_json::from_str(&json).unwrap();
+    
+    assert_eq!(deserialized.hostname, "db.example.com");
+    assert_eq!(deserialized.port, Some(5433));
+    assert_eq!(deserialized.user, "admin");
+    assert_eq!(deserialized.password, "secret");
+    assert_eq!(deserialized.database, "mydb");
+    assert!(deserialized.ssl);
+    assert_eq!(deserialized.command_timeout_ms, 10000);
+    assert_eq!(deserialized.retry_attempts, 5);
+}
+
+#[test]
+fn test_config_deserialization_with_defaults() {
+    let json = r#"{
+        "user": "testuser",
+        "password": "testpass",
+        "database": "testdb",
+        "added_command": "CALL test()"
+    }"#;
+    
+    let config: PostgresStoredProcReactionConfig = serde_json::from_str(json).unwrap();
+    
+    assert_eq!(config.hostname, "localhost"); // default
+    assert_eq!(config.port, None);
+    assert_eq!(config.get_port(), 5432); // default port
+    assert!(!config.ssl); // default
+    assert_eq!(config.command_timeout_ms, 30000); // default
+    assert_eq!(config.retry_attempts, 3); // default
+}
+
+// ============================================================================
+// Unit Tests for Parser Module
+// ============================================================================
+
+#[test]
+fn test_parser_invalid_procedure_name_with_semicolon() {
+    let parser = ParameterParser::new();
+    let data = json!({"id": 1});
+    
+    // Parser should extract the procedure name but executor will handle injection
+    let result = parser.parse_command("CALL test(); DROP TABLE users;--", &data);
+    assert!(result.is_ok());
+    let (proc_name, _) = result.unwrap();
+    assert_eq!(proc_name, "test"); // Stops at first parenthesis
+}
+
+#[test]
+fn test_parser_parameter_with_underscores() {
+    let parser = ParameterParser::new();
+    let command = "CALL test(@user_id, @user_name)";
+    let data = json!({"user_id": 42, "user_name": "Alice"});
+    
+    let (_, params) = parser.parse_command(command, &data).unwrap();
+    assert_eq!(params.len(), 2);
+    assert_eq!(params[0], json!(42));
+    assert_eq!(params[1], json!("Alice"));
+}
+
+#[test]
+fn test_parser_large_numbers() {
+    let parser = ParameterParser::new();
+    let command = "CALL test(@big_int, @big_float)";
+    let data = json!({
+        "big_int": 9223372036854775807i64,
+        "big_float": 1.7976931348623157e308
+    });
+    
+    let (_, params) = parser.parse_command(command, &data).unwrap();
+    assert_eq!(params[0], json!(9223372036854775807i64));
+    assert_eq!(params[1], json!(1.7976931348623157e308));
+}
+
+#[test]
+fn test_parser_empty_strings() {
+    let parser = ParameterParser::new();
+    let command = "CALL test(@name, @description)";
+    let data = json!({"name": "", "description": ""});
+    
+    let (_, params) = parser.parse_command(command, &data).unwrap();
+    assert_eq!(params[0], json!(""));
+    assert_eq!(params[1], json!(""));
+}
+
+#[test]
+fn test_parser_mixed_case_field_names() {
+    let parser = ParameterParser::new();
+    let command = "CALL test(@userId, @UserName, @USER_EMAIL)";
+    let data = json!({
+        "userId": 1,
+        "UserName": "Alice",
+        "USER_EMAIL": "alice@example.com"
+    });
+    
+    let (_, params) = parser.parse_command(command, &data).unwrap();
+    assert_eq!(params.len(), 3);
+}
+
+#[test]
+fn test_parser_nested_array_field() {
+    let parser = ParameterParser::new();
+    let command = "CALL test(@items)";
+    let data = json!({
+        "items": [
+            {"id": 1, "name": "Item 1"},
+            {"id": 2, "name": "Item 2"}
+        ]
+    });
+    
+    let (_, params) = parser.parse_command(command, &data).unwrap();
+    assert_eq!(params[0], json!([
+        {"id": 1, "name": "Item 1"},
+        {"id": 2, "name": "Item 2"}
+    ]));
+}
+
+// ============================================================================
+// Integration Tests with PostgreSQL
+// ============================================================================
 
 #[tokio::test]
 async fn test_postgres_config_validation() {
