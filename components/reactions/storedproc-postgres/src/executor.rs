@@ -165,7 +165,11 @@ impl PostgresExecutor {
 
         for attempt in 0..=self.retry_attempts {
             if attempt > 0 {
-                let backoff = Duration::from_millis(100 * 2u64.pow(attempt - 1));
+                // Use saturating_pow and saturating_mul to prevent overflow, and cap the backoff to 30 seconds.
+                let max_backoff = Duration::from_secs(30);
+                let exp = (attempt - 1) as u32;
+                let backoff_millis = 100u64.saturating_mul(2u64.saturating_pow(exp));
+                let backoff = Duration::from_millis(backoff_millis).min(max_backoff);
                 debug!("Retrying after {:?} (attempt {})", backoff, attempt);
                 tokio::time::sleep(backoff).await;
             }
