@@ -587,6 +587,76 @@ async fn test_postgres_executor_with_unicode() {
 }
 
 #[tokio::test]
+#[serial]
+async fn test_postgres_reaction_lifecycle() {
+    env_logger::builder()
+        .is_test(true)
+        .filter_level(log::LevelFilter::Debug)
+        .try_init()
+        .ok();
+
+    let pg = setup_postgres().await;
+    let pg_config = pg.config();
+    setup_stored_procedures(pg_config).await;
+
+    // Create the PostgreSQL stored procedure reaction
+    let reaction = PostgresStoredProcReaction::builder("postgres-reaction")
+        .with_hostname(&pg_config.host)
+        .with_port(pg_config.port)
+        .with_database(&pg_config.database)
+        .with_user(&pg_config.user)
+        .with_password(&pg_config.password)
+        .with_ssl(false)
+        .with_added_command("CALL log_sensor_added(@sensor_id, @temperature)")
+        .with_updated_command("CALL log_sensor_updated(@sensor_id, @temperature)")
+        .with_deleted_command("CALL log_sensor_deleted(@sensor_id)")
+        .with_query("sensor-query")
+        .with_auto_start(false) // Don't auto-start for this test
+        .build()
+        .await
+        .expect("Should create reaction");
+
+    // Verify reaction properties
+    assert_eq!(reaction.id(), "postgres-reaction");
+    assert_eq!(reaction.type_name(), "storedproc-postgres");
+    assert_eq!(reaction.query_ids(), vec!["sensor-query"]);
+    assert!(!reaction.auto_start(), "Should not auto-start");
+
+    // Verify initial status
+    let status = reaction.status().await;
+    assert_eq!(
+        status,
+        drasi_lib::channels::ComponentStatus::Stopped,
+        "Reaction should start in Stopped status"
+    );
+
+    // Verify properties can be retrieved
+    let properties = reaction.properties();
+    assert_eq!(
+        properties.get("hostname").and_then(|v| v.as_str()),
+        Some(pg_config.host.as_str()),
+        "Hostname should match"
+    );
+    assert_eq!(
+        properties.get("database").and_then(|v| v.as_str()),
+        Some("PostgreSQL"),
+        "Database type should be PostgreSQL"
+    );
+    assert_eq!(
+        properties.get("database_name").and_then(|v| v.as_str()),
+        Some(pg_config.database.as_str()),
+        "Database name should match"
+    );
+    assert_eq!(
+        properties.get("ssl").and_then(|v| v.as_bool()),
+        Some(false),
+        "SSL should be false"
+    );
+
+    pg.cleanup().await;
+}
+
+#[tokio::test]
 async fn test_postgres_executor_retry_on_failure() {
     env_logger::builder()
         .is_test(true)
