@@ -92,8 +92,7 @@ impl FutureQueueSource {
 
         let handle = tokio::spawn(async move {
             debug!(
-                "FutureQueueSource polling task started for query '{}'",
-                query_id
+                "FutureQueueSource polling task started for query '{query_id}'"
             );
 
             loop {
@@ -102,8 +101,7 @@ impl FutureQueueSource {
                     let status = status_clone.read().await;
                     if *status != FutureQueueSourceStatus::Running {
                         info!(
-                            "FutureQueueSource polling task stopping for query '{}'",
-                            query_id
+                            "FutureQueueSource polling task stopping for query '{query_id}'"
                         );
                         break;
                     }
@@ -119,8 +117,7 @@ impl FutureQueueSource {
                     }
                     Err(e) => {
                         error!(
-                            "FutureQueueSource failed to peek due time for query '{}': {}",
-                            query_id, e
+                            "FutureQueueSource failed to peek due time for query '{query_id}': {e}"
                         );
                         sleep(Duration::from_secs(1)).await;
                         continue;
@@ -146,8 +143,7 @@ impl FutureQueueSource {
                     }
                     Err(e) => {
                         error!(
-                            "FutureQueueSource failed to pop from queue for query '{}': {}",
-                            query_id, e
+                            "FutureQueueSource failed to pop from queue for query '{query_id}': {e}"
                         );
                         sleep(Duration::from_secs(1)).await;
                         continue;
@@ -193,22 +189,19 @@ impl FutureQueueSource {
                 if let Some(dispatcher) = dispatcher_guard.as_ref() {
                     if let Err(e) = dispatcher.dispatch_change(Arc::new(event_wrapper)).await {
                         debug!(
-                            "FutureQueueSource failed to dispatch event for query '{}': {}",
-                            query_id, e
+                            "FutureQueueSource failed to dispatch event for query '{query_id}': {e}"
                         );
                     }
                 } else {
                     warn!(
-                        "FutureQueueSource: No dispatcher available for query '{}'",
-                        query_id
+                        "FutureQueueSource: No dispatcher available for query '{query_id}'"
                     );
                     break;
                 }
             }
 
             debug!(
-                "FutureQueueSource polling task exited for query '{}'",
-                query_id
+                "FutureQueueSource polling task exited for query '{query_id}'"
             );
         });
 
@@ -496,8 +489,7 @@ mod tests {
         // Should have waited at least 400ms (with some tolerance)
         assert!(
             elapsed >= Duration::from_millis(400),
-            "Expected to wait at least 400ms, but only waited {:?}",
-            elapsed
+            "Expected to wait at least 400ms, but only waited {elapsed:?}"
         );
 
         // Verify the event
