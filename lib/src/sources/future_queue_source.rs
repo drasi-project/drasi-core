@@ -91,18 +91,14 @@ impl FutureQueueSource {
         let dispatcher_clone = self.dispatcher.clone();
 
         let handle = tokio::spawn(async move {
-            debug!(
-                "FutureQueueSource polling task started for query '{query_id}'"
-            );
+            debug!("FutureQueueSource polling task started for query '{query_id}'");
 
             loop {
                 // Check if we should stop
                 {
                     let status = status_clone.read().await;
                     if *status != FutureQueueSourceStatus::Running {
-                        info!(
-                            "FutureQueueSource polling task stopping for query '{query_id}'"
-                        );
+                        info!("FutureQueueSource polling task stopping for query '{query_id}'");
                         break;
                     }
                 }
@@ -193,16 +189,12 @@ impl FutureQueueSource {
                         );
                     }
                 } else {
-                    warn!(
-                        "FutureQueueSource: No dispatcher available for query '{query_id}'"
-                    );
+                    warn!("FutureQueueSource: No dispatcher available for query '{query_id}'");
                     break;
                 }
             }
 
-            debug!(
-                "FutureQueueSource polling task exited for query '{query_id}'"
-            );
+            debug!("FutureQueueSource polling task exited for query '{query_id}'");
         });
 
         *self.task_handle.write().await = Some(handle);
