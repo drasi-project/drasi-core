@@ -337,7 +337,7 @@ impl Query for DrasiQuery {
 
         // NEW: Subscribe to each source sequentially
         // Also includes FutureQueueSource for temporal query support
-        
+
         // Set up FutureQueueSource for temporal query support
         // This creates a virtual source that polls the future queue and emits due elements
         // as source events, integrating temporal queries into the standard source subscription
@@ -387,7 +387,7 @@ impl Query for DrasiQuery {
 
         // Build list of sources to subscribe to (regular sources + FutureQueueSource)
         let mut sources_to_subscribe: Vec<(Arc<dyn Source>, String)> = Vec::new();
-        
+
         // Add regular sources from SourceManager
         for subscription in &self.base.config.sources {
             let source_id = &subscription.source_id;
@@ -410,7 +410,7 @@ impl Query for DrasiQuery {
                 }
             }
         }
-        
+
         // Add FutureQueueSource
         sources_to_subscribe.push((
             future_queue_source as Arc<dyn Source>,

@@ -78,8 +78,7 @@ impl FutureQueueSource {
         info!("Starting FutureQueueSource for query '{}'", self.query_id);
 
         // Create dispatcher internally
-        let dispatcher =
-            crate::channels::ChannelChangeDispatcher::<SourceEventWrapper>::new(1000);
+        let dispatcher = crate::channels::ChannelChangeDispatcher::<SourceEventWrapper>::new(1000);
         *self.dispatcher.write().await = Some(Box::new(dispatcher));
 
         *status = FutureQueueSourceStatus::Running;
@@ -255,7 +254,7 @@ impl FutureQueueSource {
     }
 
     /// Subscribe to future queue events (for query consumption)
-    /// 
+    ///
     /// # Arguments
     /// * `query_id` - ID of the subscribing query (unused, kept for API compatibility)
     /// * `enable_bootstrap` - Whether to request initial data (unused, FutureQueueSource doesn't support bootstrap)
@@ -267,10 +266,8 @@ impl FutureQueueSource {
         _enable_bootstrap: bool,
         _node_labels: Vec<String>,
         _relation_labels: Vec<String>,
-    ) -> Result<
-        crate::channels::SubscriptionResponse,
-        Box<dyn std::error::Error + Send + Sync>,
-    > {
+    ) -> Result<crate::channels::SubscriptionResponse, Box<dyn std::error::Error + Send + Sync>>
+    {
         let status = self.status.read().await;
         if *status != FutureQueueSourceStatus::Running {
             return Err("FutureQueueSource is not running".into());
@@ -372,7 +369,6 @@ impl crate::plugin_core::Source for FutureQueueSource {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,7 +379,7 @@ mod tests {
     #[tokio::test]
     async fn test_future_queue_source_lifecycle() {
         use crate::plugin_core::Source;
-        
+
         let future_queue = Arc::new(InMemoryFutureQueue::new());
         let source = FutureQueueSource::new(future_queue, "test-query".to_string());
 
@@ -411,7 +407,7 @@ mod tests {
     #[tokio::test]
     async fn test_future_queue_source_emits_events() {
         use crate::plugin_core::Source;
-        
+
         let future_queue = Arc::new(InMemoryFutureQueue::new());
         let source = FutureQueueSource::new(future_queue.clone(), "test-query".to_string());
 
@@ -434,14 +430,12 @@ mod tests {
 
         // Start the source
         source.start().await.unwrap();
-        
+
         // Subscribe to get events
-        let response = source.subscribe(
-            "test-query".to_string(),
-            false,
-            vec![],
-            vec![]
-        ).await.unwrap();
+        let response = source
+            .subscribe("test-query".to_string(), false, vec![], vec![])
+            .await
+            .unwrap();
         let mut receiver = response.receiver;
 
         // Wait for the event
@@ -465,7 +459,7 @@ mod tests {
     #[tokio::test]
     async fn test_future_queue_source_waits_for_due_time() {
         use crate::plugin_core::Source;
-        
+
         let future_queue = Arc::new(InMemoryFutureQueue::new());
         let source = FutureQueueSource::new(future_queue.clone(), "test-query".to_string());
 
@@ -483,14 +477,12 @@ mod tests {
 
         // Start the source
         source.start().await.unwrap();
-        
+
         // Subscribe to get events
-        let response = source.subscribe(
-            "test-query".to_string(),
-            false,
-            vec![],
-            vec![]
-        ).await.unwrap();
+        let response = source
+            .subscribe("test-query".to_string(), false, vec![], vec![])
+            .await
+            .unwrap();
         let mut receiver = response.receiver;
 
         // Wait for the event
@@ -517,7 +509,7 @@ mod tests {
     #[tokio::test]
     async fn test_future_queue_source_preserves_source_id() {
         use crate::plugin_core::Source;
-        
+
         let future_queue = Arc::new(InMemoryFutureQueue::new());
         let source = FutureQueueSource::new(future_queue.clone(), "test-query".to_string());
 
@@ -536,14 +528,12 @@ mod tests {
 
         // Start the source
         source.start().await.unwrap();
-        
+
         // Subscribe to get events
-        let response = source.subscribe(
-            "test-query".to_string(),
-            false,
-            vec![],
-            vec![]
-        ).await.unwrap();
+        let response = source
+            .subscribe("test-query".to_string(), false, vec![], vec![])
+            .await
+            .unwrap();
         let mut receiver = response.receiver;
 
         // Collect events
