@@ -7,6 +7,23 @@ If you wish to build a specific component, simply run `cargo build` from the fol
 
 Clippy is Rust's linter that helps catch common mistakes and improve code quality. The CI workflow runs clippy with specific flags to ensure code quality. You can run clippy locally with the same configuration as CI.
 
+### Prerequisites
+
+Some crates require the `jq` library. On Ubuntu/Debian:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y jq libjq-dev
+export JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu
+```
+
+For the best compatibility with CI, use Rust 1.83.0:
+
+```bash
+rustup update 1.83.0 && rustup default 1.83.0
+rustup component add clippy
+```
+
 ### Running clippy on all crates
 
 To run clippy on all workspace members at once (as CI does):
