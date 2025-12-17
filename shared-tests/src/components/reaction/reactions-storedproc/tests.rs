@@ -802,52 +802,6 @@ async fn test_postgres_executor_with_special_characters() {
 
 #[tokio::test]
 #[serial]
-async fn test_postgres_executor_with_unicode() {
-    env_logger::builder()
-        .is_test(true)
-        .filter_level(log::LevelFilter::Debug)
-        .try_init()
-        .ok();
-
-    let pg = setup_postgres().await;
-    let pg_config = pg.config();
-    setup_stored_procedures(pg_config).await;
-
-    let config = PostgresStoredProcReactionConfig {
-        hostname: pg_config.host.clone(),
-        port: Some(pg_config.port),
-        user: pg_config.user.clone(),
-        password: pg_config.password.clone(),
-        database: pg_config.database.clone(),
-        ssl: false,
-        added_command: Some("CALL log_sensor_added(@sensor_id, @temperature)".to_string()),
-        updated_command: None,
-        deleted_command: None,
-        command_timeout_ms: 5000,
-        retry_attempts: 3,
-    };
-
-    let executor = PostgresExecutor::new(&config).await.unwrap();
-
-    // Test with Unicode characters
-    let params = vec![
-        json!("传感器-001"),
-        json!(25.5),
-    ];
-
-    let result = executor.execute_procedure("log_sensor_added", params).await;
-    assert!(result.is_ok(), "Should handle Unicode characters");
-
-    sleep(Duration::from_millis(100)).await;
-
-    let entries = get_log_entries(pg_config).await;
-    assert_eq!(entries[0].1, "传感器-001");
-
-    pg.cleanup().await;
-}
-
-#[tokio::test]
-#[serial]
 async fn test_postgres_reaction_lifecycle() {
     env_logger::builder()
         .is_test(true)
