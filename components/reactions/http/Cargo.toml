@@ -1,0 +1,42 @@
+# Copyright 2025 The Drasi Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[package]
+name = "drasi-reaction-http"
+version = "0.2.0"
+edition = "2021"
+authors = ["Drasi Project"]
+description = "HTTP reaction plugin for Drasi"
+license = "Apache-2.0"
+repository = "https://github.com/drasi-project/drasi-core"
+keywords = ["drasi", "plugin", "reaction", "http"]
+categories = ["network-programming"]
+
+[dependencies]
+drasi-lib = { path = "../../../lib" }
+drasi-core = { path = "../../../core" }
+anyhow = "1.0"
+async-trait = "0.1"
+log = "0.4"
+handlebars = "5.1"
+reqwest = { version = "0.11", features = ["json", "stream"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+futures = "0.3"
+chrono = "0.4"
+uuid = { version = "1.0", features = ["v4"] }
+tokio-stream = "0.1"
+prost-types = "0.12"
+ordered-float = "3.0"
