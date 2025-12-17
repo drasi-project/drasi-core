@@ -179,7 +179,7 @@ fn test_template_spec_creation() {
         template: r#"{"message": "test"}"#.to_string(),
     };
 
-    assert_eq!(spec.endpoint, Some("/custom/path".to_string()));
+    assert_eq!(spec.path, Some("/custom/path".to_string()));
     assert_eq!(spec.template, r#"{"message": "test"}"#);
 }
 
