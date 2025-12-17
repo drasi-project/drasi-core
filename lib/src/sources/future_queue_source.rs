@@ -266,9 +266,10 @@ impl FutureQueueSource {
 
         let receiver = dispatcher.create_receiver().await.map_err(
             |e| -> Box<dyn std::error::Error + Send + Sync> {
+                // Preserve the original error and add context
                 Box::new(std::io::Error::new(
                     std::io::ErrorKind::Other,
-                    e.to_string(),
+                    format!("Failed to create receiver for future queue subscription: {}", e)
                 ))
             },
         )?;
