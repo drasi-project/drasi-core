@@ -86,7 +86,7 @@ impl Default for PostgresStoredProcReactionConfig {
 }
 
 fn default_hostname() -> String {
-    "localhost".to_string()
+    "localhost".to_string() // DevSkim: ignore DS137138
 }
 
 fn default_timeout_ms() -> u64 {
