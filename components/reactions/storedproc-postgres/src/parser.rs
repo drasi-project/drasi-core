@@ -68,29 +68,27 @@ impl ParameterParser {
     fn extract_procedure_name(&self, command: &str) -> Result<String> {
         let trimmed = command.trim();
         let upper = trimmed.to_uppercase();
-        let name_part = if upper.starts_with("CALL ") {
-            &trimmed[5..] // Skip "CALL " (case-insensitive)
-        } else if upper.starts_with("EXEC ") {
-            &trimmed[5..] // Skip "EXEC " (case-insensitive)
+        let name_part = if upper.starts_with("CALL ") || upper.starts_with("EXEC ") {
+            &trimmed[5..] // Skip "CALL " or "EXEC " (case-insensitive)
         } else {
             trimmed
         };
 
         // Validate that parentheses exist
         if !name_part.contains('(') {
-            anyhow::bail!("Invalid procedure format: {}", command);
+            anyhow::bail!("Invalid procedure format: {command}");
         }
 
         // Extract everything before the first parenthesis
         let name = name_part
             .split('(')
             .next()
-            .ok_or_else(|| anyhow!("Invalid procedure format: {}", command))?
+            .ok_or_else(|| anyhow!("Invalid procedure format: {command}"))?
             .trim()
             .to_string();
 
         if name.is_empty() {
-            anyhow::bail!("Procedure name is empty in command: {}", command);
+            anyhow::bail!("Procedure name is empty in command: {command}");
         }
 
         Ok(name)
@@ -120,7 +118,7 @@ impl ParameterParser {
         for part in parts {
             current = current
                 .get(part)
-                .ok_or_else(|| anyhow!("Field '{}' not found in query result", field_name))?;
+                .ok_or_else(|| anyhow!("Field '{field_name}' not found in query result"))?;
         }
 
         Ok(current.clone())

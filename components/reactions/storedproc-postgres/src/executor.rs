@@ -53,12 +53,12 @@ impl PostgresExecutor {
         // Connect to database
         let (client, connection) = tokio_postgres::connect(&connection_string, NoTls)
             .await
-            .map_err(|e| anyhow!("Failed to connect to database: {}", e))?;
+            .map_err(|e| anyhow!("Failed to connect to database: {e}"))?;
 
         // Spawn connection handler
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                log::error!("PostgreSQL connection error: {}", e);
+                log::error!("PostgreSQL connection error: {e}");
             }
         });
 
@@ -81,7 +81,7 @@ impl PostgresExecutor {
         timeout(self.command_timeout, client.simple_query("SELECT 1"))
             .await
             .map_err(|_| anyhow!("Connection test timed out"))?
-            .map_err(|e| anyhow!("Connection test failed: {}", e))?;
+            .map_err(|e| anyhow!("Connection test failed: {e}"))?;
 
         info!("Database connection test successful");
         Ok(())
@@ -104,10 +104,10 @@ impl PostgresExecutor {
             // Build the CALL statement
             // For tokio-postgres, we need to use parameterized queries with $1, $2, etc.
             let param_placeholders: Vec<String> =
-                (1..=params.len()).map(|i| format!("${}", i)).collect();
+                (1..=params.len()).map(|i| format!("${i}")).collect();
 
             let query = if param_placeholders.is_empty() {
-                format!("CALL {}()", proc_name)
+                format!("CALL {proc_name}()")
             } else {
                 format!("CALL {}({})", proc_name, param_placeholders.join(", "))
             };
@@ -146,10 +146,10 @@ impl PostgresExecutor {
             // Execute the stored procedure
             let result = timeout(cmd_timeout, client.execute(&query, &param_refs[..]))
                 .await
-                .map_err(|_| anyhow!("Procedure execution timed out after {:?}", cmd_timeout))?
-                .map_err(|e| anyhow!("Failed to execute procedure: {}", e))?;
+                .map_err(|_| anyhow!("Procedure execution timed out after {cmd_timeout:?}"))?
+                .map_err(|e| anyhow!("Failed to execute procedure: {e}"))?;
 
-            debug!("Procedure executed successfully, rows affected: {}", result);
+            debug!("Procedure executed successfully, rows affected: {result}");
             Ok(())
         })
         .await
@@ -170,7 +170,7 @@ impl PostgresExecutor {
                 let exp = (attempt - 1) as u32;
                 let backoff_millis = 100u64.saturating_mul(2u64.saturating_pow(exp));
                 let backoff = Duration::from_millis(backoff_millis).min(max_backoff);
-                debug!("Retrying after {:?} (attempt {})", backoff, attempt);
+                debug!("Retrying after {backoff:?} (attempt {attempt})");
                 tokio::time::sleep(backoff).await;
             }
 
