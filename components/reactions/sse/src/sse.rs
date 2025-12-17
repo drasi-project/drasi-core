@@ -121,13 +121,17 @@ impl SseReaction {
         base_sse_path: &str,
         handlebars: &Handlebars,
         context: &Map<String, Value>,
+        reaction_id: &str,
     ) -> String {
         if let Some(custom_path) = custom_path {
             // Render the path template if it contains variables
             let rendered_path = if custom_path.contains("{{") {
                 handlebars
                     .render_template(custom_path, context)
-                    .unwrap_or_else(|_| custom_path.clone())
+                    .unwrap_or_else(|e| {
+                        error!("[{reaction_id}] Failed to render path template '{}': {}. Using template as-is.", custom_path, e);
+                        custom_path.clone()
+                    })
             } else {
                 custom_path.clone()
             };
@@ -350,6 +354,7 @@ impl Reaction for SseReaction {
                                     &base_sse_path,
                                     &handlebars,
                                     &context,
+                                    &reaction_id,
                                 );
 
                                 // Render template if provided
@@ -379,14 +384,24 @@ impl Reaction for SseReaction {
                                     .to_string()
                                 };
 
-                                // Get or create broadcaster for this path
+                                // Get or create broadcaster for this path (double-checked locking)
                                 let broadcaster = {
-                                    let mut broadcasters_write = broadcasters.write().await;
-                                    broadcasters_write.entry(sse_path.clone()).or_insert_with(|| {
-                                        let (tx, _rx) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
-                                        debug!("[{reaction_id}] Created broadcaster for path: {sse_path}");
-                                        tx
-                                    }).clone()
+                                    // Try read lock first (common case)
+                                    {
+                                        let broadcasters_read = broadcasters.read().await;
+                                        if let Some(broadcaster) = broadcasters_read.get(&sse_path) {
+                                            broadcaster.clone()
+                                        } else {
+                                            drop(broadcasters_read);
+                                            // Need to create broadcaster, acquire write lock
+                                            let mut broadcasters_write = broadcasters.write().await;
+                                            broadcasters_write.entry(sse_path.clone()).or_insert_with(|| {
+                                                let (tx, _rx) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
+                                                debug!("[{reaction_id}] Created broadcaster for path: {sse_path}");
+                                                tx
+                                            }).clone()
+                                        }
+                                    }
                                 };
 
                                 match broadcaster.send(payload.clone()) {
