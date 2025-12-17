@@ -11,6 +11,9 @@ readme = "../readme.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[lints]
+workspace = true
+
 [dependencies]
 serde = "1.0.164"
 serde_json = "1.0.96"

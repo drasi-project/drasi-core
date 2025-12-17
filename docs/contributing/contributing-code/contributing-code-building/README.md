@@ -5,7 +5,7 @@ If you wish to build a specific component, simply run `cargo build` from the fol
 
 ## Running Clippy
 
-Clippy is Rust's linter that helps catch common mistakes and improve code quality. The CI workflow runs clippy with specific flags to ensure code quality. You can run clippy locally with the same configuration as CI.
+Clippy is Rust's linter that helps catch common mistakes and improve code quality. The repository is configured with workspace-level clippy lints in `Cargo.toml`, so all crates automatically use the same configuration as CI.
 
 ### Prerequisites
 
@@ -29,71 +29,69 @@ rustup component add clippy
 To run clippy on all workspace members at once (as CI does):
 
 ```bash
+# From repository root
+cargo clippy --all-targets --all-features
+```
+
+Or use the Makefile shorthand:
+
+```bash
 make clippy
 ```
 
 ### Running clippy on a specific crate
 
-To get the same results as CI for a specific crate, you have two options:
-
-**Option 1: Using the shell script**
+To run clippy on a specific crate, navigate to the crate directory:
 
 ```bash
-./clippy-crate.sh <crate-name>
+# Navigate to the crate directory
+cd core
+cargo clippy --all-targets --all-features
+
+# To automatically fix issues where possible
+cargo clippy --fix --all-targets --all-features
 ```
 
-Example:
-```bash
-./clippy-crate.sh core
-./clippy-crate.sh query-cypher
-```
-
-**Option 2: Using make**
-
-```bash
-make clippy-crate CRATE=<crate-name>
-```
-
-Example:
-```bash
-make clippy-crate CRATE=core
-make clippy-crate CRATE=query-cypher
-```
-
-### Running clippy on all crates individually
-
-To run clippy on each workspace member one at a time:
+Example for different crates:
 
 ```bash
-make clippy-all-crates
+cd query-ast && cargo clippy
+cd ../core && cargo clippy --fix
+cd ../query-cypher && cargo clippy --all-targets
 ```
-
-This is useful for identifying which specific crate has clippy warnings, as the output will be organized by crate.
 
 ### Available crates
 
-- `core`
-- `query-ast`
-- `query-cypher`
-- `query-gql`
-- `functions-cypher`
-- `functions-gql`
-- `index-rocksdb`
-- `index-garnet`
-- `middleware`
-- `shared-tests`
-- `query-perf`
-- `examples`
+- `core` - Core continuous query engine
+- `query-ast` - Abstract Syntax Tree definitions
+- `query-cypher` - Cypher query parser
+- `query-gql` - GQL query parser
+- `functions-cypher` - Cypher function implementations
+- `functions-gql` - GQL function implementations
+- `index-rocksdb` - RocksDB index implementation
+- `index-garnet` - Garnet index implementation
+- `middleware` - Middleware components
+- `shared-tests` - Shared test utilities
+- `query-perf` - Performance testing
+- `examples` - Usage examples
 
 ### Clippy configuration
 
-The clippy configuration matches the CI workflow and includes:
-- Warnings treated as errors (`-Dwarnings`)
-- Warning on use of `print!` and `println!` (`-W clippy::print_stdout`)
-- Warning on use of `.unwrap()` (`-W clippy::unwrap_used`)
-- Allowing unused code (`-A unused`)
-- Allowing module inception (`-A clippy::module_inception`)
-- Allowing pointer arguments (`-A clippy::ptr_arg`)
-- Allowing type complexity (`-A clippy::type_complexity`)
+The clippy configuration is defined in the workspace `Cargo.toml` and automatically inherited by all crates:
 
-Additional configuration is in `clippy.toml` at the repository root.
+```toml
+[workspace.lints.rust]
+warnings = "deny"       # Treat all warnings as errors
+unused = "allow"        # Allow unused code
+
+[workspace.lints.clippy]
+print_stdout = "warn"       # Warn on print!/println! usage
+unwrap_used = "warn"        # Warn on .unwrap() usage
+module_inception = "allow"  # Allow module inception
+ptr_arg = "allow"           # Allow pointer arguments
+type_complexity = "allow"   # Allow complex types
+```
+
+Additional clippy configuration is in `clippy.toml` at the repository root:
+- `allow-print-in-tests = true` - Allows print statements in tests
+- `allow-unwrap-in-tests = true` - Allows unwrap in tests

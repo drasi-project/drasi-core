@@ -160,19 +160,17 @@ The drasi-core library is one component of an early release of Drasi which enabl
 
 ### Running Clippy
 
-To ensure code quality, the project uses clippy with specific configuration matching CI. You can run clippy locally:
+The repository uses workspace-level clippy configuration, so you can run clippy from any crate directory with the same settings as CI:
 
 ```bash
-# Run clippy on all crates (as CI does)
-make clippy
+# From repository root - run on all crates
+cargo clippy --all-targets --all-features
 
-# Run clippy on a specific crate
-./clippy-crate.sh core
-# or
-make clippy-crate CRATE=core
+# From a specific crate directory
+cd core && cargo clippy
 
-# Run clippy on all crates individually (to see per-crate results)
-make clippy-all-crates
+# Auto-fix issues where possible
+cd query-ast && cargo clippy --fix
 ```
 
 See [Building the code](./docs/contributing/contributing-code/contributing-code-building/README.md) for more details.

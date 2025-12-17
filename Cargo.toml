@@ -20,6 +20,17 @@ members = [
 [workspace.package]
 version = "0.2.0"
 
+[workspace.lints.rust]
+warnings = "deny"
+unused = "allow"
+
+[workspace.lints.clippy]
+print_stdout = "warn"
+unwrap_used = "warn"
+module_inception = "allow"
+ptr_arg = "allow"
+type_complexity = "allow"
+
 [profile.release]
 codegen-units = 1
 lto = true
