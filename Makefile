@@ -47,5 +47,5 @@ clippy-all-crates:
 	done
 	@echo ""
 	@echo "==========================================="; \
-	echo "All crates passed clippy checks!"; \
-	echo "==========================================="
+	@echo "All crates passed clippy checks!"; \
+	@echo "==========================================="
