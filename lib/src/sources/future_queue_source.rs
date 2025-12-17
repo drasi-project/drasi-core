@@ -160,14 +160,21 @@ impl FutureQueueSource {
                 let source_id = future_ref.element_ref.source_id.to_string();
 
                 // Convert due_time to DateTime
-                let timestamp = match DateTime::from_timestamp_millis(
-                    future_ref.due_time.try_into().unwrap_or(0),
-                ) {
-                    Some(dt) => dt,
-                    None => {
+                let timestamp = match future_ref.due_time.try_into() {
+                    Ok(millis) => match DateTime::from_timestamp_millis(millis) {
+                        Some(dt) => dt,
+                        None => {
+                            warn!(
+                                "FutureQueueSource: Due time {} for element {} is out of range, using current time",
+                                future_ref.due_time, future_ref.element_ref
+                            );
+                            chrono::Utc::now()
+                        }
+                    },
+                    Err(e) => {
                         warn!(
-                            "FutureQueueSource: Due time {} for element {} is out of range, using current time",
-                            future_ref.due_time, future_ref.element_ref
+                            "FutureQueueSource: Failed to convert due_time {} for element {}: {}, using current time",
+                            future_ref.due_time, future_ref.element_ref, e
                         );
                         chrono::Utc::now()
                     }
