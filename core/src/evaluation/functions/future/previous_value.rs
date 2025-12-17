@@ -24,7 +24,6 @@ use crate::evaluation::ExpressionEvaluationContext;
 use crate::evaluation::ExpressionEvaluator;
 use crate::evaluation::{FunctionError, FunctionEvaluationError};
 use crate::interface::ResultIndex;
-use crate::interface::ResultKey;
 use crate::interface::ResultOwner;
 use crate::models::ElementValue;
 use async_trait::async_trait;
@@ -78,7 +77,6 @@ impl ScalarFunction for PreviousValue {
                 expected: "ElementValue".to_string(),
             },
         })?;
-        let group_signature = context.get_input_grouping_hash();
 
         let expression_evaluator = match self.expression_evaluator.upgrade() {
             Some(evaluator) => evaluator,
@@ -90,30 +88,17 @@ impl ScalarFunction for PreviousValue {
             }
         };
 
-        let result_key = match context.get_output_grouping_key() {
-            Some(group_expressions) => {
-                let mut grouping_vals = Vec::new();
-                for group_expression in group_expressions {
-                    grouping_vals.push(
-                        match expression_evaluator
-                            .evaluate_expression(context, group_expression)
-                            .await
-                        {
-                            Ok(val) => val,
-                            Err(_e) => {
-                                return Err(FunctionError {
-                                    function_name: expression.name.to_string(),
-                                    error: FunctionEvaluationError::InvalidType {
-                                        expected: "VariableValue".to_string(),
-                                    },
-                                })
-                            }
-                        },
-                    );
-                }
-                ResultKey::GroupBy(Arc::new(grouping_vals))
+        let result_key = match expression_evaluator
+            .resolve_context_result_key(context)
+            .await
+        {
+            Ok(key) => key,
+            Err(e) => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::EvaluationError(Box::new(e)),
+                })
             }
-            None => ResultKey::InputHash(group_signature),
         };
 
         let current_value: ElementValue = value.try_into().map_err(|_e| FunctionError {

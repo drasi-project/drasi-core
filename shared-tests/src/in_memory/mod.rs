@@ -501,3 +501,26 @@ mod prev_unique {
         prev_distinct::prev_unique_with_match(&test_config).await;
     }
 }
+
+mod future_aggregations {
+    use super::InMemoryQueryConfig;
+    use crate::use_cases::*;
+
+    #[tokio::test]
+    async fn truefor_sum() {
+        let test_config = InMemoryQueryConfig::new();
+        future_aggregations::truefor_sum(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn truefor_grouped_sum() {
+        let test_config = InMemoryQueryConfig::new();
+        future_aggregations::truefor_grouped_sum(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn truelater_max() {
+        let test_config = InMemoryQueryConfig::new();
+        future_aggregations::truelater_max(&test_config).await;
+    }
+}
