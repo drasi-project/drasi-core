@@ -156,6 +156,27 @@ Drasi maintains internal indexes that are used to compute the effect of a data c
 The drasi-core library is one component of an early release of Drasi which enables the community to learn about and experiment with the platform. Please let us know what you think and open Issues when you find bugs or want to request a new feature. Drasi is not yet ready for production workloads.
 
 
+## Development
+
+### Running Clippy
+
+To ensure code quality, the project uses clippy with specific configuration matching CI. You can run clippy locally:
+
+```bash
+# Run clippy on all crates (as CI does)
+make clippy
+
+# Run clippy on a specific crate
+./clippy-crate.sh core
+# or
+make clippy-crate CRATE=core
+
+# Run clippy on all crates individually (to see per-crate results)
+make clippy-all-crates
+```
+
+See [Building the code](./docs/contributing/contributing-code/contributing-code-building/README.md) for more details.
+
 ## Contributing
 
 Please see the [Contribution guide](CONTRIBUTING.md)
