@@ -238,6 +238,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_parse_command_various_types() {
         let parser = ParameterParser::new();
         let command = "CALL test_types(@str, @num, @bool, @null, @float, @arr, @obj)";
@@ -462,7 +463,7 @@ mod tests {
     #[test]
     fn test_parameter_parser_default() {
         let parser1 = ParameterParser::new();
-        let parser2 = ParameterParser::default();
+        let parser2 = ParameterParser;
 
         // Both should work the same way
         let command = "CALL test(@id)";

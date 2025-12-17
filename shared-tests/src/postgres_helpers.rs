@@ -131,7 +131,7 @@ impl PostgresGuard {
         // Spawn connection handler
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                log::error!("PostgreSQL connection error: {}", e);
+                log::error!("PostgreSQL connection error: {e}");
             }
         });
 

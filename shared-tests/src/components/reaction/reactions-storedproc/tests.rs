@@ -38,7 +38,7 @@ async fn setup_stored_procedures(config: &PostgresConfig) {
     // Spawn the connection to run in the background
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("Connection error: {}", e);
+            eprintln!("Connection error: {e}");
         }
     });
 
@@ -123,7 +123,7 @@ async fn get_log_entries(config: &PostgresConfig) -> Vec<(String, String)> {
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("Connection error: {}", e);
+            eprintln!("Connection error: {e}");
         }
     });
 
@@ -147,7 +147,7 @@ async fn get_log_count(config: &PostgresConfig) -> i64 {
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("Connection error: {}", e);
+            eprintln!("Connection error: {e}"../../../shared-tests);
         }
     });
 
