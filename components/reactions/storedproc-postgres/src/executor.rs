@@ -167,7 +167,7 @@ impl PostgresExecutor {
             if attempt > 0 {
                 // Use saturating_pow and saturating_mul to prevent overflow, and cap the backoff to 30 seconds.
                 let max_backoff = Duration::from_secs(30);
-                let exp = (attempt - 1) as u32;
+                let exp = attempt - 1;
                 let backoff_millis = 100u64.saturating_mul(2u64.saturating_pow(exp));
                 let backoff = Duration::from_millis(backoff_millis).min(max_backoff);
                 debug!("Retrying after {backoff:?} (attempt {attempt})");
