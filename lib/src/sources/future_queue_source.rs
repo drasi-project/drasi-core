@@ -276,7 +276,10 @@ impl FutureQueueSource {
                 // Preserve the original error and add context
                 Box::new(std::io::Error::new(
                     std::io::ErrorKind::Other,
-                    format!("Failed to create receiver for future queue subscription: {}", e)
+                    format!(
+                        "Failed to create receiver for future queue subscription: {}",
+                        e
+                    ),
                 ))
             },
         )?;
