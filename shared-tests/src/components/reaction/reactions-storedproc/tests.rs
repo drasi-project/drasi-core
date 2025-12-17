@@ -147,7 +147,7 @@ async fn get_log_count(config: &PostgresConfig) -> i64 {
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("Connection error: {e}"../../../shared-tests);
+            eprintln!("Connection error: {e}");
         }
     });
 
