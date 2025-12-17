@@ -374,10 +374,7 @@ mod tests {
         assert_eq!(entries[0].operation, "add");
         assert_eq!(entries[0].user_id, Some(1));
         assert_eq!(entries[0].user_name, Some("Alice".to_string()));
-        assert_eq!(
-            entries[0].user_email,
-            Some("alice@example.com".to_string())
-        );
+        assert_eq!(entries[0].user_email, Some("alice@example.com".to_string()));
 
         pg.cleanup().await;
     }
@@ -397,7 +394,10 @@ mod tests {
 
         // Test update
         client
-            .execute("CALL update_user(1, 'Alice Updated', 'alice.new@example.com')", &[])
+            .execute(
+                "CALL update_user(1, 'Alice Updated', 'alice.new@example.com')",
+                &[],
+            )
             .await
             .unwrap();
 

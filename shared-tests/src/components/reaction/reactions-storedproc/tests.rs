@@ -17,6 +17,7 @@
 //! These tests validate the end-to-end behavior of the PostgreSQL-specific
 //! stored procedure reaction using testcontainers to provide a real PostgreSQL database.
 
+use crate::postgres_helpers::{setup_postgres, PostgresConfig};
 use drasi_lib::plugin_core::Reaction;
 use drasi_reaction_storedproc_postgres::config::PostgresStoredProcReactionConfig;
 use drasi_reaction_storedproc_postgres::executor::PostgresExecutor;
@@ -24,15 +25,15 @@ use drasi_reaction_storedproc_postgres::parser::ParameterParser;
 use drasi_reaction_storedproc_postgres::PostgresStoredProcReaction;
 use serde_json::json;
 use serial_test::serial;
-use crate::postgres_helpers::{setup_postgres, PostgresConfig};
 use std::time::Duration;
 use tokio::time::sleep;
 
 /// Helper function to setup stored procedures in the test database
 async fn setup_stored_procedures(config: &PostgresConfig) {
-    let (client, connection) = tokio_postgres::connect(&config.connection_string(), tokio_postgres::NoTls)
-        .await
-        .expect("Failed to connect to database");
+    let (client, connection) =
+        tokio_postgres::connect(&config.connection_string(), tokio_postgres::NoTls)
+            .await
+            .expect("Failed to connect to database");
 
     // Spawn the connection to run in the background
     tokio::spawn(async move {
@@ -115,9 +116,10 @@ async fn setup_stored_procedures(config: &PostgresConfig) {
 
 /// Helper function to get log entries from the database
 async fn get_log_entries(config: &PostgresConfig) -> Vec<(String, String)> {
-    let (client, connection) = tokio_postgres::connect(&config.connection_string(), tokio_postgres::NoTls)
-        .await
-        .expect("Failed to connect to database");
+    let (client, connection) =
+        tokio_postgres::connect(&config.connection_string(), tokio_postgres::NoTls)
+            .await
+            .expect("Failed to connect to database");
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
@@ -133,16 +135,15 @@ async fn get_log_entries(config: &PostgresConfig) -> Vec<(String, String)> {
         .await
         .expect("Failed to query sensor_log");
 
-    rows.iter()
-        .map(|row| (row.get(0), row.get(1)))
-        .collect()
+    rows.iter().map(|row| (row.get(0), row.get(1))).collect()
 }
 
 /// Helper function to get log count
 async fn get_log_count(config: &PostgresConfig) -> i64 {
-    let (client, connection) = tokio_postgres::connect(&config.connection_string(), tokio_postgres::NoTls)
-        .await
-        .expect("Failed to connect to database");
+    let (client, connection) =
+        tokio_postgres::connect(&config.connection_string(), tokio_postgres::NoTls)
+            .await
+            .expect("Failed to connect to database");
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
@@ -187,7 +188,7 @@ fn test_config_custom_port() {
         port: Some(5433),
         ..Default::default()
     };
-    
+
     assert_eq!(config.get_port(), 5433);
 }
 
@@ -198,10 +199,13 @@ fn test_config_validation_no_commands() {
         database: "testdb".to_string(),
         ..Default::default()
     };
-    
+
     let result = config.validate();
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("At least one command"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("At least one command"));
 }
 
 #[test]
@@ -212,7 +216,7 @@ fn test_config_validation_empty_user() {
         added_command: Some("CALL test()".to_string()),
         ..Default::default()
     };
-    
+
     let result = config.validate();
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("user is required"));
@@ -226,10 +230,13 @@ fn test_config_validation_empty_database() {
         added_command: Some("CALL test()".to_string()),
         ..Default::default()
     };
-    
+
     let result = config.validate();
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Database name is required"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("Database name is required"));
 }
 
 #[test]
@@ -240,7 +247,7 @@ fn test_config_validation_valid_with_added_command() {
         added_command: Some("CALL add_item(@id)".to_string()),
         ..Default::default()
     };
-    
+
     assert!(config.validate().is_ok());
 }
 
@@ -252,7 +259,7 @@ fn test_config_validation_valid_with_updated_command() {
         updated_command: Some("CALL update_item(@id)".to_string()),
         ..Default::default()
     };
-    
+
     assert!(config.validate().is_ok());
 }
 
@@ -264,7 +271,7 @@ fn test_config_validation_valid_with_deleted_command() {
         deleted_command: Some("CALL delete_item(@id)".to_string()),
         ..Default::default()
     };
-    
+
     assert!(config.validate().is_ok());
 }
 
@@ -278,7 +285,7 @@ fn test_config_validation_valid_with_all_commands() {
         deleted_command: Some("CALL delete_item(@id)".to_string()),
         ..Default::default()
     };
-    
+
     assert!(config.validate().is_ok());
 }
 
@@ -297,10 +304,10 @@ fn test_config_serialization() {
         command_timeout_ms: 10000,
         retry_attempts: 5,
     };
-    
+
     let json = serde_json::to_string(&config).unwrap();
     let deserialized: PostgresStoredProcReactionConfig = serde_json::from_str(&json).unwrap();
-    
+
     assert_eq!(deserialized.hostname, "db.example.com");
     assert_eq!(deserialized.port, Some(5433));
     assert_eq!(deserialized.user, "admin");
@@ -319,7 +326,7 @@ fn test_config_deserialization_with_defaults() {
         "database": "testdb",
         "added_command": "CALL test()"
     }"#;
-    
+
     let config: PostgresStoredProcReactionConfig = serde_json::from_str(json).unwrap();
 
     // DevSkim: ignore DS137138 - localhost is appropriate for test default values
@@ -339,7 +346,7 @@ fn test_config_deserialization_with_defaults() {
 fn test_parser_invalid_procedure_name_with_semicolon() {
     let parser = ParameterParser::new();
     let data = json!({"id": 1});
-    
+
     // Parser should extract the procedure name but executor will handle injection
     let result = parser.parse_command("CALL test(); DROP TABLE users;--", &data);
     assert!(result.is_ok());
@@ -352,7 +359,7 @@ fn test_parser_parameter_with_underscores() {
     let parser = ParameterParser::new();
     let command = "CALL test(@user_id, @user_name)";
     let data = json!({"user_id": 42, "user_name": "Alice"});
-    
+
     let (_, params) = parser.parse_command(command, &data).unwrap();
     assert_eq!(params.len(), 2);
     assert_eq!(params[0], json!(42));
@@ -367,7 +374,7 @@ fn test_parser_large_numbers() {
         "big_int": 9223372036854775807i64,
         "big_float": 1.7976931348623157e308
     });
-    
+
     let (_, params) = parser.parse_command(command, &data).unwrap();
     assert_eq!(params[0], json!(9223372036854775807i64));
     assert_eq!(params[1], json!(1.7976931348623157e308));
@@ -378,7 +385,7 @@ fn test_parser_empty_strings() {
     let parser = ParameterParser::new();
     let command = "CALL test(@name, @description)";
     let data = json!({"name": "", "description": ""});
-    
+
     let (_, params) = parser.parse_command(command, &data).unwrap();
     assert_eq!(params[0], json!(""));
     assert_eq!(params[1], json!(""));
@@ -393,7 +400,7 @@ fn test_parser_mixed_case_field_names() {
         "UserName": "Alice",
         "USER_EMAIL": "alice@example.com"
     });
-    
+
     let (_, params) = parser.parse_command(command, &data).unwrap();
     assert_eq!(params.len(), 3);
 }
@@ -408,12 +415,15 @@ fn test_parser_nested_array_field() {
             {"id": 2, "name": "Item 2"}
         ]
     });
-    
+
     let (_, params) = parser.parse_command(command, &data).unwrap();
-    assert_eq!(params[0], json!([
-        {"id": 1, "name": "Item 1"},
-        {"id": 2, "name": "Item 2"}
-    ]));
+    assert_eq!(
+        params[0],
+        json!([
+            {"id": 1, "name": "Item 1"},
+            {"id": 2, "name": "Item 2"}
+        ])
+    );
 }
 
 // ============================================================================
@@ -527,13 +537,14 @@ async fn test_postgres_executor_procedure_execution() {
     let executor = PostgresExecutor::new(&config).await.unwrap();
 
     // Execute the stored procedure
-    let params = vec![
-        json!("sensor-001"),
-        json!(25.5),
-    ];
+    let params = vec![json!("sensor-001"), json!(25.5)];
 
     let result = executor.execute_procedure("log_sensor_added", params).await;
-    assert!(result.is_ok(), "Procedure execution should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Procedure execution should succeed: {:?}",
+        result.err()
+    );
 
     // Wait a bit for the insert to complete
     sleep(Duration::from_millis(100)).await;
@@ -580,13 +591,7 @@ async fn test_postgres_executor_multiple_operations() {
 
     // Execute ADD
     executor
-        .execute_procedure(
-            "log_sensor_added",
-            vec![
-                json!("sensor-001"),
-                json!(25.5),
-            ],
-        )
+        .execute_procedure("log_sensor_added", vec![json!("sensor-001"), json!(25.5)])
         .await
         .expect("ADD should succeed");
 
@@ -652,10 +657,7 @@ async fn test_postgres_parser_with_executor() {
     });
 
     let (proc_name, params) = parser
-        .parse_command(
-            "CALL log_sensor_added(@sensor_id, @temperature)",
-            &data,
-        )
+        .parse_command("CALL log_sensor_added(@sensor_id, @temperature)", &data)
         .expect("Parser should succeed");
 
     assert_eq!(proc_name, "log_sensor_added");
@@ -700,12 +702,9 @@ async fn test_postgres_reaction_creation() {
         retry_attempts: 3,
     };
 
-    let reaction = PostgresStoredProcReaction::new(
-        "test-reaction",
-        vec!["test-query".to_string()],
-        config,
-    )
-    .await;
+    let reaction =
+        PostgresStoredProcReaction::new("test-reaction", vec!["test-query".to_string()], config)
+            .await;
 
     assert!(reaction.is_ok(), "Should create reaction successfully");
 
@@ -782,10 +781,7 @@ async fn test_postgres_executor_with_special_characters() {
     let executor = PostgresExecutor::new(&config).await.unwrap();
 
     // Test with special characters (potential SQL injection)
-    let params = vec![
-        json!("sensor'; DROP TABLE sensor_log; --"),
-        json!(25.5),
-    ];
+    let params = vec![json!("sensor'; DROP TABLE sensor_log; --"), json!(25.5)];
 
     let result = executor.execute_procedure("log_sensor_added", params).await;
     assert!(

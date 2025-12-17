@@ -22,7 +22,8 @@ use std::sync::OnceLock;
 static PARAM_REGEX: OnceLock<Regex> = OnceLock::new();
 
 fn get_param_regex() -> &'static Regex {
-    PARAM_REGEX.get_or_init(|| Regex::new(r"@([\w.]+)").expect("PARAM_REGEX: invalid regex pattern"))
+    PARAM_REGEX
+        .get_or_init(|| Regex::new(r"@([\w.]+)").expect("PARAM_REGEX: invalid regex pattern"))
 }
 
 /// Parameter parser for extracting and substituting query result fields
