@@ -118,16 +118,16 @@ fn test_sse_type_name() {
 fn test_sse_builder_with_routes() {
     let query_config = QueryConfig {
         added: Some(TemplateSpec {
-            endpoint: Some("/custom/added".to_string()),
+            path: Some("/custom/added".to_string()),
             template: r#"{"event": "add", "data": {{json after}}}"#.to_string(),
         }),
         updated: Some(TemplateSpec {
-            endpoint: None,
+            path: None,
             template: r#"{"event": "update", "before": {{json before}}, "after": {{json after}}}"#
                 .to_string(),
         }),
         deleted: Some(TemplateSpec {
-            endpoint: Some("/custom/deleted".to_string()),
+            path: Some("/custom/deleted".to_string()),
             template: r#"{"event": "delete", "data": {{json before}}}"#.to_string(),
         }),
     };
@@ -149,7 +149,7 @@ fn test_sse_config_with_routes_serialization() {
         "test-query".to_string(),
         QueryConfig {
             added: Some(TemplateSpec {
-                endpoint: None,
+                path: None,
                 template: r#"{"type": "added", "data": {{json after}}}"#.to_string(),
             }),
             updated: None,
@@ -175,7 +175,7 @@ fn test_sse_config_with_routes_serialization() {
 #[test]
 fn test_template_spec_creation() {
     let spec = TemplateSpec {
-        endpoint: Some("/custom/path".to_string()),
+        path: Some("/custom/path".to_string()),
         template: r#"{"message": "test"}"#.to_string(),
     };
 
@@ -187,15 +187,15 @@ fn test_template_spec_creation() {
 fn test_query_config_all_operations() {
     let config = QueryConfig {
         added: Some(TemplateSpec {
-            endpoint: None,
+            path: None,
             template: "add template".to_string(),
         }),
         updated: Some(TemplateSpec {
-            endpoint: None,
+            path: None,
             template: "update template".to_string(),
         }),
         deleted: Some(TemplateSpec {
-            endpoint: None,
+            path: None,
             template: "delete template".to_string(),
         }),
     };
@@ -216,15 +216,15 @@ fn test_config_default_routes_empty() {
 fn test_sse_builder_with_default_template() {
     let default_template = QueryConfig {
         added: Some(TemplateSpec {
-            endpoint: None,
+            path: None,
             template: r#"{"event": "add", "data": {{json after}}}"#.to_string(),
         }),
         updated: Some(TemplateSpec {
-            endpoint: None,
+            path: None,
             template: r#"{"event": "update", "data": {{json after}}}"#.to_string(),
         }),
         deleted: Some(TemplateSpec {
-            endpoint: None,
+            path: None,
             template: r#"{"event": "delete", "data": {{json before}}}"#.to_string(),
         }),
     };
@@ -243,7 +243,7 @@ fn test_sse_builder_with_default_template() {
 fn test_sse_builder_invalid_template_fails() {
     let invalid_template = QueryConfig {
         added: Some(TemplateSpec {
-            endpoint: None,
+            path: None,
             template: r#"{{invalid syntax"#.to_string(),
         }),
         updated: None,
@@ -263,7 +263,7 @@ fn test_sse_builder_invalid_template_fails() {
 fn test_sse_builder_route_validation_passes() {
     let route_config = QueryConfig {
         added: Some(TemplateSpec {
-            endpoint: None,
+            path: None,
             template: r#"{"data": {{json after}}}"#.to_string(),
         }),
         updated: None,
@@ -282,7 +282,7 @@ fn test_sse_builder_route_validation_passes() {
 fn test_sse_builder_route_validation_fails() {
     let route_config = QueryConfig {
         added: Some(TemplateSpec {
-            endpoint: None,
+            path: None,
             template: r#"{"data": {{json after}}}"#.to_string(),
         }),
         updated: None,
@@ -305,7 +305,7 @@ fn test_sse_builder_route_validation_fails() {
 fn test_sse_builder_route_validation_dotted_notation() {
     let route_config = QueryConfig {
         added: Some(TemplateSpec {
-            endpoint: None,
+            path: None,
             template: r#"{"data": {{json after}}}"#.to_string(),
         }),
         updated: None,
@@ -325,7 +325,7 @@ fn test_sse_builder_route_validation_dotted_notation() {
 fn test_config_with_default_template_serialization() {
     let default_template = QueryConfig {
         added: Some(TemplateSpec {
-            endpoint: None,
+            path: None,
             template: r#"{"event": "add"}"#.to_string(),
         }),
         updated: None,

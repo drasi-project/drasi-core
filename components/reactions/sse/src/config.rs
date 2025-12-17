@@ -33,18 +33,19 @@ fn default_sse_host() -> String {
     "0.0.0.0".to_string()
 }
 
-/// Specification for SSE output template and endpoint.
+/// Specification for SSE output template and path.
 ///
 /// This type is used to configure SSE templates for different operation types (added, updated, deleted).
 /// All template fields support Handlebars template syntax for dynamic content generation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TemplateSpec {
-    /// Optional custom endpoint path for this specific template.
-    /// NOTE: This field is reserved for future use. Currently, all SSE events are sent to the configured sse_path.
-    /// Future versions may support routing different events to different SSE endpoints.
+    /// Optional custom path for this specific template.
+    /// If provided, events will be sent to this path appended to the base SSE path.
+    /// For example, if the base sse_path is "/events" and path is "sensors", 
+    /// events will be sent to "/events/sensors".
     /// Supports Handlebars templates for dynamic paths.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub endpoint: Option<String>,
+    pub path: Option<String>,
 
     /// Event data template as a Handlebars template.
     /// If empty, sends the default JSON format with queryId, results, and timestamp.

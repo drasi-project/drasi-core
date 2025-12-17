@@ -38,7 +38,7 @@ use super::SseReactionBuilder;
 pub struct SseReaction {
     base: ReactionBase,
     config: SseReactionConfig,
-    broadcaster: broadcast::Sender<String>,
+    broadcasters: Arc<tokio::sync::RwLock<HashMap<String, broadcast::Sender<String>>>>,
     task_handles: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
@@ -98,11 +98,16 @@ impl SseReaction {
         if let Some(capacity) = priority_queue_capacity {
             params = params.with_priority_queue_capacity(capacity);
         }
+        
+        // Create default broadcaster for the main sse_path
+        let mut broadcasters = HashMap::new();
         let (tx, _rx) = broadcast::channel(1024);
+        broadcasters.insert(config.sse_path.clone(), tx);
+        
         Self {
             base: ReactionBase::new(params),
             config,
-            broadcaster: tx,
+            broadcasters: Arc::new(tokio::sync::RwLock::new(broadcasters)),
             task_handles: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         }
     }
@@ -175,11 +180,12 @@ impl Reaction for SseReaction {
 
         // Spawn processing task
         let status = self.base.status.clone();
-        let broadcaster = self.broadcaster.clone();
+        let broadcasters = self.broadcasters.clone();
         let reaction_id = self.base.id.clone();
         let priority_queue = self.base.priority_queue.clone();
         let query_configs = self.config.routes.clone();
         let default_template = self.config.default_template.clone();
+        let base_sse_path = self.config.sse_path.clone();
         let processing_handle = tokio::spawn(async move {
             info!("[{reaction_id}] SSE result processing task started");
 
@@ -308,6 +314,25 @@ impl Reaction for SseReaction {
                                     Value::Number(timestamp.into()),
                                 );
 
+                                // Determine the SSE path for this event
+                                let sse_path = if let Some(custom_path) = &spec.path {
+                                    // Render the path template if it contains variables
+                                    let rendered_path = if custom_path.contains("{{") {
+                                        handlebars.render_template(custom_path, &context)
+                                            .unwrap_or_else(|_| custom_path.clone())
+                                    } else {
+                                        custom_path.clone()
+                                    };
+                                    // Ensure path starts with /
+                                    if rendered_path.starts_with('/') {
+                                        rendered_path
+                                    } else {
+                                        format!("{}/{}", base_sse_path, rendered_path)
+                                    }
+                                } else {
+                                    base_sse_path.clone()
+                                };
+
                                 // Render template if provided
                                 let payload = if !spec.template.is_empty() {
                                     match handlebars.render_template(&spec.template, &context) {
@@ -335,17 +360,27 @@ impl Reaction for SseReaction {
                                     .to_string()
                                 };
 
+                                // Get or create broadcaster for this path
+                                let broadcaster = {
+                                    let mut broadcasters_write = broadcasters.write().await;
+                                    broadcasters_write.entry(sse_path.clone()).or_insert_with(|| {
+                                        let (tx, _rx) = broadcast::channel(1024);
+                                        debug!("[{reaction_id}] Created broadcaster for path: {sse_path}");
+                                        tx
+                                    }).clone()
+                                };
+
                                 match broadcaster.send(payload.clone()) {
                                     Ok(count) => {
-                                        debug!("[{reaction_id}] Broadcast to {count} SSE listeners")
+                                        debug!("[{reaction_id}] Broadcast to {count} SSE listeners on path {sse_path}")
                                     }
-                                    Err(e) => debug!("[{reaction_id}] no SSE listeners: {e}"),
+                                    Err(e) => debug!("[{reaction_id}] no SSE listeners on path {sse_path}: {e}"),
                                 }
                             }
                         }
                     }
                 } else {
-                    // Default behavior - send all results together
+                    // Default behavior - send all results together to the base path
                     let payload = json!({
                         "queryId": query_result.query_id,
                         "results": query_result.results,
@@ -353,11 +388,19 @@ impl Reaction for SseReaction {
                     })
                     .to_string();
 
-                    match broadcaster.send(payload.clone()) {
-                        Ok(count) => {
-                            info!("[{reaction_id}] Broadcast query result to {count} SSE listeners")
+                    // Get broadcaster for the base path
+                    let broadcaster = {
+                        let broadcasters_read = broadcasters.read().await;
+                        broadcasters_read.get(&base_sse_path).cloned()
+                    };
+
+                    if let Some(broadcaster) = broadcaster {
+                        match broadcaster.send(payload.clone()) {
+                            Ok(count) => {
+                                info!("[{reaction_id}] Broadcast query result to {count} SSE listeners on {base_sse_path}")
+                            }
+                            Err(e) => debug!("[{reaction_id}] no SSE listeners on {base_sse_path}: {e}"),
                         }
-                        Err(e) => debug!("[{reaction_id}] no SSE listeners: {e}"),
                     }
                 }
             }
@@ -367,8 +410,8 @@ impl Reaction for SseReaction {
         // Store the processing task handle
         self.base.set_processing_task(processing_handle).await;
 
-        // Heartbeat task
-        let hb_tx = self.broadcaster.clone();
+        // Heartbeat task - sends to all paths
+        let broadcasters_hb = self.broadcasters.clone();
         let interval = self.config.heartbeat_interval_ms;
         let hb_handle = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_millis(interval));
@@ -376,28 +419,43 @@ impl Reaction for SseReaction {
                 ticker.tick().await;
                 let beat = json!({"type":"heartbeat","ts": chrono::Utc::now().timestamp_millis()})
                     .to_string();
-                let _ = hb_tx.send(beat);
+                // Send heartbeat to all broadcasters
+                let broadcasters_read = broadcasters_hb.read().await;
+                for broadcaster in broadcasters_read.values() {
+                    let _ = broadcaster.send(beat.clone());
+                }
             }
         });
         self.task_handles.lock().await.push(hb_handle);
 
-        // HTTP server task
+        // HTTP server task - dynamically creates routes for all paths
         let host = self.config.host.clone();
         let port = self.config.port;
-        let path = self.config.sse_path.clone();
-        let rx_factory = self.broadcaster.clone();
+        let broadcasters_server = self.broadcasters.clone();
         let server_handle = tokio::spawn(async move {
+            use axum::response::IntoResponse;
+            
             // Configure CORS to allow all origins
             let cors = CorsLayer::new()
                 .allow_origin(Any)
                 .allow_methods([Method::GET, Method::OPTIONS])
                 .allow_headers(Any);
 
-            let app = Router::new()
-                .route(
-                    &path,
-                    get(move || async move {
-                        let rx = rx_factory.subscribe();
+            // Create a handler that checks for matching paths dynamically
+            let broadcasters_clone = broadcasters_server.clone();
+            let handler = get(move |req: axum::http::Request<axum::body::Body>| {
+                let broadcasters = broadcasters_clone.clone();
+                async move {
+                    let path = req.uri().path().to_string();
+                    
+                    // Try to find a broadcaster for this path
+                    let broadcaster = {
+                        let broadcasters_read = broadcasters.read().await;
+                        broadcasters_read.get(&path).cloned()
+                    };
+                    
+                    if let Some(broadcaster) = broadcaster {
+                        let rx = broadcaster.subscribe();
                         let stream = tokio_stream::wrappers::BroadcastStream::new(rx)
                             .filter_map(|res| res.ok())
                             .map(|msg| {
@@ -407,12 +465,19 @@ impl Reaction for SseReaction {
                             KeepAlive::new()
                                 .interval(Duration::from_secs(30))
                                 .text("keep-alive"),
-                        )
-                    }),
-                )
+                        ).into_response()
+                    } else {
+                        // Return 404 for unknown paths
+                        axum::http::StatusCode::NOT_FOUND.into_response()
+                    }
+                }
+            });
+
+            let app = Router::new()
+                .fallback(handler)
                 .layer(cors);
 
-            info!("Starting SSE server on {host}:{port} path {path} with CORS enabled");
+            info!("Starting SSE server on {host}:{port} with CORS enabled");
             let listener = match tokio::net::TcpListener::bind((host.as_str(), port)).await {
                 Ok(l) => l,
                 Err(e) => {

@@ -101,11 +101,11 @@ Defines template specifications for each operation type within a query.
 
 #### TemplateSpec
 
-Specification for SSE event output with custom templates.
+Specification for SSE event output with custom templates and paths.
 
 | Name | Description | Type | Default | Required |
 |------|-------------|------|---------|----------|
-| `endpoint` | Optional custom endpoint path for this template. **Note:** Currently reserved for future use; all events use the configured sse_path. | Option&lt;String&gt; | None | No |
+| `path` | Optional custom path for this template. If provided, events will be sent to this path. Can be absolute (e.g., "/sensors") or relative to base sse_path (e.g., "sensors" becomes "/events/sensors" if base is "/events"). Supports Handlebars templates for dynamic paths. | Option&lt;String&gt; | None | No |
 | `template` | Event data template as a Handlebars template. If empty, uses default JSON format. | String | Empty | No |
 
 #### Template Variables
@@ -127,7 +127,7 @@ use drasi_reaction_sse::{SseReaction, QueryConfig, TemplateSpec};
 
 let query_config = QueryConfig {
     added: Some(TemplateSpec {
-        endpoint: None,
+        path: None,
         template: r#"{
             "event": "sensor_added",
             "sensor_id": "{{after.id}}",
@@ -136,7 +136,7 @@ let query_config = QueryConfig {
         }"#.to_string(),
     }),
     updated: Some(TemplateSpec {
-        endpoint: None,
+        path: None,
         template: r#"{
             "event": "sensor_updated",
             "sensor_id": "{{after.id}}",
@@ -146,7 +146,7 @@ let query_config = QueryConfig {
         }"#.to_string(),
     }),
     deleted: Some(TemplateSpec {
-        endpoint: Some("/sensors/deleted".to_string()),
+        path: Some("/sensors/deleted".to_string()),
         template: r#"{
             "event": "sensor_removed",
             "sensor_id": "{{before.id}}",
@@ -169,7 +169,7 @@ The `json` Handlebars helper serializes complex objects:
 use drasi_reaction_sse::{TemplateSpec};
 
 let template_spec = TemplateSpec {
-    endpoint: None,
+    path: None,
     template: r#"{
         "event": "{{operation}}",
         "query": "{{query_name}}",
@@ -256,7 +256,7 @@ Sent whenever subscribed queries produce new results:
 
 ### Heartbeat Event
 
-Sent at regular intervals to keep connections alive:
+Sent at regular intervals to keep connections alive. **Note:** Heartbeat messages are sent to all SSE paths and are not affected by custom templates. They always use the standard format shown below:
 
 ```json
 {
@@ -325,7 +325,7 @@ use drasi_reaction_sse::{SseReaction, QueryConfig, TemplateSpec};
 // Define a default template that applies to all queries
 let default_template = QueryConfig {
     added: Some(TemplateSpec {
-        endpoint: None,
+        path: None,
         template: r#"{
             "event": "data_added",
             "query": "{{query_name}}",
@@ -334,7 +334,7 @@ let default_template = QueryConfig {
         }"#.to_string(),
     }),
     updated: Some(TemplateSpec {
-        endpoint: None,
+        path: None,
         template: r#"{
             "event": "data_updated",
             "query": "{{query_name}}",
@@ -344,7 +344,7 @@ let default_template = QueryConfig {
         }"#.to_string(),
     }),
     deleted: Some(TemplateSpec {
-        endpoint: None,
+        path: None,
         template: r#"{
             "event": "data_deleted",
             "query": "{{query_name}}",
@@ -374,7 +374,7 @@ use drasi_reaction_sse::{SseReaction, QueryConfig, TemplateSpec};
 // Define custom templates for different operation types
 let sensor_config = QueryConfig {
     added: Some(TemplateSpec {
-        endpoint: None,
+        path: None,
         template: r#"{
             "type": "new_sensor",
             "id": "{{after.sensor_id}}",
@@ -384,7 +384,7 @@ let sensor_config = QueryConfig {
         }"#.to_string(),
     }),
     updated: Some(TemplateSpec {
-        endpoint: None,
+        path: None,
         template: r#"{
             "type": "sensor_update",
             "id": "{{after.sensor_id}}",
@@ -396,7 +396,7 @@ let sensor_config = QueryConfig {
         }"#.to_string(),
     }),
     deleted: Some(TemplateSpec {
-        endpoint: None,
+        path: None,
         template: r#"{
             "type": "sensor_removed",
             "id": "{{before.sensor_id}}",
