@@ -234,7 +234,7 @@ impl FutureQueueSource {
     fn now() -> u64 {
         SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis() as u64
     }
 
