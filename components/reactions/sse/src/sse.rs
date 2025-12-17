@@ -15,6 +15,7 @@
 use async_trait::async_trait;
 use axum::http::Method;
 use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::IntoResponse;
 use axum::{routing::get, Router};
 use handlebars::Handlebars;
 use log::{debug, error, info};
@@ -33,6 +34,8 @@ use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 
 pub use super::config::SseReactionConfig;
 use super::SseReactionBuilder;
+
+const BROADCAST_CHANNEL_CAPACITY: usize = 1024;
 
 /// SSE reaction exposes query results to browser clients via Server-Sent Events.
 pub struct SseReaction {
@@ -98,17 +101,44 @@ impl SseReaction {
         if let Some(capacity) = priority_queue_capacity {
             params = params.with_priority_queue_capacity(capacity);
         }
-        
+
         // Create default broadcaster for the main sse_path
         let mut broadcasters = HashMap::new();
-        let (tx, _rx) = broadcast::channel(1024);
+        let (tx, _rx) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         broadcasters.insert(config.sse_path.clone(), tx);
-        
+
         Self {
             base: ReactionBase::new(params),
             config,
             broadcasters: Arc::new(tokio::sync::RwLock::new(broadcasters)),
             task_handles: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Resolve the SSE path for an event based on the template spec and base path
+    fn resolve_sse_path(
+        custom_path: Option<&String>,
+        base_sse_path: &str,
+        handlebars: &Handlebars,
+        context: &Map<String, Value>,
+    ) -> String {
+        if let Some(custom_path) = custom_path {
+            // Render the path template if it contains variables
+            let rendered_path = if custom_path.contains("{{") {
+                handlebars
+                    .render_template(custom_path, context)
+                    .unwrap_or_else(|_| custom_path.clone())
+            } else {
+                custom_path.clone()
+            };
+            // Ensure path starts with /
+            if rendered_path.starts_with('/') {
+                rendered_path
+            } else {
+                format!("{}/{}", base_sse_path, rendered_path)
+            }
+        } else {
+            base_sse_path.to_string()
         }
     }
 }
@@ -315,23 +345,12 @@ impl Reaction for SseReaction {
                                 );
 
                                 // Determine the SSE path for this event
-                                let sse_path = if let Some(custom_path) = &spec.path {
-                                    // Render the path template if it contains variables
-                                    let rendered_path = if custom_path.contains("{{") {
-                                        handlebars.render_template(custom_path, &context)
-                                            .unwrap_or_else(|_| custom_path.clone())
-                                    } else {
-                                        custom_path.clone()
-                                    };
-                                    // Ensure path starts with /
-                                    if rendered_path.starts_with('/') {
-                                        rendered_path
-                                    } else {
-                                        format!("{}/{}", base_sse_path, rendered_path)
-                                    }
-                                } else {
-                                    base_sse_path.clone()
-                                };
+                                let sse_path = SseReaction::resolve_sse_path(
+                                    spec.path.as_ref(),
+                                    &base_sse_path,
+                                    &handlebars,
+                                    &context,
+                                );
 
                                 // Render template if provided
                                 let payload = if !spec.template.is_empty() {
@@ -364,7 +383,7 @@ impl Reaction for SseReaction {
                                 let broadcaster = {
                                     let mut broadcasters_write = broadcasters.write().await;
                                     broadcasters_write.entry(sse_path.clone()).or_insert_with(|| {
-                                        let (tx, _rx) = broadcast::channel(1024);
+                                        let (tx, _rx) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
                                         debug!("[{reaction_id}] Created broadcaster for path: {sse_path}");
                                         tx
                                     }).clone()
@@ -433,8 +452,6 @@ impl Reaction for SseReaction {
         let port = self.config.port;
         let broadcasters_server = self.broadcasters.clone();
         let server_handle = tokio::spawn(async move {
-            use axum::response::IntoResponse;
-            
             // Configure CORS to allow all origins
             let cors = CorsLayer::new()
                 .allow_origin(Any)
