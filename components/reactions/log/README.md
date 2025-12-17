@@ -2,6 +2,8 @@
 
 A development and debugging reaction that outputs query results to the console for monitoring data changes in real-time.
 
+> **⚠️ Important**: This reaction uses Rust's `log` crate. You must initialize a logger (like `env_logger`) in your application for output to appear. See [Usage Examples](#usage-examples) for details.
+
 ## Overview
 
 The Log Reaction provides console logging of continuous query results, making it ideal for development, debugging, and low-volume monitoring scenarios. It subscribes to one or more queries and prints formatted output to stdout showing how data changes over time.
@@ -191,12 +193,19 @@ Simple logging with default JSON output:
 use drasi_reaction_log::LogReaction;
 use std::sync::Arc;
 
+// Initialize logger FIRST - required for console output
+env_logger::Builder::from_env(
+    env_logger::Env::default().default_filter_or("info")
+).init();
+
 let reaction = LogReaction::builder("basic-logger")
     .from_query("my-query")
     .build();
 
 drasi.add_reaction(Arc::new(reaction)).await?;
 ```
+
+**Note**: All examples below assume logging has been initialized as shown above.
 
 ### Multi-Query Monitoring
 
@@ -333,12 +342,21 @@ RUST_LOG=debug cargo run
 
 ### No Output Visible
 
-**Symptoms**: Reaction starts but no output appears
+**Symptoms**: Reaction starts but no output appears in console
 
 **Solutions**:
-1. Check query is producing results
-2. Verify reaction is subscribed to correct query IDs
-3. Check reaction status: `drasi.get_reaction_status("my-logger").await`
+1. **Initialize a logger**: LogReaction uses Rust's `log` crate. You must initialize a logger (like `env_logger`) in your application:
+   ```rust
+   env_logger::Builder::from_env(
+       env_logger::Env::default().default_filter_or("info")
+   ).init();
+   ```
+   Add this **before** creating DrasiLib. Also add `env_logger = "0.10"` to your `Cargo.toml` dependencies.
+
+2. Check query is producing results
+3. Verify reaction is subscribed to correct query IDs
+4. Check reaction status: `drasi.get_reaction_status("my-logger").await`
+5. Enable debug logging: `RUST_LOG=debug`
 4. Enable debug logging: `RUST_LOG=debug`
 
 ### Template Rendering Errors
