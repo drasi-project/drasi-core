@@ -183,9 +183,9 @@ impl ApplicationSourceHandle {
         labels: Vec<impl Into<Arc<str>>>,
         properties: drasi_core::models::ElementPropertyMap,
     ) -> Result<()> {
-        let effective_from = crate::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
+        let effective_from = crate::time::get_current_timestamp_millis().unwrap_or_else(|e| {
             warn!("Failed to get timestamp for node insert: {e}, using fallback");
-            (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
+            chrono::Utc::now().timestamp_millis() as u64
         });
 
         let element = Element::Node {
@@ -210,9 +210,9 @@ impl ApplicationSourceHandle {
         labels: Vec<impl Into<Arc<str>>>,
         properties: drasi_core::models::ElementPropertyMap,
     ) -> Result<()> {
-        let effective_from = crate::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
+        let effective_from = crate::time::get_current_timestamp_millis().unwrap_or_else(|e| {
             warn!("Failed to get timestamp for node update: {e}, using fallback");
-            (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
+            chrono::Utc::now().timestamp_millis() as u64
         });
 
         let element = Element::Node {
@@ -236,9 +236,9 @@ impl ApplicationSourceHandle {
         element_id: impl Into<Arc<str>>,
         labels: Vec<impl Into<Arc<str>>>,
     ) -> Result<()> {
-        let effective_from = crate::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
+        let effective_from = crate::time::get_current_timestamp_millis().unwrap_or_else(|e| {
             warn!("Failed to get timestamp for delete: {e}, using fallback");
-            (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
+            chrono::Utc::now().timestamp_millis() as u64
         });
 
         let metadata = ElementMetadata {
@@ -262,9 +262,9 @@ impl ApplicationSourceHandle {
         start_node_id: impl Into<Arc<str>>,
         end_node_id: impl Into<Arc<str>>,
     ) -> Result<()> {
-        let effective_from = crate::time::get_current_timestamp_nanos().unwrap_or_else(|e| {
+        let effective_from = crate::time::get_current_timestamp_millis().unwrap_or_else(|e| {
             warn!("Failed to get timestamp for relation insert: {e}, using fallback");
-            (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
+            chrono::Utc::now().timestamp_millis() as u64
         });
 
         let element = Element::Relation {
