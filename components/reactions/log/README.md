@@ -179,6 +179,7 @@ let reaction = LogReaction::new(
     config
 )?; // Returns Result - validates templates and routes
 
+use std::sync::Arc;
 drasi.add_reaction(Arc::new(reaction)).await?;
 ```
 
