@@ -18,10 +18,10 @@
 //! stored procedure reaction using testcontainers to provide a real MySQL database.
 use crate::mysql_helpers::{setup_mysql, MysqlConfig};
 use drasi_lib::plugin_core::Reaction;
-use drasi_reaction_storedproc_mysql::config::MysqlStoredProcReactionConfig;
-use drasi_reaction_storedproc_mysql::executor::MysqlExecutor;
+use drasi_reaction_storedproc_mysql::config::MySqlStoredProcReactionConfig;
+use drasi_reaction_storedproc_mysql::executor::MySqlExecutor;
 use drasi_reaction_storedproc_mysql::parser::ParameterParser;
-use drasi_reaction_storedproc_mysql::MysqlStoredProcReaction;
+use drasi_reaction_storedproc_mysql::MySqlStoredProcReaction;
 use mysql_async::prelude::*;
 use serde_json::json;
 use serial_test::serial;
@@ -137,7 +137,7 @@ async fn get_log_count(config: &MysqlConfig) -> i64 {
 
 #[test]
 fn test_config_default_values() {
-    let config = MysqlStoredProcReactionConfig::default();
+    let config = MySqlStoredProcReactionConfig::default();
 
     assert_eq!(config.hostname, "localhost");
     assert_eq!(config.port, None);
@@ -155,7 +155,7 @@ fn test_config_default_values() {
 
 #[test]
 fn test_config_custom_port() {
-    let config = MysqlStoredProcReactionConfig {
+    let config = MySqlStoredProcReactionConfig {
         port: Some(3307),
         ..Default::default()
     };
@@ -165,7 +165,7 @@ fn test_config_custom_port() {
 
 #[test]
 fn test_config_validation_no_commands() {
-    let config = MysqlStoredProcReactionConfig {
+    let config = MySqlStoredProcReactionConfig {
         user: "testuser".to_string(),
         database: "testdb".to_string(),
         ..Default::default()
@@ -181,7 +181,7 @@ fn test_config_validation_no_commands() {
 
 #[test]
 fn test_config_validation_empty_user() {
-    let config = MysqlStoredProcReactionConfig {
+    let config = MySqlStoredProcReactionConfig {
         user: "".to_string(),
         database: "testdb".to_string(),
         added_command: Some("CALL test()".to_string()),
@@ -195,7 +195,7 @@ fn test_config_validation_empty_user() {
 
 #[test]
 fn test_config_validation_empty_database() {
-    let config = MysqlStoredProcReactionConfig {
+    let config = MySqlStoredProcReactionConfig {
         user: "testuser".to_string(),
         database: "".to_string(),
         added_command: Some("CALL test()".to_string()),
@@ -212,7 +212,7 @@ fn test_config_validation_empty_database() {
 
 #[test]
 fn test_config_validation_valid_with_added_command() {
-    let config = MysqlStoredProcReactionConfig {
+    let config = MySqlStoredProcReactionConfig {
         user: "testuser".to_string(),
         database: "testdb".to_string(),
         added_command: Some("CALL add_item(@id)".to_string()),
@@ -224,7 +224,7 @@ fn test_config_validation_valid_with_added_command() {
 
 #[test]
 fn test_config_validation_valid_with_updated_command() {
-    let config = MysqlStoredProcReactionConfig {
+    let config = MySqlStoredProcReactionConfig {
         user: "testuser".to_string(),
         database: "testdb".to_string(),
         updated_command: Some("CALL update_item(@id)".to_string()),
@@ -236,7 +236,7 @@ fn test_config_validation_valid_with_updated_command() {
 
 #[test]
 fn test_config_validation_valid_with_deleted_command() {
-    let config = MysqlStoredProcReactionConfig {
+    let config = MySqlStoredProcReactionConfig {
         user: "testuser".to_string(),
         database: "testdb".to_string(),
         deleted_command: Some("CALL delete_item(@id)".to_string()),
@@ -248,7 +248,7 @@ fn test_config_validation_valid_with_deleted_command() {
 
 #[test]
 fn test_config_validation_valid_with_all_commands() {
-    let config = MysqlStoredProcReactionConfig {
+    let config = MySqlStoredProcReactionConfig {
         user: "testuser".to_string(),
         database: "testdb".to_string(),
         added_command: Some("CALL add_item(@id)".to_string()),
@@ -262,7 +262,7 @@ fn test_config_validation_valid_with_all_commands() {
 
 #[test]
 fn test_config_serialization() {
-    let config = MysqlStoredProcReactionConfig {
+    let config = MySqlStoredProcReactionConfig {
         hostname: "db.example.com".to_string(),
         port: Some(3307),
         user: "admin".to_string(),
@@ -277,7 +277,7 @@ fn test_config_serialization() {
     };
 
     let json = serde_json::to_string(&config).unwrap();
-    let deserialized: MysqlStoredProcReactionConfig = serde_json::from_str(&json).unwrap();
+    let deserialized: MySqlStoredProcReactionConfig = serde_json::from_str(&json).unwrap();
 
     assert_eq!(deserialized.hostname, "db.example.com");
     assert_eq!(deserialized.port, Some(3307));
@@ -298,7 +298,7 @@ fn test_config_deserialization_with_defaults() {
         "added_command": "CALL test()"
     }"#;
 
-    let config: MysqlStoredProcReactionConfig = serde_json::from_str(json).unwrap();
+    let config: MySqlStoredProcReactionConfig = serde_json::from_str(json).unwrap();
 
     assert_eq!(config.hostname, "localhost"); // default
     assert_eq!(config.port, None);
@@ -409,7 +409,7 @@ async fn test_mysql_config_validation() {
         .ok();
 
     // Valid config
-    let config = MysqlStoredProcReactionConfig {
+    let config = MySqlStoredProcReactionConfig {
         hostname: "localhost".to_string(),
         port: Some(3306),
         user: "testuser".to_string(),
@@ -452,7 +452,7 @@ async fn test_mysql_executor_connection() {
     let mysql = setup_mysql().await;
     let mysql_config = mysql.config();
 
-    let config = MysqlStoredProcReactionConfig {
+    let config = MySqlStoredProcReactionConfig {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
         user: mysql_config.user.clone(),
@@ -466,7 +466,7 @@ async fn test_mysql_executor_connection() {
         retry_attempts: 3,
     };
 
-    let executor = MysqlExecutor::new(&config).await;
+    let executor = MySqlExecutor::new(&config).await;
     assert!(executor.is_ok(), "Should create executor successfully");
 
     let executor = executor.unwrap();
@@ -489,7 +489,7 @@ async fn test_mysql_executor_procedure_execution() {
     let mysql_config = mysql.config();
     setup_stored_procedures(mysql_config).await;
 
-    let config = MysqlStoredProcReactionConfig {
+    let config = MySqlStoredProcReactionConfig {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
         user: mysql_config.user.clone(),
@@ -503,7 +503,7 @@ async fn test_mysql_executor_procedure_execution() {
         retry_attempts: 3,
     };
 
-    let executor = MysqlExecutor::new(&config).await.unwrap();
+    let executor = MySqlExecutor::new(&config).await.unwrap();
 
     // Execute the stored procedure
     let params = vec![json!("sensor-001"), json!(25.5)];
@@ -542,7 +542,7 @@ async fn test_mysql_executor_multiple_operations() {
     let mysql_config = mysql.config();
     setup_stored_procedures(mysql_config).await;
 
-    let config = MysqlStoredProcReactionConfig {
+    let config = MySqlStoredProcReactionConfig {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
         user: mysql_config.user.clone(),
@@ -556,7 +556,7 @@ async fn test_mysql_executor_multiple_operations() {
         retry_attempts: 3,
     };
 
-    let executor = MysqlExecutor::new(&config).await.unwrap();
+    let executor = MySqlExecutor::new(&config).await.unwrap();
 
     // Execute ADD
     executor
@@ -602,7 +602,7 @@ async fn test_mysql_parser_with_executor() {
     let mysql_config = mysql.config();
     setup_stored_procedures(mysql_config).await;
 
-    let config = MysqlStoredProcReactionConfig {
+    let config = MySqlStoredProcReactionConfig {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
         user: mysql_config.user.clone(),
@@ -616,7 +616,7 @@ async fn test_mysql_parser_with_executor() {
         retry_attempts: 3,
     };
 
-    let executor = MysqlExecutor::new(&config).await.unwrap();
+    let executor = MySqlExecutor::new(&config).await.unwrap();
     let parser = ParameterParser::new();
 
     // Parse command with data
@@ -657,7 +657,7 @@ async fn test_mysql_reaction_creation() {
     let mysql_config = mysql.config();
     setup_stored_procedures(mysql_config).await;
 
-    let config = MysqlStoredProcReactionConfig {
+    let config = MySqlStoredProcReactionConfig {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
         user: mysql_config.user.clone(),
@@ -672,7 +672,7 @@ async fn test_mysql_reaction_creation() {
     };
 
     let reaction =
-        MysqlStoredProcReaction::new("test-reaction", vec!["test-query".to_string()], config)
+        MySqlStoredProcReaction::new("test-reaction", vec!["test-query".to_string()], config)
             .await;
 
     assert!(reaction.is_ok(), "Should create reaction successfully");
@@ -697,7 +697,7 @@ async fn test_mysql_reaction_builder() {
     let mysql_config = mysql.config();
     setup_stored_procedures(mysql_config).await;
 
-    let reaction = MysqlStoredProcReaction::builder("test-builder")
+    let reaction = MySqlStoredProcReaction::builder("test-builder")
         .with_hostname(&mysql_config.host)
         .with_port(mysql_config.port)
         .with_database(&mysql_config.database)
@@ -733,7 +733,7 @@ async fn test_mysql_executor_with_special_characters() {
     let mysql_config = mysql.config();
     setup_stored_procedures(mysql_config).await;
 
-    let config = MysqlStoredProcReactionConfig {
+    let config = MySqlStoredProcReactionConfig {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
         user: mysql_config.user.clone(),
@@ -747,7 +747,7 @@ async fn test_mysql_executor_with_special_characters() {
         retry_attempts: 3,
     };
 
-    let executor = MysqlExecutor::new(&config).await.unwrap();
+    let executor = MySqlExecutor::new(&config).await.unwrap();
 
     // Test with special characters (potential SQL injection)
     let params = vec![json!("sensor'; DROP TABLE sensor_log; --"), json!(25.5)];
@@ -782,7 +782,7 @@ async fn test_mysql_reaction_lifecycle() {
     setup_stored_procedures(mysql_config).await;
 
     // Create the MySQL stored procedure reaction
-    let reaction = MysqlStoredProcReaction::builder("mysql-reaction")
+    let reaction = MySqlStoredProcReaction::builder("mysql-reaction")
         .with_hostname(&mysql_config.host)
         .with_port(mysql_config.port)
         .with_database(&mysql_config.database)
@@ -849,7 +849,7 @@ async fn test_mysql_executor_retry_on_failure() {
     let mysql = setup_mysql().await;
     let mysql_config = mysql.config();
 
-    let config = MysqlStoredProcReactionConfig {
+    let config = MySqlStoredProcReactionConfig {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
         user: mysql_config.user.clone(),
@@ -863,7 +863,7 @@ async fn test_mysql_executor_retry_on_failure() {
         retry_attempts: 2,
     };
 
-    let executor = MysqlExecutor::new(&config).await.unwrap();
+    let executor = MySqlExecutor::new(&config).await.unwrap();
 
     // Try to execute non-existent procedure (should fail after retries)
     let result = executor
