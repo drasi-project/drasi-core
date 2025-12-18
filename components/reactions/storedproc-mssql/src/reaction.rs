@@ -201,9 +201,7 @@ impl MsSqlStoredProcReaction {
                                 }
                             }
                         } else {
-                            error!(
-                                "[{reaction_id}] No data available for {result_type} operation"
-                            );
+                            error!("[{reaction_id}] No data available for {result_type} operation");
                         }
                     } else {
                         debug!(
