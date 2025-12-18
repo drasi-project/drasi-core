@@ -129,10 +129,8 @@ impl MySqlExecutor {
 
             debug!("Executing: {} with {} parameters", query, params.len());
 
-            let mysql_params: Vec<mysql_async::Value> = params
-                .iter()
-                .map(|v| self.json_to_mysql_value(v))
-                .collect();
+            let mysql_params: Vec<mysql_async::Value> =
+                params.iter().map(|v| self.json_to_mysql_value(v)).collect();
 
             // Execute the stored procedure
             timeout(cmd_timeout, conn.exec_drop(&query, mysql_params))

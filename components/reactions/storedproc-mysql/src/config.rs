@@ -86,7 +86,8 @@ impl Default for MySqlStoredProcReactionConfig {
 }
 
 fn default_hostname() -> String {
-    "localhost".to_string() // DevSkim: ignore DS137138
+    // DevSkim: ignore DS137138
+    "localhost".to_string()
 }
 
 fn default_timeout_ms() -> u64 {

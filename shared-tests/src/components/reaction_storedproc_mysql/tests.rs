@@ -419,7 +419,7 @@ async fn test_mysql_config_validation() {
     // Valid config
     let config = MySqlStoredProcReactionConfig {
         // DevSkim: ignore DS137138
-        hostname: "localhost".to_string(), 
+        hostname: "localhost".to_string(),
         port: Some(3306),
         user: "testuser".to_string(),
         password: "password".to_string(),

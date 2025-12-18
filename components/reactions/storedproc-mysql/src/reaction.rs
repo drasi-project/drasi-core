@@ -159,7 +159,9 @@ impl MySqlStoredProcReaction {
                         "update" => &config.updated_command,
                         "delete" => &config.deleted_command,
                         _ => {
-                            debug!("[{reaction_id}] Unknown operation type: {result_type}, skipping");
+                            debug!(
+                                "[{reaction_id}] Unknown operation type: {result_type}, skipping"
+                            );
                             continue;
                         }
                     };
@@ -218,10 +220,7 @@ impl Reaction for MySqlStoredProcReaction {
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
         let mut props = HashMap::new();
-        props.insert(
-            "database".to_string(),
-            serde_json::json!("MySQL"),
-        );
+        props.insert("database".to_string(), serde_json::json!("MySQL"));
         props.insert(
             "hostname".to_string(),
             serde_json::json!(self.config.hostname),
@@ -230,10 +229,7 @@ impl Reaction for MySqlStoredProcReaction {
             "database_name".to_string(),
             serde_json::json!(self.config.database),
         );
-        props.insert(
-            "ssl".to_string(),
-            serde_json::json!(self.config.ssl),
-        );
+        props.insert("ssl".to_string(), serde_json::json!(self.config.ssl));
         props
     }
 
@@ -271,7 +267,10 @@ impl Reaction for MySqlStoredProcReaction {
         let task = self.spawn_processing_task();
         *self.task_handle.lock().await = Some(task);
 
-        info!("[{}] MySQL StoredProc reaction started successfully", self.base.id);
+        info!(
+            "[{}] MySQL StoredProc reaction started successfully",
+            self.base.id
+        );
         Ok(())
     }
 
