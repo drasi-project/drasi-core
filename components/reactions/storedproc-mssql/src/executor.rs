@@ -135,7 +135,7 @@ impl MsSqlExecutor {
                         query.bind(None::<&str>);
                     }
                     Value::Bool(b) => {
-                        query.bind(*b as i32);
+                        query.bind(*b);
                     }
                     Value::Number(n) => {
                         if let Some(i) = n.as_i64() {
