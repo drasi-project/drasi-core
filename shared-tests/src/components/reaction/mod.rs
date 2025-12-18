@@ -14,5 +14,5 @@
 
 //! Reaction component tests
 
-#[path = "reactions-storedproc/mod.rs"]
-pub mod reactions_storedproc;
+#[path = "reactions-storedproc-postgres/mod.rs"]
+pub mod reactions_storedproc_postgres;
