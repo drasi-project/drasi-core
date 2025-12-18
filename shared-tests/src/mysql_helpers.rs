@@ -22,6 +22,7 @@ use anyhow::Result;
 use mysql_async::prelude::*;
 use mysql_async::{Conn, OptsBuilder};
 use std::sync::Arc;
+use testcontainers::ImageExt;
 use testcontainers_modules::mysql::Mysql;
 
 /// MySQL container configuration
@@ -82,11 +83,20 @@ pub async fn setup_mysql() -> MysqlGuard {
 async fn setup_mysql_raw() -> (testcontainers::ContainerAsync<Mysql>, MysqlConfig) {
     use testcontainers::runners::AsyncRunner;
 
-    // Start MySQL container
-    let container = Mysql::default().start().await.unwrap();
+    // Start MySQL container with mysql_native_password plugin for compatibility
+    // The testcontainers MySQL image uses root user with empty password by default
+    // We'll set a custom database and password for the test user
+    let mysql_image = Mysql::default()
+        .with_env_var("MYSQL_DATABASE", "test")
+        .with_env_var("MYSQL_USER", "test")
+        .with_env_var("MYSQL_PASSWORD", "test")
+        .with_env_var("MYSQL_ROOT_PASSWORD", "root")
+        .with_env_var("MYSQL_AUTHENTICATION_PLUGIN", "mysql_native_password");
+
+    let container = mysql_image.start().await.unwrap();
     let mysql_port = container.get_host_port_ipv4(3306).await.unwrap();
 
-    // The testcontainers MySQL module uses these default credentials
+    // Use the credentials we configured above
     let config = MysqlConfig {
         host: "localhost".to_string(),
         port: mysql_port,
@@ -96,7 +106,7 @@ async fn setup_mysql_raw() -> (testcontainers::ContainerAsync<Mysql>, MysqlConfi
     };
 
     // Give MySQL a moment to fully initialize after the wait strategy completes
-    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
 
     (container, config)
 }
@@ -332,7 +342,7 @@ mod tests {
 
         assert_eq!(config.host, "localhost");
         assert_eq!(config.database, "test");
-        assert_eq!(config.user, "root");
+        assert_eq!(config.user, "test");
 
         // Verify we can connect
         let mut conn = mysql.get_client().await.unwrap();
