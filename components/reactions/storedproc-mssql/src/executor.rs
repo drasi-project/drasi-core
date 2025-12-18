@@ -19,11 +19,13 @@ use log::{debug, info};
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
-use tiberius::{AuthMethod, Client as TiberiusClient, Config as TiberiusConfig, EncryptionLevel, Query};
+use tiberius::{
+    AuthMethod, Client as TiberiusClient, Config as TiberiusConfig, EncryptionLevel, Query,
+};
 use tokio::net::TcpStream;
 use tokio::sync::RwLock;
 use tokio::time::timeout;
-use tokio_util::compat::{TokioAsyncWriteCompatExt, Compat};
+use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 use crate::config::MsSqlStoredProcReactionConfig;
 
@@ -48,10 +50,7 @@ impl MsSqlExecutor {
         let mut tiberius_config = TiberiusConfig::new();
         tiberius_config.host(&config.hostname);
         tiberius_config.port(port);
-        tiberius_config.authentication(AuthMethod::sql_server(
-            &config.user,
-            &config.password,
-        ));
+        tiberius_config.authentication(AuthMethod::sql_server(&config.user, &config.password));
         tiberius_config.database(&config.database);
         tiberius_config.trust_cert(); // For self-signed certificates
 
@@ -115,9 +114,8 @@ impl MsSqlExecutor {
 
             // Build the EXEC statement for MS SQL
             // MS SQL uses @p1, @p2, @p3 for parameter placeholders
-            let param_placeholders: Vec<String> = (1..=params.len())
-                .map(|i| format!("@p{}", i))
-                .collect();
+            let param_placeholders: Vec<String> =
+                (1..=params.len()).map(|i| format!("@p{}", i)).collect();
 
             let query_str = if param_placeholders.is_empty() {
                 format!("EXEC {}", proc_name)
@@ -166,12 +164,7 @@ impl MsSqlExecutor {
             // Execute the stored procedure
             timeout(cmd_timeout, query.execute(&mut *client))
                 .await
-                .map_err(|_| {
-                    anyhow!(
-                        "Procedure execution timed out after {:?}",
-                        cmd_timeout
-                    )
-                })?
+                .map_err(|_| anyhow!("Procedure execution timed out after {:?}", cmd_timeout))?
                 .map_err(|e| anyhow!("Failed to execute procedure: {}", e))?;
 
             debug!("Procedure executed successfully");

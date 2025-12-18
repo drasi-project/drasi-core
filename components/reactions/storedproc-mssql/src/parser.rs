@@ -268,7 +268,10 @@ mod tests {
         let parser = ParameterParser::new();
         let result = parser.extract_procedure_name("CALL add_user");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid procedure format"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid procedure format"));
     }
 
     #[test]
@@ -345,11 +348,11 @@ mod tests {
     #[test]
     fn test_parse_command_case_insensitive_call() {
         let parser = ParameterParser::new();
-        
+
         let result1 = parser.extract_procedure_name("CALL add_user(@id)");
         let result2 = parser.extract_procedure_name("call add_user(@id)");
         let result3 = parser.extract_procedure_name("Call add_user(@id)");
-        
+
         assert_eq!(result1.unwrap(), "add_user");
         assert_eq!(result2.unwrap(), "add_user");
         assert_eq!(result3.unwrap(), "add_user");
@@ -461,14 +464,14 @@ mod tests {
     fn test_parameter_parser_default() {
         let parser1 = ParameterParser::new();
         let parser2 = ParameterParser::default();
-        
+
         // Both should work the same way
         let command = "CALL test(@id)";
         let data = json!({"id": 42});
-        
+
         let result1 = parser1.parse_command(command, &data).unwrap();
         let result2 = parser2.parse_command(command, &data).unwrap();
-        
+
         assert_eq!(result1, result2);
     }
 

@@ -233,10 +233,7 @@ impl Reaction for MsSqlStoredProcReaction {
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
         let mut props = HashMap::new();
-        props.insert(
-            "database".to_string(),
-            serde_json::json!("MS SQL Server"),
-        );
+        props.insert("database".to_string(), serde_json::json!("MS SQL Server"));
         props.insert(
             "hostname".to_string(),
             serde_json::json!(self.config.hostname),
@@ -245,10 +242,7 @@ impl Reaction for MsSqlStoredProcReaction {
             "database_name".to_string(),
             serde_json::json!(self.config.database),
         );
-        props.insert(
-            "ssl".to_string(),
-            serde_json::json!(self.config.ssl),
-        );
+        props.insert("ssl".to_string(), serde_json::json!(self.config.ssl));
         props
     }
 
@@ -286,19 +280,28 @@ impl Reaction for MsSqlStoredProcReaction {
         let task = self.spawn_processing_task();
         *self.task_handle.lock().await = Some(task);
 
-        info!("[{}] MS SQL Server StoredProc reaction started successfully", self.base.id);
+        info!(
+            "[{}] MS SQL Server StoredProc reaction started successfully",
+            self.base.id
+        );
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        info!("[{}] Stopping MS SQL Server StoredProc reaction", self.base.id);
+        info!(
+            "[{}] Stopping MS SQL Server StoredProc reaction",
+            self.base.id
+        );
 
         // Abort the processing task
         if let Some(handle) = self.task_handle.lock().await.take() {
             handle.abort();
         }
 
-        info!("[{}] MS SQL Server StoredProc reaction stopped", self.base.id);
+        info!(
+            "[{}] MS SQL Server StoredProc reaction stopped",
+            self.base.id
+        );
         Ok(())
     }
 

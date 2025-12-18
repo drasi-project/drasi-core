@@ -24,7 +24,7 @@
 
 use anyhow::Result;
 use std::sync::Arc;
-use testcontainers::{ImageExt, ContainerAsync, GenericImage};
+use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use testcontainers_modules::mssql_server::MssqlServer;
 use tiberius::{Client, Config};
 use tokio::net::TcpStream;
@@ -44,7 +44,10 @@ impl MssqlContainer {
         }
     }
 
-    async fn get_host_port_ipv4(&self, port: u16) -> Result<u16, testcontainers::core::error::TestcontainersError> {
+    async fn get_host_port_ipv4(
+        &self,
+        port: u16,
+    ) -> Result<u16, testcontainers::core::error::TestcontainersError> {
         match self {
             MssqlContainer::MssqlServer(c) => c.get_host_port_ipv4(port).await,
             MssqlContainer::AzureSqlEdge(c) => c.get_host_port_ipv4(port).await,
@@ -148,7 +151,7 @@ async fn setup_mssql_raw() -> (MssqlContainer, MssqlConfig) {
     // Retry container startup to handle transient Docker/containerd issues
     let max_container_retries = 3;
     let mut last_error = None;
-    
+
     let (container, init_time) = 'retry_loop: loop {
         for attempt in 1..=max_container_retries {
             let result = if cfg!(target_arch = "aarch64") {
@@ -160,7 +163,9 @@ async fn setup_mssql_raw() -> (MssqlContainer, MssqlConfig) {
                     // Add capabilities needed for Azure SQL Edge on ARM
                     .with_privileged(true);
 
-                image.start().await
+                image
+                    .start()
+                    .await
                     .map(|c| (MssqlContainer::AzureSqlEdge(c), 20000))
             } else {
                 // Standard MSSQL Server for AMD64
@@ -168,17 +173,19 @@ async fn setup_mssql_raw() -> (MssqlContainer, MssqlConfig) {
                     .with_env_var("ACCEPT_EULA", "Y")
                     .with_env_var("MSSQL_SA_PASSWORD", password);
 
-                image.start().await
+                image
+                    .start()
+                    .await
                     .map(|c| (MssqlContainer::MssqlServer(c), 15000))
             };
-            
+
             match result {
                 Ok(container_tuple) => {
                     break 'retry_loop container_tuple;
                 }
                 Err(e) => {
                     last_error = Some(e);
-                    
+
                     if attempt < max_container_retries {
                         // Exponential backoff: 1s, 2s, 4s
                         let delay = std::time::Duration::from_secs(2u64.pow(attempt as u32 - 1));
@@ -187,7 +194,7 @@ async fn setup_mssql_raw() -> (MssqlContainer, MssqlConfig) {
                 }
             }
         }
-        
+
         // If we get here, all retries failed
         panic!(
             "Failed to start MSSQL container after {max_container_retries} attempts. \n\
@@ -231,14 +238,12 @@ async fn wait_for_mssql_ready(config: &MssqlConfig, container: &MssqlContainer) 
             Ok(mut client) => {
                 // Try a simple query to verify the connection works
                 match client.query("SELECT 1", &[]).await {
-                    Ok(stream) => {
-                        match stream.into_results().await {
-                            Ok(_) => {
-                                return;
-                            }
-                            Err(_) => {}
+                    Ok(stream) => match stream.into_results().await {
+                        Ok(_) => {
+                            return;
                         }
-                    }
+                        Err(_) => {}
+                    },
                     Err(_) => {}
                 }
             }
@@ -250,7 +255,10 @@ async fn wait_for_mssql_ready(config: &MssqlConfig, container: &MssqlContainer) 
         }
     }
 
-    panic!("MSSQL failed to become ready after {max_retries} attempts ({} seconds)", max_retries * 3);
+    panic!(
+        "MSSQL failed to become ready after {max_retries} attempts ({} seconds)",
+        max_retries * 3
+    );
 }
 
 /// Guard wrapper for MSSQL container that ensures proper cleanup

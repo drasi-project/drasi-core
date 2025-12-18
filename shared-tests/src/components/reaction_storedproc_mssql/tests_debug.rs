@@ -13,37 +13,35 @@ async fn test_mssql_connection_no_serial() {
     log::info!("=== TEST STARTED (NO SERIAL) ===");
     println!("=== TEST STARTED (NO SERIAL) ===");
 
-    let result = tokio::time::timeout(
-        Duration::from_secs(120),
-        async {
-            log::info!("Calling setup_mssql()...");
-            let mssql = setup_mssql().await;
-            log::info!("setup_mssql() completed");
+    let result = tokio::time::timeout(Duration::from_secs(120), async {
+        log::info!("Calling setup_mssql()...");
+        let mssql = setup_mssql().await;
+        log::info!("setup_mssql() completed");
 
-            let mut client = mssql.get_client().await.unwrap();
-            let rows = client
-                .query("SELECT 1 AS value", &[])
-                .await
-                .unwrap()
-                .into_results()
-                .await
-                .unwrap();
+        let mut client = mssql.get_client().await.unwrap();
+        let rows = client
+            .query("SELECT 1 AS value", &[])
+            .await
+            .unwrap()
+            .into_results()
+            .await
+            .unwrap();
 
-            if let Some(rows) = rows.first() {
-                if let Some(row) = rows.first() {
-                    let value: i32 = row.get(0).unwrap();
-                    assert_eq!(value, 1);
-                }
+        if let Some(rows) = rows.first() {
+            if let Some(row) = rows.first() {
+                let value: i32 = row.get(0).unwrap();
+                assert_eq!(value, 1);
             }
-
-            mssql.cleanup().await;
         }
-    ).await;
+
+        mssql.cleanup().await;
+    })
+    .await;
 
     match result {
         Ok(_) => {
             log::info!("Test completed successfully");
-        },
+        }
         Err(_) => panic!("Test timed out after 120 seconds"),
     }
 }

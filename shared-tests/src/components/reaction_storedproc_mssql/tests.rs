@@ -27,7 +27,10 @@ use tokio::time::sleep;
 
 /// Helper function to setup stored procedures in the test database
 async fn setup_stored_procedures(config: &MssqlConfig) {
-    let mut client = config.connect().await.expect("Failed to connect to database");
+    let mut client = config
+        .connect()
+        .await
+        .expect("Failed to connect to database");
 
     // Create a table to log stored procedure calls
     execute_sql(
@@ -46,18 +49,26 @@ async fn setup_stored_procedures(config: &MssqlConfig) {
     // Drop and create stored procedure for ADD operation
     // Use separate connections to ensure batch separation
     drop(client);
-    
-    let mut client = config.connect().await.expect("Failed to connect to database");
+
+    let mut client = config
+        .connect()
+        .await
+        .expect("Failed to connect to database");
     if let Ok(stream) = client
-        .simple_query("IF OBJECT_ID('log_sensor_added', 'P') IS NOT NULL DROP PROCEDURE log_sensor_added")
+        .simple_query(
+            "IF OBJECT_ID('log_sensor_added', 'P') IS NOT NULL DROP PROCEDURE log_sensor_added",
+        )
         .await
     {
         let _ = stream.into_results().await;
     }
 
     drop(client);
-    
-    let mut client = config.connect().await.expect("Failed to connect to database");
+
+    let mut client = config
+        .connect()
+        .await
+        .expect("Failed to connect to database");
     let stream = client
         .simple_query(
             "CREATE PROCEDURE log_sensor_added
@@ -67,7 +78,7 @@ async fn setup_stored_procedures(config: &MssqlConfig) {
             BEGIN
                 INSERT INTO sensor_log (operation, sensor_id, temperature)
                 VALUES ('ADD', @p_sensor_id, @p_temperature);
-            END"
+            END",
         )
         .await
         .expect("Failed to create log_sensor_added procedure");
@@ -75,18 +86,26 @@ async fn setup_stored_procedures(config: &MssqlConfig) {
 
     // Drop and create stored procedure for UPDATE operation
     drop(client);
-    
-    let mut client = config.connect().await.expect("Failed to connect to database");
+
+    let mut client = config
+        .connect()
+        .await
+        .expect("Failed to connect to database");
     if let Ok(stream) = client
-        .simple_query("IF OBJECT_ID('log_sensor_updated', 'P') IS NOT NULL DROP PROCEDURE log_sensor_updated")
+        .simple_query(
+            "IF OBJECT_ID('log_sensor_updated', 'P') IS NOT NULL DROP PROCEDURE log_sensor_updated",
+        )
         .await
     {
         let _ = stream.into_results().await;
     }
 
     drop(client);
-    
-    let mut client = config.connect().await.expect("Failed to connect to database");
+
+    let mut client = config
+        .connect()
+        .await
+        .expect("Failed to connect to database");
     let stream = client
         .simple_query(
             "CREATE PROCEDURE log_sensor_updated
@@ -96,7 +115,7 @@ async fn setup_stored_procedures(config: &MssqlConfig) {
             BEGIN
                 INSERT INTO sensor_log (operation, sensor_id, temperature)
                 VALUES ('UPDATE', @p_sensor_id, @p_temperature);
-            END"
+            END",
         )
         .await
         .expect("Failed to create log_sensor_updated procedure");
@@ -104,18 +123,26 @@ async fn setup_stored_procedures(config: &MssqlConfig) {
 
     // Drop and create stored procedure for DELETE operation
     drop(client);
-    
-    let mut client = config.connect().await.expect("Failed to connect to database");
+
+    let mut client = config
+        .connect()
+        .await
+        .expect("Failed to connect to database");
     if let Ok(stream) = client
-        .simple_query("IF OBJECT_ID('log_sensor_deleted', 'P') IS NOT NULL DROP PROCEDURE log_sensor_deleted")
+        .simple_query(
+            "IF OBJECT_ID('log_sensor_deleted', 'P') IS NOT NULL DROP PROCEDURE log_sensor_deleted",
+        )
         .await
     {
         let _ = stream.into_results().await;
     }
 
     drop(client);
-    
-    let mut client = config.connect().await.expect("Failed to connect to database");
+
+    let mut client = config
+        .connect()
+        .await
+        .expect("Failed to connect to database");
     let stream = client
         .simple_query(
             "CREATE PROCEDURE log_sensor_deleted
@@ -124,7 +151,7 @@ async fn setup_stored_procedures(config: &MssqlConfig) {
             BEGIN
                 INSERT INTO sensor_log (operation, sensor_id, temperature)
                 VALUES ('DELETE', @p_sensor_id, NULL);
-            END"
+            END",
         )
         .await
         .expect("Failed to create log_sensor_deleted procedure");
@@ -133,7 +160,10 @@ async fn setup_stored_procedures(config: &MssqlConfig) {
 
 /// Helper function to get log entries from the database
 async fn get_log_entries(config: &MssqlConfig) -> Vec<(String, String)> {
-    let mut client = config.connect().await.expect("Failed to connect to database");
+    let mut client = config
+        .connect()
+        .await
+        .expect("Failed to connect to database");
 
     let rows = client
         .query(
@@ -160,7 +190,10 @@ async fn get_log_entries(config: &MssqlConfig) -> Vec<(String, String)> {
 
 /// Helper function to get log count
 async fn get_log_count(config: &MssqlConfig) -> i64 {
-    let mut client = config.connect().await.expect("Failed to connect to database");
+    let mut client = config
+        .connect()
+        .await
+        .expect("Failed to connect to database");
 
     let rows = client
         .query("SELECT COUNT(*) as count FROM sensor_log", &[])
@@ -206,31 +239,29 @@ async fn test_mssql_connection() {
         .ok();
 
     // Wrap test in timeout to prevent hanging
-    let result = tokio::time::timeout(
-        Duration::from_secs(120),
-        async {
-            let mssql = setup_mssql().await;
+    let result = tokio::time::timeout(Duration::from_secs(120), async {
+        let mssql = setup_mssql().await;
 
-            // Verify we can connect
-            let mut client = mssql.get_client().await.unwrap();
-            let rows = client
-                .query("SELECT 1 AS value", &[])
-                .await
-                .unwrap()
-                .into_results()
-                .await
-                .unwrap();
+        // Verify we can connect
+        let mut client = mssql.get_client().await.unwrap();
+        let rows = client
+            .query("SELECT 1 AS value", &[])
+            .await
+            .unwrap()
+            .into_results()
+            .await
+            .unwrap();
 
-            if let Some(rows) = rows.first() {
-                if let Some(row) = rows.first() {
-                    let value: i32 = row.get(0).unwrap();
-                    assert_eq!(value, 1);
-                }
+        if let Some(rows) = rows.first() {
+            if let Some(row) = rows.first() {
+                let value: i32 = row.get(0).unwrap();
+                assert_eq!(value, 1);
             }
-
-            mssql.cleanup().await;
         }
-    ).await;
+
+        mssql.cleanup().await;
+    })
+    .await;
 
     match result {
         Ok(_) => {},
@@ -249,38 +280,36 @@ async fn test_mssql_stored_procedures() {
         .ok();
 
     // Wrap test in timeout to prevent hanging
-    let result = tokio::time::timeout(
-        Duration::from_secs(120),
-        async {
-            let mssql = setup_mssql().await;
-            let mssql_config = mssql.config();
-            setup_stored_procedures(mssql_config).await;
+    let result = tokio::time::timeout(Duration::from_secs(120), async {
+        let mssql = setup_mssql().await;
+        let mssql_config = mssql.config();
+        setup_stored_procedures(mssql_config).await;
 
-            // Execute the stored procedure using parameterized query
-            let mut client = mssql.get_client().await.unwrap();
+        // Execute the stored procedure using parameterized query
+        let mut client = mssql.get_client().await.unwrap();
 
-            client
-                .execute(
-                    "EXEC log_sensor_added @p_sensor_id = @P1, @p_temperature = @P2",
-                    &[&"sensor-001", &25.5f64],
-                )
-                .await
-                .expect("Failed to execute stored procedure");
+        client
+            .execute(
+                "EXEC log_sensor_added @p_sensor_id = @P1, @p_temperature = @P2",
+                &[&"sensor-001", &25.5f64],
+            )
+            .await
+            .expect("Failed to execute stored procedure");
 
-            // Wait a bit for the insert to complete
-            sleep(Duration::from_millis(100)).await;
+        // Wait a bit for the insert to complete
+        sleep(Duration::from_millis(100)).await;
 
-            // Verify the log entry
-            let count = get_log_count(mssql_config).await;
-            assert_eq!(count, 1, "Should have 1 log entry");
+        // Verify the log entry
+        let count = get_log_count(mssql_config).await;
+        assert_eq!(count, 1, "Should have 1 log entry");
 
-            let entries = get_log_entries(mssql_config).await;
-            assert_eq!(entries[0].0, "ADD");
-            assert_eq!(entries[0].1, "sensor-001");
+        let entries = get_log_entries(mssql_config).await;
+        assert_eq!(entries[0].0, "ADD");
+        assert_eq!(entries[0].1, "sensor-001");
 
-            mssql.cleanup().await;
-        }
-    ).await;
+        mssql.cleanup().await;
+    })
+    .await;
 
     match result {
         Ok(_) => {},
@@ -299,55 +328,53 @@ async fn test_mssql_multiple_operations() {
         .ok();
 
     // Wrap test in timeout to prevent hanging
-    let result = tokio::time::timeout(
-        Duration::from_secs(120),
-        async {
-            let mssql = setup_mssql().await;
-            let mssql_config = mssql.config();
-            setup_stored_procedures(mssql_config).await;
+    let result = tokio::time::timeout(Duration::from_secs(120), async {
+        let mssql = setup_mssql().await;
+        let mssql_config = mssql.config();
+        setup_stored_procedures(mssql_config).await;
 
-            let mut client = mssql.get_client().await.unwrap();
+        let mut client = mssql.get_client().await.unwrap();
 
-            // Execute ADD
-            client
-                .execute(
-                    "EXEC log_sensor_added @p_sensor_id = @P1, @p_temperature = @P2",
-                    &[&"sensor-001", &25.5f64],
-                )
-                .await
-                .expect("ADD should succeed");
+        // Execute ADD
+        client
+            .execute(
+                "EXEC log_sensor_added @p_sensor_id = @P1, @p_temperature = @P2",
+                &[&"sensor-001", &25.5f64],
+            )
+            .await
+            .expect("ADD should succeed");
 
-            // Execute UPDATE
-            client
-                .execute(
-                    "EXEC log_sensor_updated @p_sensor_id = @P1, @p_temperature = @P2",
-                    &[&"sensor-001", &26.5f64],
-                )
-                .await
-                .expect("UPDATE should succeed");
+        // Execute UPDATE
+        client
+            .execute(
+                "EXEC log_sensor_updated @p_sensor_id = @P1, @p_temperature = @P2",
+                &[&"sensor-001", &26.5f64],
+            )
+            .await
+            .expect("UPDATE should succeed");
 
-            // Execute DELETE
-            client
-                .execute(
-                    "EXEC log_sensor_deleted @p_sensor_id = @P1",
-                    &[&"sensor-001"],
-                )
-                .await
-                .expect("DELETE should succeed");
+        // Execute DELETE
+        client
+            .execute(
+                "EXEC log_sensor_deleted @p_sensor_id = @P1",
+                &[&"sensor-001"],
+            )
+            .await
+            .expect("DELETE should succeed");
 
-            // Wait for operations to complete
-            sleep(Duration::from_millis(100)).await;
+        // Wait for operations to complete
+        sleep(Duration::from_millis(100)).await;
 
-            // Verify all operations logged
-            let entries = get_log_entries(mssql_config).await;
-            assert_eq!(entries.len(), 3, "Should have 3 log entries");
-            assert_eq!(entries[0].0, "ADD");
-            assert_eq!(entries[1].0, "UPDATE");
-            assert_eq!(entries[2].0, "DELETE");
+        // Verify all operations logged
+        let entries = get_log_entries(mssql_config).await;
+        assert_eq!(entries.len(), 3, "Should have 3 log entries");
+        assert_eq!(entries[0].0, "ADD");
+        assert_eq!(entries[1].0, "UPDATE");
+        assert_eq!(entries[2].0, "DELETE");
 
-            mssql.cleanup().await;
-        }
-    ).await;
+        mssql.cleanup().await;
+    })
+    .await;
 
     match result {
         Ok(_) => {},
@@ -366,34 +393,32 @@ async fn test_mssql_with_special_characters() {
         .ok();
 
     // Wrap test in timeout to prevent hanging
-    let result = tokio::time::timeout(
-        Duration::from_secs(120),
-        async {
-            let mssql = setup_mssql().await;
-            let mssql_config = mssql.config();
-            setup_stored_procedures(mssql_config).await;
+    let result = tokio::time::timeout(Duration::from_secs(120), async {
+        let mssql = setup_mssql().await;
+        let mssql_config = mssql.config();
+        setup_stored_procedures(mssql_config).await;
 
-            let mut client = mssql.get_client().await.unwrap();
+        let mut client = mssql.get_client().await.unwrap();
 
-            // Test with special characters (potential SQL injection)
-            client
-                .execute(
-                    "EXEC log_sensor_added @p_sensor_id = @P1, @p_temperature = @P2",
-                    &[&"sensor'; DROP TABLE sensor_log; --", &25.5f64],
-                )
-                .await
-                .expect("Should safely handle special characters");
+        // Test with special characters (potential SQL injection)
+        client
+            .execute(
+                "EXEC log_sensor_added @p_sensor_id = @P1, @p_temperature = @P2",
+                &[&"sensor'; DROP TABLE sensor_log; --", &25.5f64],
+            )
+            .await
+            .expect("Should safely handle special characters");
 
-            sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(100)).await;
 
-            // Verify the table still exists and has the entry
-            let entries = get_log_entries(mssql_config).await;
-            assert_eq!(entries.len(), 1);
-            assert_eq!(entries[0].1, "sensor'; DROP TABLE sensor_log; --");
+        // Verify the table still exists and has the entry
+        let entries = get_log_entries(mssql_config).await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1, "sensor'; DROP TABLE sensor_log; --");
 
-            mssql.cleanup().await;
-        }
-    ).await;
+        mssql.cleanup().await;
+    })
+    .await;
 
     match result {
         Ok(_) => {},
