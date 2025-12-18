@@ -61,12 +61,12 @@ impl MySqlExecutor {
         let mut conn = pool
             .get_conn()
             .await
-            .map_err(|e| anyhow!("Failed to connect to MySQL: {}", e))?;
+            .map_err(|e| anyhow!("Failed to connect to MySQL: {e}"))?;
 
         // Test query
         conn.query_drop("SELECT 1")
             .await
-            .map_err(|e| anyhow!("Failed to test MySQL connection: {}", e))?;
+            .map_err(|e| anyhow!("Failed to test MySQL connection: {e}"))?;
 
         // Return connection to pool
         drop(conn);
@@ -89,12 +89,12 @@ impl MySqlExecutor {
             .pool
             .get_conn()
             .await
-            .map_err(|e| anyhow!("Failed to get connection: {}", e))?;
+            .map_err(|e| anyhow!("Failed to get connection: {e}"))?;
 
         timeout(self.command_timeout, conn.query_drop("SELECT 1"))
             .await
             .map_err(|_| anyhow!("Connection test timed out"))?
-            .map_err(|e| anyhow!("Connection test failed: {}", e))?;
+            .map_err(|e| anyhow!("Connection test failed: {e}"))?;
 
         info!("Database connection test successful");
         Ok(())
@@ -115,14 +115,14 @@ impl MySqlExecutor {
             let mut conn = pool
                 .get_conn()
                 .await
-                .map_err(|e| anyhow!("Failed to get connection: {}", e))?;
+                .map_err(|e| anyhow!("Failed to get connection: {e}"))?;
 
             // Build the CALL statement for MySQL
             // MySQL uses ? for parameter placeholders
             let param_placeholders: Vec<&str> = (0..params.len()).map(|_| "?").collect();
 
             let query = if param_placeholders.is_empty() {
-                format!("CALL {}()", proc_name)
+                format!("CALL {proc_name}()")
             } else {
                 format!("CALL {}({})", proc_name, param_placeholders.join(", "))
             };
@@ -137,13 +137,8 @@ impl MySqlExecutor {
             // Execute the stored procedure
             timeout(cmd_timeout, conn.exec_drop(&query, mysql_params))
                 .await
-                .map_err(|_| {
-                    anyhow!(
-                        "Procedure execution timed out after {:?}",
-                        cmd_timeout
-                    )
-                })?
-                .map_err(|e| anyhow!("Failed to execute procedure: {}", e))?;
+                .map_err(|_| anyhow!("Procedure execution timed out after {cmd_timeout:?}"))?
+                .map_err(|e| anyhow!("Failed to execute procedure: {e}"))?;
 
             debug!("Procedure executed successfully");
             Ok(())
@@ -162,7 +157,7 @@ impl MySqlExecutor {
         for attempt in 0..=self.retry_attempts {
             if attempt > 0 {
                 let backoff = Duration::from_millis(100 * 2u64.pow(attempt - 1));
-                debug!("Retrying after {:?} (attempt {})", backoff, attempt);
+                debug!("Retrying after {backoff:?} (attempt {attempt})");
                 tokio::time::sleep(backoff).await;
             }
 

@@ -133,7 +133,7 @@ impl MySqlStoredProcReaction {
         let reaction_id = self.base.id.clone();
 
         tokio::spawn(async move {
-            info!("[{}] Starting processing loop", reaction_id);
+            info!("[{reaction_id}] Starting processing loop");
 
             loop {
                 // Dequeue next result (blocks until available)
@@ -159,10 +159,7 @@ impl MySqlStoredProcReaction {
                         "update" => &config.updated_command,
                         "delete" => &config.deleted_command,
                         _ => {
-                            debug!(
-                                "[{}] Unknown operation type: {}, skipping",
-                                reaction_id, result_type
-                            );
+                            debug!("[{reaction_id}] Unknown operation type: {result_type}, skipping");
                             continue;
                         }
                     };
@@ -186,34 +183,22 @@ impl MySqlStoredProcReaction {
                                     // Execute stored procedure
                                     match executor.execute_procedure(&proc_name, params).await {
                                         Ok(()) => {
-                                            debug!(
-                                                "[{}] Successfully executed {} for {} operation",
-                                                reaction_id, proc_name, result_type
-                                            );
+                                            debug!("[{reaction_id}] Successfully executed {proc_name} for {result_type} operation");
                                         }
                                         Err(e) => {
-                                            error!(
-                                                "[{}] Failed to execute {}: {}",
-                                                reaction_id, proc_name, e
-                                            );
+                                            error!("[{reaction_id}] Failed to execute {proc_name}: {e}");
                                         }
                                     }
                                 }
                                 Err(e) => {
-                                    error!("[{}] Failed to parse command: {}", reaction_id, e);
+                                    error!("[{reaction_id}] Failed to parse command: {e}");
                                 }
                             }
                         } else {
-                            error!(
-                                "[{}] No data available for {} operation",
-                                reaction_id, result_type
-                            );
+                            error!("[{reaction_id}] No data available for {result_type} operation");
                         }
                     } else {
-                        debug!(
-                            "[{}] No command configured for {} operation, skipping",
-                            reaction_id, result_type
-                        );
+                        debug!("[{reaction_id}] No command configured for {result_type} operation, skipping");
                     }
                 }
             }

@@ -195,7 +195,9 @@ impl Drop for MysqlGuardInner {
                 // Just drop the container - testcontainers will handle cleanup
                 // We can't use block_on here because we might already be in an async runtime
                 drop(container);
-                log::debug!("MySQL container {container_id} dropped (cleanup delegated to testcontainers)");
+                log::debug!(
+                    "MySQL container {container_id} dropped (cleanup delegated to testcontainers)"
+                );
             }
         }
     }
@@ -298,19 +300,19 @@ pub async fn get_procedure_log_count(conn: &mut Conn) -> Result<i64> {
 /// Get procedure log entries
 pub async fn get_procedure_log_entries(conn: &mut Conn) -> Result<Vec<ProcedureLogEntry>> {
     let rows: Vec<(String, Option<i32>, Option<String>, Option<String>)> = conn
-        .query(
-            "SELECT operation, user_id, user_name, user_email FROM procedure_log ORDER BY id",
-        )
+        .query("SELECT operation, user_id, user_name, user_email FROM procedure_log ORDER BY id")
         .await?;
 
     let entries = rows
         .into_iter()
-        .map(|(operation, user_id, user_name, user_email)| ProcedureLogEntry {
-            operation,
-            user_id,
-            user_name,
-            user_email,
-        })
+        .map(
+            |(operation, user_id, user_name, user_email)| ProcedureLogEntry {
+                operation,
+                user_id,
+                user_name,
+                user_email,
+            },
+        )
         .collect();
 
     Ok(entries)
