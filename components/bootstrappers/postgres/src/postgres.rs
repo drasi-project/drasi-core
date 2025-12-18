@@ -84,7 +84,7 @@ impl PostgresBootstrapProviderBuilder {
     /// Create a new builder with default values
     pub fn new() -> Self {
         Self {
-            host: "localhost".to_string(),
+            host: "localhost".to_string(),  // DevSkim: ignore DS137138
             port: 5432,
             database: String::new(),
             user: String::new(),

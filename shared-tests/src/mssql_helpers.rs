@@ -222,13 +222,13 @@ async fn setup_mssql_raw() -> (MssqlContainer, MssqlConfig) {
     tokio::time::sleep(std::time::Duration::from_millis(init_time)).await;
 
     // Wait for the database to be ready with retries
-    wait_for_mssql_ready(&config, &container).await;
+    wait_for_mssql_ready(&config).await;
 
     (container, config)
 }
 
 /// Wait for MSSQL to be ready for connections with retries
-async fn wait_for_mssql_ready(config: &MssqlConfig, container: &MssqlContainer) {
+async fn wait_for_mssql_ready(config: &MssqlConfig) {
     let max_retries = 30; // Increased from 10 to handle slower systems
     let retry_delay = std::time::Duration::from_secs(3);
 
@@ -348,8 +348,6 @@ pub async fn execute_sql(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[tokio::test]
     #[cfg(not(target_arch = "aarch64"))] // Skip on ARM64 - Azure SQL Edge has stability issues
     async fn test_setup_mssql() {
