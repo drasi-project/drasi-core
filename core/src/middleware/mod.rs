@@ -59,17 +59,16 @@ impl MiddlewareTypeRegistry {
     /// Discovers and loads all plugins from registered plugin loaders
     pub fn discover_and_load_plugins(&mut self) -> Result<usize, PluginLoadError> {
         let mut loaded_count = 0;
+        let mut factories_to_register = Vec::new();
 
-        // Collect all loaders to avoid borrowing issues
-        let loaders_count = self.plugin_loaders.len();
-        
-        for i in 0..loaders_count {
+        // Process each loader
+        for loader in &mut self.plugin_loaders {
             // Discover plugins from this loader
-            let descriptors = self.plugin_loaders[i].discover_plugins()?;
+            let descriptors = loader.discover_plugins()?;
             
             // Load each discovered plugin
             for descriptor in descriptors {
-                match self.plugin_loaders[i].load_plugin(&descriptor) {
+                match loader.load_plugin(&descriptor) {
                     Ok(factory) => {
                         log::info!(
                             "Loaded plugin '{}' version {} from {}",
@@ -77,7 +76,7 @@ impl MiddlewareTypeRegistry {
                             descriptor.version,
                             descriptor.path.display()
                         );
-                        self.register(factory);
+                        factories_to_register.push(factory);
                         loaded_count += 1;
                     }
                     Err(e) => {
@@ -90,6 +89,11 @@ impl MiddlewareTypeRegistry {
                     }
                 }
             }
+        }
+
+        // Register all loaded factories
+        for factory in factories_to_register {
+            self.register(factory);
         }
 
         Ok(loaded_count)
