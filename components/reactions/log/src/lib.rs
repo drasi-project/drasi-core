@@ -42,5 +42,5 @@ mod log;
 #[cfg(test)]
 mod tests;
 
-pub use config::LogReactionConfig;
+pub use config::{LogReactionConfig, QueryConfig, TemplateSpec};
 pub use log::{LogReaction, LogReactionBuilder};

@@ -40,6 +40,7 @@ Set a default template that applies to all queries:
 
 ```rust
 use drasi_reaction_log::{LogReaction, QueryConfig, TemplateSpec};
+use std::sync::Arc;
 
 // Define a default template that applies to all queries
 let default_template = QueryConfig {
@@ -77,6 +78,7 @@ Override default template for specific queries:
 
 ```rust
 use drasi_reaction_log::{LogReaction, QueryConfig, TemplateSpec};
+use std::sync::Arc;
 
 // Define custom templates for different queries
 let sensor_config = QueryConfig {
@@ -114,6 +116,7 @@ For programmatic configuration or deserialization scenarios:
 
 ```rust
 use drasi_reaction_log::{LogReaction, LogReactionConfig, QueryConfig, TemplateSpec};
+use std::sync::Arc;
 
 let default_template = QueryConfig {
     added: Some(TemplateSpec {
@@ -136,7 +139,7 @@ let reaction = LogReaction::new(
     "my-logger",
     vec!["query1".to_string(), "query2".to_string()],
     config
-);
+)?;
 
 drasi.add_reaction(Arc::new(reaction)).await?;
 ```
@@ -146,6 +149,7 @@ drasi.add_reaction(Arc::new(reaction)).await?;
 ```rust
 use drasi_reaction_log::{LogReaction, LogReactionConfig, QueryConfig, TemplateSpec};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 let mut routes = HashMap::new();
 routes.insert("sensor-query".to_string(), QueryConfig {
@@ -376,6 +380,9 @@ drasi.add_reaction(Arc::new(reaction)).await?;
 Subscribe to multiple queries:
 
 ```rust
+use drasi_reaction_log::LogReaction;
+use std::sync::Arc;
+
 let reaction = LogReaction::builder("multi-logger")
     .with_queries(vec![
         "sensor-data".to_string(),
@@ -393,6 +400,7 @@ Use templates for readable output:
 
 ```rust
 use drasi_reaction_log::{LogReaction, QueryConfig, TemplateSpec};
+use std::sync::Arc;
 
 let inventory_template = QueryConfig {
     added: Some(TemplateSpec {
@@ -419,6 +427,9 @@ drasi.add_reaction(Arc::new(reaction)).await?;
 Adjust queue capacity for high-volume scenarios:
 
 ```rust
+use drasi_reaction_log::LogReaction;
+use std::sync::Arc;
+
 let reaction = LogReaction::builder("high-volume-logger")
     .with_query("events")
     .with_priority_queue_capacity(50000)  // Increased buffer
@@ -432,6 +443,9 @@ drasi.add_reaction(Arc::new(reaction)).await?;
 Create but don't start immediately:
 
 ```rust
+use drasi_reaction_log::LogReaction;
+use std::sync::Arc;
+
 let reaction = LogReaction::builder("manual-logger")
     .with_query("debug-query")
     .with_auto_start(false)  // Don't start automatically
@@ -447,6 +461,7 @@ drasi.start_reaction("manual-logger").await?;
 
 ```rust
 use drasi_reaction_log::{LogReaction, QueryConfig, TemplateSpec};
+use std::sync::Arc;
 
 let user_template = QueryConfig {
     added: Some(TemplateSpec {
@@ -467,6 +482,8 @@ let reaction = LogReaction::builder("complex-logger")
     .build()?;
 
 drasi.add_reaction(Arc::new(reaction)).await?;
+
+drasi.add_reaction(Arc::new(reaction)).await?;
 ```
 
 ### Per-Query Templates
@@ -475,6 +492,7 @@ Different formatting for different queries:
 
 ```rust
 use drasi_reaction_log::{LogReaction, QueryConfig, TemplateSpec};
+use std::sync::Arc;
 
 // Default template for all queries
 let default_template = QueryConfig {

@@ -60,36 +60,7 @@ impl LogReaction {
         let id = id.into();
         
         // Validate templates and routes
-        let handlebars = handlebars::Handlebars::new();
-        
-        // Validate all templates in routes
-        for (query_id, route_config) in &config.routes {
-            Self::validate_query_config(&handlebars, route_config)
-                .map_err(|e| anyhow::anyhow!("Invalid template in route '{}': {}", query_id, e))?;
-        }
-        
-        // Validate default template if provided
-        if let Some(default_template) = &config.default_template {
-            Self::validate_query_config(&handlebars, default_template)
-                .map_err(|e| anyhow::anyhow!("Invalid default template: {}", e))?;
-        }
-        
-        // Validate that all routes correspond to subscribed queries
-        if !config.routes.is_empty() && !queries.is_empty() {
-            for route_query in config.routes.keys() {
-                // Check exact match or if the query ends with the route (for dotted notation)
-                let matches = queries.iter().any(|q| {
-                    q == route_query || q.ends_with(&format!(".{}", route_query))
-                });
-                if !matches {
-                    return Err(anyhow::anyhow!(
-                        "Route '{}' does not match any subscribed query. Subscribed queries: {:?}",
-                        route_query,
-                        queries
-                    ));
-                }
-            }
-        }
+        Self::validate_config(&queries, &config)?;
         
         let params = ReactionBaseParams::new(id, queries);
         Ok(Self {
@@ -128,36 +99,7 @@ impl LogReaction {
         let id = id.into();
         
         // Validate templates and routes
-        let handlebars = handlebars::Handlebars::new();
-        
-        // Validate all templates in routes
-        for (query_id, route_config) in &config.routes {
-            Self::validate_query_config(&handlebars, route_config)
-                .map_err(|e| anyhow::anyhow!("Invalid template in route '{}': {}", query_id, e))?;
-        }
-        
-        // Validate default template if provided
-        if let Some(default_template) = &config.default_template {
-            Self::validate_query_config(&handlebars, default_template)
-                .map_err(|e| anyhow::anyhow!("Invalid default template: {}", e))?;
-        }
-        
-        // Validate that all routes correspond to subscribed queries
-        if !config.routes.is_empty() && !queries.is_empty() {
-            for route_query in config.routes.keys() {
-                // Check exact match or if the query ends with the route (for dotted notation)
-                let matches = queries.iter().any(|q| {
-                    q == route_query || q.ends_with(&format!(".{}", route_query))
-                });
-                if !matches {
-                    return Err(anyhow::anyhow!(
-                        "Route '{}' does not match any subscribed query. Subscribed queries: {:?}",
-                        route_query,
-                        queries
-                    ));
-                }
-            }
-        }
+        Self::validate_config(&queries, &config)?;
         
         let params = ReactionBaseParams::new(id, queries)
             .with_priority_queue_capacity(priority_queue_capacity);
@@ -190,6 +132,46 @@ impl LogReaction {
         if let Some(deleted) = &config.deleted {
             Self::validate_template(handlebars, &deleted.template)?;
         }
+        Ok(())
+    }
+
+    /// Validate configuration: templates and route-query matching
+    fn validate_config(
+        queries: &[String],
+        config: &LogReactionConfig,
+    ) -> anyhow::Result<()> {
+        let handlebars = handlebars::Handlebars::new();
+        
+        // Validate all templates in routes
+        for (query_id, route_config) in &config.routes {
+            Self::validate_query_config(&handlebars, route_config)
+                .map_err(|e| anyhow::anyhow!("Invalid template in route '{}': {}", query_id, e))?;
+        }
+        
+        // Validate default template if provided
+        if let Some(default_template) = &config.default_template {
+            Self::validate_query_config(&handlebars, default_template)
+                .map_err(|e| anyhow::anyhow!("Invalid default template: {}", e))?;
+        }
+        
+        // Validate that all routes correspond to subscribed queries
+        if !config.routes.is_empty() && !queries.is_empty() {
+            for route_query in config.routes.keys() {
+                // Pre-compute dotted format once per route
+                let dotted_route = format!(".{}", route_query);
+                let matches = queries.iter().any(|q| {
+                    q == route_query || q.ends_with(&dotted_route)
+                });
+                if !matches {
+                    return Err(anyhow::anyhow!(
+                        "Route '{}' does not match any subscribed query. Subscribed queries: {:?}",
+                        route_query,
+                        queries
+                    ));
+                }
+            }
+        }
+        
         Ok(())
     }
 
@@ -329,37 +311,8 @@ impl LogReactionBuilder {
     /// - Returns error if any template has invalid Handlebars syntax
     /// - Returns error if a route query ID doesn't match any subscribed query
     pub fn build(self) -> anyhow::Result<LogReaction> {
-        // Create a single Handlebars instance for all validation
-        let handlebars = handlebars::Handlebars::new();
-
-        // Validate all templates in routes
-        for (query_id, config) in &self.config.routes {
-            LogReaction::validate_query_config(&handlebars, config)
-                .map_err(|e| anyhow::anyhow!("Invalid template in route '{}': {}", query_id, e))?;
-        }
-
-        // Validate default template if provided
-        if let Some(default_template) = &self.config.default_template {
-            LogReaction::validate_query_config(&handlebars, default_template)
-                .map_err(|e| anyhow::anyhow!("Invalid default template: {}", e))?;
-        }
-
-        // Validate that all routes correspond to subscribed queries
-        if !self.config.routes.is_empty() && !self.queries.is_empty() {
-            for route_query in self.config.routes.keys() {
-                // Check exact match or if the query ends with the route (for dotted notation)
-                let matches = self.queries.iter().any(|q| {
-                    q == route_query || q.ends_with(&format!(".{}", route_query))
-                });
-                if !matches {
-                    return Err(anyhow::anyhow!(
-                        "Route '{}' does not match any subscribed query. Subscribed queries: {:?}",
-                        route_query,
-                        self.queries
-                    ));
-                }
-            }
-        }
+        // Validate templates and routes
+        LogReaction::validate_config(&self.queries, &self.config)?;
 
         let mut params =
             ReactionBaseParams::new(self.id, self.queries).with_auto_start(self.auto_start);
