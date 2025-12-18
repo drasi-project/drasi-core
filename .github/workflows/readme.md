@@ -34,8 +34,9 @@ This document describes the GitHub Actions workflows in the `.github/workflows` 
   - Scheduled weekly (every Monday at 15:15 UTC).
 
 ### [test.yml](test.yml)
-- **Purpose**: Executes `cargo test` to run unit tests.
+- **Purpose**: Executes `cargo test` to run unit tests and performance tests.
 - **Trigger**: Automatically triggered on pull requests to the `main`, `feature/*`, or `release/*` branches and pushes to the `main` branch.
+  - Note: Performance tests are skipped for draft pull requests.
 
 
 ## Viewing Workflow Status
