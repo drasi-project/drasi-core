@@ -482,8 +482,6 @@ let reaction = LogReaction::builder("complex-logger")
     .build()?;
 
 drasi.add_reaction(Arc::new(reaction)).await?;
-
-drasi.add_reaction(Arc::new(reaction)).await?;
 ```
 
 ### Per-Query Templates
