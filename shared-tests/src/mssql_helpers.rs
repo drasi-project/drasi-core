@@ -214,6 +214,7 @@ async fn setup_mssql_raw() -> (MssqlContainer, MssqlConfig) {
 
     // The testcontainers MSSQL module uses these default credentials
     let config = MssqlConfig {
+        // DevSkim: ignore DS137138
         host: "localhost".to_string(),
         port: mssql_port,
         database: "master".to_string(), // Default database

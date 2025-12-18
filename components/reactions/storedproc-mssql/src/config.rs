@@ -86,6 +86,7 @@ impl Default for MsSqlStoredProcReactionConfig {
 }
 
 fn default_hostname() -> String {
+    // DevSkim: ignore DS137138
     "localhost".to_string()
 }
 
