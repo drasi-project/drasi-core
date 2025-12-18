@@ -364,7 +364,7 @@ use drasi_reaction_log::LogReaction;
 use std::sync::Arc;
 
 let reaction = LogReaction::builder("basic-logger")
-    .from_query("my-query")
+    .with_query("my-query")
     .build()?;
 
 drasi.add_reaction(Arc::new(reaction)).await?;
