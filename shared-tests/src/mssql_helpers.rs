@@ -200,12 +200,7 @@ async fn setup_mssql_raw() -> (MssqlContainer, MssqlConfig) {
 
         result_opt.unwrap_or_else(|| {
             panic!(
-                "Failed to start MSSQL container after {max_container_retries} attempts. \n\
-                Last error: {last_error:?}\n\
-                This might be due to Docker/containerd issues. Try:\n\
-                1. Restart Docker Desktop\n\
-                2. Run: docker system prune -a (WARNING: removes all unused images)\n\
-                3. Check Docker logs for errors"
+                "Failed to start MSSQL container after {max_container_retries} attempts. Last error: {last_error:?}",
             )
         })
     };
