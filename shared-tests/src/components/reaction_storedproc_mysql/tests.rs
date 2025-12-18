@@ -145,7 +145,8 @@ async fn get_log_count(config: &MysqlConfig) -> i64 {
 fn test_config_default_values() {
     let config = MySqlStoredProcReactionConfig::default();
 
-    assert_eq!(config.hostname, "localhost"); // DevSkim: ignore DS137138
+    // DevSkim: ignore DS137138
+    assert_eq!(config.hostname, "localhost");
     assert_eq!(config.port, None);
     assert_eq!(config.get_port(), 3306); // Default MySQL port
     assert_eq!(config.user, "");
@@ -306,7 +307,8 @@ fn test_config_deserialization_with_defaults() {
 
     let config: MySqlStoredProcReactionConfig = serde_json::from_str(json).unwrap();
 
-    assert_eq!(config.hostname, "localhost"); // DevSkim: ignore DS137138
+    // DevSkim: ignore DS137138
+    assert_eq!(config.hostname, "localhost");
     assert_eq!(config.port, None);
     assert_eq!(config.get_port(), 3306); // default port
     assert!(!config.ssl); // default
@@ -416,7 +418,8 @@ async fn test_mysql_config_validation() {
 
     // Valid config
     let config = MySqlStoredProcReactionConfig {
-        hostname: "localhost".to_string(), // DevSkim: ignore DS137138
+        // DevSkim: ignore DS137138
+        hostname: "localhost".to_string(), 
         port: Some(3306),
         user: "testuser".to_string(),
         password: "password".to_string(),
