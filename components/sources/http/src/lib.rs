@@ -803,12 +803,7 @@ impl Source for HttpSource {
         &self,
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
-        self.base
-            .subscribe_with_bootstrap(
-                &settings,
-                "HTTP",
-            )
-            .await
+        self.base.subscribe_with_bootstrap(&settings, "HTTP").await
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

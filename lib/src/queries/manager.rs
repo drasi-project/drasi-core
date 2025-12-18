@@ -337,30 +337,36 @@ impl Query for DrasiQuery {
         };
 
         // Build subscription settings for each source
-        let subscription_settings = match crate::queries::SubscriptionSettingsBuilder::build_subscription_settings(
-            &self.base.config,
-            &labels,
-        ) {
-            Ok(settings) => settings,
-            Err(e) => {
-                error!("Failed to build subscription settings for query '{}': {}", self.base.config.id, e);
-                *self.base.status.write().await = ComponentStatus::Error;
+        let subscription_settings =
+            match crate::queries::SubscriptionSettingsBuilder::build_subscription_settings(
+                &self.base.config,
+                &labels,
+            ) {
+                Ok(settings) => settings,
+                Err(e) => {
+                    error!(
+                        "Failed to build subscription settings for query '{}': {}",
+                        self.base.config.id, e
+                    );
+                    *self.base.status.write().await = ComponentStatus::Error;
 
-                let event = ComponentEvent {
-                    component_id: self.base.config.id.clone(),
-                    component_type: ComponentType::Query,
-                    status: ComponentStatus::Error,
-                    timestamp: chrono::Utc::now(),
-                    message: Some(format!("Failed to build subscription settings: {e}")),
-                };
+                    let event = ComponentEvent {
+                        component_id: self.base.config.id.clone(),
+                        component_type: ComponentType::Query,
+                        status: ComponentStatus::Error,
+                        timestamp: chrono::Utc::now(),
+                        message: Some(format!("Failed to build subscription settings: {e}")),
+                    };
 
-                if let Err(e) = self.base.event_tx.send(event).await {
-                    error!("Failed to send component event: {e}");
+                    if let Err(e) = self.base.event_tx.send(event).await {
+                        error!("Failed to send component event: {e}");
+                    }
+
+                    return Err(anyhow::anyhow!(
+                        "Failed to build subscription settings: {e}"
+                    ));
                 }
-
-                return Err(anyhow::anyhow!("Failed to build subscription settings: {e}"));
-            }
-        };
+            };
 
         // Subscribe to each source sequentially
         // Also includes FutureQueueSource for temporal query support
@@ -413,14 +419,19 @@ impl Query for DrasiQuery {
         let mut subscription_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
         // Build list of sources to subscribe to (regular sources + FutureQueueSource)
-        let mut sources_to_subscribe: Vec<(String, Arc<dyn Source>, SourceSubscriptionSettings )> = Vec::new();
+        let mut sources_to_subscribe: Vec<(String, Arc<dyn Source>, SourceSubscriptionSettings)> =
+            Vec::new();
 
         // Add regular sources from SourceManager
         for (idx, subscription) in self.base.config.sources.iter().enumerate() {
             let source_id = &subscription.source_id;
             match self.source_manager.get_source_instance(source_id).await {
                 Some(src) => {
-                    sources_to_subscribe.push((source_id.clone(), src, subscription_settings[idx].clone()));
+                    sources_to_subscribe.push((
+                        source_id.clone(),
+                        src,
+                        subscription_settings[idx].clone(),
+                    ));
                 }
                 None => {
                     error!(
@@ -449,15 +460,11 @@ impl Query for DrasiQuery {
                 query_text: self.base.config.query.clone(),
                 nodes: HashSet::new(),
                 relations: HashSet::new(),
-            },            
+            },
         ));
 
         for (source_id, source, settings) in sources_to_subscribe {
-            
-            let subscription_response = match source
-                .subscribe(settings.clone())
-                .await
-            {
+            let subscription_response = match source.subscribe(settings.clone()).await {
                 Ok(response) => response,
                 Err(e) => {
                     error!(

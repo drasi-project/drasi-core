@@ -145,8 +145,10 @@ pub trait Source: Send + Sync {
     /// A SubscriptionResponse containing:
     /// * A receiver for streaming source events
     /// * Optionally a bootstrap receiver for initial data
-    async fn subscribe(&self, settings: crate::config::SourceSubscriptionSettings)
-        -> Result<SubscriptionResponse>;
+    async fn subscribe(
+        &self,
+        settings: crate::config::SourceSubscriptionSettings,
+    ) -> Result<SubscriptionResponse>;
 
     /// Downcast helper for testing - allows access to concrete types
     fn as_any(&self) -> &dyn std::any::Any;

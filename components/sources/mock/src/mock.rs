@@ -396,12 +396,7 @@ impl Source for MockSource {
         &self,
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
-        self.base
-            .subscribe_with_bootstrap(
-                &settings,
-                "Mock",
-            )
-            .await
+        self.base.subscribe_with_bootstrap(&settings, "Mock").await
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

@@ -1173,10 +1173,7 @@ impl Source for PlatformSource {
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
         self.base
-            .subscribe_with_bootstrap(
-                &settings,
-                "Platform",
-            )
+            .subscribe_with_bootstrap(&settings, "Platform")
             .await
     }
 

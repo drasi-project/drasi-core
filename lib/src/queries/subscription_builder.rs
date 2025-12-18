@@ -118,13 +118,11 @@ impl SubscriptionSettingsBuilder {
                     // Not found in any source config
                     // Check if this is a join relation
                     if let Some(join_configs) = joins {
-                        let is_join = join_configs.iter().any(|j| j.id == *relation_label);
-                        
-                        if is_join {
+                        if let Some(join_config) =
+                            join_configs.iter().find(|j| j.id == *relation_label)
+                        {
                             // This is a join relation - verify that all node labels in the join keys
                             // match node labels from the query
-                            let join_config = join_configs.iter().find(|j| j.id == *relation_label).unwrap();
-                            
                             for key in &join_config.keys {
                                 if !query_labels.node_labels.contains(&key.label) {
                                     bail!(
@@ -138,7 +136,7 @@ impl SubscriptionSettingsBuilder {
                             continue;
                         }
                     }
-                    
+
                     // Not a join relation - add to first source (default)
                     if let Some(first_settings) = settings_vec.first_mut() {
                         first_settings.relations.insert(relation_label.clone());
@@ -167,7 +165,9 @@ impl SubscriptionSettingsBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{QueryConfig, QueryJoinConfig, QueryJoinKeyConfig, QueryLanguage, SourceSubscriptionConfig};
+    use crate::config::{
+        QueryConfig, QueryJoinConfig, QueryJoinKeyConfig, QueryLanguage, SourceSubscriptionConfig,
+    };
 
     fn create_test_query_config(sources: Vec<SourceSubscriptionConfig>) -> QueryConfig {
         QueryConfig {
@@ -202,9 +202,10 @@ mod tests {
             relation_labels: vec![],
         };
 
-        let result = SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
+        let result =
+            SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
         assert!(result.is_ok());
-        
+
         let settings = result.unwrap();
         assert_eq!(settings.len(), 1);
         assert!(settings[0].nodes.contains("Person"));
@@ -233,9 +234,10 @@ mod tests {
             relation_labels: vec![],
         };
 
-        let result = SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
+        let result =
+            SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
         assert!(result.is_ok());
-        
+
         let settings = result.unwrap();
         assert_eq!(settings.len(), 2);
         assert!(settings[0].nodes.contains("Person"));
@@ -265,7 +267,8 @@ mod tests {
             relation_labels: vec![],
         };
 
-        let result = SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
+        let result =
+            SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("multiple sources"));
     }
@@ -285,9 +288,10 @@ mod tests {
             relation_labels: vec!["KNOWS".to_string()],
         };
 
-        let result = SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
+        let result =
+            SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
         assert!(result.is_ok());
-        
+
         let settings = result.unwrap();
         assert_eq!(settings.len(), 1);
         assert!(settings[0].relations.contains("KNOWS"));
@@ -295,14 +299,12 @@ mod tests {
 
     #[test]
     fn test_relation_label_not_in_any_source_goes_to_first() {
-        let sources = vec![
-            SourceSubscriptionConfig {
-                source_id: "source1".to_string(),
-                nodes: vec![],
-                relations: vec![],
-                pipeline: vec![],
-            },
-        ];
+        let sources = vec![SourceSubscriptionConfig {
+            source_id: "source1".to_string(),
+            nodes: vec![],
+            relations: vec![],
+            pipeline: vec![],
+        }];
 
         let query_config = create_test_query_config(sources);
         let query_labels = QueryLabels {
@@ -310,9 +312,10 @@ mod tests {
             relation_labels: vec!["KNOWS".to_string()],
         };
 
-        let result = SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
+        let result =
+            SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
         assert!(result.is_ok());
-        
+
         let settings = result.unwrap();
         assert_eq!(settings.len(), 1);
         assert!(settings[0].relations.contains("KNOWS"));
@@ -341,7 +344,8 @@ mod tests {
             relation_labels: vec!["KNOWS".to_string()],
         };
 
-        let result = SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
+        let result =
+            SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("multiple sources"));
     }
@@ -375,9 +379,10 @@ mod tests {
             relation_labels: vec!["CUSTOMER".to_string()],
         };
 
-        let result = SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
+        let result =
+            SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
         assert!(result.is_ok());
-        
+
         let settings = result.unwrap();
         assert_eq!(settings.len(), 1);
         // CUSTOMER should not be in relations since it's a join
@@ -416,9 +421,13 @@ mod tests {
             relation_labels: vec!["CUSTOMER".to_string()],
         };
 
-        let result = SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
+        let result =
+            SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not found in the query"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not found in the query"));
     }
 
     #[test]
@@ -458,23 +467,24 @@ mod tests {
             relation_labels: vec!["PLACED_BY".to_string(), "CONTAINS".to_string()],
         };
 
-        let result = SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
+        let result =
+            SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
         assert!(result.is_ok());
-        
+
         let settings = result.unwrap();
         assert_eq!(settings.len(), 2);
-        
+
         // Order should be in first source
         assert!(settings[0].nodes.contains("Order"));
         // Customer should be in second source
         assert!(settings[1].nodes.contains("Customer"));
         // Product not in any source config, should go to first
         assert!(settings[0].nodes.contains("Product"));
-        
+
         // PLACED_BY is a join, should not be in any relations
         assert!(!settings[0].relations.contains("PLACED_BY"));
         assert!(!settings[1].relations.contains("PLACED_BY"));
-        
+
         // CONTAINS is not in any config and not a join, should go to first
         assert!(settings[0].relations.contains("CONTAINS"));
     }

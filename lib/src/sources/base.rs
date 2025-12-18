@@ -377,7 +377,10 @@ impl SourceBase {
 
             // Spawn bootstrap task
             tokio::spawn(async move {
-                match provider.bootstrap(request, &context, bootstrap_tx, Some(&settings_clone)).await {
+                match provider
+                    .bootstrap(request, &context, bootstrap_tx, Some(&settings_clone))
+                    .await
+                {
                     Ok(count) => {
                         info!(
                             "Bootstrap completed successfully for query '{}', sent {count} events",
@@ -385,7 +388,10 @@ impl SourceBase {
                         );
                     }
                     Err(e) => {
-                        error!("Bootstrap failed for query '{}': {e}", settings_clone.query_id);
+                        error!(
+                            "Bootstrap failed for query '{}': {e}",
+                            settings_clone.query_id
+                        );
                     }
                 }
             });

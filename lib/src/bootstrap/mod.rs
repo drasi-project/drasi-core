@@ -147,7 +147,9 @@ impl BootstrapProvider for Box<dyn BootstrapProvider> {
         event_tx: BootstrapEventSender,
         settings: Option<&crate::config::SourceSubscriptionSettings>,
     ) -> Result<usize> {
-        (**self).bootstrap(request, context, event_tx, settings).await
+        (**self)
+            .bootstrap(request, context, event_tx, settings)
+            .await
     }
 }
 

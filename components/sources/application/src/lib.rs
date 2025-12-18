@@ -510,10 +510,7 @@ impl Source for ApplicationSource {
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
         self.base
-            .subscribe_with_bootstrap(
-                &settings,
-                "Application",
-            )
+            .subscribe_with_bootstrap(&settings, "Application")
             .await
     }
 

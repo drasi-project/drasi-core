@@ -352,12 +352,7 @@ impl Source for GrpcSource {
         &self,
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
-        self.base
-            .subscribe_with_bootstrap(
-                &settings,
-                "gRPC",
-            )
-            .await
+        self.base.subscribe_with_bootstrap(&settings, "gRPC").await
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

@@ -254,7 +254,7 @@ impl FutureQueueSource {
     /// * `relation_labels` - Relation labels the query is interested in (unused)
     pub async fn subscribe(
         &self,
-        _settings: crate::config::SourceSubscriptionSettings
+        _settings: crate::config::SourceSubscriptionSettings,
     ) -> Result<crate::channels::SubscriptionResponse, Box<dyn std::error::Error + Send + Sync>>
     {
         let status = self.status.read().await;
@@ -361,12 +361,12 @@ impl crate::plugin_core::Source for FutureQueueSource {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
     use super::*;
+    use crate::config::SourceSubscriptionSettings;
     use drasi_core::in_memory_index::in_memory_future_queue::InMemoryFutureQueue;
     use drasi_core::interface::PushType;
     use drasi_core::models::{ElementReference, ElementTimestamp};
-    use crate::config::SourceSubscriptionSettings;
+    use std::collections::HashSet;
 
     #[tokio::test]
     async fn test_future_queue_source_lifecycle() {
@@ -433,10 +433,7 @@ mod tests {
         source.start().await.unwrap();
 
         // Subscribe to get events
-        let response = source
-            .subscribe(sub_settings)
-            .await
-            .unwrap();
+        let response = source.subscribe(sub_settings).await.unwrap();
         let mut receiver = response.receiver;
 
         // Wait for the event
@@ -489,10 +486,7 @@ mod tests {
         source.start().await.unwrap();
 
         // Subscribe to get events
-        let response = source
-            .subscribe(sub_settings)
-            .await
-            .unwrap();
+        let response = source.subscribe(sub_settings).await.unwrap();
         let mut receiver = response.receiver;
 
         // Wait for the event
@@ -548,10 +542,7 @@ mod tests {
         source.start().await.unwrap();
 
         // Subscribe to get events
-        let response = source
-            .subscribe(sub_settings)
-            .await
-            .unwrap();
+        let response = source.subscribe(sub_settings).await.unwrap();
         let mut receiver = response.receiver;
 
         // Collect events
