@@ -51,3 +51,4 @@ time-macros = { version = "0.2.6", features = ["serde"] }
 [dev-dependencies]
 mockall = "0.13.1"
 drasi-query-cypher = { path = "../query-cypher" }
+tempfile = "3.8"

@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod fs_plugin_loader;
+pub mod plugin_loader;
+
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
@@ -22,8 +25,11 @@ use crate::{
     models::{SourceChange, SourceMiddlewareConfig},
 };
 
+use self::plugin_loader::{PluginLoadError, PluginLoader};
+
 pub struct MiddlewareTypeRegistry {
     source_middleware_types: HashMap<String, Arc<dyn SourceMiddlewareFactory>>,
+    plugin_loaders: Vec<Box<dyn PluginLoader>>,
 }
 
 impl Default for MiddlewareTypeRegistry {
@@ -36,15 +42,72 @@ impl MiddlewareTypeRegistry {
     pub fn new() -> Self {
         MiddlewareTypeRegistry {
             source_middleware_types: HashMap::new(),
+            plugin_loaders: Vec::new(),
         }
     }
 
+    /// Registers a middleware factory
     pub fn register(&mut self, factory: Arc<dyn SourceMiddlewareFactory>) {
         self.source_middleware_types.insert(factory.name(), factory);
     }
 
+    /// Registers a plugin loader that can discover and load external middleware plugins
+    pub fn register_plugin_loader(&mut self, loader: Box<dyn PluginLoader>) {
+        self.plugin_loaders.push(loader);
+    }
+
+    /// Discovers and loads all plugins from registered plugin loaders
+    pub fn discover_and_load_plugins(&mut self) -> Result<usize, PluginLoadError> {
+        let mut loaded_count = 0;
+
+        // Collect all loaders to avoid borrowing issues
+        let loaders_count = self.plugin_loaders.len();
+        
+        for i in 0..loaders_count {
+            // Discover plugins from this loader
+            let descriptors = self.plugin_loaders[i].discover_plugins()?;
+            
+            // Load each discovered plugin
+            for descriptor in descriptors {
+                match self.plugin_loaders[i].load_plugin(&descriptor) {
+                    Ok(factory) => {
+                        log::info!(
+                            "Loaded plugin '{}' version {} from {}",
+                            descriptor.name,
+                            descriptor.version,
+                            descriptor.path.display()
+                        );
+                        self.register(factory);
+                        loaded_count += 1;
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to load plugin '{}' from {}: {}",
+                            descriptor.name,
+                            descriptor.path.display(),
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(loaded_count)
+    }
+
+    /// Gets a middleware factory by name
     pub fn get(&self, name: &str) -> Option<Arc<dyn SourceMiddlewareFactory>> {
         self.source_middleware_types.get(name).cloned()
+    }
+
+    /// Returns the number of registered middleware factories
+    pub fn count(&self) -> usize {
+        self.source_middleware_types.len()
+    }
+
+    /// Lists all registered middleware names
+    pub fn list_middleware_names(&self) -> Vec<String> {
+        self.source_middleware_types.keys().cloned().collect()
     }
 }
 

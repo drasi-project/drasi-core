@@ -2,11 +2,43 @@
 
 ## Introduction
 
-Middleware components are pluggable modules that process incoming changes before they are processed by a a continuous query. Middlewares can transform, enrich, filter, or route source-changes and they can be chained together in a pipeline.
+Middleware components are pluggable modules that process incoming changes before they are processed by a continuous query. Middlewares can transform, enrich, filter, or route source-changes and they can be chained together in a pipeline.
 
 Learn more about [middlewares in Drasi here](https://drasi.io/concepts/middleware/).
 
 This guide explains how to develop custom middleware in Drasi core.
+
+## Plugin System (NEW)
+
+Drasi now supports an extensible plugin architecture that allows developers to create and distribute middleware components independently of the core library. This enables:
+
+- **Lower Barrier to Entry**: Create middleware without modifying drasi-core
+- **Independent Distribution**: Package and version middleware separately
+- **Reduced Coupling**: Simplifies core library maintenance
+- **Private Extensions**: Build proprietary middleware without modifying source code
+
+**For complete details on the plugin system, see [docs/PLUGIN_SYSTEM.md](../docs/PLUGIN_SYSTEM.md)**
+
+### Quick Start with Plugins
+
+```rust
+use drasi_core::middleware::{
+    MiddlewareTypeRegistry,
+    fs_plugin_loader::FileSystemPluginLoader,
+    plugin_loader::PluginLoaderConfig,
+};
+use std::path::PathBuf;
+
+// Create registry and load plugins
+let mut registry = MiddlewareTypeRegistry::new();
+let loader = FileSystemPluginLoader::with_directory("./plugins");
+registry.register_plugin_loader(Box::new(loader));
+registry.discover_and_load_plugins()?;
+```
+
+## Built-in Middleware Development
+
+This section describes how to develop middleware directly in the drasi-core repository. For plugin development, see the Plugin System documentation above.
 
 ## Core Concepts
 

@@ -11,7 +11,6 @@ drasi-query-ast = { path = "../query-ast" }
 drasi-core = { path = "../core" }
 drasi-query-cypher = { path = "../query-cypher" }
 drasi-functions-cypher = { path = "../functions-cypher" }
-drasi-middleware = { path = "../middleware" }
 serde = "1.0.163"
 serde_json = "1.0.96"
 async-trait = "0.1.68"
@@ -35,3 +34,7 @@ path = "temperature.rs"
 [[example]]
 name = "process_monitor"
 path = "process_monitor.rs"
+
+[[example]]
+name = "plugin_system"
+path = "plugin_system.rs"
