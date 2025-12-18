@@ -219,10 +219,11 @@ async fn get_log_count(config: &MssqlConfig) -> i64 {
 
 #[test]
 fn test_config_defaults() {
-    use drasi_core_mssql_storedproc_reaction::config::MsSqlStoredProcReactionConfig;
+    use drasi_reaction_storedproc_mssql::config::MsSqlStoredProcReactionConfig;
 
     let config = MsSqlStoredProcReactionConfig::default();
 
+    // DevSkim: ignore DS137138
     assert_eq!(config.hostname, "localhost");
     assert_eq!(config.get_port(), 1433);
     assert_eq!(config.ssl, false);
@@ -232,7 +233,7 @@ fn test_config_defaults() {
 
 #[test]
 fn test_config_validation_requires_user() {
-    use drasi_core_mssql_storedproc_reaction::config::MsSqlStoredProcReactionConfig;
+    use drasi_reaction_storedproc_mssql::config::MsSqlStoredProcReactionConfig;
 
     let config = MsSqlStoredProcReactionConfig {
         user: String::new(),
@@ -248,7 +249,7 @@ fn test_config_validation_requires_user() {
 
 #[test]
 fn test_config_validation_requires_database() {
-    use drasi_core_mssql_storedproc_reaction::config::MsSqlStoredProcReactionConfig;
+    use drasi_reaction_storedproc_mssql::config::MsSqlStoredProcReactionConfig;
 
     let config = MsSqlStoredProcReactionConfig {
         user: "test_user".to_string(),
@@ -267,7 +268,7 @@ fn test_config_validation_requires_database() {
 
 #[test]
 fn test_config_validation_requires_at_least_one_command() {
-    use drasi_core_mssql_storedproc_reaction::config::MsSqlStoredProcReactionConfig;
+    use drasi_reaction_storedproc_mssql::config::MsSqlStoredProcReactionConfig;
 
     let config = MsSqlStoredProcReactionConfig {
         user: "test_user".to_string(),
@@ -289,7 +290,7 @@ fn test_config_validation_requires_at_least_one_command() {
 
 #[test]
 fn test_config_validation_success() {
-    use drasi_core_mssql_storedproc_reaction::config::MsSqlStoredProcReactionConfig;
+    use drasi_reaction_storedproc_mssql::config::MsSqlStoredProcReactionConfig;
 
     let config = MsSqlStoredProcReactionConfig {
         user: "test_user".to_string(),
@@ -305,7 +306,7 @@ fn test_config_validation_success() {
 
 #[test]
 fn test_config_custom_port() {
-    use drasi_core_mssql_storedproc_reaction::config::MsSqlStoredProcReactionConfig;
+    use drasi_reaction_storedproc_mssql::config::MsSqlStoredProcReactionConfig;
 
     let config = MsSqlStoredProcReactionConfig {
         port: Some(14330),
