@@ -220,9 +220,9 @@ async fn get_log_count(config: &MssqlConfig) -> i64 {
 #[test]
 fn test_config_defaults() {
     use drasi_core_mssql_storedproc_reaction::config::MsSqlStoredProcReactionConfig;
-    
+
     let config = MsSqlStoredProcReactionConfig::default();
-    
+
     assert_eq!(config.hostname, "localhost");
     assert_eq!(config.get_port(), 1433);
     assert_eq!(config.ssl, false);
@@ -233,14 +233,14 @@ fn test_config_defaults() {
 #[test]
 fn test_config_validation_requires_user() {
     use drasi_core_mssql_storedproc_reaction::config::MsSqlStoredProcReactionConfig;
-    
+
     let config = MsSqlStoredProcReactionConfig {
         user: String::new(),
         database: "test_db".to_string(),
         added_command: Some("EXEC test_proc".to_string()),
         ..Default::default()
     };
-    
+
     let result = config.validate();
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("user is required"));
@@ -249,23 +249,26 @@ fn test_config_validation_requires_user() {
 #[test]
 fn test_config_validation_requires_database() {
     use drasi_core_mssql_storedproc_reaction::config::MsSqlStoredProcReactionConfig;
-    
+
     let config = MsSqlStoredProcReactionConfig {
         user: "test_user".to_string(),
         database: String::new(),
         added_command: Some("EXEC test_proc".to_string()),
         ..Default::default()
     };
-    
+
     let result = config.validate();
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Database name is required"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("Database name is required"));
 }
 
 #[test]
 fn test_config_validation_requires_at_least_one_command() {
     use drasi_core_mssql_storedproc_reaction::config::MsSqlStoredProcReactionConfig;
-    
+
     let config = MsSqlStoredProcReactionConfig {
         user: "test_user".to_string(),
         password: "test_pass".to_string(),
@@ -275,16 +278,19 @@ fn test_config_validation_requires_at_least_one_command() {
         deleted_command: None,
         ..Default::default()
     };
-    
+
     let result = config.validate();
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("At least one command"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("At least one command"));
 }
 
 #[test]
 fn test_config_validation_success() {
     use drasi_core_mssql_storedproc_reaction::config::MsSqlStoredProcReactionConfig;
-    
+
     let config = MsSqlStoredProcReactionConfig {
         user: "test_user".to_string(),
         password: "test_pass".to_string(),
@@ -292,7 +298,7 @@ fn test_config_validation_success() {
         added_command: Some("EXEC test_proc".to_string()),
         ..Default::default()
     };
-    
+
     let result = config.validate();
     assert!(result.is_ok());
 }
@@ -300,12 +306,12 @@ fn test_config_validation_success() {
 #[test]
 fn test_config_custom_port() {
     use drasi_core_mssql_storedproc_reaction::config::MsSqlStoredProcReactionConfig;
-    
+
     let config = MsSqlStoredProcReactionConfig {
         port: Some(14330),
         ..Default::default()
     };
-    
+
     assert_eq!(config.get_port(), 14330);
 }
 
