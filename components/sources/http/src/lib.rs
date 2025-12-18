@@ -1300,7 +1300,7 @@ mod tests {
                     } => {
                         assert_eq!(metadata.reference.element_id.as_ref(), "user-1");
                         assert_eq!(metadata.labels.len(), 1);
-                        assert_eq!(metadata.effective_from, 1234567890000000000);
+                        assert_eq!(metadata.effective_from, 1234567890000);
                         assert!(properties.get("name").is_some());
                         assert!(properties.get("age").is_some());
                     }

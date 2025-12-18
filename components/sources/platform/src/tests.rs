@@ -397,7 +397,7 @@ mod event_transformation {
                     assert_eq!(metadata.reference.source_id.as_ref(), "test_source");
                     assert_eq!(metadata.labels.len(), 1);
                     assert_eq!(metadata.labels[0].as_ref(), "Person");
-                    assert_eq!(metadata.effective_from, 1234567890000000);
+                    assert_eq!(metadata.effective_from, 1234567890);
                     assert!(properties.get("name").is_some());
                     assert!(properties.get("age").is_some());
                 }
@@ -435,7 +435,7 @@ mod event_transformation {
                 Element::Node { metadata, .. } => {
                     assert_eq!(metadata.reference.element_id.as_ref(), "node1");
                     assert_eq!(metadata.labels.len(), 2);
-                    assert_eq!(metadata.effective_from, 1234567891000000);
+                    assert_eq!(metadata.effective_from, 1234567891);
                 }
                 _ => panic!("Expected Node element"),
             },
@@ -471,7 +471,7 @@ mod event_transformation {
                 assert_eq!(metadata.reference.element_id.as_ref(), "node1");
                 assert_eq!(metadata.reference.source_id.as_ref(), "test_source");
                 assert_eq!(metadata.labels.len(), 1);
-                assert_eq!(metadata.effective_from, 1234567892000000);
+                assert_eq!(metadata.effective_from, 1234567892);
             }
             _ => panic!("Expected Delete variant"),
         }
@@ -792,7 +792,7 @@ mod event_transformation {
                     assert_eq!(metadata.reference.source_id.as_ref(), "hello-world-source");
                     assert_eq!(metadata.labels.len(), 1);
                     assert_eq!(metadata.labels[0].as_ref(), "Message");
-                    assert_eq!(metadata.effective_from, 1759503489836973000);
+                    assert_eq!(metadata.effective_from, 1759503489836);
                     assert!(properties.get("From").is_some());
                     assert!(properties.get("Message").is_some());
                     assert!(properties.get("MessageId").is_some());
@@ -828,7 +828,7 @@ mod event_transformation {
         match &results[0].source_change {
             SourceChange::Insert { element } => match element {
                 Element::Node { metadata, .. } => {
-                    assert_eq!(metadata.effective_from, 9999999999999000000);
+                    assert_eq!(metadata.effective_from, 9999999999999);
                 }
                 _ => panic!("Expected Node element"),
             },

@@ -720,7 +720,7 @@ fn convert_proto_metadata_to_core(
                 .map(|s| Arc::from(s.as_str()))
                 .collect::<Vec<_>>(),
         ),
-        effective_from: proto_metadata.effective_from,
+        effective_from: proto_metadata.effective_from / 1_000_000, // Convert nanoseconds to milliseconds
     })
 }
 

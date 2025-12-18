@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use anyhow::{bail, Result};
 
 use crate::config::{QueryConfig, SourceSubscriptionConfig, SourceSubscriptionSettings};
@@ -31,6 +33,7 @@ impl SubscriptionSettingsBuilder {
             .sources
             .iter()
             .map(|source_config| SourceSubscriptionSettings {
+                source_id: source_config.source_id.clone(),
                 enable_bootstrap: query_config.enable_bootstrap,
                 query_id: query_config.id.clone(),
                 query_text: query_config.query.clone(),

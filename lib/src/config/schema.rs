@@ -131,6 +131,7 @@ pub struct SourceSubscriptionConfig {
 ///
 /// # Fields
 ///
+/// - **source_id**: ID of the source
 /// - **enable_bootstrap**: Whether to request initial data
 /// - **query_id**: ID of the subscribing query
 /// - **query_text**: The full query text
@@ -144,6 +145,7 @@ pub struct SourceSubscriptionConfig {
 /// use std::collections::HashSet;
 ///
 /// let settings = SourceSubscriptionSettings {
+///     source_id: "orders_db".to_string(),
 ///     enable_bootstrap: true,
 ///     query_id: "my-query".to_string(),
 ///     query_text: "MATCH (o:Order)-[:PLACED_BY]->(c:Customer) RETURN o, c".to_string(),
@@ -153,6 +155,7 @@ pub struct SourceSubscriptionConfig {
 /// ```
 #[derive(Debug, Clone)]
 pub struct SourceSubscriptionSettings {
+    pub source_id: String,
     pub enable_bootstrap: bool,
     pub query_id: String,
     pub query_text: String,

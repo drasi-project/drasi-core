@@ -22,6 +22,7 @@ on:
     branches:
       - main
       - feature/*
+      - feature-lib
 
 env:
   CARGO_TERM_COLOR: always
@@ -78,7 +79,7 @@ jobs:
             ${{ runner.os }}-cargo-build-
       - name: Install Rust and Cargo tarpaulin
         run: |
-          rustup update stable
+          rustup update 1.88.0 && rustup default 1.88.0
           cargo install cargo-tarpaulin
       
       - name: Generate Code Coverage

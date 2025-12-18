@@ -42,12 +42,15 @@ impl Display for ElementReference {
     }
 }
 
+/// Timestamp type used for elements, measured in milliseconds since UNIX epoch.
 pub type ElementTimestamp = u64;
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct ElementMetadata {
     pub reference: ElementReference,
     pub labels: Arc<[Arc<str>]>,
+
+    /// The effective time from which this element is valid. Measured in milliseconds since UNIX epoch.
     pub effective_from: ElementTimestamp,
 }
 
