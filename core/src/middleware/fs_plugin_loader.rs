@@ -27,6 +27,10 @@ use super::plugin_loader::{
 };
 use crate::interface::SourceMiddlewareFactory;
 
+/// Error message for unimplemented plugin loading
+const PLUGIN_LOADING_NOT_IMPLEMENTED: &str = 
+    "Plugin loading not yet implemented. This requires format-specific loaders.";
+
 /// File system-based plugin loader that discovers plugins in a directory
 pub struct FileSystemPluginLoader {
     config: PluginLoaderConfig,
@@ -158,7 +162,7 @@ impl PluginLoader for FileSystemPluginLoader {
         // This is a stub implementation. The actual loading logic would be
         // implemented in format-specific loaders (WASM, dynamic library, etc.)
         Err(PluginLoadError::InitializationFailed(
-            "Plugin loading not yet implemented. This requires format-specific loaders.".to_string(),
+            PLUGIN_LOADING_NOT_IMPLEMENTED.to_string(),
         ))
     }
 
