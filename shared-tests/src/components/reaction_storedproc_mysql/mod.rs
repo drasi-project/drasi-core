@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Tests for reaction components
+//! MySQL stored procedure reaction tests
 
-pub mod reaction_storedproc_mysql;
+#[cfg(test)]
+mod tests;

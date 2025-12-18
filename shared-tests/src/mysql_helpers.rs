@@ -98,6 +98,7 @@ async fn setup_mysql_raw() -> (testcontainers::ContainerAsync<Mysql>, MysqlConfi
 
     // Use the credentials we configured above
     let config = MysqlConfig {
+        // DevSkim: ignore DS137138
         host: "localhost".to_string(),
         port: mysql_port,
         database: "test".to_string(),
@@ -342,6 +343,7 @@ mod tests {
         let mysql = setup_mysql().await;
         let config = mysql.config();
 
+        // DevSkim: ignore DS137138
         assert_eq!(config.host, "localhost");
         assert_eq!(config.database, "test");
         assert_eq!(config.user, "test");
