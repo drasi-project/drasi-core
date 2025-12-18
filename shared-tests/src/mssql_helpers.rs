@@ -152,7 +152,9 @@ async fn setup_mssql_raw() -> (MssqlContainer, MssqlConfig) {
     let max_container_retries = 3;
     let mut last_error = None;
 
-    let (container, init_time) = 'retry_loop: loop {
+    let (container, init_time) = {
+        let mut result_opt = None;
+
         for attempt in 1..=max_container_retries {
             let result = if cfg!(target_arch = "aarch64") {
                 // Azure SQL Edge for ARM64
@@ -181,7 +183,8 @@ async fn setup_mssql_raw() -> (MssqlContainer, MssqlConfig) {
 
             match result {
                 Ok(container_tuple) => {
-                    break 'retry_loop container_tuple;
+                    result_opt = Some(container_tuple);
+                    break;
                 }
                 Err(e) => {
                     last_error = Some(e);
@@ -195,16 +198,16 @@ async fn setup_mssql_raw() -> (MssqlContainer, MssqlConfig) {
             }
         }
 
-        // If we get here, all retries failed
-        panic!(
-            "Failed to start MSSQL container after {max_container_retries} attempts. \n\
-            Last error: {:?}\n\
-            This might be due to Docker/containerd issues. Try:\n\
-            1. Restart Docker Desktop\n\
-            2. Run: docker system prune -a (WARNING: removes all unused images)\n\
-            3. Check Docker logs for errors",
-            last_error
-        );
+        result_opt.unwrap_or_else(|| {
+            panic!(
+                "Failed to start MSSQL container after {max_container_retries} attempts. \n\
+                Last error: {last_error:?}\n\
+                This might be due to Docker/containerd issues. Try:\n\
+                1. Restart Docker Desktop\n\
+                2. Run: docker system prune -a (WARNING: removes all unused images)\n\
+                3. Check Docker logs for errors"
+            )
+        })
     };
 
     let mssql_port = container.get_host_port_ipv4(1433).await.unwrap();
@@ -234,20 +237,13 @@ async fn wait_for_mssql_ready(config: &MssqlConfig, container: &MssqlContainer) 
     let retry_delay = std::time::Duration::from_secs(3);
 
     for attempt in 1..=max_retries {
-        match config.connect().await {
-            Ok(mut client) => {
-                // Try a simple query to verify the connection works
-                match client.query("SELECT 1", &[]).await {
-                    Ok(stream) => match stream.into_results().await {
-                        Ok(_) => {
-                            return;
-                        }
-                        Err(_) => {}
-                    },
-                    Err(_) => {}
+        if let Ok(mut client) = config.connect().await {
+            // Try a simple query to verify the connection works
+            if let Ok(stream) = client.query("SELECT 1", &[]).await {
+                if stream.into_results().await.is_ok() {
+                    return;
                 }
             }
-            Err(_) => {}
         }
 
         if attempt < max_retries {
