@@ -226,7 +226,7 @@ fn test_config_defaults() {
     // DevSkim: ignore DS137138
     assert_eq!(config.hostname, "localhost");
     assert_eq!(config.get_port(), 1433);
-    assert!(config.ssl);
+    assert!(!config.ssl);
     assert_eq!(config.command_timeout_ms, 30000);
     assert_eq!(config.retry_attempts, 3);
 }

@@ -348,6 +348,8 @@ pub async fn execute_sql(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[tokio::test]
     #[cfg(not(target_arch = "aarch64"))] // Skip on ARM64 - Azure SQL Edge has stability issues
     async fn test_setup_mssql() {
