@@ -76,15 +76,16 @@ pub fn convert_http_to_source_change(
 ) -> Result<drasi_core::models::SourceChange> {
     use drasi_core::models::{ElementMetadata, ElementReference, SourceChange};
 
-    // Get timestamp or use current time in nanoseconds
+    // Get timestamp or use current time in milliseconds
+    // Note: HTTP API accepts timestamps in nanoseconds, we convert to milliseconds
     let get_timestamp = |ts: Option<u64>| -> u64 {
-        ts.unwrap_or_else(|| {
-            crate::time::get_system_time_nanos().unwrap_or_else(|e| {
-                log::warn!("Failed to get system time for HTTP event: {e}, using fallback");
-                // Use current milliseconds * 1M as fallback
-                (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
+        ts.map(|nanos| nanos / 1_000_000) // Convert nanoseconds to milliseconds
+            .unwrap_or_else(|| {
+                crate::time::get_system_time_millis().unwrap_or_else(|e| {
+                    log::warn!("Failed to get system time for HTTP event: {e}, using fallback");
+                    chrono::Utc::now().timestamp_millis() as u64
+                })
             })
-        })
     };
 
     match http_change {

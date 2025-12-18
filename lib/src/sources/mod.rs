@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod base;
+pub mod future_queue_source;
 pub mod manager;
 
 #[cfg(test)]
@@ -32,5 +33,6 @@ pub trait Publisher: Send + Sync {
 }
 
 pub use base::{SourceBase, SourceBaseParams};
+pub use future_queue_source::{FutureQueueSource, FUTURE_QUEUE_SOURCE_ID};
 pub use manager::SourceManager;
 pub use manager::{convert_json_to_element_properties, convert_json_to_element_value};
