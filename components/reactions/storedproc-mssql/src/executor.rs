@@ -64,14 +64,14 @@ impl MsSqlExecutor {
         // Connect to the database
         let tcp = TcpStream::connect(tiberius_config.get_addr())
             .await
-            .map_err(|e| anyhow!("Failed to connect to MS SQL Server: {}", e))?;
+            .map_err(|e| anyhow!("Failed to connect to MS SQL Server: {e}"))?;
 
         tcp.set_nodelay(true)
-            .map_err(|e| anyhow!("Failed to set TCP_NODELAY: {}", e))?;
+            .map_err(|e| anyhow!("Failed to set TCP_NODELAY: {e}"))?;
 
         let client = TiberiusClient::connect(tiberius_config, tcp.compat_write())
             .await
-            .map_err(|e| anyhow!("Failed to establish MS SQL connection: {}", e))?;
+            .map_err(|e| anyhow!("Failed to establish MS SQL connection: {e}"))?;
 
         info!(
             "Connected to MS SQL Server: {}:{}/{}",
@@ -92,7 +92,7 @@ impl MsSqlExecutor {
         timeout(self.command_timeout, client.simple_query("SELECT 1"))
             .await
             .map_err(|_| anyhow!("Connection test timed out"))?
-            .map_err(|e| anyhow!("Connection test failed: {}", e))?;
+            .map_err(|e| anyhow!("Connection test failed: {e}"))?;
 
         info!("Database connection test successful");
         Ok(())
@@ -115,10 +115,10 @@ impl MsSqlExecutor {
             // Build the EXEC statement for MS SQL
             // MS SQL uses @p1, @p2, @p3 for parameter placeholders
             let param_placeholders: Vec<String> =
-                (1..=params.len()).map(|i| format!("@p{}", i)).collect();
+                (1..=params.len()).map(|i| format!("@p{i}")).collect();
 
             let query_str = if param_placeholders.is_empty() {
-                format!("EXEC {}", proc_name)
+                format!("EXEC {proc_name}")
             } else {
                 format!("EXEC {} {}", proc_name, param_placeholders.join(", "))
             };
@@ -164,8 +164,8 @@ impl MsSqlExecutor {
             // Execute the stored procedure
             timeout(cmd_timeout, query.execute(&mut *client))
                 .await
-                .map_err(|_| anyhow!("Procedure execution timed out after {:?}", cmd_timeout))?
-                .map_err(|e| anyhow!("Failed to execute procedure: {}", e))?;
+                .map_err(|_| anyhow!("Procedure execution timed out after {cmd_timeout:?}"))?
+                .map_err(|e| anyhow!("Failed to execute procedure: {e}"))?;
 
             debug!("Procedure executed successfully");
             Ok(())
@@ -184,7 +184,7 @@ impl MsSqlExecutor {
         for attempt in 0..=self.retry_attempts {
             if attempt > 0 {
                 let backoff = Duration::from_millis(100 * 2u64.pow(attempt - 1));
-                debug!("Retrying after {:?} (attempt {})", backoff, attempt);
+                debug!("Retrying after {backoff:?} (attempt {attempt})");
                 tokio::time::sleep(backoff).await;
             }
 
