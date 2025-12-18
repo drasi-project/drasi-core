@@ -146,6 +146,20 @@ Result: [Removing {
 
 More examples can be found under the [examples](examples) folder.
 
+## Extensibility
+
+### Middleware Plugin System
+
+Drasi supports an extensible plugin architecture for middleware, enabling developers to create and distribute middleware components independently of the core library. This lowers the barrier to entry for community contributions and allows organizations to create private or specialized middleware for their specific use cases.
+
+Key features:
+- **Dynamic Loading**: Load middleware plugins at runtime without recompiling
+- **Independent Distribution**: Package and version middleware separately
+- **Multiple Formats**: Support for WebAssembly (WASM) and native plugins
+- **Easy Discovery**: Automatic plugin discovery from configured directories
+
+For more information, see the [Plugin System documentation](docs/PLUGIN_SYSTEM.md) and the [plugin system example](examples/plugin_system.rs).
+
 ## Storage implementations
 
 Drasi maintains internal indexes that are used to compute the effect of a data change on the query result. By default these indexes are in-memory, but a continuous query can be configured to use persistent storage.  Currently there are storage implementions for Redis, Garnet and RocksDB.
