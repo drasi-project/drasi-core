@@ -49,7 +49,10 @@ pub struct TemplateSpec {
     pub path: Option<String>,
 
     /// Event data template as a Handlebars template.
-    /// If empty, sends the default JSON format with queryId, results, and timestamp.
+    /// If this string is empty, each event uses the per-result default JSON format
+    /// with fields `queryId`, `result` (singular), and `timestamp`. This differs from
+    /// the global default (when no custom template is configured), which uses a
+    /// `results` array.
     #[serde(default)]
     pub template: String,
 }
