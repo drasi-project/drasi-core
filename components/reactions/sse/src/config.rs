@@ -40,7 +40,8 @@ fn default_sse_host() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TemplateSpec {
     /// Optional custom path for this specific template.
-    /// If provided, events will be sent to this path appended to the base SSE path.
+    /// If provided, events will be sent to this path. Absolute paths (starting with '/')
+    /// are used as-is, while relative paths are appended to the base SSE path.
     /// For example, if the base sse_path is "/events" and path is "sensors",
     /// events will be sent to "/events/sensors".
     /// Supports Handlebars templates for dynamic paths.
