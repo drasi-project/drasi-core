@@ -143,9 +143,9 @@ impl SseReactionBuilder {
         if template.is_empty() {
             return Ok(());
         }
-        // Compile the template to validate syntax without requiring data
+        // Validate the template by attempting to render it with empty data
         handlebars
-            .compile_template(template)
+            .render_template(template, &serde_json::json!({}))
             .map_err(|e| anyhow::anyhow!("Invalid template: {}", e))?;
         Ok(())
     }
@@ -166,8 +166,31 @@ impl SseReactionBuilder {
 
     /// Build the SSE reaction
     pub fn build(self) -> anyhow::Result<SseReaction> {
-        // Create a single Handlebars instance for all validation
-        let handlebars = handlebars::Handlebars::new();
+        // Create a single Handlebars instance for all validation with json helper
+        let mut handlebars = handlebars::Handlebars::new();
+        
+        // Register the json helper for template validation
+        handlebars.register_helper(
+            "json",
+            Box::new(
+                |h: &handlebars::Helper,
+                 _: &handlebars::Handlebars,
+                 _: &handlebars::Context,
+                 _: &mut handlebars::RenderContext,
+                 out: &mut dyn handlebars::Output|
+                 -> handlebars::HelperResult {
+                    if let Some(value) = h.param(0) {
+                        match serde_json::to_string(&value.value()) {
+                            Ok(json_str) => out.write(&json_str)?,
+                            Err(_) => out.write("null")?,
+                        }
+                    } else {
+                        out.write("null")?;
+                    }
+                    Ok(())
+                },
+            ),
+        );
 
         // Validate all templates in routes
         for (query_id, config) in &self.routes {

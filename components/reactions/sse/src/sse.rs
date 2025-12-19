@@ -45,6 +45,17 @@ pub struct SseReaction {
     task_handles: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
+impl std::fmt::Debug for SseReaction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SseReaction")
+            .field("id", &self.base.id)
+            .field("config", &self.config)
+            .field("broadcasters", &"<broadcasters>")
+            .field("task_handles", &"<task_handles>")
+            .finish()
+    }
+}
+
 impl SseReaction {
     /// Create a builder for SseReaction
     pub fn builder(id: impl Into<String>) -> SseReactionBuilder {
