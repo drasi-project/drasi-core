@@ -123,7 +123,14 @@ impl SseReaction {
         // Note: Dynamic paths with template variables will still be created on-demand
         for (_query_id, query_config) in &config.routes {
             // Check all operation types (added, updated, deleted)
-            for template_spec in [&query_config.added, &query_config.updated, &query_config.deleted].iter().filter_map(|s| s.as_ref()) {
+            for template_spec in [
+                &query_config.added,
+                &query_config.updated,
+                &query_config.deleted,
+            ]
+            .iter()
+            .filter_map(|s| s.as_ref())
+            {
                 if let Some(custom_path) = &template_spec.path {
                     // Only pre-create broadcasters for static paths (no template variables)
                     if !custom_path.contains("{{") {
@@ -143,7 +150,14 @@ impl SseReaction {
 
         // Also check default template for static paths
         if let Some(default_config) = &config.default_template {
-            for template_spec in [&default_config.added, &default_config.updated, &default_config.deleted].iter().filter_map(|s| s.as_ref()) {
+            for template_spec in [
+                &default_config.added,
+                &default_config.updated,
+                &default_config.deleted,
+            ]
+            .iter()
+            .filter_map(|s| s.as_ref())
+            {
                 if let Some(custom_path) = &template_spec.path {
                     if !custom_path.contains("{{") {
                         let resolved_path = if custom_path.starts_with('/') {
@@ -292,7 +306,9 @@ impl Reaction for SseReaction {
                             match serde_json::to_string(&value.value()) {
                                 Ok(json_str) => out.write(&json_str)?,
                                 Err(e) => {
-                                    debug!("[{reaction_id}] JSON serialization error in template: {e}");
+                                    debug!(
+                                        "[{reaction_id}] JSON serialization error in template: {e}"
+                                    );
                                     out.write("null")?;
                                 }
                             }
@@ -338,12 +354,15 @@ impl Reaction for SseReaction {
                 // If the query ID is in dotted format (e.g., "source.query" or "namespace.source.query"),
                 // also try matching just the last segment for flexibility with source-prefixed queries
                 // Note: If multiple queries share the same final segment, configure using full IDs to avoid ambiguity
-                let query_config = query_configs.get(query_name).or_else(|| {
-                    query_name
-                        .split('.')
-                        .last()
-                        .and_then(|name| query_configs.get(name))
-                }).or(default_template.as_ref());
+                let query_config = query_configs
+                    .get(query_name)
+                    .or_else(|| {
+                        query_name
+                            .split('.')
+                            .last()
+                            .and_then(|name| query_configs.get(name))
+                    })
+                    .or(default_template.as_ref());
 
                 // Process results based on query-specific configuration or default template
                 if let Some(config) = query_config {
@@ -371,11 +390,14 @@ impl Reaction for SseReaction {
                                         if let Some(data) = result.get("data") {
                                             if let Some(obj) = data.as_object() {
                                                 if let Some(before) = obj.get("before") {
-                                                    context
-                                                        .insert("before".to_string(), before.clone());
+                                                    context.insert(
+                                                        "before".to_string(),
+                                                        before.clone(),
+                                                    );
                                                 }
                                                 if let Some(after) = obj.get("after") {
-                                                    context.insert("after".to_string(), after.clone());
+                                                    context
+                                                        .insert("after".to_string(), after.clone());
                                                 }
                                             }
                                         }
@@ -442,7 +464,8 @@ impl Reaction for SseReaction {
                                     // Try read lock first (common case)
                                     {
                                         let broadcasters_read = broadcasters.read().await;
-                                        if let Some(broadcaster) = broadcasters_read.get(&sse_path) {
+                                        if let Some(broadcaster) = broadcasters_read.get(&sse_path)
+                                        {
                                             broadcaster.clone()
                                         } else {
                                             drop(broadcasters_read);
@@ -461,7 +484,9 @@ impl Reaction for SseReaction {
                                     Ok(count) => {
                                         debug!("[{reaction_id}] Broadcast to {count} SSE listeners on path {sse_path}")
                                     }
-                                    Err(e) => debug!("[{reaction_id}] no SSE listeners on path {sse_path}: {e}"),
+                                    Err(e) => debug!(
+                                        "[{reaction_id}] no SSE listeners on path {sse_path}: {e}"
+                                    ),
                                 }
                             }
                         }
@@ -486,7 +511,9 @@ impl Reaction for SseReaction {
                             Ok(count) => {
                                 info!("[{reaction_id}] Broadcast query result to {count} SSE listeners on {base_sse_path}")
                             }
-                            Err(e) => debug!("[{reaction_id}] no SSE listeners on {base_sse_path}: {e}"),
+                            Err(e) => {
+                                debug!("[{reaction_id}] no SSE listeners on {base_sse_path}: {e}")
+                            }
                         }
                     }
                 }
@@ -532,13 +559,13 @@ impl Reaction for SseReaction {
                 let broadcasters = broadcasters_clone.clone();
                 async move {
                     let path = req.uri().path().to_string();
-                    
+
                     // Try to find a broadcaster for this path
                     let broadcaster = {
                         let broadcasters_read = broadcasters.read().await;
                         broadcasters_read.get(&path).cloned()
                     };
-                    
+
                     if let Some(broadcaster) = broadcaster {
                         let rx = broadcaster.subscribe();
                         let stream = tokio_stream::wrappers::BroadcastStream::new(rx)
@@ -546,11 +573,13 @@ impl Reaction for SseReaction {
                             .map(|msg| {
                                 Ok::<Event, std::convert::Infallible>(Event::default().data(msg))
                             });
-                        Sse::new(stream).keep_alive(
-                            KeepAlive::new()
-                                .interval(Duration::from_secs(30))
-                                .text("keep-alive"),
-                        ).into_response()
+                        Sse::new(stream)
+                            .keep_alive(
+                                KeepAlive::new()
+                                    .interval(Duration::from_secs(30))
+                                    .text("keep-alive"),
+                            )
+                            .into_response()
                     } else {
                         // Return 404 for unknown paths
                         axum::http::StatusCode::NOT_FOUND.into_response()
@@ -558,9 +587,7 @@ impl Reaction for SseReaction {
                 }
             });
 
-            let app = Router::new()
-                .fallback(handler)
-                .layer(cors);
+            let app = Router::new().fallback(handler).layer(cors);
 
             info!("Starting SSE server on {host}:{port} with CORS enabled");
             let listener = match tokio::net::TcpListener::bind((host.as_str(), port)).await {

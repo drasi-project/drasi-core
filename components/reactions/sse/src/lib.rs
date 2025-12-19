@@ -139,7 +139,10 @@ impl SseReactionBuilder {
     }
 
     /// Validate a template by attempting to compile it with Handlebars
-    fn validate_template(handlebars: &handlebars::Handlebars, template: &str) -> anyhow::Result<()> {
+    fn validate_template(
+        handlebars: &handlebars::Handlebars,
+        template: &str,
+    ) -> anyhow::Result<()> {
         if template.is_empty() {
             return Ok(());
         }
@@ -151,7 +154,10 @@ impl SseReactionBuilder {
     }
 
     /// Validate all templates in a QueryConfig
-    fn validate_query_config(handlebars: &handlebars::Handlebars, config: &QueryConfig) -> anyhow::Result<()> {
+    fn validate_query_config(
+        handlebars: &handlebars::Handlebars,
+        config: &QueryConfig,
+    ) -> anyhow::Result<()> {
         if let Some(added) = &config.added {
             Self::validate_template(handlebars, &added.template)?;
         }
@@ -168,7 +174,7 @@ impl SseReactionBuilder {
     pub fn build(self) -> anyhow::Result<SseReaction> {
         // Create a single Handlebars instance for all validation with json helper
         let mut handlebars = handlebars::Handlebars::new();
-        
+
         // Register the json helper for template validation
         handlebars.register_helper(
             "json",
@@ -208,9 +214,10 @@ impl SseReactionBuilder {
         if !self.routes.is_empty() && !self.queries.is_empty() {
             for route_query in self.routes.keys() {
                 // Check exact match or if the query ends with the route (for dotted notation)
-                let matches = self.queries.iter().any(|q| {
-                    q == route_query || q.ends_with(&format!(".{}", route_query))
-                });
+                let matches = self
+                    .queries
+                    .iter()
+                    .any(|q| q == route_query || q.ends_with(&format!(".{}", route_query)));
                 if !matches {
                     return Err(anyhow::anyhow!(
                         "Route '{}' does not match any subscribed query. Subscribed queries: {:?}",

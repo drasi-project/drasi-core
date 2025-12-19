@@ -18,8 +18,8 @@ use anyhow::Result;
 use drasi_lib::{DrasiLib, Query};
 use drasi_reaction_sse::{QueryConfig, SseReaction, TemplateSpec};
 use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
-use std::collections::HashMap;
 use futures_util::{Stream, StreamExt};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -75,10 +75,7 @@ async fn test_sse_basic_integration() -> Result<()> {
 
     // Connect to SSE endpoint
     let client = reqwest::Client::new();
-    let response = client
-        .get("http://localhost:18080/events")
-        .send()
-        .await?;
+    let response = client.get("http://localhost:18080/events").send().await?;
 
     assert_eq!(response.status(), 200);
 
@@ -103,7 +100,7 @@ async fn test_sse_basic_integration() -> Result<()> {
                 let data = event.data.clone();
                 log::info!("Received SSE event: {}", data);
                 received_events.push(data.clone());
-                
+
                 // Stop after receiving a non-heartbeat event
                 if !data.contains("heartbeat") {
                     break;
@@ -117,7 +114,10 @@ async fn test_sse_basic_integration() -> Result<()> {
     }
 
     // Verify we received at least one event
-    assert!(!received_events.is_empty(), "Should receive at least one SSE event");
+    assert!(
+        !received_events.is_empty(),
+        "Should receive at least one SSE event"
+    );
 
     // Check for data event (not just heartbeat)
     let has_data_event = received_events.iter().any(|e| !e.contains("heartbeat"));
@@ -137,7 +137,9 @@ async fn test_sse_custom_templates_integration() -> Result<()> {
         .try_init();
 
     // Create Application source
-    let config = ApplicationSourceConfig { properties: HashMap::new() };
+    let config = ApplicationSourceConfig {
+        properties: HashMap::new(),
+    };
     let (app_source, handle) = ApplicationSource::new("test-source", config)?;
 
     // Create query
@@ -189,10 +191,7 @@ async fn test_sse_custom_templates_integration() -> Result<()> {
 
     // Connect to SSE endpoint
     let client = reqwest::Client::new();
-    let response = client
-        .get("http://localhost:18081/events")
-        .send()
-        .await?;
+    let response = client.get("http://localhost:18081/events").send().await?;
 
     assert_eq!(response.status(), 200);
 
@@ -214,7 +213,7 @@ async fn test_sse_custom_templates_integration() -> Result<()> {
         if let Ok(event) = event_result {
             let data = event.data.clone();
             log::info!("Received custom template event: {}", data);
-            
+
             // Check if we received our custom formatted event
             if data.contains("person_added") && data.contains("Bob") {
                 received_custom_event = true;
@@ -240,7 +239,9 @@ async fn test_sse_multi_path_integration() -> Result<()> {
         .try_init();
 
     // Create Application source
-    let config = ApplicationSourceConfig { properties: HashMap::new() };
+    let config = ApplicationSourceConfig {
+        properties: HashMap::new(),
+    };
     let (app_source, handle) = ApplicationSource::new("test-source", config)?;
 
     // Create two queries
@@ -310,12 +311,9 @@ async fn test_sse_multi_path_integration() -> Result<()> {
 
     // Connect to both SSE paths
     let client = reqwest::Client::new();
-    
+
     // Test /persons path
-    let persons_response = client
-        .get("http://localhost:18082/persons")
-        .send()
-        .await?;
+    let persons_response = client.get("http://localhost:18082/persons").send().await?;
     assert_eq!(persons_response.status(), 200);
 
     // Test /companies path
@@ -375,7 +373,10 @@ async fn test_sse_multi_path_integration() -> Result<()> {
         }
     }
 
-    assert!(received_person, "Should receive person event on /persons path");
+    assert!(
+        received_person,
+        "Should receive person event on /persons path"
+    );
     assert!(
         received_company,
         "Should receive company event on /companies path"

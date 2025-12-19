@@ -41,7 +41,7 @@ fn default_sse_host() -> String {
 pub struct TemplateSpec {
     /// Optional custom path for this specific template.
     /// If provided, events will be sent to this path appended to the base SSE path.
-    /// For example, if the base sse_path is "/events" and path is "sensors", 
+    /// For example, if the base sse_path is "/events" and path is "sensors",
     /// events will be sent to "/events/sensors".
     /// Supports Handlebars templates for dynamic paths.
     #[serde(skip_serializing_if = "Option::is_none")]
