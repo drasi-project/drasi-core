@@ -59,6 +59,23 @@ fn pre_create_broadcaster_for_template_spec(
     }
 }
 
+/// Helper function to pre-create broadcasters for all operation types in a QueryConfig
+fn pre_create_broadcasters_for_query_config(
+    broadcasters: &mut HashMap<String, broadcast::Sender<String>>,
+    query_config: &super::config::QueryConfig,
+    base_sse_path: &str,
+) {
+    if let Some(ref spec) = query_config.added {
+        pre_create_broadcaster_for_template_spec(broadcasters, spec, base_sse_path);
+    }
+    if let Some(ref spec) = query_config.updated {
+        pre_create_broadcaster_for_template_spec(broadcasters, spec, base_sse_path);
+    }
+    if let Some(ref spec) = query_config.deleted {
+        pre_create_broadcaster_for_template_spec(broadcasters, spec, base_sse_path);
+    }
+}
+
 /// SSE reaction exposes query results to browser clients via Server-Sent Events.
 pub struct SseReaction {
     base: ReactionBase,
@@ -144,29 +161,12 @@ impl SseReaction {
         // This ensures paths are available immediately when clients connect
         // Note: Dynamic paths with template variables will still be created on-demand
         for query_config in config.routes.values() {
-            // Check all operation types (added, updated, deleted)
-            if let Some(ref spec) = query_config.added {
-                pre_create_broadcaster_for_template_spec(&mut broadcasters, spec, &config.sse_path);
-            }
-            if let Some(ref spec) = query_config.updated {
-                pre_create_broadcaster_for_template_spec(&mut broadcasters, spec, &config.sse_path);
-            }
-            if let Some(ref spec) = query_config.deleted {
-                pre_create_broadcaster_for_template_spec(&mut broadcasters, spec, &config.sse_path);
-            }
+            pre_create_broadcasters_for_query_config(&mut broadcasters, query_config, &config.sse_path);
         }
 
         // Also check default template for static paths
         if let Some(default_config) = &config.default_template {
-            if let Some(ref spec) = default_config.added {
-                pre_create_broadcaster_for_template_spec(&mut broadcasters, spec, &config.sse_path);
-            }
-            if let Some(ref spec) = default_config.updated {
-                pre_create_broadcaster_for_template_spec(&mut broadcasters, spec, &config.sse_path);
-            }
-            if let Some(ref spec) = default_config.deleted {
-                pre_create_broadcaster_for_template_spec(&mut broadcasters, spec, &config.sse_path);
-            }
+            pre_create_broadcasters_for_query_config(&mut broadcasters, default_config, &config.sse_path);
         }
 
         Self {
@@ -444,11 +444,15 @@ impl Reaction for SseReaction {
                                             drop(broadcasters_read);
                                             // Need to create broadcaster, acquire write lock
                                             let mut broadcasters_write = broadcasters.write().await;
-                                            broadcasters_write.entry(sse_path.clone()).or_insert_with(|| {
+                                            // Re-check if another thread created it while we waited for write lock
+                                            if let Some(broadcaster) = broadcasters_write.get(&sse_path) {
+                                                broadcaster.clone()
+                                            } else {
                                                 let (tx, _rx) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
                                                 debug!("[{reaction_id}] Created broadcaster for path: {sse_path}");
+                                                broadcasters_write.insert(sse_path.clone(), tx.clone());
                                                 tx
-                                            }).clone()
+                                            }
                                         }
                                     }
                                 };
