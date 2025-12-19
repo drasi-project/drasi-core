@@ -159,13 +159,28 @@ impl SseReactionBuilder {
         config: &QueryConfig,
     ) -> anyhow::Result<()> {
         if let Some(added) = &config.added {
+            // Validate body template
             Self::validate_template(handlebars, &added.template)?;
+            // Validate path template (if present)
+            if let Some(path) = &added.path {
+                Self::validate_template(handlebars, path)?;
+            }
         }
         if let Some(updated) = &config.updated {
+            // Validate body template
             Self::validate_template(handlebars, &updated.template)?;
+            // Validate path template (if present)
+            if let Some(path) = &updated.path {
+                Self::validate_template(handlebars, path)?;
+            }
         }
         if let Some(deleted) = &config.deleted {
+            // Validate body template
             Self::validate_template(handlebars, &deleted.template)?;
+            // Validate path template (if present)
+            if let Some(path) = &deleted.path {
+                Self::validate_template(handlebars, path)?;
+            }
         }
         Ok(())
     }
