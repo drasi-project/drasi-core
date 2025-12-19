@@ -121,7 +121,7 @@ impl SseReaction {
         // Pre-create broadcasters for all configured static paths
         // This ensures paths are available immediately when clients connect
         // Note: Dynamic paths with template variables will still be created on-demand
-        for (_query_id, query_config) in &config.routes {
+        for query_config in config.routes.values() {
             // Check all operation types (added, updated, deleted)
             for template_spec in [
                 &query_config.added,
@@ -196,7 +196,7 @@ impl SseReaction {
                 handlebars
                     .render_template(custom_path, context)
                     .unwrap_or_else(|e| {
-                        error!("[{reaction_id}] Failed to render path template '{}': {}. Using template as-is.", custom_path, e);
+                        error!("[{reaction_id}] Failed to render path template '{custom_path}': {e}. Using template as-is.");
                         custom_path.clone()
                     })
             } else {
@@ -206,7 +206,7 @@ impl SseReaction {
             if rendered_path.starts_with('/') {
                 rendered_path
             } else {
-                format!("{}/{}", base_sse_path, rendered_path)
+                format!("{base_sse_path}/{rendered_path}")
             }
         } else {
             base_sse_path.to_string()
@@ -359,7 +359,7 @@ impl Reaction for SseReaction {
                     .or_else(|| {
                         query_name
                             .split('.')
-                            .last()
+                            .next_back()
                             .and_then(|name| query_configs.get(name))
                     })
                     .or(default_template.as_ref());

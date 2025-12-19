@@ -149,7 +149,7 @@ impl SseReactionBuilder {
         // Validate the template by attempting to render it with empty data
         handlebars
             .render_template(template, &serde_json::json!({}))
-            .map_err(|e| anyhow::anyhow!("Invalid template: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Invalid template: {e}"))?;
         Ok(())
     }
 
@@ -201,13 +201,13 @@ impl SseReactionBuilder {
         // Validate all templates in routes
         for (query_id, config) in &self.routes {
             Self::validate_query_config(&handlebars, config)
-                .map_err(|e| anyhow::anyhow!("Invalid template in route '{}': {}", query_id, e))?;
+                .map_err(|e| anyhow::anyhow!("Invalid template in route '{query_id}': {e}"))?;
         }
 
         // Validate default template if provided
         if let Some(default_template) = &self.default_template {
             Self::validate_query_config(&handlebars, default_template)
-                .map_err(|e| anyhow::anyhow!("Invalid default template: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Invalid default template: {e}"))?;
         }
 
         // Validate that all routes correspond to subscribed queries
@@ -217,7 +217,7 @@ impl SseReactionBuilder {
                 let matches = self
                     .queries
                     .iter()
-                    .any(|q| q == route_query || q.ends_with(&format!(".{}", route_query)));
+                    .any(|q| q == route_query || q.ends_with(&format!(".{route_query}")));
                 if !matches {
                     return Err(anyhow::anyhow!(
                         "Route '{}' does not match any subscribed query. Subscribed queries: {:?}",

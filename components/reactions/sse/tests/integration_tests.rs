@@ -18,7 +18,7 @@ use anyhow::Result;
 use drasi_lib::{DrasiLib, Query};
 use drasi_reaction_sse::{QueryConfig, SseReaction, TemplateSpec};
 use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
-use futures_util::{Stream, StreamExt};
+use futures_util::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -98,7 +98,7 @@ async fn test_sse_basic_integration() -> Result<()> {
         match event_result {
             Ok(event) => {
                 let data = event.data.clone();
-                log::info!("Received SSE event: {}", data);
+                log::info!("Received SSE event: {data}");
                 received_events.push(data.clone());
 
                 // Stop after receiving a non-heartbeat event
@@ -107,7 +107,7 @@ async fn test_sse_basic_integration() -> Result<()> {
                 }
             }
             Err(e) => {
-                log::error!("Error reading SSE event: {}", e);
+                log::error!("Error reading SSE event: {e}");
                 break;
             }
         }
@@ -212,7 +212,7 @@ async fn test_sse_custom_templates_integration() -> Result<()> {
     while let Some(event_result) = event_stream.next().await {
         if let Ok(event) = event_result {
             let data = event.data.clone();
-            log::info!("Received custom template event: {}", data);
+            log::info!("Received custom template event: {data}");
 
             // Check if we received our custom formatted event
             if data.contains("person_added") && data.contains("Bob") {
@@ -352,7 +352,7 @@ async fn test_sse_multi_path_integration() -> Result<()> {
     while let Some(event_result) = persons_stream.next().await {
         if let Ok(event) = event_result {
             let data = event.data.clone();
-            log::info!("Received on /persons: {}", data);
+            log::info!("Received on /persons: {data}");
             if data.contains("Charlie") && data.contains("person") {
                 received_person = true;
                 break;
@@ -365,7 +365,7 @@ async fn test_sse_multi_path_integration() -> Result<()> {
     while let Some(event_result) = companies_stream.next().await {
         if let Ok(event) = event_result {
             let data = event.data.clone();
-            log::info!("Received on /companies: {}", data);
+            log::info!("Received on /companies: {data}");
             if data.contains("Acme") && data.contains("company") {
                 received_company = true;
                 break;
