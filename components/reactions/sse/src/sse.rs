@@ -37,6 +37,28 @@ use super::SseReactionBuilder;
 
 const BROADCAST_CHANNEL_CAPACITY: usize = 1024;
 
+/// Helper function to pre-create broadcasters for static paths in a template spec
+fn pre_create_broadcaster_for_template_spec(
+    broadcasters: &mut HashMap<String, broadcast::Sender<String>>,
+    template_spec: &super::config::TemplateSpec,
+    base_sse_path: &str,
+) {
+    if let Some(custom_path) = &template_spec.path {
+        // Only pre-create broadcasters for static paths (no template variables)
+        if !custom_path.contains("{{") {
+            let resolved_path = if custom_path.starts_with('/') {
+                custom_path.clone()
+            } else {
+                format!("{}/{}", base_sse_path, custom_path)
+            };
+            broadcasters.entry(resolved_path).or_insert_with(|| {
+                let (tx, _rx) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
+                tx
+            });
+        }
+    }
+}
+
 /// SSE reaction exposes query results to browser clients via Server-Sent Events.
 pub struct SseReaction {
     base: ReactionBase,
@@ -123,54 +145,27 @@ impl SseReaction {
         // Note: Dynamic paths with template variables will still be created on-demand
         for query_config in config.routes.values() {
             // Check all operation types (added, updated, deleted)
-            for template_spec in [
-                &query_config.added,
-                &query_config.updated,
-                &query_config.deleted,
-            ]
-            .iter()
-            .filter_map(|s| s.as_ref())
-            {
-                if let Some(custom_path) = &template_spec.path {
-                    // Only pre-create broadcasters for static paths (no template variables)
-                    if !custom_path.contains("{{") {
-                        let resolved_path = if custom_path.starts_with('/') {
-                            custom_path.clone()
-                        } else {
-                            format!("{}/{}", config.sse_path, custom_path)
-                        };
-                        broadcasters.entry(resolved_path).or_insert_with(|| {
-                            let (tx, _rx) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
-                            tx
-                        });
-                    }
-                }
+            if let Some(ref spec) = query_config.added {
+                pre_create_broadcaster_for_template_spec(&mut broadcasters, spec, &config.sse_path);
+            }
+            if let Some(ref spec) = query_config.updated {
+                pre_create_broadcaster_for_template_spec(&mut broadcasters, spec, &config.sse_path);
+            }
+            if let Some(ref spec) = query_config.deleted {
+                pre_create_broadcaster_for_template_spec(&mut broadcasters, spec, &config.sse_path);
             }
         }
 
         // Also check default template for static paths
         if let Some(default_config) = &config.default_template {
-            for template_spec in [
-                &default_config.added,
-                &default_config.updated,
-                &default_config.deleted,
-            ]
-            .iter()
-            .filter_map(|s| s.as_ref())
-            {
-                if let Some(custom_path) = &template_spec.path {
-                    if !custom_path.contains("{{") {
-                        let resolved_path = if custom_path.starts_with('/') {
-                            custom_path.clone()
-                        } else {
-                            format!("{}/{}", config.sse_path, custom_path)
-                        };
-                        broadcasters.entry(resolved_path).or_insert_with(|| {
-                            let (tx, _rx) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
-                            tx
-                        });
-                    }
-                }
+            if let Some(ref spec) = default_config.added {
+                pre_create_broadcaster_for_template_spec(&mut broadcasters, spec, &config.sse_path);
+            }
+            if let Some(ref spec) = default_config.updated {
+                pre_create_broadcaster_for_template_spec(&mut broadcasters, spec, &config.sse_path);
+            }
+            if let Some(ref spec) = default_config.deleted {
+                pre_create_broadcaster_for_template_spec(&mut broadcasters, spec, &config.sse_path);
             }
         }
 
@@ -293,33 +288,7 @@ impl Reaction for SseReaction {
             let mut handlebars = Handlebars::new();
 
             // Register the json helper to serialize values as JSON
-            handlebars.register_helper(
-                "json",
-                Box::new(
-                    |h: &handlebars::Helper,
-                     _: &Handlebars,
-                     _: &handlebars::Context,
-                     _: &mut handlebars::RenderContext,
-                     out: &mut dyn handlebars::Output|
-                     -> handlebars::HelperResult {
-                        if let Some(value) = h.param(0) {
-                            match serde_json::to_string(&value.value()) {
-                                Ok(json_str) => out.write(&json_str)?,
-                                Err(e) => {
-                                    debug!(
-                                        "[{reaction_id}] JSON serialization error in template: {e}"
-                                    );
-                                    out.write("null")?;
-                                }
-                            }
-                        } else {
-                            // No parameter provided to json helper
-                            out.write("null")?;
-                        }
-                        Ok(())
-                    },
-                ),
-            );
+            super::register_json_helper(&mut handlebars);
 
             loop {
                 if !matches!(*status.read().await, ComponentStatus::Running) {
@@ -357,10 +326,14 @@ impl Reaction for SseReaction {
                 let query_config = query_configs
                     .get(query_name)
                     .or_else(|| {
-                        query_name
-                            .split('.')
-                            .next_back()
-                            .and_then(|name| query_configs.get(name))
+                        if query_name.contains('.') {
+                            query_name
+                                .rsplit('.')
+                                .next()
+                                .and_then(|name| query_configs.get(name))
+                        } else {
+                            None
+                        }
                     })
                     .or(default_template.as_ref());
 

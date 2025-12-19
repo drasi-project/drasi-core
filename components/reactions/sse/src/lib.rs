@@ -36,6 +36,36 @@ pub mod sse;
 pub use config::{QueryConfig, SseReactionConfig, TemplateSpec};
 pub use sse::SseReaction;
 
+/// Helper function to register the json helper in a Handlebars instance
+/// This helper serializes values to JSON format in templates
+fn register_json_helper(handlebars: &mut handlebars::Handlebars) {
+    handlebars.register_helper(
+        "json",
+        Box::new(
+            |h: &handlebars::Helper,
+             _: &handlebars::Handlebars,
+             _: &handlebars::Context,
+             _: &mut handlebars::RenderContext,
+             out: &mut dyn handlebars::Output|
+             -> handlebars::HelperResult {
+                if let Some(value) = h.param(0) {
+                    match serde_json::to_string(&value.value()) {
+                        Ok(json_str) => out.write(&json_str)?,
+                        Err(_) => {
+                            // On serialization error, output null
+                            out.write("null")?;
+                        }
+                    }
+                } else {
+                    // No parameter provided to json helper
+                    out.write("null")?;
+                }
+                Ok(())
+            },
+        ),
+    );
+}
+
 /// Builder for SSE reaction
 pub struct SseReactionBuilder {
     id: String,
@@ -189,29 +219,9 @@ impl SseReactionBuilder {
     pub fn build(self) -> anyhow::Result<SseReaction> {
         // Create a single Handlebars instance for all validation with json helper
         let mut handlebars = handlebars::Handlebars::new();
-
+        
         // Register the json helper for template validation
-        handlebars.register_helper(
-            "json",
-            Box::new(
-                |h: &handlebars::Helper,
-                 _: &handlebars::Handlebars,
-                 _: &handlebars::Context,
-                 _: &mut handlebars::RenderContext,
-                 out: &mut dyn handlebars::Output|
-                 -> handlebars::HelperResult {
-                    if let Some(value) = h.param(0) {
-                        match serde_json::to_string(&value.value()) {
-                            Ok(json_str) => out.write(&json_str)?,
-                            Err(_) => out.write("null")?,
-                        }
-                    } else {
-                        out.write("null")?;
-                    }
-                    Ok(())
-                },
-            ),
-        );
+        register_json_helper(&mut handlebars);
 
         // Validate all templates in routes
         for (query_id, config) in &self.routes {
