@@ -234,7 +234,6 @@ async fn test_sse_custom_templates_integration() -> Result<()> {
 
 /// Test SSE with multi-path routing
 #[tokio::test]
-#[ignore] // TODO: Fix multi-path routing - paths need to be resolved correctly
 async fn test_sse_multi_path_integration() -> Result<()> {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .is_test(true)

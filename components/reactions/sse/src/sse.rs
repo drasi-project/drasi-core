@@ -118,6 +118,48 @@ impl SseReaction {
         let (tx, _rx) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         broadcasters.insert(config.sse_path.clone(), tx);
 
+        // Pre-create broadcasters for all configured static paths
+        // This ensures paths are available immediately when clients connect
+        // Note: Dynamic paths with template variables will still be created on-demand
+        for (_query_id, query_config) in &config.routes {
+            // Check all operation types (added, updated, deleted)
+            for template_spec in [&query_config.added, &query_config.updated, &query_config.deleted].iter().filter_map(|s| s.as_ref()) {
+                if let Some(custom_path) = &template_spec.path {
+                    // Only pre-create broadcasters for static paths (no template variables)
+                    if !custom_path.contains("{{") {
+                        let resolved_path = if custom_path.starts_with('/') {
+                            custom_path.clone()
+                        } else {
+                            format!("{}/{}", config.sse_path, custom_path)
+                        };
+                        broadcasters.entry(resolved_path).or_insert_with(|| {
+                            let (tx, _rx) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
+                            tx
+                        });
+                    }
+                }
+            }
+        }
+
+        // Also check default template for static paths
+        if let Some(default_config) = &config.default_template {
+            for template_spec in [&default_config.added, &default_config.updated, &default_config.deleted].iter().filter_map(|s| s.as_ref()) {
+                if let Some(custom_path) = &template_spec.path {
+                    if !custom_path.contains("{{") {
+                        let resolved_path = if custom_path.starts_with('/') {
+                            custom_path.clone()
+                        } else {
+                            format!("{}/{}", config.sse_path, custom_path)
+                        };
+                        broadcasters.entry(resolved_path).or_insert_with(|| {
+                            let (tx, _rx) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
+                            tx
+                        });
+                    }
+                }
+            }
+        }
+
         Self {
             base: ReactionBase::new(params),
             config,
