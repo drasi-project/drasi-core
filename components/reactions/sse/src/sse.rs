@@ -515,6 +515,14 @@ impl Reaction for SseReaction {
                                 debug!("[{reaction_id}] no SSE listeners on {base_sse_path}: {e}")
                             }
                         }
+                    } else {
+                        // This should not happen because the base_sse_path broadcaster is pre-created,
+                        // but log an error defensively so dropped events are visible during debugging.
+                        error!(
+                            "[{reaction_id}] Missing broadcaster for base SSE path {base_sse_path}; \
+                             dropping event payload for query '{}'",
+                            query_result.query_id
+                        );
                     }
                 }
             }
