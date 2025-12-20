@@ -116,7 +116,7 @@ impl LogReaction {
         }
         // Compile the template to validate syntax without requiring data
         handlebars::Template::compile(template)
-            .map_err(|e| anyhow::anyhow!("Invalid template: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Invalid template: {e}"))?;
         Ok(())
     }
 
@@ -139,13 +139,13 @@ impl LogReaction {
         // Validate all templates in routes
         for (query_id, route_config) in &config.routes {
             Self::validate_query_config(route_config)
-                .map_err(|e| anyhow::anyhow!("Invalid template in route '{}': {}", query_id, e))?;
+                .map_err(|e| anyhow::anyhow!("Invalid template in route '{query_id}': {e}"))?;
         }
 
         // Validate default template if provided
         if let Some(default_template) = &config.default_template {
             Self::validate_query_config(default_template)
-                .map_err(|e| anyhow::anyhow!("Invalid default template: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Invalid default template: {e}"))?;
         }
 
         // Validate that all routes correspond to subscribed queries
@@ -158,9 +158,7 @@ impl LogReaction {
                     .any(|q| q == route_query || q.ends_with(&dotted_route));
                 if !matches {
                     return Err(anyhow::anyhow!(
-                        "Route '{}' does not match any subscribed query. Subscribed queries: {:?}",
-                        route_query,
-                        queries
+                        "Route '{route_query}' does not match any subscribed query. Subscribed queries: {queries:?}"
                     ));
                 }
             }
