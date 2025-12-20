@@ -457,7 +457,6 @@ impl Query for DrasiQuery {
                 source_id: FUTURE_QUEUE_SOURCE_ID.to_string(),
                 enable_bootstrap: false,
                 query_id: self.base.config.id.clone(),
-                query_text: self.base.config.query.clone(),
                 nodes: HashSet::new(),
                 relations: HashSet::new(),
             },

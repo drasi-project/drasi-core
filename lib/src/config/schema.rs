@@ -134,7 +134,6 @@ pub struct SourceSubscriptionConfig {
 /// - **source_id**: ID of the source
 /// - **enable_bootstrap**: Whether to request initial data
 /// - **query_id**: ID of the subscribing query
-/// - **query_text**: The full query text
 /// - **nodes**: Set of node labels the query is interested in from this source
 /// - **relations**: Set of relation labels the query is interested in from this source
 ///
@@ -148,7 +147,6 @@ pub struct SourceSubscriptionConfig {
 ///     source_id: "orders_db".to_string(),
 ///     enable_bootstrap: true,
 ///     query_id: "my-query".to_string(),
-///     query_text: "MATCH (o:Order)-[:PLACED_BY]->(c:Customer) RETURN o, c".to_string(),
 ///     nodes: ["Order", "Customer"].iter().map(|s| s.to_string()).collect(),
 ///     relations: ["PLACED_BY"].iter().map(|s| s.to_string()).collect(),
 /// };
@@ -158,7 +156,6 @@ pub struct SourceSubscriptionSettings {
     pub source_id: String,
     pub enable_bootstrap: bool,
     pub query_id: String,
-    pub query_text: String,
     pub nodes: HashSet<String>,
     pub relations: HashSet<String>,
 }

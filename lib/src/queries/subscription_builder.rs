@@ -36,7 +36,6 @@ impl SubscriptionSettingsBuilder {
                 source_id: source_config.source_id.clone(),
                 enable_bootstrap: query_config.enable_bootstrap,
                 query_id: query_config.id.clone(),
-                query_text: query_config.query.clone(),
                 nodes: source_config.nodes.iter().cloned().collect(),
                 relations: source_config.relations.iter().cloned().collect(),
             })

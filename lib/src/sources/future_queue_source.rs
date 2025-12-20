@@ -404,7 +404,6 @@ mod tests {
             source_id: FUTURE_QUEUE_SOURCE_ID.to_string(),
             enable_bootstrap: false,
             query_id: "test-query".to_string(),
-            query_text: "".to_string(),
             nodes: HashSet::new(),
             relations: HashSet::new(),
         };
@@ -462,7 +461,6 @@ mod tests {
             source_id: FUTURE_QUEUE_SOURCE_ID.to_string(),
             enable_bootstrap: false,
             query_id: "test-query".to_string(),
-            query_text: "".to_string(),
             nodes: HashSet::new(),
             relations: HashSet::new(),
         };
@@ -517,7 +515,6 @@ mod tests {
             source_id: FUTURE_QUEUE_SOURCE_ID.to_string(),
             enable_bootstrap: false,
             query_id: "test-query".to_string(),
-            query_text: "".to_string(),
             nodes: HashSet::new(),
             relations: HashSet::new(),
         };
