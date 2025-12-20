@@ -161,12 +161,20 @@ impl SseReaction {
         // This ensures paths are available immediately when clients connect
         // Note: Dynamic paths with template variables will still be created on-demand
         for query_config in config.routes.values() {
-            pre_create_broadcasters_for_query_config(&mut broadcasters, query_config, &config.sse_path);
+            pre_create_broadcasters_for_query_config(
+                &mut broadcasters,
+                query_config,
+                &config.sse_path,
+            );
         }
 
         // Also check default template for static paths
         if let Some(default_config) = &config.default_template {
-            pre_create_broadcasters_for_query_config(&mut broadcasters, default_config, &config.sse_path);
+            pre_create_broadcasters_for_query_config(
+                &mut broadcasters,
+                default_config,
+                &config.sse_path,
+            );
         }
 
         Self {
@@ -445,12 +453,16 @@ impl Reaction for SseReaction {
                                             // Need to create broadcaster, acquire write lock
                                             let mut broadcasters_write = broadcasters.write().await;
                                             // Re-check if another thread created it while we waited for write lock
-                                            if let Some(broadcaster) = broadcasters_write.get(&sse_path) {
+                                            if let Some(broadcaster) =
+                                                broadcasters_write.get(&sse_path)
+                                            {
                                                 broadcaster.clone()
                                             } else {
-                                                let (tx, _rx) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
+                                                let (tx, _rx) =
+                                                    broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
                                                 debug!("[{reaction_id}] Created broadcaster for path: {sse_path}");
-                                                broadcasters_write.insert(sse_path.clone(), tx.clone());
+                                                broadcasters_write
+                                                    .insert(sse_path.clone(), tx.clone());
                                                 tx
                                             }
                                         }

@@ -219,7 +219,7 @@ impl SseReactionBuilder {
     pub fn build(self) -> anyhow::Result<SseReaction> {
         // Create a single Handlebars instance for all validation with json helper
         let mut handlebars = handlebars::Handlebars::new();
-        
+
         // Register the json helper for template validation
         register_json_helper(&mut handlebars);
 
