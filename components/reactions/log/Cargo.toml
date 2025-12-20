@@ -9,6 +9,9 @@ repository = "https://github.com/drasi-project/drasi-core"
 keywords = ["drasi", "plugin", "reaction", "log", "logging"]
 categories = ["development-tools::debugging"]
 
+[lints]
+workspace = true
+
 [dependencies]
 drasi-lib = { path = "../../../lib" }
 anyhow = "1.0"

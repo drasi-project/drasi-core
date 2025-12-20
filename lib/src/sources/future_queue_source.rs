@@ -273,10 +273,7 @@ impl FutureQueueSource {
                 // Preserve the original error and add context
                 Box::new(std::io::Error::new(
                     std::io::ErrorKind::Other,
-                    format!(
-                        "Failed to create receiver for future queue subscription: {}",
-                        e
-                    ),
+                    format!("Failed to create receiver for future queue subscription: {e}"),
                 ))
             },
         )?;
@@ -323,13 +320,13 @@ impl crate::plugin_core::Source for FutureQueueSource {
     async fn start(&self) -> anyhow::Result<()> {
         self.start_internal()
             .await
-            .map_err(|e| anyhow::anyhow!("{}", e))
+            .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     async fn stop(&self) -> anyhow::Result<()> {
         self.stop_internal()
             .await
-            .map_err(|e| anyhow::anyhow!("{}", e))
+            .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     async fn status(&self) -> ComponentStatus {
@@ -347,7 +344,7 @@ impl crate::plugin_core::Source for FutureQueueSource {
     ) -> anyhow::Result<crate::channels::SubscriptionResponse> {
         self.subscribe(settings)
             .await
-            .map_err(|e| anyhow::anyhow!("{}", e))
+            .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
