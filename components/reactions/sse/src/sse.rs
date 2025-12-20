@@ -49,7 +49,7 @@ fn pre_create_broadcaster_for_template_spec(
             let resolved_path = if custom_path.starts_with('/') {
                 custom_path.clone()
             } else {
-                format!("{}/{}", base_sse_path, custom_path)
+                format!("{base_sse_path}/{custom_path}")
             };
             broadcasters.entry(resolved_path).or_insert_with(|| {
                 let (tx, _rx) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
