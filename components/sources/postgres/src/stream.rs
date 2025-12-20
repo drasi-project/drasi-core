@@ -559,7 +559,7 @@ impl ReplicationStream {
             metadata: ElementMetadata {
                 reference: ElementReference::new(&self.source_id, &element_id),
                 labels: Arc::from([Arc::from(mapping.label.as_str())]),
-                effective_from: Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64,
+                effective_from: Utc::now().timestamp_millis() as u64,
             },
             properties,
         };
@@ -617,7 +617,7 @@ impl ReplicationStream {
             metadata: ElementMetadata {
                 reference: ElementReference::new(&self.source_id, &element_id),
                 labels: Arc::from([Arc::from(mapping.label.as_str())]),
-                effective_from: Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64,
+                effective_from: Utc::now().timestamp_millis() as u64,
             },
             properties: after_properties,
         };
@@ -648,7 +648,7 @@ impl ReplicationStream {
             metadata: ElementMetadata {
                 reference: ElementReference::new(&self.source_id, &element_id),
                 labels: Arc::from([Arc::from(mapping.label.as_str())]),
-                effective_from: Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64,
+                effective_from: Utc::now().timestamp_millis() as u64,
             },
         }))
     }
