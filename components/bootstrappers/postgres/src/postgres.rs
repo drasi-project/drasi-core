@@ -203,6 +203,7 @@ impl BootstrapProvider for PostgresBootstrapProvider {
         request: BootstrapRequest,
         context: &BootstrapContext,
         event_tx: drasi_lib::channels::BootstrapEventSender,
+        _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
     ) -> Result<usize> {
         info!(
             "Starting PostgreSQL bootstrap for query '{}' with {} node labels and {} relation labels",

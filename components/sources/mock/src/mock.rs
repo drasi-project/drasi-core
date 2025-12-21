@@ -394,20 +394,9 @@ impl Source for MockSource {
 
     async fn subscribe(
         &self,
-        query_id: String,
-        enable_bootstrap: bool,
-        node_labels: Vec<String>,
-        relation_labels: Vec<String>,
+        settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
-        self.base
-            .subscribe_with_bootstrap(
-                query_id,
-                enable_bootstrap,
-                node_labels,
-                relation_labels,
-                "Mock",
-            )
-            .await
+        self.base.subscribe_with_bootstrap(&settings, "Mock").await
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

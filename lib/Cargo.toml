@@ -24,6 +24,9 @@ keywords = ["drasi"]
 categories = ["database"]
 readme = "README.md"
 
+[lints]
+workspace = true
+
 [lib]
 name = "drasi_lib"
 path = "src/lib.rs"
@@ -65,15 +68,3 @@ test-case = "3.3"
 # Additional testing dependencies
 futures = "0.3"
 rstest = "0.18"
-
-[lints.clippy]
-print_stdout = "warn"
-unwrap_used = "warn"
-module_inception = "allow"
-ptr_arg = "allow"
-type_complexity = "allow"
-uninlined_format_args = "allow"
-
-[lints.rust]
-unused = "allow"
-warnings = "deny"

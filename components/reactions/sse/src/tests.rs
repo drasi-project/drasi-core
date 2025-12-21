@@ -113,3 +113,236 @@ fn test_sse_type_name() {
     let reaction = SseReaction::builder("test").build().unwrap();
     assert_eq!(reaction.type_name(), "sse");
 }
+
+#[test]
+fn test_sse_builder_with_routes() {
+    let query_config = QueryConfig {
+        added: Some(TemplateSpec {
+            path: Some("/custom/added".to_string()),
+            template: r#"{"event": "add", "data": {{json after}}}"#.to_string(),
+        }),
+        updated: Some(TemplateSpec {
+            path: None,
+            template: r#"{"event": "update", "before": {{json before}}, "after": {{json after}}}"#
+                .to_string(),
+        }),
+        deleted: Some(TemplateSpec {
+            path: Some("/custom/deleted".to_string()),
+            template: r#"{"event": "delete", "data": {{json before}}}"#.to_string(),
+        }),
+    };
+
+    let reaction = SseReaction::builder("test-reaction")
+        .with_query("query1")
+        .with_route("query1", query_config)
+        .build()
+        .unwrap();
+
+    assert_eq!(reaction.id(), "test-reaction");
+    assert_eq!(reaction.query_ids(), vec!["query1"]);
+}
+
+#[test]
+fn test_sse_config_with_routes_serialization() {
+    let mut routes = std::collections::HashMap::new();
+    routes.insert(
+        "test-query".to_string(),
+        QueryConfig {
+            added: Some(TemplateSpec {
+                path: None,
+                template: r#"{"type": "added", "data": {{json after}}}"#.to_string(),
+            }),
+            updated: None,
+            deleted: None,
+        },
+    );
+
+    let config = SseReactionConfig {
+        host: "0.0.0.0".to_string(),
+        port: 8080,
+        sse_path: "/events".to_string(),
+        heartbeat_interval_ms: 30000,
+        routes,
+        default_template: None,
+    };
+
+    let serialized = serde_json::to_string(&config).unwrap();
+    let deserialized: SseReactionConfig = serde_json::from_str(&serialized).unwrap();
+
+    assert_eq!(config, deserialized);
+}
+
+#[test]
+fn test_template_spec_creation() {
+    let spec = TemplateSpec {
+        path: Some("/custom/path".to_string()),
+        template: r#"{"message": "test"}"#.to_string(),
+    };
+
+    assert_eq!(spec.path, Some("/custom/path".to_string()));
+    assert_eq!(spec.template, r#"{"message": "test"}"#);
+}
+
+#[test]
+fn test_query_config_all_operations() {
+    let config = QueryConfig {
+        added: Some(TemplateSpec {
+            path: None,
+            template: "add template".to_string(),
+        }),
+        updated: Some(TemplateSpec {
+            path: None,
+            template: "update template".to_string(),
+        }),
+        deleted: Some(TemplateSpec {
+            path: None,
+            template: "delete template".to_string(),
+        }),
+    };
+
+    assert!(config.added.is_some());
+    assert!(config.updated.is_some());
+    assert!(config.deleted.is_some());
+}
+
+#[test]
+fn test_config_default_routes_empty() {
+    let config = SseReactionConfig::default();
+    assert!(config.routes.is_empty());
+    assert!(config.default_template.is_none());
+}
+
+#[test]
+fn test_sse_builder_with_default_template() {
+    let default_template = QueryConfig {
+        added: Some(TemplateSpec {
+            path: None,
+            template: r#"{"event": "add", "data": {{json after}}}"#.to_string(),
+        }),
+        updated: Some(TemplateSpec {
+            path: None,
+            template: r#"{"event": "update", "data": {{json after}}}"#.to_string(),
+        }),
+        deleted: Some(TemplateSpec {
+            path: None,
+            template: r#"{"event": "delete", "data": {{json before}}}"#.to_string(),
+        }),
+    };
+
+    let reaction = SseReaction::builder("test-reaction")
+        .with_queries(vec!["query1".to_string(), "query2".to_string()])
+        .with_default_template(default_template)
+        .build()
+        .unwrap();
+
+    assert_eq!(reaction.id(), "test-reaction");
+    assert_eq!(reaction.query_ids().len(), 2);
+}
+
+#[test]
+fn test_sse_builder_invalid_template_fails() {
+    let invalid_template = QueryConfig {
+        added: Some(TemplateSpec {
+            path: None,
+            template: r#"{{invalid syntax"#.to_string(),
+        }),
+        updated: None,
+        deleted: None,
+    };
+
+    let result = SseReaction::builder("test-reaction")
+        .with_query("query1")
+        .with_default_template(invalid_template)
+        .build();
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("Invalid"));
+}
+
+#[test]
+fn test_sse_builder_route_validation_passes() {
+    let route_config = QueryConfig {
+        added: Some(TemplateSpec {
+            path: None,
+            template: r#"{"data": {{json after}}}"#.to_string(),
+        }),
+        updated: None,
+        deleted: None,
+    };
+
+    let result = SseReaction::builder("test-reaction")
+        .with_query("query1")
+        .with_route("query1", route_config)
+        .build();
+
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_sse_builder_route_validation_fails() {
+    let route_config = QueryConfig {
+        added: Some(TemplateSpec {
+            path: None,
+            template: r#"{"data": {{json after}}}"#.to_string(),
+        }),
+        updated: None,
+        deleted: None,
+    };
+
+    let result = SseReaction::builder("test-reaction")
+        .with_query("query1")
+        .with_route("query2", route_config)
+        .build();
+
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("does not match any subscribed query"));
+}
+
+#[test]
+fn test_sse_builder_route_validation_dotted_notation() {
+    let route_config = QueryConfig {
+        added: Some(TemplateSpec {
+            path: None,
+            template: r#"{"data": {{json after}}}"#.to_string(),
+        }),
+        updated: None,
+        deleted: None,
+    };
+
+    // Should match "source.query1" with route "query1"
+    let result = SseReaction::builder("test-reaction")
+        .with_query("source.query1")
+        .with_route("query1", route_config)
+        .build();
+
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_config_with_default_template_serialization() {
+    let default_template = QueryConfig {
+        added: Some(TemplateSpec {
+            path: None,
+            template: r#"{"event": "add"}"#.to_string(),
+        }),
+        updated: None,
+        deleted: None,
+    };
+
+    let config = SseReactionConfig {
+        host: "0.0.0.0".to_string(),
+        port: 8080,
+        sse_path: "/events".to_string(),
+        heartbeat_interval_ms: 30000,
+        routes: std::collections::HashMap::new(),
+        default_template: Some(default_template),
+    };
+
+    let serialized = serde_json::to_string(&config).unwrap();
+    let deserialized: SseReactionConfig = serde_json::from_str(&serialized).unwrap();
+
+    assert_eq!(config, deserialized);
+}

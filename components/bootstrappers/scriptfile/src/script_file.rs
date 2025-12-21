@@ -304,6 +304,7 @@ impl BootstrapProvider for ScriptFileBootstrapProvider {
         request: BootstrapRequest,
         context: &BootstrapContext,
         event_tx: drasi_lib::channels::BootstrapEventSender,
+        _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
     ) -> Result<usize> {
         info!(
             "Starting script file bootstrap for query {} from {} file(s)",
