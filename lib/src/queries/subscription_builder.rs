@@ -86,8 +86,7 @@ impl SubscriptionSettingsBuilder {
                 _ => {
                     // Found in multiple sources - error
                     bail!(
-                        "Node label '{}' is configured in multiple sources. Each node label must be assigned to exactly one source.",
-                        node_label
+                        "Node label '{node_label}' is configured in multiple sources. Each node label must be assigned to exactly one source."
                     );
                 }
             }
@@ -150,8 +149,7 @@ impl SubscriptionSettingsBuilder {
                 _ => {
                     // Found in multiple sources - error
                     bail!(
-                        "Relation label '{}' is configured in multiple sources. Each relation label must be assigned to exactly one source.",
-                        relation_label
+                        "Relation label '{relation_label}' is configured in multiple sources. Each relation label must be assigned to exactly one source."
                     );
                 }
             }
