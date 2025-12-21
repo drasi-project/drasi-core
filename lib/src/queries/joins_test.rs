@@ -55,6 +55,8 @@ mod query_joins_tests {
             sources: sources
                 .into_iter()
                 .map(|source_id| SourceSubscriptionConfig {
+                    nodes: vec![],
+                    relations: vec![],
                     source_id,
                     pipeline: vec![],
                 })
