@@ -350,20 +350,9 @@ impl Source for GrpcSource {
 
     async fn subscribe(
         &self,
-        query_id: String,
-        enable_bootstrap: bool,
-        node_labels: Vec<String>,
-        relation_labels: Vec<String>,
+        settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
-        self.base
-            .subscribe_with_bootstrap(
-                query_id,
-                enable_bootstrap,
-                node_labels,
-                relation_labels,
-                "gRPC",
-            )
-            .await
+        self.base.subscribe_with_bootstrap(&settings, "gRPC").await
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -726,7 +715,7 @@ fn convert_proto_metadata_to_core(
                 .map(|s| Arc::from(s.as_str()))
                 .collect::<Vec<_>>(),
         ),
-        effective_from: proto_metadata.effective_from,
+        effective_from: proto_metadata.effective_from / 1_000_000, // Convert nanoseconds to milliseconds
     })
 }
 

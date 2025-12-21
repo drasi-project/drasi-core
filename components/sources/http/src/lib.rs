@@ -801,20 +801,9 @@ impl Source for HttpSource {
 
     async fn subscribe(
         &self,
-        query_id: String,
-        enable_bootstrap: bool,
-        node_labels: Vec<String>,
-        relation_labels: Vec<String>,
+        settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
-        self.base
-            .subscribe_with_bootstrap(
-                query_id,
-                enable_bootstrap,
-                node_labels,
-                relation_labels,
-                "HTTP",
-            )
-            .await
+        self.base.subscribe_with_bootstrap(&settings, "HTTP").await
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -1306,7 +1295,7 @@ mod tests {
                     } => {
                         assert_eq!(metadata.reference.element_id.as_ref(), "user-1");
                         assert_eq!(metadata.labels.len(), 1);
-                        assert_eq!(metadata.effective_from, 1234567890000000000);
+                        assert_eq!(metadata.effective_from, 1234567890000);
                         assert!(properties.get("name").is_some());
                         assert!(properties.get("age").is_some());
                     }

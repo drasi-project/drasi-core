@@ -159,10 +159,7 @@ impl Source for TestMockSource {
 
     async fn subscribe(
         &self,
-        query_id: String,
-        _enable_bootstrap: bool,
-        _node_labels: Vec<String>,
-        _relation_labels: Vec<String>,
+        settings: crate::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
         let dispatcher = ChannelChangeDispatcher::<SourceEventWrapper>::new(100);
         let receiver = dispatcher.create_receiver().await?;
@@ -170,7 +167,7 @@ impl Source for TestMockSource {
         self.dispatchers.write().await.push(Box::new(dispatcher));
 
         Ok(SubscriptionResponse {
-            query_id,
+            query_id: settings.query_id,
             source_id: self.id.clone(),
             receiver,
             bootstrap_receiver: None,

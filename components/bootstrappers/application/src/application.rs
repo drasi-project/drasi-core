@@ -173,6 +173,7 @@ impl BootstrapProvider for ApplicationBootstrapProvider {
         request: BootstrapRequest,
         _context: &BootstrapContext,
         _event_tx: drasi_lib::channels::BootstrapEventSender,
+        _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
     ) -> Result<usize> {
         info!(
             "ApplicationBootstrapProvider processing bootstrap request for query '{}' with {} node labels and {} relation labels",

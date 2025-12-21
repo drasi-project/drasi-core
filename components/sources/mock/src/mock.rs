@@ -200,11 +200,10 @@ impl Source for MockSource {
                         let metadata = ElementMetadata {
                             reference,
                             labels: Arc::from(vec![Arc::from("Counter")]),
-                            effective_from: crate::time::get_system_time_nanos().unwrap_or_else(
+                            effective_from: crate::time::get_system_time_millis().unwrap_or_else(
                                 |e| {
                                     log::warn!("Failed to get timestamp for mock counter: {e}");
-                                    // Use current milliseconds * 1M as fallback
-                                    (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
+                                    chrono::Utc::now().timestamp_millis() as u64
                                 },
                             ),
                         };
@@ -264,11 +263,10 @@ impl Source for MockSource {
                         let metadata = ElementMetadata {
                             reference,
                             labels: Arc::from(vec![Arc::from("SensorReading")]),
-                            effective_from: crate::time::get_system_time_nanos().unwrap_or_else(
+                            effective_from: crate::time::get_system_time_millis().unwrap_or_else(
                                 |e| {
                                     log::warn!("Failed to get timestamp for mock sensor: {e}");
-                                    // Use current milliseconds * 1M as fallback
-                                    (chrono::Utc::now().timestamp_millis() as u64) * 1_000_000
+                                    chrono::Utc::now().timestamp_millis() as u64
                                 },
                             ),
                         };
@@ -396,20 +394,9 @@ impl Source for MockSource {
 
     async fn subscribe(
         &self,
-        query_id: String,
-        enable_bootstrap: bool,
-        node_labels: Vec<String>,
-        relation_labels: Vec<String>,
+        settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
-        self.base
-            .subscribe_with_bootstrap(
-                query_id,
-                enable_bootstrap,
-                node_labels,
-                relation_labels,
-                "Mock",
-            )
-            .await
+        self.base.subscribe_with_bootstrap(&settings, "Mock").await
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

@@ -73,6 +73,7 @@ impl BootstrapProvider for NoOpBootstrapProvider {
         request: BootstrapRequest,
         _context: &BootstrapContext,
         _event_tx: BootstrapEventSender,
+        _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
     ) -> Result<usize> {
         info!(
             "No-op bootstrap for query {}: returning no data",

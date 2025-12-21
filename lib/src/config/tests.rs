@@ -128,6 +128,8 @@ mod schema_tests {
             query_language: crate::config::QueryLanguage::Cypher,
             middleware: vec![],
             sources: vec![crate::config::SourceSubscriptionConfig {
+                nodes: vec![],
+                relations: vec![],
                 source_id: "source1".to_string(),
                 pipeline: vec![],
             }],
@@ -280,6 +282,8 @@ mod runtime_tests {
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
             sources: vec![crate::config::SourceSubscriptionConfig {
+                nodes: vec![],
+                relations: vec![],
                 source_id: "source1".to_string(),
                 pipeline: vec![],
             }],
@@ -377,6 +381,8 @@ mod dispatch_mode_tests {
             query_language: crate::config::QueryLanguage::Cypher,
             middleware: vec![],
             sources: vec![crate::config::SourceSubscriptionConfig {
+                nodes: vec![],
+                relations: vec![],
                 source_id: "source1".to_string(),
                 pipeline: vec![],
             }],
@@ -396,6 +402,8 @@ mod dispatch_mode_tests {
             query_language: crate::config::QueryLanguage::Cypher,
             middleware: vec![],
             sources: vec![crate::config::SourceSubscriptionConfig {
+                nodes: vec![],
+                relations: vec![],
                 source_id: "source2".to_string(),
                 pipeline: vec![],
             }],
@@ -415,6 +423,8 @@ mod dispatch_mode_tests {
             query_language: crate::config::QueryLanguage::Cypher,
             middleware: vec![],
             sources: vec![crate::config::SourceSubscriptionConfig {
+                nodes: vec![],
+                relations: vec![],
                 source_id: "source3".to_string(),
                 pipeline: vec![],
             }],
