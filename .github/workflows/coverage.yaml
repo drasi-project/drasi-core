@@ -22,6 +22,7 @@ on:
     branches:
       - main
       - feature/*
+      - feature-lib
 
 env:
   CARGO_TERM_COLOR: always
@@ -78,14 +79,14 @@ jobs:
             ${{ runner.os }}-cargo-build-
       - name: Install Rust and Cargo tarpaulin
         run: |
-          rustup update stable
+          rustup update 1.88.0 && rustup default 1.88.0
           cargo install cargo-tarpaulin
       
       - name: Generate Code Coverage
         env:
           REDIS_URL: redis://localhost:6379
         run: |
-          cargo tarpaulin --out Xml
+          cargo tarpaulin --release --out Xml
           mv cobertura.xml drasi-core-tarpaulin-report.xml
           echo "Code coverage report generated"
 

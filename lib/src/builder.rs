@@ -346,6 +346,8 @@ impl Query {
     pub fn from_source(mut self, source_id: impl Into<String>) -> Self {
         self.sources.push(SourceSubscriptionConfig {
             source_id: source_id.into(),
+            nodes: Vec::new(),
+            relations: Vec::new(),
             pipeline: Vec::new(),
         });
         self
@@ -362,6 +364,8 @@ impl Query {
     ) -> Self {
         self.sources.push(SourceSubscriptionConfig {
             source_id: source_id.into(),
+            nodes: Vec::new(),
+            relations: Vec::new(),
             pipeline,
         });
         self

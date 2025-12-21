@@ -1170,19 +1170,10 @@ impl Source for PlatformSource {
 
     async fn subscribe(
         &self,
-        query_id: String,
-        enable_bootstrap: bool,
-        node_labels: Vec<String>,
-        relation_labels: Vec<String>,
+        settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
         self.base
-            .subscribe_with_bootstrap(
-                query_id,
-                enable_bootstrap,
-                node_labels,
-                relation_labels,
-                "Platform",
-            )
+            .subscribe_with_bootstrap(&settings, "Platform")
             .await
     }
 
@@ -1367,10 +1358,11 @@ fn transform_platform_event(
             return Err(anyhow::anyhow!("Labels array is empty or invalid"));
         }
 
-        // Extract timestamp from payload.source.ts_ns (already in nanoseconds)
-        let effective_from = payload["source"]["ts_ns"]
+        // Extract timestamp from payload.source.ts_ns (in nanoseconds) and convert to milliseconds
+        let ts_ns = payload["source"]["ts_ns"]
             .as_u64()
             .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'payload.source.ts_ns' field"))?;
+        let effective_from = ts_ns / 1_000_000; // Convert nanoseconds to milliseconds
 
         // Build ElementMetadata
         let reference = ElementReference::new(source_id, element_id);

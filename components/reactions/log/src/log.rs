@@ -16,7 +16,7 @@ use super::config::LogReactionConfig;
 use anyhow::Result;
 use async_trait::async_trait;
 use handlebars::Handlebars;
-use log::{debug, info};
+use log::debug;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,36 +36,140 @@ impl LogReaction {
     ///
     /// The event channel is automatically injected when the reaction is added
     /// to DrasiLib via `add_reaction()`.
-    pub fn new(id: impl Into<String>, queries: Vec<String>, config: LogReactionConfig) -> Self {
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Unique identifier for the reaction
+    /// * `queries` - Query IDs to subscribe to
+    /// * `config` - Configuration including templates and routes
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(LogReaction)` if all templates are valid and all routes correspond to subscribed queries.
+    /// Returns `Err` if template validation fails or if a route doesn't match a subscribed query.
+    ///
+    /// # Errors
+    ///
+    /// - Returns error if any template has invalid Handlebars syntax
+    /// - Returns error if a route query ID doesn't match any subscribed query
+    pub fn new(
+        id: impl Into<String>,
+        queries: Vec<String>,
+        config: LogReactionConfig,
+    ) -> anyhow::Result<Self> {
         let id = id.into();
+
+        // Validate templates and routes
+        Self::validate_config(&queries, &config)?;
+
         let params = ReactionBaseParams::new(id, queries);
-        Self {
+        Ok(Self {
             base: ReactionBase::new(params),
             config,
-        }
+        })
     }
 
     /// Create a new log reaction with custom priority queue capacity
     ///
     /// The event channel is automatically injected when the reaction is added
     /// to DrasiLib via `add_reaction()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Unique identifier for the reaction
+    /// * `queries` - Query IDs to subscribe to
+    /// * `config` - Configuration including templates and routes
+    /// * `priority_queue_capacity` - Maximum events in priority queue
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(LogReaction)` if all templates are valid and all routes correspond to subscribed queries.
+    /// Returns `Err` if template validation fails or if a route doesn't match a subscribed query.
+    ///
+    /// # Errors
+    ///
+    /// - Returns error if any template has invalid Handlebars syntax
+    /// - Returns error if a route query ID doesn't match any subscribed query
     pub fn with_priority_queue_capacity(
         id: impl Into<String>,
         queries: Vec<String>,
         config: LogReactionConfig,
         priority_queue_capacity: usize,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let id = id.into();
+
+        // Validate templates and routes
+        Self::validate_config(&queries, &config)?;
+
         let params = ReactionBaseParams::new(id, queries)
             .with_priority_queue_capacity(priority_queue_capacity);
-        Self {
+        Ok(Self {
             base: ReactionBase::new(params),
             config,
-        }
+        })
     }
 
+    /// Validate a template by attempting to compile it with Handlebars
+    fn validate_template(template: &str) -> anyhow::Result<()> {
+        if template.is_empty() {
+            return Ok(());
+        }
+        // Compile the template to validate syntax without requiring data
+        handlebars::Template::compile(template)
+            .map_err(|e| anyhow::anyhow!("Invalid template: {e}"))?;
+        Ok(())
+    }
+
+    /// Validate all templates in a QueryConfig
+    fn validate_query_config(config: &crate::config::QueryConfig) -> anyhow::Result<()> {
+        if let Some(added) = &config.added {
+            Self::validate_template(&added.template)?;
+        }
+        if let Some(updated) = &config.updated {
+            Self::validate_template(&updated.template)?;
+        }
+        if let Some(deleted) = &config.deleted {
+            Self::validate_template(&deleted.template)?;
+        }
+        Ok(())
+    }
+
+    /// Validate configuration: templates and route-query matching
+    fn validate_config(queries: &[String], config: &LogReactionConfig) -> anyhow::Result<()> {
+        // Validate all templates in routes
+        for (query_id, route_config) in &config.routes {
+            Self::validate_query_config(route_config)
+                .map_err(|e| anyhow::anyhow!("Invalid template in route '{query_id}': {e}"))?;
+        }
+
+        // Validate default template if provided
+        if let Some(default_template) = &config.default_template {
+            Self::validate_query_config(default_template)
+                .map_err(|e| anyhow::anyhow!("Invalid default template: {e}"))?;
+        }
+
+        // Validate that all routes correspond to subscribed queries
+        if !config.routes.is_empty() && !queries.is_empty() {
+            for route_query in config.routes.keys() {
+                // Pre-compute dotted format once per route
+                let dotted_route = format!(".{route_query}");
+                let matches = queries
+                    .iter()
+                    .any(|q| q == route_query || q.ends_with(&dotted_route));
+                if !matches {
+                    return Err(anyhow::anyhow!(
+                        "Route '{route_query}' does not match any subscribed query. Subscribed queries: {queries:?}"
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    #[allow(clippy::print_stdout)]
     fn log_result(&self, message: &str) {
-        info!("[{}] {}", self.base.id, message);
+        println!("[{}] {}", self.base.id, message);
     }
 
     /// Create a builder for LogReaction
@@ -125,47 +229,92 @@ impl LogReactionBuilder {
         self
     }
 
-    /// Set Handlebars template for ADD events
+    /// Set default template configuration for all queries.
     ///
-    /// Available variables: `after`, `query_name`, `operation`
+    /// The default template is used when no query-specific route is defined.
     ///
-    /// Example: `"[NEW] Item {{after.id}}: {{after.name}}"`
-    pub fn with_added_template(mut self, template: impl Into<String>) -> Self {
-        self.config.added_template = Some(template.into());
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use drasi_reaction_log::{QueryConfig, TemplateSpec};
+    ///
+    /// let default_template = QueryConfig {
+    ///     added: Some(TemplateSpec {
+    ///         template: "[ADD] {{after.id}}".to_string(),
+    ///     }),
+    ///     updated: Some(TemplateSpec {
+    ///         template: "[UPD] {{after.id}}".to_string(),
+    ///     }),
+    ///     deleted: Some(TemplateSpec {
+    ///         template: "[DEL] {{before.id}}".to_string(),
+    ///     }),
+    /// };
+    ///
+    /// let reaction = LogReaction::builder("my-logger")
+    ///     .with_query("my-query")
+    ///     .with_default_template(default_template)
+    ///     .build();
+    /// ```
+    pub fn with_default_template(mut self, template: crate::config::QueryConfig) -> Self {
+        self.config.default_template = Some(template);
         self
     }
 
-    /// Set Handlebars template for UPDATE events
+    /// Set template configuration for a specific query.
     ///
-    /// Available variables: `before`, `after`, `data`, `query_name`, `operation`
+    /// Query-specific templates override the default template.
     ///
-    /// Example: `"[CHG] {{after.id}}: {{before.value}} -> {{after.value}}"`
-    pub fn with_updated_template(mut self, template: impl Into<String>) -> Self {
-        self.config.updated_template = Some(template.into());
-        self
-    }
-
-    /// Set Handlebars template for DELETE events
+    /// # Example
     ///
-    /// Available variables: `before`, `query_name`, `operation`
+    /// ```rust,ignore
+    /// use drasi_reaction_log::{QueryConfig, TemplateSpec};
     ///
-    /// Example: `"[DEL] Item {{before.id}} removed"`
-    pub fn with_deleted_template(mut self, template: impl Into<String>) -> Self {
-        self.config.deleted_template = Some(template.into());
+    /// let sensor_config = QueryConfig {
+    ///     added: Some(TemplateSpec {
+    ///         template: "[SENSOR] {{after.id}}: {{after.temperature}}°C".to_string(),
+    ///     }),
+    ///     updated: None,
+    ///     deleted: None,
+    /// };
+    ///
+    /// let reaction = LogReaction::builder("my-logger")
+    ///     .with_query("sensor-data")
+    ///     .with_route("sensor-data", sensor_config)
+    ///     .build();
+    /// ```
+    pub fn with_route(
+        mut self,
+        query_id: impl Into<String>,
+        config: crate::config::QueryConfig,
+    ) -> Self {
+        self.config.routes.insert(query_id.into(), config);
         self
     }
 
     /// Build the LogReaction
-    pub fn build(self) -> LogReaction {
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(LogReaction)` if all templates are valid and all routes correspond to subscribed queries.
+    /// Returns `Err` if template validation fails or if a route doesn't match a subscribed query.
+    ///
+    /// # Errors
+    ///
+    /// - Returns error if any template has invalid Handlebars syntax
+    /// - Returns error if a route query ID doesn't match any subscribed query
+    pub fn build(self) -> anyhow::Result<LogReaction> {
+        // Validate templates and routes
+        LogReaction::validate_config(&self.queries, &self.config)?;
+
         let mut params =
             ReactionBaseParams::new(self.id, self.queries).with_auto_start(self.auto_start);
         if let Some(capacity) = self.priority_queue_capacity {
             params = params.with_priority_queue_capacity(capacity);
         }
-        LogReaction {
+        Ok(LogReaction {
             base: ReactionBase::new(params),
             config: self.config,
-        }
+        })
     }
 }
 
@@ -280,12 +429,15 @@ impl Reaction for LogReaction {
                     continue;
                 }
 
-                info!(
-                    "[{}] Query '{}' ({} items):",
-                    reaction_name,
-                    query_result.query_id,
-                    query_result.results.len()
-                );
+                #[allow(clippy::print_stdout)]
+                {
+                    println!(
+                        "[{}] Query '{}' ({} items):",
+                        reaction_name,
+                        query_result.query_id,
+                        query_result.results.len()
+                    );
+                }
 
                 for result in &query_result.results {
                     if let Some(result_type) = result.get("type").and_then(|v| v.as_str()) {
@@ -303,28 +455,48 @@ impl Reaction for LogReaction {
                             Value::String(result_type.to_uppercase()),
                         );
 
+                        // Get query-specific config if available, otherwise use default
+                        let query_config = config
+                            .routes
+                            .get(&query_result.query_id)
+                            .or(config.default_template.as_ref());
+
                         match result_type_lower.as_str() {
                             "add" => {
                                 if let Some(data) = result.get("data") {
                                     context.insert("after".to_string(), data.clone());
 
-                                    if let Some(ref template) = config.added_template {
+                                    // Check for template in config
+                                    let template = query_config
+                                        .and_then(|qc| qc.added.as_ref())
+                                        .map(|ts| ts.template.as_str());
+
+                                    if let Some(template_str) = template {
                                         // Use template
-                                        match handlebars.render_template(template, &context) {
+                                        match handlebars.render_template(template_str, &context) {
                                             Ok(rendered) => {
-                                                info!("[{reaction_name}]   {rendered}");
+                                                #[allow(clippy::print_stdout)]
+                                                {
+                                                    println!("[{reaction_name}]   {rendered}");
+                                                }
                                             }
                                             Err(e) => {
                                                 debug!(
                                                     "[{reaction_name}] Template render error: {e}"
                                                 );
                                                 // Fall back to JSON output
-                                                info!("[{reaction_name}]   [ADD] {data}");
+                                                #[allow(clippy::print_stdout)]
+                                                {
+                                                    println!("[{reaction_name}]   [ADD] {data}");
+                                                }
                                             }
                                         }
                                     } else {
                                         // Default: show full JSON
-                                        info!("[{reaction_name}]   [ADD] {data}");
+                                        #[allow(clippy::print_stdout)]
+                                        {
+                                            println!("[{reaction_name}]   [ADD] {data}");
+                                        }
                                     }
                                 }
                             }
@@ -332,23 +504,37 @@ impl Reaction for LogReaction {
                                 if let Some(data) = result.get("data") {
                                     context.insert("before".to_string(), data.clone());
 
-                                    if let Some(ref template) = config.deleted_template {
+                                    // Check for template in config
+                                    let template = query_config
+                                        .and_then(|qc| qc.deleted.as_ref())
+                                        .map(|ts| ts.template.as_str());
+
+                                    if let Some(template_str) = template {
                                         // Use template
-                                        match handlebars.render_template(template, &context) {
+                                        match handlebars.render_template(template_str, &context) {
                                             Ok(rendered) => {
-                                                info!("[{reaction_name}]   {rendered}");
+                                                #[allow(clippy::print_stdout)]
+                                                {
+                                                    println!("[{reaction_name}]   {rendered}");
+                                                }
                                             }
                                             Err(e) => {
                                                 debug!(
                                                     "[{reaction_name}] Template render error: {e}"
                                                 );
                                                 // Fall back to JSON output
-                                                info!("[{reaction_name}]   [DELETE] {data}");
+                                                #[allow(clippy::print_stdout)]
+                                                {
+                                                    println!("[{reaction_name}]   [DELETE] {data}");
+                                                }
                                             }
                                         }
                                     } else {
                                         // Default: show full JSON
-                                        info!("[{reaction_name}]   [DELETE] {data}");
+                                        #[allow(clippy::print_stdout)]
+                                        {
+                                            println!("[{reaction_name}]   [DELETE] {data}");
+                                        }
                                     }
                                 }
                             }
@@ -362,35 +548,54 @@ impl Reaction for LogReaction {
                                         context.insert("data".to_string(), data.clone());
                                     }
 
-                                    if let Some(ref template) = config.updated_template {
+                                    // Check for template in config
+                                    let template = query_config
+                                        .and_then(|qc| qc.updated.as_ref())
+                                        .map(|ts| ts.template.as_str());
+
+                                    if let Some(template_str) = template {
                                         // Use template
-                                        match handlebars.render_template(template, &context) {
+                                        match handlebars.render_template(template_str, &context) {
                                             Ok(rendered) => {
-                                                info!("[{reaction_name}]   {rendered}");
+                                                #[allow(clippy::print_stdout)]
+                                                {
+                                                    println!("[{reaction_name}]   {rendered}");
+                                                }
                                             }
                                             Err(e) => {
                                                 debug!(
                                                     "[{reaction_name}] Template render error: {e}"
                                                 );
                                                 // Fall back to JSON output
-                                                info!(
-                                                    "[{reaction_name}]   [UPDATE] {before} -> {after}"
-                                                );
+                                                #[allow(clippy::print_stdout)]
+                                                {
+                                                    println!(
+                                                        "[{reaction_name}]   [UPDATE] {before} -> {after}"
+                                                    );
+                                                }
                                             }
                                         }
                                     } else {
                                         // Default: show full JSON
-                                        info!("[{reaction_name}]   [UPDATE] {before} -> {after}");
+                                        #[allow(clippy::print_stdout)]
+                                        {
+                                            println!(
+                                                "[{reaction_name}]   [UPDATE] {before} -> {after}"
+                                            );
+                                        }
                                     }
                                 }
                             }
                             _ => {
-                                info!(
-                                    "[{}]   [{}] {}",
-                                    reaction_name,
-                                    result_type.to_uppercase(),
-                                    result
-                                );
+                                #[allow(clippy::print_stdout)]
+                                {
+                                    println!(
+                                        "[{}]   [{}] {}",
+                                        reaction_name,
+                                        result_type.to_uppercase(),
+                                        result
+                                    );
+                                }
                             }
                         }
                     }

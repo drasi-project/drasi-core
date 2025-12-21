@@ -15,6 +15,19 @@
 use anyhow::{Context, Result};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Get the current timestamp in milliseconds since Unix epoch.
+///
+/// # Returns
+///
+/// Returns the timestamp in milliseconds, or an error if the system time is invalid.
+pub fn get_current_timestamp_millis() -> Result<u64> {
+    let millis = chrono::Utc::now().timestamp_millis();
+    if millis < 0 {
+        anyhow::bail!("System time produced negative timestamp: {millis} ms");
+    }
+    Ok(millis as u64)
+}
+
 /// Get the current timestamp in nanoseconds since Unix epoch.
 ///
 /// This function handles edge cases where nanosecond precision would overflow,
@@ -23,6 +36,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// # Returns
 ///
 /// Returns the timestamp in nanoseconds, or an error if the system time is invalid.
+#[allow(dead_code)]
 pub fn get_current_timestamp_nanos() -> Result<u64> {
     // Try to get nanosecond precision first
     match chrono::Utc::now().timestamp_nanos_opt() {
@@ -47,6 +61,20 @@ pub fn get_current_timestamp_nanos() -> Result<u64> {
     }
 }
 
+/// Get the current SystemTime duration since Unix epoch in milliseconds.
+///
+/// This function properly handles the case where system time is before Unix epoch.
+///
+/// # Returns
+///
+/// Returns the duration in milliseconds, or an error if system time is before Unix epoch.
+pub fn get_system_time_millis() -> Result<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("System time is before Unix epoch (January 1, 1970)")
+        .map(|duration| duration.as_millis() as u64)
+}
+
 /// Get the current SystemTime duration since Unix epoch in nanoseconds.
 ///
 /// This function properly handles the case where system time is before Unix epoch.
@@ -54,6 +82,7 @@ pub fn get_current_timestamp_nanos() -> Result<u64> {
 /// # Returns
 ///
 /// Returns the duration in nanoseconds, or an error if system time is before Unix epoch.
+#[allow(dead_code)]
 pub fn get_system_time_nanos() -> Result<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -64,10 +93,9 @@ pub fn get_system_time_nanos() -> Result<u64> {
 /// Get the current timestamp with automatic fallback strategy.
 ///
 /// This function tries multiple methods to get a valid timestamp:
-/// 1. Chrono nanosecond precision
-/// 2. Chrono millisecond precision (if nanos overflow)
-/// 3. SystemTime (if chrono fails)
-/// 4. Default value (if all else fails and default is provided)
+/// 1. Chrono millisecond precision
+/// 2. SystemTime (if chrono fails)
+/// 3. Default value (if all else fails and default is provided)
 ///
 /// # Arguments
 ///
@@ -75,16 +103,16 @@ pub fn get_system_time_nanos() -> Result<u64> {
 ///
 /// # Returns
 ///
-/// Returns a timestamp in nanoseconds, using the first successful method.
+/// Returns a timestamp in milliseconds, using the first successful method.
 #[allow(dead_code)]
 pub fn get_timestamp_with_fallback(default_on_error: Option<u64>) -> Result<u64> {
     // Try chrono first (handles time zones correctly)
-    if let Ok(timestamp) = get_current_timestamp_nanos() {
+    if let Ok(timestamp) = get_current_timestamp_millis() {
         return Ok(timestamp);
     }
 
     // Try SystemTime as fallback
-    if let Ok(timestamp) = get_system_time_nanos() {
+    if let Ok(timestamp) = get_system_time_millis() {
         log::debug!("Using SystemTime fallback for timestamp");
         return Ok(timestamp);
     }
@@ -101,6 +129,24 @@ pub fn get_timestamp_with_fallback(default_on_error: Option<u64>) -> Result<u64>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_get_current_timestamp_millis() {
+        // Should succeed for current time
+        let result = get_current_timestamp_millis();
+        assert!(result.is_ok());
+        let timestamp = result.unwrap();
+        assert!(timestamp > 0);
+    }
+
+    #[test]
+    fn test_get_system_time_millis() {
+        // Should succeed for current time
+        let result = get_system_time_millis();
+        assert!(result.is_ok());
+        let timestamp = result.unwrap();
+        assert!(timestamp > 0);
+    }
 
     #[test]
     fn test_get_current_timestamp_nanos() {
