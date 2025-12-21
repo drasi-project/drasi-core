@@ -254,10 +254,7 @@ impl FutureQueueSource {
     /// * `relation_labels` - Relation labels the query is interested in (unused)
     pub async fn subscribe(
         &self,
-        _query_id: String,
-        _enable_bootstrap: bool,
-        _node_labels: Vec<String>,
-        _relation_labels: Vec<String>,
+        _settings: crate::config::SourceSubscriptionSettings,
     ) -> Result<crate::channels::SubscriptionResponse, Box<dyn std::error::Error + Send + Sync>>
     {
         let status = self.status.read().await;
@@ -276,10 +273,7 @@ impl FutureQueueSource {
                 // Preserve the original error and add context
                 Box::new(std::io::Error::new(
                     std::io::ErrorKind::Other,
-                    format!(
-                        "Failed to create receiver for future queue subscription: {}",
-                        e
-                    ),
+                    format!("Failed to create receiver for future queue subscription: {e}"),
                 ))
             },
         )?;
@@ -326,13 +320,13 @@ impl crate::plugin_core::Source for FutureQueueSource {
     async fn start(&self) -> anyhow::Result<()> {
         self.start_internal()
             .await
-            .map_err(|e| anyhow::anyhow!("{}", e))
+            .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     async fn stop(&self) -> anyhow::Result<()> {
         self.stop_internal()
             .await
-            .map_err(|e| anyhow::anyhow!("{}", e))
+            .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     async fn status(&self) -> ComponentStatus {
@@ -346,14 +340,11 @@ impl crate::plugin_core::Source for FutureQueueSource {
 
     async fn subscribe(
         &self,
-        query_id: String,
-        enable_bootstrap: bool,
-        node_labels: Vec<String>,
-        relation_labels: Vec<String>,
+        settings: crate::config::SourceSubscriptionSettings,
     ) -> anyhow::Result<crate::channels::SubscriptionResponse> {
-        self.subscribe(query_id, enable_bootstrap, node_labels, relation_labels)
+        self.subscribe(settings)
             .await
-            .map_err(|e| anyhow::anyhow!("{}", e))
+            .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -368,9 +359,11 @@ impl crate::plugin_core::Source for FutureQueueSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::SourceSubscriptionSettings;
     use drasi_core::in_memory_index::in_memory_future_queue::InMemoryFutureQueue;
     use drasi_core::interface::PushType;
     use drasi_core::models::{ElementReference, ElementTimestamp};
+    use std::collections::HashSet;
 
     #[tokio::test]
     async fn test_future_queue_source_lifecycle() {
@@ -404,6 +397,14 @@ mod tests {
     async fn test_future_queue_source_emits_events() {
         use crate::plugin_core::Source;
 
+        let sub_settings = SourceSubscriptionSettings {
+            source_id: FUTURE_QUEUE_SOURCE_ID.to_string(),
+            enable_bootstrap: false,
+            query_id: "test-query".to_string(),
+            nodes: HashSet::new(),
+            relations: HashSet::new(),
+        };
+
         let future_queue = Arc::new(InMemoryFutureQueue::new());
         let source = FutureQueueSource::new(future_queue.clone(), "test-query".to_string());
 
@@ -428,10 +429,7 @@ mod tests {
         source.start().await.unwrap();
 
         // Subscribe to get events
-        let response = source
-            .subscribe("test-query".to_string(), false, vec![], vec![])
-            .await
-            .unwrap();
+        let response = source.subscribe(sub_settings).await.unwrap();
         let mut receiver = response.receiver;
 
         // Wait for the event
@@ -456,6 +454,14 @@ mod tests {
     async fn test_future_queue_source_waits_for_due_time() {
         use crate::plugin_core::Source;
 
+        let sub_settings = SourceSubscriptionSettings {
+            source_id: FUTURE_QUEUE_SOURCE_ID.to_string(),
+            enable_bootstrap: false,
+            query_id: "test-query".to_string(),
+            nodes: HashSet::new(),
+            relations: HashSet::new(),
+        };
+
         let future_queue = Arc::new(InMemoryFutureQueue::new());
         let source = FutureQueueSource::new(future_queue.clone(), "test-query".to_string());
 
@@ -475,10 +481,7 @@ mod tests {
         source.start().await.unwrap();
 
         // Subscribe to get events
-        let response = source
-            .subscribe("test-query".to_string(), false, vec![], vec![])
-            .await
-            .unwrap();
+        let response = source.subscribe(sub_settings).await.unwrap();
         let mut receiver = response.receiver;
 
         // Wait for the event
@@ -505,6 +508,14 @@ mod tests {
     async fn test_future_queue_source_preserves_source_id() {
         use crate::plugin_core::Source;
 
+        let sub_settings = SourceSubscriptionSettings {
+            source_id: FUTURE_QUEUE_SOURCE_ID.to_string(),
+            enable_bootstrap: false,
+            query_id: "test-query".to_string(),
+            nodes: HashSet::new(),
+            relations: HashSet::new(),
+        };
+
         let future_queue = Arc::new(InMemoryFutureQueue::new());
         let source = FutureQueueSource::new(future_queue.clone(), "test-query".to_string());
 
@@ -525,10 +536,7 @@ mod tests {
         source.start().await.unwrap();
 
         // Subscribe to get events
-        let response = source
-            .subscribe("test-query".to_string(), false, vec![], vec![])
-            .await
-            .unwrap();
+        let response = source.subscribe(sub_settings).await.unwrap();
         let mut receiver = response.receiver;
 
         // Collect events

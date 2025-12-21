@@ -296,6 +296,7 @@ impl BootstrapProvider for PlatformBootstrapProvider {
         request: BootstrapRequest,
         context: &BootstrapContext,
         event_tx: drasi_lib::channels::BootstrapEventSender,
+        _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
     ) -> Result<usize> {
         info!(
             "Starting platform bootstrap for query {} from source {}",

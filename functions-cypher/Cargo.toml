@@ -3,5 +3,8 @@ name = "drasi-functions-cypher"
 version.workspace = true
 edition = "2021"
 
+[lints]
+workspace = true
+
 [dependencies]
 drasi-core = { path = "../core" }

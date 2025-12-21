@@ -1170,19 +1170,10 @@ impl Source for PlatformSource {
 
     async fn subscribe(
         &self,
-        query_id: String,
-        enable_bootstrap: bool,
-        node_labels: Vec<String>,
-        relation_labels: Vec<String>,
+        settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
         self.base
-            .subscribe_with_bootstrap(
-                query_id,
-                enable_bootstrap,
-                node_labels,
-                relation_labels,
-                "Platform",
-            )
+            .subscribe_with_bootstrap(&settings, "Platform")
             .await
     }
 

@@ -121,11 +121,18 @@ pub trait BootstrapProvider: Send + Sync {
     /// Perform bootstrap operation for the given request
     /// Sends bootstrap events to the provided channel
     /// Returns the number of elements sent
+    ///
+    /// # Arguments
+    /// * `request` - Bootstrap request with query ID and labels
+    /// * `context` - Bootstrap context with source information
+    /// * `event_tx` - Channel to send bootstrap events
+    /// * `settings` - Optional subscription settings with additional query context
     async fn bootstrap(
         &self,
         request: BootstrapRequest,
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
+        settings: Option<&crate::config::SourceSubscriptionSettings>,
     ) -> Result<usize>;
 }
 
@@ -138,8 +145,11 @@ impl BootstrapProvider for Box<dyn BootstrapProvider> {
         request: BootstrapRequest,
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
+        settings: Option<&crate::config::SourceSubscriptionSettings>,
     ) -> Result<usize> {
-        (**self).bootstrap(request, context, event_tx).await
+        (**self)
+            .bootstrap(request, context, event_tx, settings)
+            .await
     }
 }
 

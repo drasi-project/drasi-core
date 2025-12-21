@@ -35,6 +35,7 @@ use drasi_query_cypher::CypherParser;
 use drasi_query_gql::GQLParser;
 
 use crate::channels::*;
+use crate::config::SourceSubscriptionSettings;
 use crate::config::{QueryConfig, QueryLanguage, QueryRuntime};
 use crate::managers::{
     is_operation_valid, log_component_error, log_component_start, log_component_stop, Operation,
@@ -335,7 +336,39 @@ impl Query for DrasiQuery {
             }
         };
 
-        // NEW: Subscribe to each source sequentially
+        // Build subscription settings for each source
+        let subscription_settings =
+            match crate::queries::SubscriptionSettingsBuilder::build_subscription_settings(
+                &self.base.config,
+                &labels,
+            ) {
+                Ok(settings) => settings,
+                Err(e) => {
+                    error!(
+                        "Failed to build subscription settings for query '{}': {}",
+                        self.base.config.id, e
+                    );
+                    *self.base.status.write().await = ComponentStatus::Error;
+
+                    let event = ComponentEvent {
+                        component_id: self.base.config.id.clone(),
+                        component_type: ComponentType::Query,
+                        status: ComponentStatus::Error,
+                        timestamp: chrono::Utc::now(),
+                        message: Some(format!("Failed to build subscription settings: {e}")),
+                    };
+
+                    if let Err(e) = self.base.event_tx.send(event).await {
+                        error!("Failed to send component event: {e}");
+                    }
+
+                    return Err(anyhow::anyhow!(
+                        "Failed to build subscription settings: {e}"
+                    ));
+                }
+            };
+
+        // Subscribe to each source sequentially
         // Also includes FutureQueueSource for temporal query support
 
         // Set up FutureQueueSource for temporal query support
@@ -386,14 +419,19 @@ impl Query for DrasiQuery {
         let mut subscription_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
         // Build list of sources to subscribe to (regular sources + FutureQueueSource)
-        let mut sources_to_subscribe: Vec<(Arc<dyn Source>, String)> = Vec::new();
+        let mut sources_to_subscribe: Vec<(String, Arc<dyn Source>, SourceSubscriptionSettings)> =
+            Vec::new();
 
         // Add regular sources from SourceManager
-        for subscription in &self.base.config.sources {
+        for (idx, subscription) in self.base.config.sources.iter().enumerate() {
             let source_id = &subscription.source_id;
             match self.source_manager.get_source_instance(source_id).await {
                 Some(src) => {
-                    sources_to_subscribe.push((src, source_id.clone()));
+                    sources_to_subscribe.push((
+                        source_id.clone(),
+                        src,
+                        subscription_settings[idx].clone(),
+                    ));
                 }
                 None => {
                     error!(
@@ -413,22 +451,19 @@ impl Query for DrasiQuery {
 
         // Add FutureQueueSource
         sources_to_subscribe.push((
-            future_queue_source as Arc<dyn Source>,
             FUTURE_QUEUE_SOURCE_ID.to_string(),
+            future_queue_source as Arc<dyn Source>,
+            SourceSubscriptionSettings {
+                source_id: FUTURE_QUEUE_SOURCE_ID.to_string(),
+                enable_bootstrap: false,
+                query_id: self.base.config.id.clone(),
+                nodes: HashSet::new(),
+                relations: HashSet::new(),
+            },
         ));
 
-        for (source, source_id) in sources_to_subscribe {
-            // Subscribe to the source with bootstrap enabled
-            let enable_bootstrap = true;
-            let subscription_response = match source
-                .subscribe(
-                    self.base.config.id.clone(),
-                    enable_bootstrap,
-                    labels.node_labels.clone(),
-                    labels.relation_labels.clone(),
-                )
-                .await
-            {
+        for (source_id, source, settings) in sources_to_subscribe {
+            let subscription_response = match source.subscribe(settings.clone()).await {
                 Ok(response) => response,
                 Err(e) => {
                     error!(
