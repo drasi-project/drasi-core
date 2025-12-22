@@ -17,7 +17,6 @@
 //! These tests validate the end-to-end behavior of the PostgreSQL-specific
 //! stored procedure reaction using testcontainers to provide a real PostgreSQL database.
 
-use crate::postgres_helpers::{setup_postgres, PostgresConfig};
 use drasi_lib::plugin_core::Reaction;
 use drasi_reaction_storedproc_postgres::config::PostgresStoredProcReactionConfig;
 use drasi_reaction_storedproc_postgres::executor::PostgresExecutor;
@@ -25,8 +24,13 @@ use drasi_reaction_storedproc_postgres::parser::ParameterParser;
 use drasi_reaction_storedproc_postgres::PostgresStoredProcReaction;
 use serde_json::json;
 use serial_test::serial;
+use shared_tests::postgres_helpers::{setup_postgres, PostgresConfig};
 use std::time::Duration;
 use tokio::time::sleep;
+
+// ============================================================================
+// Test Helper Functions
+// ============================================================================
 
 /// Helper function to setup stored procedures in the test database
 async fn setup_stored_procedures(config: &PostgresConfig) {
@@ -35,7 +39,6 @@ async fn setup_stored_procedures(config: &PostgresConfig) {
             .await
             .expect("Failed to connect to database");
 
-    // Spawn the connection to run in the background
     tokio::spawn(async move {
         if let Err(e) = connection.await {
             eprintln!("Connection error: {e}");

@@ -34,11 +34,9 @@ testcontainers-modules = { version = "0.11", features = ["redis", "postgres"] }
 
 # PostgreSQL testing utilities
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4"] }
-drasi-reaction-storedproc-postgres = { path = "../components/reactions/storedproc-postgres", optional = true }
 
 # For test utilities that need to create test sources/queries
 drasi-lib = { path = "../lib" }
 
 [dev-dependencies]
-drasi-reaction-storedproc-postgres = { path = "../components/reactions/storedproc-postgres" }
 serial_test = "3.0"

@@ -13,6 +13,3 @@
 // limitations under the License.
 
 //! Reaction component tests
-
-#[path = "reactions-storedproc-postgres/mod.rs"]
-pub mod reactions_storedproc_postgres;
