@@ -34,7 +34,7 @@
 //!
 //! // Or using configuration
 //! use drasi_bootstrap_postgres::PostgresSourceConfig;
-//! use drasi_lib::config::common::SslMode;
+//! use drasi_source_postgres::SslMode;
 //!
 //! let config = PostgresSourceConfig {
 //!     host: "localhost".to_string(),
