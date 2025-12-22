@@ -371,7 +371,7 @@ mod tests {
         // Verify that attempting to use Redis without a plugin returns an error
         let factory = IndexFactory::new(vec![], None);
         let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Redis {
-            connection_string: "redis://localhost:6379".to_string(),
+            connection_string: "redis://localhost:6379".to_string(),    // DevSkim: ignore DS162092
             cache_size: None,
         });
         let result = factory.build(&backend_ref, "test_query").await;

@@ -182,13 +182,13 @@ async fn main() -> Result<()> {
     println!(" Index Backend: RocksDB (persistent)");
     println!(" Data Dir: {}", data_dir.path().display());
     println!("----------------------------------------");
-    println!(" HTTP Source: http://localhost:9000");
+    println!(" HTTP Source: http://localhost:9000");        // DevSkim: ignore DS162092
     println!("   POST /sources/stock-prices/events");
     println!("   GET  /health");
     println!("----------------------------------------");
     println!(" Query: all-prices");
     println!("----------------------------------------");
-    println!(" Results API: http://localhost:8080");
+    println!(" Results API: http://localhost:8080");        // DevSkim: ignore DS162092
     println!("   GET /queries/all-prices/results");
     println!("----------------------------------------");
     println!(" Press Ctrl+C to stop");
