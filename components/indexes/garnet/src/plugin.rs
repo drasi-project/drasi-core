@@ -248,7 +248,7 @@ mod tests {
     #[test]
     fn test_garnet_index_provider_connection_string_with_tls() {
         // Test connection string with TLS
-        let provider = GarnetIndexProvider::new("rediss://localhost:6379", None);
-        assert_eq!(provider.connection_string(), "rediss://localhost:6379");
+        let provider = GarnetIndexProvider::new("rediss://localhost:6379", None); // DevSkim: ignore DS162092
+        assert_eq!(provider.connection_string(), "rediss://localhost:6379"); // DevSkim: ignore DS162092
     }
 }

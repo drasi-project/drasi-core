@@ -397,7 +397,7 @@ mod runtime_tests {
         let mut properties = HashMap::new();
         properties.insert(
             "host".to_string(),
-            serde_json::Value::String("localhost".to_string()),
+            serde_json::Value::String("localhost".to_string()), // DevSkim: ignore DS162092
         );
 
         let source_runtime = SourceRuntime {
@@ -411,7 +411,7 @@ mod runtime_tests {
         let json = serde_json::to_string(&source_runtime).unwrap();
         assert!(json.contains("test_source"));
         assert!(json.contains("postgres"));
-        assert!(json.contains("localhost"));
+        assert!(json.contains("localhost")); // DevSkim: ignore DS162092
         // error_message should be skipped when None
         assert!(!json.contains("error_message"));
     }
@@ -468,7 +468,7 @@ mod runtime_tests {
         let mut properties = HashMap::new();
         properties.insert(
             "endpoint".to_string(),
-            serde_json::Value::String("http://localhost:8080".to_string()),
+            serde_json::Value::String("http://localhost:8080".to_string()), // DevSkim: ignore DS162092
         );
 
         let reaction_runtime = ReactionRuntime {
