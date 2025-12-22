@@ -412,7 +412,7 @@ mod runtime_tests {
         assert!(json.contains("test_source"));
         assert!(json.contains("postgres"));
         assert!(json.contains("localhost")); // DevSkim: ignore DS162092
-        // error_message should be skipped when None
+                                             // error_message should be skipped when None
         assert!(!json.contains("error_message"));
     }
 
