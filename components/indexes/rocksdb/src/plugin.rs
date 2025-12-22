@@ -187,3 +187,115 @@ impl IndexBackendPlugin for RocksDbIndexProvider {
         false // RocksDB is persistent
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_rocksdb_index_provider_new() {
+        let provider = RocksDbIndexProvider::new("/data/drasi", true, false);
+        assert_eq!(provider.path(), &PathBuf::from("/data/drasi"));
+        assert!(provider.is_archive_enabled());
+        assert!(!provider.is_direct_io_enabled());
+    }
+
+    #[test]
+    fn test_rocksdb_index_provider_new_from_pathbuf() {
+        let path = PathBuf::from("/var/lib/drasi");
+        let provider = RocksDbIndexProvider::new(path, false, true);
+        assert_eq!(provider.path(), &PathBuf::from("/var/lib/drasi"));
+        assert!(!provider.is_archive_enabled());
+        assert!(provider.is_direct_io_enabled());
+    }
+
+    #[test]
+    fn test_rocksdb_index_provider_is_volatile() {
+        let provider = RocksDbIndexProvider::new("/tmp/test", false, false);
+        assert!(!provider.is_volatile());
+    }
+
+    #[test]
+    fn test_rocksdb_index_provider_all_options_enabled() {
+        let provider = RocksDbIndexProvider::new("/data/drasi", true, true);
+        assert!(provider.is_archive_enabled());
+        assert!(provider.is_direct_io_enabled());
+    }
+
+    #[test]
+    fn test_rocksdb_index_provider_all_options_disabled() {
+        let provider = RocksDbIndexProvider::new("/data/drasi", false, false);
+        assert!(!provider.is_archive_enabled());
+        assert!(!provider.is_direct_io_enabled());
+    }
+
+    #[tokio::test]
+    async fn test_rocksdb_create_element_index() {
+        let temp_dir = TempDir::new().unwrap();
+        let provider = RocksDbIndexProvider::new(temp_dir.path(), false, false);
+
+        let result = provider.create_element_index("test_query").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_rocksdb_create_archive_index() {
+        let temp_dir = TempDir::new().unwrap();
+        let provider = RocksDbIndexProvider::new(temp_dir.path(), true, false);
+
+        let result = provider.create_archive_index("test_query").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_rocksdb_create_result_index() {
+        let temp_dir = TempDir::new().unwrap();
+        let provider = RocksDbIndexProvider::new(temp_dir.path(), false, false);
+
+        let result = provider.create_result_index("test_query").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_rocksdb_create_future_queue() {
+        let temp_dir = TempDir::new().unwrap();
+        let provider = RocksDbIndexProvider::new(temp_dir.path(), false, false);
+
+        let result = provider.create_future_queue("test_query").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_rocksdb_create_all_indexes() {
+        let temp_dir = TempDir::new().unwrap();
+        let provider = RocksDbIndexProvider::new(temp_dir.path(), true, false);
+
+        // Create all index types with unique query IDs to avoid conflicts
+        // since RocksDB creates separate directories per query
+        let element_result = provider.create_element_index("query_element").await;
+        let archive_result = provider.create_archive_index("query_archive").await;
+        let result_result = provider.create_result_index("query_result").await;
+        let queue_result = provider.create_future_queue("query_queue").await;
+
+        assert!(element_result.is_ok());
+        assert!(archive_result.is_ok());
+        assert!(result_result.is_ok());
+        assert!(queue_result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_rocksdb_multiple_queries() {
+        let temp_dir = TempDir::new().unwrap();
+        let provider = RocksDbIndexProvider::new(temp_dir.path(), false, false);
+
+        // Create indexes for multiple queries
+        let result1 = provider.create_element_index("query1").await;
+        let result2 = provider.create_element_index("query2").await;
+        let result3 = provider.create_element_index("query3").await;
+
+        assert!(result1.is_ok());
+        assert!(result2.is_ok());
+        assert!(result3.is_ok());
+    }
+}

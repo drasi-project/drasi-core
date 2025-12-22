@@ -191,3 +191,64 @@ impl IndexBackendPlugin for GarnetIndexProvider {
         false // Redis/Garnet is persistent (assuming persistence is configured)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_garnet_index_provider_new() {
+        let provider = GarnetIndexProvider::new("redis://localhost:6379", None); // DevSkim: ignore DS162092
+        assert_eq!(provider.connection_string(), "redis://localhost:6379"); // DevSkim: ignore DS162092
+        assert!(provider.cache_size().is_none());
+    }
+
+    #[test]
+    fn test_garnet_index_provider_new_with_cache() {
+        let provider = GarnetIndexProvider::new("redis://localhost:6379", Some(1000)); // DevSkim: ignore DS162092
+        assert_eq!(provider.connection_string(), "redis://localhost:6379"); // DevSkim: ignore DS162092
+        assert_eq!(provider.cache_size(), Some(1000));
+    }
+
+    #[test]
+    fn test_garnet_index_provider_connection_string_from_string() {
+        let provider = GarnetIndexProvider::new(String::from("redis://myhost:1234"), None); // DevSkim: ignore DS162092
+        assert_eq!(provider.connection_string(), "redis://myhost:1234"); // DevSkim: ignore DS162092
+    }
+
+    #[test]
+    fn test_garnet_index_provider_is_volatile() {
+        let provider = GarnetIndexProvider::new("redis://localhost:6379", None); // DevSkim: ignore DS162092
+        assert!(!provider.is_volatile());
+    }
+
+    #[test]
+    fn test_garnet_index_provider_large_cache_size() {
+        let provider = GarnetIndexProvider::new("redis://localhost:6379", Some(1_000_000)); // DevSkim: ignore DS162092
+        assert_eq!(provider.cache_size(), Some(1_000_000));
+    }
+
+    #[test]
+    fn test_garnet_index_provider_zero_cache_size() {
+        // Zero cache size should be valid (effectively no caching)
+        let provider = GarnetIndexProvider::new("redis://localhost:6379", Some(0)); // DevSkim: ignore DS162092
+        assert_eq!(provider.cache_size(), Some(0));
+    }
+
+    #[test]
+    fn test_garnet_index_provider_connection_string_with_auth() {
+        // Test connection string with authentication
+        let provider = GarnetIndexProvider::new("redis://:password@localhost:6379/0", None); // DevSkim: ignore DS137138 DS162092
+        assert_eq!(
+            provider.connection_string(),
+            "redis://:password@localhost:6379/0" // DevSkim: ignore DS137138 DS162092
+        );
+    }
+
+    #[test]
+    fn test_garnet_index_provider_connection_string_with_tls() {
+        // Test connection string with TLS
+        let provider = GarnetIndexProvider::new("rediss://localhost:6379", None);
+        assert_eq!(provider.connection_string(), "rediss://localhost:6379");
+    }
+}

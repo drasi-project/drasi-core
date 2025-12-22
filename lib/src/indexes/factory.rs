@@ -371,7 +371,7 @@ mod tests {
         // Verify that attempting to use Redis without a plugin returns an error
         let factory = IndexFactory::new(vec![], None);
         let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Redis {
-            connection_string: "redis://localhost:6379".to_string(),    // DevSkim: ignore DS162092
+            connection_string: "redis://localhost:6379".to_string(), // DevSkim: ignore DS162092
             cache_size: None,
         });
         let result = factory.build(&backend_ref, "test_query").await;
@@ -429,5 +429,206 @@ mod tests {
             direct_io: false,
         });
         assert!(!factory.is_volatile(&backend_ref));
+    }
+
+    #[test]
+    fn test_is_volatile_inline_redis() {
+        let factory = IndexFactory::new(vec![], None);
+        let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Redis {
+            connection_string: "redis://localhost:6379".to_string(), // DevSkim: ignore DS162092
+            cache_size: Some(1000),
+        });
+        assert!(!factory.is_volatile(&backend_ref));
+    }
+
+    #[test]
+    fn test_is_volatile_unknown_backend() {
+        // When a named backend doesn't exist, is_volatile returns false
+        let factory = IndexFactory::new(vec![], None);
+        let backend_ref = StorageBackendRef::Named("nonexistent".to_string());
+        assert!(!factory.is_volatile(&backend_ref));
+    }
+
+    #[test]
+    fn test_index_error_display_unknown_store() {
+        let error = IndexError::UnknownStore("my_backend".to_string());
+        let display = format!("{error}");
+        assert!(display.contains("Unknown storage backend"));
+        assert!(display.contains("my_backend"));
+    }
+
+    #[test]
+    fn test_index_error_display_connection_failed() {
+        let error = IndexError::ConnectionFailed("Connection refused".to_string());
+        let display = format!("{error}");
+        assert!(display.contains("Failed to connect"));
+        assert!(display.contains("Connection refused"));
+    }
+
+    #[test]
+    fn test_index_error_display_path_error() {
+        let error = IndexError::PathError("/invalid/path".to_string());
+        let display = format!("{error}");
+        assert!(display.contains("Storage path error"));
+        assert!(display.contains("/invalid/path"));
+    }
+
+    #[test]
+    fn test_index_error_display_initialization_failed() {
+        let error = IndexError::InitializationFailed("Database init failed".to_string());
+        let display = format!("{error}");
+        assert!(display.contains("Failed to initialize"));
+        assert!(display.contains("Database init failed"));
+    }
+
+    #[test]
+    fn test_index_error_display_not_supported() {
+        let error = IndexError::NotSupported;
+        let display = format!("{error}");
+        assert!(display.contains("not supported"));
+    }
+
+    #[test]
+    fn test_index_error_is_std_error() {
+        let error = IndexError::UnknownStore("test".to_string());
+        // Verify it implements std::error::Error
+        let _: &dyn std::error::Error = &error;
+    }
+
+    #[test]
+    fn test_index_error_from_drasi_core_index_error() {
+        // Create a std::io::Error to wrap in IndexError::other
+        let io_error = std::io::Error::new(std::io::ErrorKind::Other, "test error");
+        let core_error = drasi_core::interface::IndexError::other(io_error);
+        let error: IndexError = core_error.into();
+        match error {
+            IndexError::InitializationFailed(msg) => {
+                assert!(msg.contains("test error"));
+            }
+            _ => panic!("Expected InitializationFailed error"),
+        }
+    }
+
+    #[test]
+    fn test_index_set_debug() {
+        // We can't easily construct an IndexSet without going through the factory,
+        // but we can test via build
+        let backends = vec![StorageBackendConfig {
+            id: "memory_test".to_string(),
+            spec: StorageBackendSpec::Memory {
+                enable_archive: false,
+            },
+        }];
+        let factory = IndexFactory::new(backends, None);
+
+        // Use tokio runtime for async test
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let index_set = rt
+            .block_on(factory.build(&StorageBackendRef::Named("memory_test".to_string()), "q1"))
+            .unwrap();
+
+        let debug_str = format!("{index_set:?}");
+        assert!(debug_str.contains("IndexSet"));
+        assert!(debug_str.contains("element_index"));
+        assert!(debug_str.contains("archive_index"));
+        assert!(debug_str.contains("result_index"));
+        assert!(debug_str.contains("future_queue"));
+    }
+
+    #[test]
+    fn test_index_factory_debug() {
+        let backends = vec![StorageBackendConfig {
+            id: "memory_test".to_string(),
+            spec: StorageBackendSpec::Memory {
+                enable_archive: true,
+            },
+        }];
+        let factory = IndexFactory::new(backends, None);
+        let debug_str = format!("{factory:?}");
+        assert!(debug_str.contains("IndexFactory"));
+        assert!(debug_str.contains("backends"));
+        assert!(debug_str.contains("memory_test"));
+    }
+
+    #[test]
+    fn test_index_factory_debug_with_plugin() {
+        use crate::plugin_core::IndexBackendPlugin;
+        use async_trait::async_trait;
+
+        // Create a mock plugin for testing
+        struct MockPlugin;
+
+        #[async_trait]
+        impl IndexBackendPlugin for MockPlugin {
+            async fn create_element_index(
+                &self,
+                _query_id: &str,
+            ) -> Result<
+                Arc<dyn drasi_core::interface::ElementIndex>,
+                drasi_core::interface::IndexError,
+            > {
+                unimplemented!()
+            }
+
+            async fn create_archive_index(
+                &self,
+                _query_id: &str,
+            ) -> Result<
+                Arc<dyn drasi_core::interface::ElementArchiveIndex>,
+                drasi_core::interface::IndexError,
+            > {
+                unimplemented!()
+            }
+
+            async fn create_result_index(
+                &self,
+                _query_id: &str,
+            ) -> Result<
+                Arc<dyn drasi_core::interface::ResultIndex>,
+                drasi_core::interface::IndexError,
+            > {
+                unimplemented!()
+            }
+
+            async fn create_future_queue(
+                &self,
+                _query_id: &str,
+            ) -> Result<
+                Arc<dyn drasi_core::interface::FutureQueue>,
+                drasi_core::interface::IndexError,
+            > {
+                unimplemented!()
+            }
+
+            fn is_volatile(&self) -> bool {
+                false
+            }
+        }
+
+        let factory = IndexFactory::new(vec![], Some(Arc::new(MockPlugin)));
+        let debug_str = format!("{factory:?}");
+        assert!(debug_str.contains("IndexFactory"));
+        assert!(debug_str.contains("plugin"));
+        assert!(debug_str.contains("<plugin>"));
+    }
+
+    #[tokio::test]
+    async fn test_build_memory_without_archive() {
+        let factory = IndexFactory::new(vec![], None);
+        let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Memory {
+            enable_archive: false,
+        });
+        let result = factory.build(&backend_ref, "test_query").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_build_memory_with_archive() {
+        let factory = IndexFactory::new(vec![], None);
+        let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Memory {
+            enable_archive: true,
+        });
+        let result = factory.build(&backend_ref, "test_query").await;
+        assert!(result.is_ok());
     }
 }
