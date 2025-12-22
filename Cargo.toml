@@ -40,11 +40,14 @@ members = [
   "components/indexes/rocksdb",
   "components/indexes/garnet",
 
-  # Internal
+  # Internal (dev/test only - not published)
   "shared-tests",
   "query-perf",
   "examples/query",
   ]
+
+# Exclude internal crates from workspace packaging
+exclude = []
 
 resolver = "2"
 
