@@ -7,8 +7,6 @@ members = [
   "query-gql",
   "functions-cypher",
   "functions-gql",
-  "index-rocksdb",
-  "index-garnet",
   "middleware",
   "lib",
 
@@ -37,6 +35,10 @@ members = [
   "components/reactions/profiler",
   "components/reactions/application",
   "components/reactions/log",
+
+  # Index Plugins
+  "components/indexes/rocksdb",
+  "components/indexes/garnet",
 
   # Internal
   "shared-tests",

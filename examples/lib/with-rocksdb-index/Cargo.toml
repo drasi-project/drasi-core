@@ -1,0 +1,30 @@
+[package]
+name = "rocksdb-index-example"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "DrasiLib example demonstrating RocksDB index plugin usage"
+
+# Keep this crate independent from the parent workspace
+[workspace]
+
+[dependencies]
+drasi-lib = { path = "../../../lib" }
+drasi-source-http = { path = "../../../components/sources/http" }
+drasi-reaction-log = { path = "../../../components/reactions/log" }
+drasi-bootstrap-scriptfile = { path = "../../../components/bootstrappers/scriptfile" }
+
+# RocksDB index plugin - this is now an optional external dependency
+drasi-index-rocksdb = { path = "../../../components/indexes/rocksdb" }
+
+tokio = { version = "1.6", features = ["full"] }
+anyhow = "1.0"
+axum = "0.7"
+env_logger = "0.10.0"
+log = "0.4"
+serde_json = "1.0"
+tempfile = "3.8"
+
+[[bin]]
+name = "rocksdb-index-example"
+path = "main.rs"

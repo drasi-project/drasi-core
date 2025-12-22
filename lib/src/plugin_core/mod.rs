@@ -65,6 +65,7 @@
 //! ```
 
 pub mod bootstrap;
+pub mod index;
 pub mod reaction;
 pub mod source;
 
@@ -79,3 +80,6 @@ pub use reaction::{QuerySubscriber, Reaction};
 
 // Bootstrap traits
 pub use bootstrap::BootstrapProvider;
+
+// Index backend plugin trait
+pub use index::IndexBackendPlugin;
