@@ -15,7 +15,6 @@ drasi-core = { path = "../core" }
 drasi-query-cypher = { path = "../query-cypher" }
 drasi-functions-cypher = { path = "../functions-cypher" }
 drasi-middleware = { path = "../middleware" }
-drasi-reaction-storedproc-mssql = { path = "../components/reactions/storedproc-mssql" }
 serde = "1.0.163"
 serde_json = "1.0.96"
 async-trait = "0.1.68"

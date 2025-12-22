@@ -23,8 +23,6 @@ pub mod temporal_retrieval;
 pub mod use_cases;
 
 #[cfg(test)]
-mod components;
-#[cfg(test)]
 mod in_memory;
 
 #[async_trait]

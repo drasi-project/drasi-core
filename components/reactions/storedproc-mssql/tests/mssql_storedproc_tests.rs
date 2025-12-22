@@ -20,10 +20,16 @@
 //! **Note**: These tests are skipped on ARM64 (Apple Silicon) platforms due to
 //! known stability issues with Azure SQL Edge containers crashing on startup.
 //! The tests will run successfully on AMD64 platforms and in CI environments.
-use crate::mssql_helpers::{execute_sql, setup_mssql, MssqlConfig};
+
+use drasi_reaction_storedproc_mssql::config::MsSqlStoredProcReactionConfig;
 use serial_test::serial;
+use shared_tests::mssql_helpers::{execute_sql, setup_mssql, MssqlConfig};
 use std::time::Duration;
 use tokio::time::sleep;
+
+// ============================================================================
+// Test Helper Functions
+// ============================================================================
 
 /// Helper function to setup stored procedures in the test database
 async fn setup_stored_procedures(config: &MssqlConfig) {
@@ -219,8 +225,6 @@ async fn get_log_count(config: &MssqlConfig) -> i64 {
 
 #[test]
 fn test_config_defaults() {
-    use drasi_reaction_storedproc_mssql::config::MsSqlStoredProcReactionConfig;
-
     let config = MsSqlStoredProcReactionConfig::default();
 
     // DevSkim: ignore DS137138
@@ -233,8 +237,6 @@ fn test_config_defaults() {
 
 #[test]
 fn test_config_validation_requires_user() {
-    use drasi_reaction_storedproc_mssql::config::MsSqlStoredProcReactionConfig;
-
     let config = MsSqlStoredProcReactionConfig {
         user: String::new(),
         database: "test_db".to_string(),
@@ -249,8 +251,6 @@ fn test_config_validation_requires_user() {
 
 #[test]
 fn test_config_validation_requires_database() {
-    use drasi_reaction_storedproc_mssql::config::MsSqlStoredProcReactionConfig;
-
     let config = MsSqlStoredProcReactionConfig {
         user: "test_user".to_string(),
         database: String::new(),
@@ -268,8 +268,6 @@ fn test_config_validation_requires_database() {
 
 #[test]
 fn test_config_validation_requires_at_least_one_command() {
-    use drasi_reaction_storedproc_mssql::config::MsSqlStoredProcReactionConfig;
-
     let config = MsSqlStoredProcReactionConfig {
         user: "test_user".to_string(),
         password: "test_pass".to_string(),
@@ -290,8 +288,6 @@ fn test_config_validation_requires_at_least_one_command() {
 
 #[test]
 fn test_config_validation_success() {
-    use drasi_reaction_storedproc_mssql::config::MsSqlStoredProcReactionConfig;
-
     let config = MsSqlStoredProcReactionConfig {
         user: "test_user".to_string(),
         password: "test_pass".to_string(),
@@ -306,8 +302,6 @@ fn test_config_validation_success() {
 
 #[test]
 fn test_config_custom_port() {
-    use drasi_reaction_storedproc_mssql::config::MsSqlStoredProcReactionConfig;
-
     let config = MsSqlStoredProcReactionConfig {
         port: Some(14330),
         ..Default::default()
