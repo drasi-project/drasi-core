@@ -170,8 +170,8 @@ async fn get_log_count(config: &PostgresConfig) -> i64 {
 fn test_config_default_values() {
     let config = PostgresStoredProcReactionConfig::default();
 
-    // DevSkim: ignore DS137138
-    assert_eq!(config.hostname, "localhost");
+    
+    assert_eq!(config.hostname, "localhost"); // DevSkim: ignore DS137138
     assert_eq!(config.port, None);
     assert_eq!(config.get_port(), 5432); // Default port
     assert_eq!(config.user, "");
@@ -332,8 +332,7 @@ fn test_config_deserialization_with_defaults() {
 
     let config: PostgresStoredProcReactionConfig = serde_json::from_str(json).unwrap();
 
-    // DevSkim: ignore DS137138
-    assert_eq!(config.hostname, "localhost"); // default
+    assert_eq!(config.hostname, "localhost"); // DevSkim: ignore DS137138
     assert_eq!(config.port, None);
     assert_eq!(config.get_port(), 5432); // default port
     assert!(!config.ssl); // default
@@ -442,9 +441,8 @@ async fn test_postgres_config_validation() {
         .ok();
 
     // Valid config
-    // DevSkim: ignore DS137138
     let config = PostgresStoredProcReactionConfig {
-        hostname: "localhost".to_string(),
+        hostname: "localhost".to_string(), // DevSkim: ignore DS137138
         port: Some(5432),
         user: "testuser".to_string(),
         password: "password".to_string(),
