@@ -15,7 +15,6 @@
 use async_trait::async_trait;
 use drasi_core::query::QueryBuilder;
 
-pub mod components;
 pub mod index;
 pub mod mysql_helpers;
 pub mod redis_helpers;
