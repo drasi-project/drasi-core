@@ -196,7 +196,6 @@ impl JsonStateStoreProvider {
 
     /// Encode a value to base64 for JSON storage.
     fn encode_value(value: &[u8]) -> String {
-        use serde::ser::Serialize;
         // Use raw base64 encoding
         base64_encode(value)
     }
