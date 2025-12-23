@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-source-application"
-version = "0.2.0"
+version = "0.1.0"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "Application source plugin for Drasi"
@@ -27,8 +27,8 @@ categories = ["database"]
 workspace = true
 
 [dependencies]
-drasi-lib = { path = "../../../lib" }
-drasi-core = { path = "../../../core" }
+drasi-lib = { version = "0.1.0", path = "../../../lib" }
+drasi-core = { version = "0.1.0", path = "../../../core" }
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
@@ -40,4 +40,4 @@ uuid = { version = "1.0", features = ["v4"] }
 tokio-stream = "0.1"
 prost-types = "0.12"
 ordered-float = "3.0"
-drasi-bootstrap-application = { path = "../../bootstrappers/application" }
+drasi-bootstrap-application = { version = "0.1.0", path = "../../bootstrappers/application" }

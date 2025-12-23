@@ -32,13 +32,13 @@ name = "drasi_lib"
 path = "src/lib.rs"
 
 [dependencies]
-drasi-core = { path = "../core" }
-drasi-functions-cypher = { path = "../functions-cypher" }
-drasi-functions-gql = { path = "../functions-gql" }
-drasi-query-ast = { path = "../query-ast" }
-drasi-query-cypher = { path = "../query-cypher" }
-drasi-query-gql = { path = "../query-gql" }
-drasi-middleware = { path = "../middleware" }
+drasi-core = { version = "0.1.0", path = "../core" }
+drasi-functions-cypher = { version = "0.1.0", path = "../functions-cypher" }
+drasi-functions-gql = { version = "0.1.0", path = "../functions-gql" }
+drasi-query-ast = { version = "0.1.0", path = "../query-ast" }
+drasi-query-cypher = { version = "0.1.0", path = "../query-cypher" }
+drasi-query-gql = { version = "0.1.0", path = "../query-gql" }
+drasi-middleware = { version = "0.1.0", path = "../middleware" }
 
 # Note: Index backends (RocksDB, Garnet) are now plugins and NOT direct dependencies.
 # Users who need persistent storage should:

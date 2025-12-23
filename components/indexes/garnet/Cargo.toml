@@ -27,8 +27,8 @@ readme = "../../../readme.md"
 workspace = true
 
 [dependencies]
-drasi-core = { path = "../../../core" }
-drasi-query-ast = { path = "../../../query-ast" }
+drasi-core = { version = "0.1.0", path = "../../../core" }
+drasi-query-ast = { version = "0.1.0", path = "../../../query-ast" }
 redis = { version = "0.25", features = ["tokio-comp"] }
 async-trait = "0.1.68"
 hashers = "1.0.1"

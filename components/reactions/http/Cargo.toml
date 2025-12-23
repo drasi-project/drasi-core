@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-reaction-http"
-version = "0.2.0"
+version = "0.1.0"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "HTTP reaction plugin for Drasi"
@@ -27,8 +27,8 @@ categories = ["network-programming"]
 workspace = true
 
 [dependencies]
-drasi-lib = { path = "../../../lib" }
-drasi-core = { path = "../../../core" }
+drasi-lib = { version = "0.1.0", path = "../../../lib" }
+drasi-core = { version = "0.1.0", path = "../../../core" }
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"

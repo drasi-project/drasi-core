@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-reaction-http-adaptive"
-version = "0.2.0"
+version = "0.1.0"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "HTTP Adaptive reaction plugin for Drasi"
@@ -27,7 +27,7 @@ categories = ["network-programming"]
 workspace = true
 
 [dependencies]
-drasi-lib = { path = "../../../lib" }
+drasi-lib = { version = "0.1.0", path = "../../../lib" }
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
@@ -41,4 +41,4 @@ uuid = { version = "1.0", features = ["v4"] }
 tokio-stream = "0.1"
 prost-types = "0.12"
 ordered-float = "3.0"
-drasi-reaction-http = { path = "../http" }
+drasi-reaction-http = { version = "0.1.0", path = "../http" }
