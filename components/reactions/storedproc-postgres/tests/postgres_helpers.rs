@@ -76,8 +76,7 @@ async fn setup_postgres_raw() -> (testcontainers::ContainerAsync<Postgres>, Post
     let pg_port = container.get_host_port_ipv4(5432).await.unwrap();
 
     let config = PostgresConfig {
-        // DevSkim: ignore DS137138
-        host: "localhost".to_string(),
+        host: "localhost".to_string(), // DevSkim: ignore DS137138
         port: pg_port,
         database: "postgres".to_string(),
         user: "postgres".to_string(),
@@ -338,8 +337,7 @@ mod tests {
         let pg = setup_postgres().await;
         let config = pg.config();
 
-        // DevSkim: ignore DS137138
-        assert_eq!(config.host, "localhost");
+        assert_eq!(config.host, "localhost"); // DevSkim: ignore DS137138
         assert_eq!(config.database, "postgres");
         assert_eq!(config.user, "postgres");
 

@@ -172,7 +172,6 @@ async fn get_log_count(config: &PostgresConfig) -> i64 {
 fn test_config_default_values() {
     let config = PostgresStoredProcReactionConfig::default();
 
-    
     assert_eq!(config.hostname, "localhost"); // DevSkim: ignore DS137138
     assert_eq!(config.port, None);
     assert_eq!(config.get_port(), 5432); // Default port
