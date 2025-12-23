@@ -47,7 +47,11 @@ members = [
   ]
 
 # Exclude internal crates from workspace packaging
-exclude = []
+exclude = [
+  "shared-tests",
+  "query-perf",
+  "examples/query",
+]
 
 resolver = "2"
 
