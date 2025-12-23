@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-reaction-http"
-version = "0.2.0"
+version = "0.1.0"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "HTTP reaction plugin for Drasi"
