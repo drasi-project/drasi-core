@@ -41,6 +41,9 @@ members = [
   "components/indexes/rocksdb",
   "components/indexes/garnet",
 
+  # Auth Plugins
+  "components/auth/azure",
+
   # Internal
   "shared-tests",
   "query-perf",
