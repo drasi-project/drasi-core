@@ -28,7 +28,7 @@ workspace = true
 [dependencies]
 drasi-lib = { path = "../../../lib" }
 
-redb = "3.1.0"
+redb = "2.6.3"
 async-trait = "0.1"
 thiserror = "2.0"
 log = "0.4"

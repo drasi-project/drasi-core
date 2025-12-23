@@ -17,7 +17,7 @@
 use async_trait::async_trait;
 use drasi_lib::plugin_core::{StateStoreError, StateStoreProvider, StateStoreResult};
 use log::{debug, info};
-use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
+use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
