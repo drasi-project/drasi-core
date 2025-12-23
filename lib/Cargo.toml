@@ -38,9 +38,13 @@ drasi-functions-gql = { path = "../functions-gql" }
 drasi-query-ast = { path = "../query-ast" }
 drasi-query-cypher = { path = "../query-cypher" }
 drasi-query-gql = { path = "../query-gql" }
-drasi-index-rocksdb = { path = "../index-rocksdb" }
-drasi-index-garnet = { path = "../index-garnet" }
 drasi-middleware = { path = "../middleware" }
+
+# Note: Index backends (RocksDB, Garnet) are now plugins and NOT direct dependencies.
+# Users who need persistent storage should:
+#   1. Add drasi-index-rocksdb or drasi-index-garnet to their Cargo.toml
+#   2. Create an IndexBackendPlugin instance
+#   3. Pass it to DrasiLib::builder().with_index_provider(...)
 
 tokio = { version = "1.0", features = ["rt-multi-thread", "sync", "time", "macros"] }
 serde = { version = "1.0", features = ["derive"] }

@@ -19,6 +19,7 @@ use std::sync::Arc;
 use super::schema::QueryConfig;
 use crate::channels::ComponentStatus;
 use crate::indexes::IndexFactory;
+use crate::plugin_core::IndexBackendPlugin;
 
 /// Runtime representation of a source with execution status
 ///
@@ -239,14 +240,27 @@ pub struct RuntimeConfig {
     pub queries: Vec<QueryConfig>,
 }
 
-impl From<super::schema::DrasiLibConfig> for RuntimeConfig {
-    fn from(config: super::schema::DrasiLibConfig) -> Self {
+impl RuntimeConfig {
+    /// Create a new RuntimeConfig with an optional index backend provider.
+    ///
+    /// When an index provider is supplied, RocksDB and Redis/Garnet storage backends
+    /// will delegate to the provider for index creation. Without a provider, only
+    /// in-memory storage backends can be used.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - The DrasiLib configuration
+    /// * `index_provider` - Optional index backend plugin for persistent storage
+    pub fn new(
+        config: super::schema::DrasiLibConfig,
+        index_provider: Option<Arc<dyn IndexBackendPlugin>>,
+    ) -> Self {
         // Get the global defaults (or hardcoded fallbacks)
         let global_priority_queue = config.priority_queue_capacity.unwrap_or(10000);
         let global_dispatch_capacity = config.dispatch_buffer_capacity.unwrap_or(1000);
 
-        // Create IndexFactory from storage backend configurations
-        let index_factory = Arc::new(IndexFactory::new(config.storage_backends));
+        // Create IndexFactory from storage backend configurations with optional plugin
+        let index_factory = Arc::new(IndexFactory::new(config.storage_backends, index_provider));
 
         // Apply global defaults to queries
         let queries = config
@@ -268,5 +282,12 @@ impl From<super::schema::DrasiLibConfig> for RuntimeConfig {
             index_factory,
             queries,
         }
+    }
+}
+
+impl From<super::schema::DrasiLibConfig> for RuntimeConfig {
+    fn from(config: super::schema::DrasiLibConfig) -> Self {
+        // Default to no index provider (only in-memory backends available)
+        Self::new(config, None)
     }
 }

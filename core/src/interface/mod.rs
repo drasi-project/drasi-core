@@ -14,6 +14,7 @@
 
 mod element_index;
 mod future_queue;
+mod index_backend;
 mod query_clock;
 mod result_index;
 mod source_middleware;
@@ -30,6 +31,7 @@ pub use future_queue::FutureElementRef;
 pub use future_queue::FutureQueue;
 pub use future_queue::FutureQueueConsumer;
 pub use future_queue::PushType;
+pub use index_backend::IndexBackendPlugin;
 pub use query_clock::QueryClock;
 pub use result_index::AccumulatorIndex;
 pub use result_index::LazySortedSetStore;
