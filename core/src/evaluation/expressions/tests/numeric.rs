@@ -269,7 +269,7 @@ async fn evaluate_tan() {
 
 #[tokio::test]
 async fn evaluate_degrees() {
-    let expr = "degrees(3.14159)";
+    let expr = "degrees(pi())";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
     let function_registry = create_numeric_expression_test_function_registry();
@@ -285,7 +285,7 @@ async fn evaluate_degrees() {
                 .evaluate_expression(&context, &expr)
                 .await
                 .unwrap(),
-            VariableValue::Float(Float::from_f64((3.14159_f64).to_degrees()).unwrap())
+            VariableValue::Float(Float::from_f64(std::f64::consts::PI.to_degrees()).unwrap())
         );
     }
 }

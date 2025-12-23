@@ -126,7 +126,7 @@ async fn degrees_pi() {
     let context =
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
-    let args = vec![VariableValue::Float((3.14159_f64).into())];
+    let args = vec![VariableValue::Float(std::f64::consts::PI.into())];
     let func_expr = ast::FunctionExpression {
         name: Arc::from("degrees"),
         args: vec![],
@@ -137,7 +137,7 @@ async fn degrees_pi() {
         .call(&context, &func_expr, args.clone())
         .await
         .unwrap();
-    assert_eq!(result, (3.14159_f64).to_degrees());
+    assert_eq!(result, std::f64::consts::PI.to_degrees());
 }
 
 #[tokio::test]
