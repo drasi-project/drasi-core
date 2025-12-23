@@ -21,9 +21,11 @@
 //! known stability issues with Azure SQL Edge containers crashing on startup.
 //! The tests will run successfully on AMD64 platforms and in CI environments.
 
+mod mssql_helpers;
+
 use drasi_reaction_storedproc_mssql::config::MsSqlStoredProcReactionConfig;
+use mssql_helpers::{execute_sql, setup_mssql, MssqlConfig};
 use serial_test::serial;
-use shared_tests::mssql_helpers::{execute_sql, setup_mssql, MssqlConfig};
 use std::time::Duration;
 use tokio::time::sleep;
 
