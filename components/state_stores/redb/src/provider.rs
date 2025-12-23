@@ -60,11 +60,20 @@ const fn table_definition(
 ///     .build()
 ///     .await?;
 /// ```
+///
+/// # Memory Considerations
+///
+/// This implementation uses `Box::leak` to create static string references required
+/// by redb's `TableDefinition` API. Each unique `store_id` allocates a small amount
+/// of memory (the table name string) that is never freed during the process lifetime.
+/// For typical use cases with a bounded number of plugins/stores, this is negligible.
+/// The leaked memory is reclaimed when the process exits.
 pub struct RedbStateStoreProvider {
     /// The redb database instance
     db: Arc<Database>,
-    /// Cache of known table names for quick lookups
-    known_tables: Arc<RwLock<std::collections::HashSet<String>>>,
+    /// Cache of leaked table name references to avoid repeated allocations
+    /// for the same store_id
+    table_name_cache: Arc<RwLock<HashMap<String, &'static str>>>,
 }
 
 impl RedbStateStoreProvider {
@@ -95,7 +104,7 @@ impl RedbStateStoreProvider {
 
         Ok(Self {
             db: Arc::new(db),
-            known_tables: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            table_name_cache: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -104,20 +113,45 @@ impl RedbStateStoreProvider {
     fn table_name(store_id: &str) -> String {
         format!("store_{store_id}")
     }
+
+    /// Get or create a static table name reference for a store_id.
+    /// This caches leaked strings to avoid allocating the same string multiple times.
+    async fn get_or_create_table_name(&self, store_id: &str) -> &'static str {
+        let table_name = Self::table_name(store_id);
+
+        // First check if we already have this table name cached
+        {
+            let cache = self.table_name_cache.read().await;
+            if let Some(&name) = cache.get(&table_name) {
+                return name;
+            }
+        }
+
+        // If not, create and cache it
+        let mut cache = self.table_name_cache.write().await;
+        // Double-check in case another task added it while we were waiting for the write lock
+        if let Some(&name) = cache.get(&table_name) {
+            return name;
+        }
+
+        // Leak the string to get a 'static reference (required by redb API)
+        let leaked: &'static str = Box::leak(table_name.clone().into_boxed_str());
+        cache.insert(table_name, leaked);
+        leaked
+    }
 }
 
 #[async_trait]
 impl StateStoreProvider for RedbStateStoreProvider {
     async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
-        let table_name = Self::table_name(store_id);
+        let table_name = self.get_or_create_table_name(store_id).await;
 
         let read_txn = self.db.begin_read().map_err(|e| {
             StateStoreError::StorageError(format!("Failed to begin read transaction: {e}"))
         })?;
 
         // Try to open the table - it may not exist yet
-        let table_def: TableDefinition<&str, &[u8]> =
-            TableDefinition::new(Box::leak(table_name.clone().into_boxed_str()));
+        let table_def: TableDefinition<&str, &[u8]> = TableDefinition::new(table_name);
 
         match read_txn.open_table(table_def) {
             Ok(table) => {
@@ -135,15 +169,14 @@ impl StateStoreProvider for RedbStateStoreProvider {
     }
 
     async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
-        let table_name = Self::table_name(store_id);
+        let table_name = self.get_or_create_table_name(store_id).await;
 
         let write_txn = self.db.begin_write().map_err(|e| {
             StateStoreError::StorageError(format!("Failed to begin write transaction: {e}"))
         })?;
 
         {
-            let table_def: TableDefinition<&str, &[u8]> =
-                TableDefinition::new(Box::leak(table_name.clone().into_boxed_str()));
+            let table_def: TableDefinition<&str, &[u8]> = TableDefinition::new(table_name);
 
             let mut table = write_txn
                 .open_table(table_def)
@@ -158,23 +191,19 @@ impl StateStoreProvider for RedbStateStoreProvider {
             StateStoreError::StorageError(format!("Failed to commit transaction: {e}"))
         })?;
 
-        // Track the table as known
-        self.known_tables.write().await.insert(table_name);
-
         debug!("Set key '{key}' in store '{store_id}'");
         Ok(())
     }
 
     async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
-        let table_name = Self::table_name(store_id);
+        let table_name = self.get_or_create_table_name(store_id).await;
 
         let write_txn = self.db.begin_write().map_err(|e| {
             StateStoreError::StorageError(format!("Failed to begin write transaction: {e}"))
         })?;
 
         let existed = {
-            let table_def: TableDefinition<&str, &[u8]> =
-                TableDefinition::new(Box::leak(table_name.clone().into_boxed_str()));
+            let table_def: TableDefinition<&str, &[u8]> = TableDefinition::new(table_name);
 
             match write_txn.open_table(table_def) {
                 Ok(mut table) => {
@@ -208,15 +237,14 @@ impl StateStoreProvider for RedbStateStoreProvider {
         store_id: &str,
         keys: &[&str],
     ) -> StateStoreResult<HashMap<String, Vec<u8>>> {
-        let table_name = Self::table_name(store_id);
+        let table_name = self.get_or_create_table_name(store_id).await;
         let mut result = HashMap::new();
 
         let read_txn = self.db.begin_read().map_err(|e| {
             StateStoreError::StorageError(format!("Failed to begin read transaction: {e}"))
         })?;
 
-        let table_def: TableDefinition<&str, &[u8]> =
-            TableDefinition::new(Box::leak(table_name.clone().into_boxed_str()));
+        let table_def: TableDefinition<&str, &[u8]> = TableDefinition::new(table_name);
 
         match read_txn.open_table(table_def) {
             Ok(table) => {
@@ -242,15 +270,14 @@ impl StateStoreProvider for RedbStateStoreProvider {
     }
 
     async fn set_many(&self, store_id: &str, entries: &[(&str, Vec<u8>)]) -> StateStoreResult<()> {
-        let table_name = Self::table_name(store_id);
+        let table_name = self.get_or_create_table_name(store_id).await;
 
         let write_txn = self.db.begin_write().map_err(|e| {
             StateStoreError::StorageError(format!("Failed to begin write transaction: {e}"))
         })?;
 
         {
-            let table_def: TableDefinition<&str, &[u8]> =
-                TableDefinition::new(Box::leak(table_name.clone().into_boxed_str()));
+            let table_def: TableDefinition<&str, &[u8]> = TableDefinition::new(table_name);
 
             let mut table = write_txn
                 .open_table(table_def)
@@ -267,23 +294,19 @@ impl StateStoreProvider for RedbStateStoreProvider {
             StateStoreError::StorageError(format!("Failed to commit transaction: {e}"))
         })?;
 
-        // Track the table as known
-        self.known_tables.write().await.insert(table_name);
-
         debug!("Set {} entries in store '{store_id}'", entries.len());
         Ok(())
     }
 
     async fn delete_many(&self, store_id: &str, keys: &[&str]) -> StateStoreResult<usize> {
-        let table_name = Self::table_name(store_id);
+        let table_name = self.get_or_create_table_name(store_id).await;
 
         let write_txn = self.db.begin_write().map_err(|e| {
             StateStoreError::StorageError(format!("Failed to begin write transaction: {e}"))
         })?;
 
         let count = {
-            let table_def: TableDefinition<&str, &[u8]> =
-                TableDefinition::new(Box::leak(table_name.clone().into_boxed_str()));
+            let table_def: TableDefinition<&str, &[u8]> = TableDefinition::new(table_name);
 
             match write_txn.open_table(table_def) {
                 Ok(mut table) => {
@@ -316,19 +339,18 @@ impl StateStoreProvider for RedbStateStoreProvider {
     }
 
     async fn clear_store(&self, store_id: &str) -> StateStoreResult<usize> {
-        let table_name = Self::table_name(store_id);
+        let table_name = self.get_or_create_table_name(store_id).await;
 
         let write_txn = self.db.begin_write().map_err(|e| {
             StateStoreError::StorageError(format!("Failed to begin write transaction: {e}"))
         })?;
 
+        // First, try to get the count efficiently using len()
         let count = {
-            let table_def: TableDefinition<&str, &[u8]> =
-                TableDefinition::new(Box::leak(table_name.clone().into_boxed_str()));
+            let table_def: TableDefinition<&str, &[u8]> = TableDefinition::new(table_name);
 
             match write_txn.open_table(table_def) {
                 Ok(table) => {
-                    // Count entries first
                     let count = table.len().map_err(|e| {
                         StateStoreError::StorageError(format!("Failed to count entries: {e}"))
                     })?;
@@ -343,10 +365,9 @@ impl StateStoreProvider for RedbStateStoreProvider {
             }
         };
 
-        // Delete the table itself
+        // Delete the table itself if it exists
         if count > 0 {
-            let table_def: TableDefinition<&str, &[u8]> =
-                TableDefinition::new(Box::leak(table_name.clone().into_boxed_str()));
+            let table_def: TableDefinition<&str, &[u8]> = TableDefinition::new(table_name);
 
             write_txn.delete_table(table_def).map_err(|e| {
                 StateStoreError::StorageError(format!("Failed to delete table: {e}"))
@@ -357,23 +378,19 @@ impl StateStoreProvider for RedbStateStoreProvider {
             StateStoreError::StorageError(format!("Failed to commit transaction: {e}"))
         })?;
 
-        // Remove from known tables
-        self.known_tables.write().await.remove(&table_name);
-
         debug!("Cleared store '{store_id}' ({count} entries)");
         Ok(count)
     }
 
     async fn list_keys(&self, store_id: &str) -> StateStoreResult<Vec<String>> {
-        let table_name = Self::table_name(store_id);
+        let table_name = self.get_or_create_table_name(store_id).await;
         let mut keys = Vec::new();
 
         let read_txn = self.db.begin_read().map_err(|e| {
             StateStoreError::StorageError(format!("Failed to begin read transaction: {e}"))
         })?;
 
-        let table_def: TableDefinition<&str, &[u8]> =
-            TableDefinition::new(Box::leak(table_name.clone().into_boxed_str()));
+        let table_def: TableDefinition<&str, &[u8]> = TableDefinition::new(table_name);
 
         match read_txn.open_table(table_def) {
             Ok(table) => {
@@ -402,15 +419,14 @@ impl StateStoreProvider for RedbStateStoreProvider {
     }
 
     async fn store_exists(&self, store_id: &str) -> bool {
-        let table_name = Self::table_name(store_id);
+        let table_name = self.get_or_create_table_name(store_id).await;
 
         let read_txn = match self.db.begin_read() {
             Ok(txn) => txn,
             Err(_) => return false,
         };
 
-        let table_def: TableDefinition<&str, &[u8]> =
-            TableDefinition::new(Box::leak(table_name.into_boxed_str()));
+        let table_def: TableDefinition<&str, &[u8]> = TableDefinition::new(table_name);
 
         match read_txn.open_table(table_def) {
             Ok(table) => {
