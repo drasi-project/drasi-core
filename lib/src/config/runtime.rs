@@ -19,7 +19,7 @@ use std::sync::Arc;
 use super::schema::QueryConfig;
 use crate::channels::ComponentStatus;
 use crate::indexes::IndexFactory;
-use crate::plugin_core::IndexBackendPlugin;
+use crate::plugin_core::{IndexBackendPlugin, MemoryStateStoreProvider, StateStoreProvider};
 
 /// Runtime representation of a source with execution status
 ///
@@ -230,30 +230,48 @@ impl From<QueryConfig> for QueryRuntime {
 ///       - source_id: s1
 ///     priority_queue_capacity: 100000  # Override global
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RuntimeConfig {
     /// Unique identifier for this DrasiLib instance
     pub id: String,
     /// Index factory for creating storage backend indexes for queries
     pub index_factory: Arc<IndexFactory>,
+    /// State store provider for plugin state persistence
+    pub state_store_provider: Arc<dyn StateStoreProvider>,
     /// Query configurations (sources/reactions are now instance-only)
     pub queries: Vec<QueryConfig>,
 }
 
+impl std::fmt::Debug for RuntimeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeConfig")
+            .field("id", &self.id)
+            .field("index_factory", &self.index_factory)
+            .field("state_store_provider", &"<dyn StateStoreProvider>")
+            .field("queries", &self.queries)
+            .finish()
+    }
+}
+
 impl RuntimeConfig {
-    /// Create a new RuntimeConfig with an optional index backend provider.
+    /// Create a new RuntimeConfig with optional index backend and state store providers.
     ///
     /// When an index provider is supplied, RocksDB and Redis/Garnet storage backends
     /// will delegate to the provider for index creation. Without a provider, only
     /// in-memory storage backends can be used.
     ///
+    /// When a state store provider is supplied, it will be used for plugin state
+    /// persistence. Without a provider, the default in-memory state store is used.
+    ///
     /// # Arguments
     ///
     /// * `config` - The DrasiLib configuration
     /// * `index_provider` - Optional index backend plugin for persistent storage
+    /// * `state_store_provider` - Optional state store provider for plugin state
     pub fn new(
         config: super::schema::DrasiLibConfig,
         index_provider: Option<Arc<dyn IndexBackendPlugin>>,
+        state_store_provider: Option<Arc<dyn StateStoreProvider>>,
     ) -> Self {
         // Get the global defaults (or hardcoded fallbacks)
         let global_priority_queue = config.priority_queue_capacity.unwrap_or(10000);
@@ -261,6 +279,10 @@ impl RuntimeConfig {
 
         // Create IndexFactory from storage backend configurations with optional plugin
         let index_factory = Arc::new(IndexFactory::new(config.storage_backends, index_provider));
+
+        // Use provided state store or default to in-memory
+        let state_store_provider: Arc<dyn StateStoreProvider> =
+            state_store_provider.unwrap_or_else(|| Arc::new(MemoryStateStoreProvider::new()));
 
         // Apply global defaults to queries
         let queries = config
@@ -280,6 +302,7 @@ impl RuntimeConfig {
         Self {
             id: config.id,
             index_factory,
+            state_store_provider,
             queries,
         }
     }
@@ -287,7 +310,7 @@ impl RuntimeConfig {
 
 impl From<super::schema::DrasiLibConfig> for RuntimeConfig {
     fn from(config: super::schema::DrasiLibConfig) -> Self {
-        // Default to no index provider (only in-memory backends available)
-        Self::new(config, None)
+        // Default to no index provider and no state store provider
+        Self::new(config, None, None)
     }
 }

@@ -122,6 +122,11 @@ pub use plugin_core::{
     Source as SourceTrait,
 };
 
+/// State store provider traits and default implementation
+pub use plugin_core::{
+    MemoryStateStoreProvider, StateStoreError, StateStoreProvider, StateStoreResult,
+};
+
 pub use reactions::common::base::{ReactionBase, ReactionBaseParams};
 /// Base implementations for source and reaction plugins
 /// These are used by plugin developers, not by drasi-lib itself
