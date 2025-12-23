@@ -12,48 +12,41 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! JSON File-Based State Store Provider for Drasi
+//! Redb-Based State Store Provider for Drasi
 //!
-//! This crate provides a persistent state store provider that stores data in JSON files.
-//! Each store partition (identified by `store_id`) is stored in a separate JSON file.
+//! This crate provides a persistent state store provider using [redb](https://docs.rs/redb),
+//! an embedded key-value database written in pure Rust.
 //!
 //! # Features
 //!
+//! - **ACID Transactions**: All operations are atomic and durable
 //! - **Persistent Storage**: Data survives restarts
-//! - **Partitioned by Store ID**: Each plugin gets its own JSON file
+//! - **Partitioned by Store ID**: Each plugin gets its own table
 //! - **Thread-Safe**: Safe for concurrent access from multiple plugins
-//! - **Automatic Cleanup**: Empty files are removed when all data is deleted
+//! - **No External Dependencies**: Pure Rust implementation
 //!
 //! # Usage
 //!
 //! ```ignore
-//! use drasi_state_store_json::JsonStateStoreProvider;
+//! use drasi_state_store_redb::RedbStateStoreProvider;
 //! use drasi_lib::DrasiLib;
 //! use std::sync::Arc;
 //!
-//! let state_store = JsonStateStoreProvider::new("/data/state")?;
+//! let state_store = RedbStateStoreProvider::new("/data/state.redb")?;
 //! let drasi = DrasiLib::builder()
 //!     .with_state_store_provider(Arc::new(state_store))
 //!     .build()
 //!     .await?;
 //! ```
 //!
-//! # File Structure
+//! # Database Structure
 //!
-//! Files are stored in the configured directory with the following naming convention:
-//! ```text
-//! {directory}/
-//!   {store_id}.json
-//! ```
+//! The provider creates a single redb database file with a separate table for each
+//! `store_id`. Tables are created dynamically when first accessed and remain in the
+//! database for subsequent operations.
 //!
-//! Each JSON file contains a map of keys to base64-encoded values:
-//! ```json
-//! {
-//!   "key1": "YmFzZTY0IGVuY29kZWQgdmFsdWU=",
-//!   "key2": "YW5vdGhlciB2YWx1ZQ=="
-//! }
-//! ```
+//! Keys and values are stored as byte arrays (`&[u8]` / `Vec<u8>`).
 
 mod provider;
 
-pub use provider::JsonStateStoreProvider;
+pub use provider::RedbStateStoreProvider;

@@ -7,7 +7,7 @@ State store plugins allow Sources, BootstrapProviders, and Reactions to persist 
 DrasiLib provides a pluggable state storage architecture:
 
 - **Default**: `MemoryStateStoreProvider` (built into drasi-lib) - Non-persistent, in-memory storage
-- **JSON Files**: `JsonStateStoreProvider` - Persistent storage using JSON files
+- **Redb**: `RedbStateStoreProvider` - ACID-compliant persistent storage using embedded database
 
 ## Architecture
 
@@ -26,9 +26,9 @@ DrasiLib provides a pluggable state storage architecture:
          ┌───────────────┴───────────────┐
          │                               │
 ┌────────▼────────┐           ┌──────────▼──────────┐
-│ Memory Provider │           │   JSON Provider      │
+│ Memory Provider │           │   Redb Provider     │
 │   (built-in)    │           │  (drasi-state-      │
-│                 │           │   store-json)       │
+│                 │           │   store-redb)       │
 └─────────────────┘           └─────────────────────┘
 ```
 
@@ -68,6 +68,8 @@ The state store uses `store_id` to partition data between different plugins. Eac
 - Same keys can be used by different plugins without conflict
 - Plugin data can be cleared independently
 
+In the redb provider, each `store_id` maps to a separate table in the database.
+
 ## Using State Stores
 
 ### Default (Memory) Provider
@@ -84,17 +86,17 @@ let core = DrasiLib::builder()
     .await?;
 ```
 
-### JSON Provider
+### Redb Provider
 
-To use persistent JSON file storage:
+To use ACID-compliant persistent storage with redb:
 
 ```rust
 use drasi_lib::DrasiLib;
-use drasi_state_store_json::JsonStateStoreProvider;
+use drasi_state_store_redb::RedbStateStoreProvider;
 use std::sync::Arc;
 
-// Create JSON state store provider
-let state_store = JsonStateStoreProvider::new("/data/state")?;
+// Create redb state store provider
+let state_store = RedbStateStoreProvider::new("/data/state.redb")?;
 
 // Use with DrasiLib
 let core = DrasiLib::builder()
@@ -103,6 +105,14 @@ let core = DrasiLib::builder()
     .build()
     .await?;
 ```
+
+#### Features of Redb Provider
+
+- **ACID Transactions**: All operations are atomic and durable
+- **Per-Store Tables**: Each `store_id` gets its own table for isolation
+- **Crash Safety**: Data integrity guaranteed even on unexpected termination
+- **MVCC**: Multiple readers can access data concurrently without blocking
+- **Pure Rust**: No external dependencies or native libraries required
 
 ## Accessing State Store in Plugins
 
@@ -204,10 +214,10 @@ impl StateStoreProvider for MyStateStoreProvider {
 
 ## Available Providers
 
-| Provider | Crate | Persistence | Use Case |
-|----------|-------|-------------|----------|
-| Memory | `drasi-lib` (built-in) | No | Development, testing |
-| JSON | `drasi-state-store-json` | Yes | Simple persistent storage |
+| Provider | Crate | Persistence | Atomicity | Use Case |
+|----------|-------|-------------|-----------|----------|
+| Memory | `drasi-lib` (built-in) | No | N/A | Development, testing |
+| Redb | `drasi-state-store-redb` | Yes | ACID | Production persistent storage |
 
 ## Best Practices
 
@@ -240,4 +250,3 @@ match store.get(&self.id, "key").await {
     Err(StateStoreError::StorageError(e)) => { /* handle storage error */ }
     Err(e) => { /* handle other errors */ }
 }
-```

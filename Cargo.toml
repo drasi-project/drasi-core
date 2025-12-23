@@ -41,7 +41,7 @@ members = [
   "components/indexes/garnet",
 
   # State Store Plugins
-  "components/state_stores/json",
+  "components/state_stores/redb",
 
   # Internal
   "shared-tests",

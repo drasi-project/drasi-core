@@ -13,13 +13,13 @@
 # limitations under the License.
 
 [package]
-name = "drasi-state-store-json"
+name = "drasi-state-store-redb"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "JSON file-based state store provider for Drasi plugins"
+description = "Redb-based state store provider for Drasi plugins"
 repository = "https://github.com/drasi-project/drasi-core"
-keywords = ["drasi", "state-store", "json"]
+keywords = ["drasi", "state-store", "redb", "embedded-database"]
 categories = ["database"]
 
 [lints]
@@ -28,12 +28,11 @@ workspace = true
 [dependencies]
 drasi-lib = { path = "../../../lib" }
 
-tokio = { version = "1.0", features = ["sync", "fs"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+redb = "3.1.0"
 async-trait = "0.1"
 thiserror = "2.0"
 log = "0.4"
+tokio = { version = "1.0", features = ["sync"] }
 
 [dev-dependencies]
 tempfile = "3.8"

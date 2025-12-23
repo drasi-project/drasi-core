@@ -546,15 +546,15 @@ let core = DrasiLib::builder()
     .await?;
 ```
 
-### JSON Provider
+### Redb Provider
 
-For persistent storage, use the JSON state store provider:
+For ACID-compliant persistent storage, use the redb state store provider:
 
 ```rust
-use drasi_state_store_json::JsonStateStoreProvider;
+use drasi_state_store_redb::RedbStateStoreProvider;
 use std::sync::Arc;
 
-let state_store = JsonStateStoreProvider::new("/data/state")?;
+let state_store = RedbStateStoreProvider::new("/data/state.redb")?;
 let core = DrasiLib::builder()
     .with_id("my-app")
     .with_state_store_provider(Arc::new(state_store))
