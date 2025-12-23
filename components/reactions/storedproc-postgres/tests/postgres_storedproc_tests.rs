@@ -17,14 +17,16 @@
 //! These tests validate the end-to-end behavior of the PostgreSQL-specific
 //! stored procedure reaction using testcontainers to provide a real PostgreSQL database.
 
+mod postgres_helpers;
+
 use drasi_lib::plugin_core::Reaction;
 use drasi_reaction_storedproc_postgres::config::PostgresStoredProcReactionConfig;
 use drasi_reaction_storedproc_postgres::executor::PostgresExecutor;
 use drasi_reaction_storedproc_postgres::parser::ParameterParser;
 use drasi_reaction_storedproc_postgres::PostgresStoredProcReaction;
+use postgres_helpers::{setup_postgres, PostgresConfig};
 use serde_json::json;
 use serial_test::serial;
-use shared_tests::postgres_helpers::{setup_postgres, PostgresConfig};
 use std::time::Duration;
 use tokio::time::sleep;
 

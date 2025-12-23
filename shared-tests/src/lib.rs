@@ -16,7 +16,6 @@ use async_trait::async_trait;
 use drasi_core::query::QueryBuilder;
 
 pub mod index;
-pub mod postgres_helpers;
 pub mod redis_helpers;
 pub mod sequence_counter;
 pub mod temporal_retrieval;
