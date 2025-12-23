@@ -15,8 +15,8 @@
 use crate::evaluation::context::QueryVariables;
 use crate::evaluation::functions::FunctionRegistry;
 use crate::evaluation::functions::{
-    CharLength, Coalesce, CypherLast, Function, Head, Size, Timestamp, ToBoolean, ToFloat,
-    ToInteger,
+    CharLength, Coalesce, CypherLast, Function, Head, IsEmpty, NullIf, Size, Timestamp, ToBoolean,
+    ToFloat, ToInteger,
 };
 use crate::evaluation::variable_value::integer::Integer;
 use crate::evaluation::variable_value::VariableValue;
@@ -41,6 +41,8 @@ fn create_cypher_scalar_expression_test_function_registry() -> Arc<FunctionRegis
     registry.register_function("toBoolean", Function::Scalar(Arc::new(ToBoolean {})));
     registry.register_function("toFloat", Function::Scalar(Arc::new(ToFloat {})));
     registry.register_function("toInteger", Function::Scalar(Arc::new(ToInteger {})));
+    registry.register_function("isEmpty", Function::Scalar(Arc::new(IsEmpty {})));
+    registry.register_function("nullIf", Function::Scalar(Arc::new(NullIf {})));
 
     registry
 }
@@ -551,4 +553,136 @@ async fn test_to_integer_null() {
         .await
         .unwrap();
     assert_eq!(result, VariableValue::Null);
+}
+
+#[tokio::test]
+async fn test_is_empty_string() {
+    let function_registry = create_cypher_scalar_expression_test_function_registry();
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+    let binding = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
+
+    let expr = "isEmpty('')";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
+    assert_eq!(result, VariableValue::Bool(true));
+
+    let expr = "isEmpty('hello')";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
+    assert_eq!(result, VariableValue::Bool(false));
+}
+
+#[tokio::test]
+async fn test_is_empty_list() {
+    let function_registry = create_cypher_scalar_expression_test_function_registry();
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+    let binding = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
+
+    let expr = "isEmpty([])";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
+    assert_eq!(result, VariableValue::Bool(true));
+
+    let expr = "isEmpty([1, 2, 3])";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
+    assert_eq!(result, VariableValue::Bool(false));
+}
+
+#[tokio::test]
+async fn test_is_empty_null() {
+    let function_registry = create_cypher_scalar_expression_test_function_registry();
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+    let binding = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
+
+    let expr = "isEmpty(null)";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
+    assert_eq!(result, VariableValue::Null);
+}
+
+#[tokio::test]
+async fn test_null_if_equal() {
+    let function_registry = create_cypher_scalar_expression_test_function_registry();
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+    let binding = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
+
+    let expr = "nullIf(5, 5)";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
+    assert_eq!(result, VariableValue::Null);
+}
+
+#[tokio::test]
+async fn test_null_if_not_equal() {
+    let function_registry = create_cypher_scalar_expression_test_function_registry();
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+    let binding = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
+
+    let expr = "nullIf(5, 3)";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
+    assert_eq!(result, VariableValue::Integer(Integer::from(5)));
+}
+
+#[tokio::test]
+async fn test_null_if_strings() {
+    let function_registry = create_cypher_scalar_expression_test_function_registry();
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+    let binding = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
+
+    let expr = "nullIf('hello', 'hello')";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
+    assert_eq!(result, VariableValue::Null);
+
+    let expr = "nullIf('hello', 'world')";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
+    assert_eq!(result, VariableValue::String("hello".to_string()));
 }

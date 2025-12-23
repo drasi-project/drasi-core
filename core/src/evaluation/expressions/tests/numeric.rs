@@ -14,7 +14,9 @@
 
 use std::sync::Arc;
 
-use crate::evaluation::functions::{Abs, Ceil, Floor, Function, Round, Sign};
+use crate::evaluation::functions::{
+    Abs, Ceil, Cos, Degrees, Floor, Function, Pi, Radians, Round, Sign, Sin, Tan,
+};
 use crate::evaluation::variable_value::float::Float;
 use crate::evaluation::variable_value::integer::Integer;
 use crate::evaluation::variable_value::VariableValue;
@@ -30,9 +32,15 @@ fn create_numeric_expression_test_function_registry() -> Arc<FunctionRegistry> {
 
     registry.register_function("abs", Function::Scalar(Arc::new(Abs {})));
     registry.register_function("ceil", Function::Scalar(Arc::new(Ceil {})));
+    registry.register_function("cos", Function::Scalar(Arc::new(Cos {})));
+    registry.register_function("degrees", Function::Scalar(Arc::new(Degrees {})));
     registry.register_function("floor", Function::Scalar(Arc::new(Floor {})));
+    registry.register_function("pi", Function::Scalar(Arc::new(Pi {})));
+    registry.register_function("radians", Function::Scalar(Arc::new(Radians {})));
     registry.register_function("round", Function::Scalar(Arc::new(Round {})));
     registry.register_function("sign", Function::Scalar(Arc::new(Sign {})));
+    registry.register_function("sin", Function::Scalar(Arc::new(Sin {})));
+    registry.register_function("tan", Function::Scalar(Arc::new(Tan {})));
 
     registry
 }
@@ -163,6 +171,144 @@ async fn evaluate_sign() {
                 .await
                 .unwrap(),
             VariableValue::Integer(Integer::from(1))
+        );
+    }
+}
+
+#[tokio::test]
+async fn evaluate_pi() {
+    let expr = "pi()";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+
+    let function_registry = create_numeric_expression_test_function_registry();
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+
+    let variables = QueryVariables::new();
+    {
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::Float(Float::from_f64(std::f64::consts::PI).unwrap())
+        );
+    }
+}
+
+#[tokio::test]
+async fn evaluate_sin() {
+    let expr = "sin(0.5)";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+
+    let function_registry = create_numeric_expression_test_function_registry();
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+
+    let variables = QueryVariables::new();
+    {
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::Float(Float::from_f64((0.5_f64).sin()).unwrap())
+        );
+    }
+}
+
+#[tokio::test]
+async fn evaluate_cos() {
+    let expr = "cos(0.5)";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+
+    let function_registry = create_numeric_expression_test_function_registry();
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+
+    let variables = QueryVariables::new();
+    {
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::Float(Float::from_f64((0.5_f64).cos()).unwrap())
+        );
+    }
+}
+
+#[tokio::test]
+async fn evaluate_tan() {
+    let expr = "tan(0.5)";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+
+    let function_registry = create_numeric_expression_test_function_registry();
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+
+    let variables = QueryVariables::new();
+    {
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::Float(Float::from_f64((0.5_f64).tan()).unwrap())
+        );
+    }
+}
+
+#[tokio::test]
+async fn evaluate_degrees() {
+    let expr = "degrees(3.14159)";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+
+    let function_registry = create_numeric_expression_test_function_registry();
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+
+    let variables = QueryVariables::new();
+    {
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::Float(Float::from_f64((3.14159_f64).to_degrees()).unwrap())
+        );
+    }
+}
+
+#[tokio::test]
+async fn evaluate_radians() {
+    let expr = "radians(180)";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+
+    let function_registry = create_numeric_expression_test_function_registry();
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+
+    let variables = QueryVariables::new();
+    {
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+        assert_eq!(
+            evaluator
+                .evaluate_expression(&context, &expr)
+                .await
+                .unwrap(),
+            VariableValue::Float(Float::from_f64(std::f64::consts::PI).unwrap())
         );
     }
 }

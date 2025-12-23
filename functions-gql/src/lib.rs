@@ -64,14 +64,21 @@ fn register_text_functions(registry: &FunctionRegistry) {
 fn register_numeric_functions(registry: &FunctionRegistry) {
     registry.register_function("abs", Function::Scalar(Arc::new(Abs {})));
     registry.register_function("ceil", Function::Scalar(Arc::new(Ceil {})));
+    registry.register_function("cos", Function::Scalar(Arc::new(Cos {})));
+    registry.register_function("degrees", Function::Scalar(Arc::new(Degrees {})));
     registry.register_function("floor", Function::Scalar(Arc::new(Floor {})));
+    registry.register_function("pi", Function::Scalar(Arc::new(Pi {})));
+    registry.register_function("radians", Function::Scalar(Arc::new(Radians {})));
     registry.register_function("round", Function::Scalar(Arc::new(Round {})));
+    registry.register_function("sin", Function::Scalar(Arc::new(Sin {})));
+    registry.register_function("tan", Function::Scalar(Arc::new(Tan {})));
 }
 
 fn register_gql_scalar_functions(registry: &FunctionRegistry) {
     registry.register_function("char_length", Function::Scalar(Arc::new(CharLength {})));
     registry.register_function("size", Function::Scalar(Arc::new(Size {})));
     registry.register_function("coalesce", Function::Scalar(Arc::new(Coalesce {})));
+    registry.register_function("nullIf", Function::Scalar(Arc::new(NullIf {})));
     registry.register_function("last", Function::Scalar(Arc::new(CypherLast {})));
     registry.register_function("cast", Function::Scalar(Arc::new(Cast {})));
 }

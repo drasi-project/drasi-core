@@ -12,16 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod distinct;
-mod index_of;
-mod insert;
-mod range;
-mod reduce;
-mod tail;
-
-pub use distinct::Distinct;
-pub use index_of::IndexOf;
-pub use insert::Insert;
-pub use range::Range;
-pub use reduce::Reduce;
-pub use tail::Tail;
+mod cos_tests;
+mod degrees_tests;
+mod pi_tests;
+mod radians_tests;
+mod sin_tests;
+mod tan_tests;
