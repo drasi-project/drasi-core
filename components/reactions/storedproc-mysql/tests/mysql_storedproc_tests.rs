@@ -17,15 +17,17 @@
 //! These tests validate the end-to-end behavior of the MySQL-specific
 //! stored procedure reaction using testcontainers to provide a real MySQL database.
 
+mod mysql_helpers;
+
 use drasi_lib::plugin_core::Reaction;
 use drasi_reaction_storedproc_mysql::config::MySqlStoredProcReactionConfig;
 use drasi_reaction_storedproc_mysql::executor::MySqlExecutor;
 use drasi_reaction_storedproc_mysql::parser::ParameterParser;
 use drasi_reaction_storedproc_mysql::MySqlStoredProcReaction;
 use mysql_async::prelude::*;
+use mysql_helpers::{setup_mysql, MysqlConfig};
 use serde_json::json;
 use serial_test::serial;
-use shared_tests::mysql_helpers::{setup_mysql, MysqlConfig};
 use std::time::Duration;
 use tokio::time::sleep;
 
