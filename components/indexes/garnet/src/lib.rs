@@ -12,13 +12,34 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Garnet/Redis Index Backend for Drasi
+//!
+//! This crate provides a distributed storage backend for Drasi queries using Redis/Garnet.
+//!
+//! # Usage
+//!
+//! ```ignore
+//! use drasi_index_garnet::GarnetIndexProvider;
+//! use drasi_lib::DrasiLib;
+//! use std::sync::Arc;
+//!
+//! let provider = GarnetIndexProvider::new("redis://localhost:6379", None);
+//! let drasi = DrasiLib::builder()
+//!     .with_index_provider(Arc::new(provider))
+//!     .build()?;
+//! ```
+
 use drasi_core::interface::IndexError;
 use redis::{aio::MultiplexedConnection, cmd, AsyncCommands};
 
 pub mod element_index;
 pub mod future_queue;
+mod plugin;
 pub mod result_index;
 mod storage_models;
+
+// Re-export the plugin provider for easy access
+pub use plugin::GarnetIndexProvider;
 
 trait ClearByPattern {
     async fn clear(&self, pattern: String) -> Result<(), IndexError>;

@@ -117,8 +117,8 @@ mod query_joins_tests {
 
         let source_manager = Arc::new(SourceManager::new(event_tx.clone()));
 
-        // Create a test IndexFactory with empty backends
-        let index_factory = Arc::new(crate::indexes::IndexFactory::new(vec![]));
+        // Create a test IndexFactory with empty backends (no plugin, memory only)
+        let index_factory = Arc::new(crate::indexes::IndexFactory::new(vec![], None));
 
         // Create a test middleware registry
         let middleware_registry = Arc::new(MiddlewareTypeRegistry::new());
