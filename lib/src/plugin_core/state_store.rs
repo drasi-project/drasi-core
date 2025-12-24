@@ -59,22 +59,42 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-/// Errors that can occur when interacting with a state store
+/// Errors that can occur when interacting with a state store.
+///
+/// # Note on Missing Keys
+///
+/// Missing keys are typically represented as `Ok(None)` from `get()`, not as
+/// `KeyNotFound` errors. The `KeyNotFound` variant is available for custom
+/// implementations that need to distinguish between "key doesn't exist" and
+/// other error conditions, but the standard trait methods prefer returning
+/// `Option` values.
 #[derive(Error, Debug)]
 pub enum StateStoreError {
-    /// The requested key was not found in the store
+    /// The requested key was not found in the store.
+    ///
+    /// Note: Standard implementations return `Ok(None)` for missing keys instead
+    /// of this error. This variant is provided for custom implementations that
+    /// need explicit error-based handling of missing keys.
     #[error("Key not found: {0}")]
     KeyNotFound(String),
 
-    /// Failed to serialize or deserialize data
+    /// Failed to serialize or deserialize data.
+    ///
+    /// This error typically occurs when stored data cannot be parsed or when
+    /// data being stored cannot be serialized to the expected format.
     #[error("Serialization error: {0}")]
     SerializationError(String),
 
-    /// Failed to read or write to the underlying storage
+    /// Failed to read or write to the underlying storage.
+    ///
+    /// This error indicates I/O failures, database errors, or other storage
+    /// backend issues.
     #[error("Storage error: {0}")]
     StorageError(String),
 
-    /// Generic error for other failures
+    /// Generic error for other failures.
+    ///
+    /// Use this for errors that don't fit the other categories.
     #[error("State store error: {0}")]
     Other(String),
 }
@@ -201,16 +221,12 @@ pub trait StateStoreProvider: Send + Sync {
     ///
     /// # Arguments
     /// * `store_id` - The partition identifier (typically the plugin ID)
-    /// * `entries` - The key-value pairs to store (ownership is transferred)
+    /// * `entries` - The key-value pairs to store
     ///
     /// # Returns
     /// * `Ok(())` - All values were successfully stored
     /// * `Err(e)` - An error occurred (some values may have been stored)
-    async fn set_many(
-        &self,
-        store_id: &str,
-        entries: Vec<(String, Vec<u8>)>,
-    ) -> StateStoreResult<()>;
+    async fn set_many(&self, store_id: &str, entries: &[(&str, &[u8])]) -> StateStoreResult<()>;
 
     /// Delete multiple keys from a store partition.
     ///
@@ -379,16 +395,12 @@ impl StateStoreProvider for MemoryStateStoreProvider {
         Ok(result)
     }
 
-    async fn set_many(
-        &self,
-        store_id: &str,
-        entries: Vec<(String, Vec<u8>)>,
-    ) -> StateStoreResult<()> {
+    async fn set_many(&self, store_id: &str, entries: &[(&str, &[u8])]) -> StateStoreResult<()> {
         let mut stores = self.stores.write().await;
         let store = stores.entry(store_id.to_string()).or_default();
 
         for (key, value) in entries {
-            store.insert(key, value);
+            store.insert((*key).to_string(), value.to_vec());
         }
 
         Ok(())
@@ -507,7 +519,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Get multiple (including non-existent)
+        // Get multiple (including non-existent key)
         let result = provider
             .get_many("store1", &["key1", "key2", "nonexistent"])
             .await
@@ -516,21 +528,22 @@ mod tests {
         assert_eq!(result.get("key1"), Some(&b"value1".to_vec()));
         assert_eq!(result.get("key2"), Some(&b"value2".to_vec()));
         assert_eq!(result.get("nonexistent"), None);
+
+        // Get from non-existent store returns empty HashMap
+        let result = provider
+            .get_many("nonexistent_store", &["key1", "key2"])
+            .await
+            .unwrap();
+        assert!(result.is_empty());
     }
 
     #[tokio::test]
     async fn test_memory_state_store_set_many() {
         let provider = MemoryStateStoreProvider::new();
 
-        // Set multiple values (new signature takes ownership)
+        // Set multiple values
         provider
-            .set_many(
-                "store1",
-                vec![
-                    ("key1".to_string(), b"value1".to_vec()),
-                    ("key2".to_string(), b"value2".to_vec()),
-                ],
-            )
+            .set_many("store1", &[("key1", b"value1"), ("key2", b"value2")])
             .await
             .unwrap();
 
@@ -545,15 +558,11 @@ mod tests {
     async fn test_memory_state_store_delete_many() {
         let provider = MemoryStateStoreProvider::new();
 
-        // Set multiple values (new signature takes ownership)
+        // Set multiple values
         provider
             .set_many(
                 "store1",
-                vec![
-                    ("key1".to_string(), b"value1".to_vec()),
-                    ("key2".to_string(), b"value2".to_vec()),
-                    ("key3".to_string(), b"value3".to_vec()),
-                ],
+                &[("key1", b"value1"), ("key2", b"value2"), ("key3", b"value3")],
             )
             .await
             .unwrap();
@@ -685,15 +694,9 @@ mod tests {
         provider.delete("store1", "key1").await.unwrap();
         assert!(!provider.store_exists("store1").await.unwrap());
 
-        // Also test with delete_many (new signature takes ownership)
+        // Also test with delete_many
         provider
-            .set_many(
-                "store2",
-                vec![
-                    ("key1".to_string(), b"value1".to_vec()),
-                    ("key2".to_string(), b"value2".to_vec()),
-                ],
-            )
+            .set_many("store2", &[("key1", b"value1"), ("key2", b"value2")])
             .await
             .unwrap();
         assert!(provider.store_exists("store2").await.unwrap());
@@ -778,5 +781,327 @@ mod tests {
             .await
             .unwrap();
         provider.sync().await.unwrap();
+    }
+
+    // =========================================================================
+    // Edge Case Tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_memory_state_store_empty_key() {
+        let provider = MemoryStateStoreProvider::new();
+
+        // Empty key should work
+        provider.set("store1", "", b"value".to_vec()).await.unwrap();
+        let result = provider.get("store1", "").await.unwrap();
+        assert_eq!(result, Some(b"value".to_vec()));
+
+        // Should be listable
+        let keys = provider.list_keys("store1").await.unwrap();
+        assert_eq!(keys, vec![""]);
+    }
+
+    #[tokio::test]
+    async fn test_memory_state_store_empty_value() {
+        let provider = MemoryStateStoreProvider::new();
+
+        // Empty value should work
+        provider.set("store1", "key", vec![]).await.unwrap();
+        let result = provider.get("store1", "key").await.unwrap();
+        assert_eq!(result, Some(vec![]));
+
+        // Key should exist and be counted
+        assert!(provider.contains_key("store1", "key").await.unwrap());
+        assert_eq!(provider.key_count("store1").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_memory_state_store_empty_store_id() {
+        let provider = MemoryStateStoreProvider::new();
+
+        // Empty store_id should work
+        provider.set("", "key", b"value".to_vec()).await.unwrap();
+        let result = provider.get("", "key").await.unwrap();
+        assert_eq!(result, Some(b"value".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_memory_state_store_unicode_keys() {
+        let provider = MemoryStateStoreProvider::new();
+
+        // Unicode in keys
+        provider
+            .set("store1", "キー", b"value".to_vec())
+            .await
+            .unwrap();
+        provider
+            .set("store1", "مفتاح", b"value2".to_vec())
+            .await
+            .unwrap();
+        provider
+            .set("store1", "🔑", b"value3".to_vec())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            provider.get("store1", "キー").await.unwrap(),
+            Some(b"value".to_vec())
+        );
+        assert_eq!(
+            provider.get("store1", "مفتاح").await.unwrap(),
+            Some(b"value2".to_vec())
+        );
+        assert_eq!(
+            provider.get("store1", "🔑").await.unwrap(),
+            Some(b"value3".to_vec())
+        );
+
+        assert_eq!(provider.key_count("store1").await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_memory_state_store_unicode_store_id() {
+        let provider = MemoryStateStoreProvider::new();
+
+        // Unicode in store_id
+        provider
+            .set("商店", "key", b"value".to_vec())
+            .await
+            .unwrap();
+        provider
+            .set("متجر", "key", b"value2".to_vec())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            provider.get("商店", "key").await.unwrap(),
+            Some(b"value".to_vec())
+        );
+        assert_eq!(
+            provider.get("متجر", "key").await.unwrap(),
+            Some(b"value2".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memory_state_store_special_characters() {
+        let provider = MemoryStateStoreProvider::new();
+
+        // Special characters in keys
+        let special_keys = [
+            "key:with:colons",
+            "key/with/slashes",
+            "key\\with\\backslashes",
+            "key\twith\ttabs",
+            "key\nwith\nnewlines",
+            "key with spaces",
+            "key\0with\0nulls",
+            "key\"with\"quotes",
+            "key'with'apostrophes",
+        ];
+
+        for (i, key) in special_keys.iter().enumerate() {
+            provider.set("store1", key, vec![i as u8]).await.unwrap();
+        }
+
+        for (i, key) in special_keys.iter().enumerate() {
+            let result = provider.get("store1", key).await.unwrap();
+            assert_eq!(result, Some(vec![i as u8]), "Failed for key: {key:?}");
+        }
+
+        assert_eq!(
+            provider.key_count("store1").await.unwrap(),
+            special_keys.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memory_state_store_large_value() {
+        let provider = MemoryStateStoreProvider::new();
+
+        // Large value (1MB)
+        let large_value: Vec<u8> = (0..1_000_000).map(|i| (i % 256) as u8).collect();
+        provider
+            .set("store1", "large", large_value.clone())
+            .await
+            .unwrap();
+
+        let result = provider.get("store1", "large").await.unwrap();
+        assert_eq!(result, Some(large_value));
+    }
+
+    #[tokio::test]
+    async fn test_memory_state_store_long_key() {
+        let provider = MemoryStateStoreProvider::new();
+
+        // Very long key (10KB)
+        let long_key: String = "k".repeat(10_000);
+        provider
+            .set("store1", &long_key, b"value".to_vec())
+            .await
+            .unwrap();
+
+        let result = provider.get("store1", &long_key).await.unwrap();
+        assert_eq!(result, Some(b"value".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_memory_state_store_long_store_id() {
+        let provider = MemoryStateStoreProvider::new();
+
+        // Very long store_id (10KB)
+        let long_store_id: String = "s".repeat(10_000);
+        provider
+            .set(&long_store_id, "key", b"value".to_vec())
+            .await
+            .unwrap();
+
+        let result = provider.get(&long_store_id, "key").await.unwrap();
+        assert_eq!(result, Some(b"value".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_memory_state_store_overwrite() {
+        let provider = MemoryStateStoreProvider::new();
+
+        // Overwrite existing key
+        provider
+            .set("store1", "key", b"value1".to_vec())
+            .await
+            .unwrap();
+        provider
+            .set("store1", "key", b"value2".to_vec())
+            .await
+            .unwrap();
+
+        let result = provider.get("store1", "key").await.unwrap();
+        assert_eq!(result, Some(b"value2".to_vec()));
+
+        // Should still be just 1 key
+        assert_eq!(provider.key_count("store1").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_memory_state_store_binary_data() {
+        let provider = MemoryStateStoreProvider::new();
+
+        // All byte values 0-255
+        let binary_data: Vec<u8> = (0u8..=255).collect();
+        provider
+            .set("store1", "binary", binary_data.clone())
+            .await
+            .unwrap();
+
+        let result = provider.get("store1", "binary").await.unwrap();
+        assert_eq!(result, Some(binary_data));
+    }
+
+    #[tokio::test]
+    async fn test_memory_state_store_get_many_empty_keys() {
+        let provider = MemoryStateStoreProvider::new();
+
+        provider
+            .set("store1", "key1", b"value1".to_vec())
+            .await
+            .unwrap();
+
+        // Empty keys array
+        let result = provider.get_many("store1", &[]).await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_memory_state_store_set_many_empty() {
+        let provider = MemoryStateStoreProvider::new();
+
+        // Empty entries should succeed
+        provider.set_many("store1", &[]).await.unwrap();
+
+        // Store should not exist (no data added)
+        assert!(!provider.store_exists("store1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_memory_state_store_delete_many_empty() {
+        let provider = MemoryStateStoreProvider::new();
+
+        provider
+            .set("store1", "key1", b"value1".to_vec())
+            .await
+            .unwrap();
+
+        // Empty keys array should delete nothing
+        let count = provider.delete_many("store1", &[]).await.unwrap();
+        assert_eq!(count, 0);
+
+        // Key should still exist
+        assert!(provider.contains_key("store1", "key1").await.unwrap());
+
+        // Delete from non-existent store should return 0
+        let count = provider
+            .delete_many("nonexistent_store", &["key1", "key2"])
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_memory_state_store_concurrent_access() {
+        use std::sync::Arc;
+
+        let provider = Arc::new(MemoryStateStoreProvider::new());
+
+        // Spawn multiple concurrent tasks
+        let mut handles = vec![];
+        for i in 0..10 {
+            let p = provider.clone();
+            handles.push(tokio::spawn(async move {
+                let key = format!("key{i}");
+                let value = vec![i as u8; 10];
+                p.set("store", &key, value.clone()).await.unwrap();
+                let result = p.get("store", &key).await.unwrap();
+                assert_eq!(result, Some(value));
+            }));
+        }
+
+        // Wait for all to complete
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // Verify all keys exist
+        assert_eq!(provider.key_count("store").await.unwrap(), 10);
+    }
+
+    #[tokio::test]
+    async fn test_memory_state_store_concurrent_different_stores() {
+        use std::sync::Arc;
+
+        let provider = Arc::new(MemoryStateStoreProvider::new());
+
+        // Spawn tasks that write to different stores concurrently
+        let mut handles = vec![];
+        for i in 0..10 {
+            let p = provider.clone();
+            handles.push(tokio::spawn(async move {
+                let store_id = format!("store{i}");
+                for j in 0..5 {
+                    let key = format!("key{j}");
+                    let value = vec![i as u8, j as u8];
+                    p.set(&store_id, &key, value).await.unwrap();
+                }
+            }));
+        }
+
+        // Wait for all to complete
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // Verify each store has 5 keys
+        for i in 0..10 {
+            let store_id = format!("store{i}");
+            assert_eq!(provider.key_count(&store_id).await.unwrap(), 5);
+        }
     }
 }

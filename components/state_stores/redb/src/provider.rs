@@ -398,15 +398,16 @@ impl StateStoreProvider for RedbStateStoreProvider {
         .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
     }
 
-    async fn set_many(
-        &self,
-        store_id: &str,
-        entries: Vec<(String, Vec<u8>)>,
-    ) -> StateStoreResult<()> {
+    async fn set_many(&self, store_id: &str, entries: &[(&str, &[u8])]) -> StateStoreResult<()> {
         let table_name = self.get_or_create_table_name(store_id).await;
         let db = self.db.clone();
         let store_id = store_id.to_string();
         let entry_count = entries.len();
+        // Clone entries for the blocking closure
+        let entries: Vec<(String, Vec<u8>)> = entries
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.to_vec()))
+            .collect();
 
         tokio::task::spawn_blocking(move || {
             let write_txn = db.begin_write().map_err(|e| {
@@ -858,6 +859,10 @@ mod tests {
 
         // Store should not exist anymore
         assert!(!provider.store_exists("store1").await.unwrap());
+
+        // Clear non-existent store should return 0
+        let count = provider.clear_store("nonexistent").await.unwrap();
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]
@@ -913,8 +918,9 @@ mod tests {
         let db_path = temp_dir.path().join("test.redb");
         let provider = RedbStateStoreProvider::new(&db_path).unwrap();
 
-        // Empty store has 0 keys
+        // Empty/non-existent store has 0 keys
         assert_eq!(provider.key_count("store1").await.unwrap(), 0);
+        assert_eq!(provider.key_count("nonexistent").await.unwrap(), 0);
 
         // Set values
         provider
@@ -928,6 +934,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(provider.key_count("store1").await.unwrap(), 2);
+
+        // Different store still has 0 keys
+        assert_eq!(provider.key_count("store2").await.unwrap(), 0);
 
         // Delete a key
         provider.delete("store1", "key1").await.unwrap();
@@ -954,7 +963,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Get multiple (including non-existent)
+        // Get multiple (including non-existent key)
         let result = provider
             .get_many("store1", &["key1", "key2", "nonexistent"])
             .await
@@ -962,6 +971,13 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result.get("key1"), Some(&b"value1".to_vec()));
         assert_eq!(result.get("key2"), Some(&b"value2".to_vec()));
+
+        // Get from non-existent store returns empty HashMap
+        let result = provider
+            .get_many("nonexistent_store", &["key1", "key2"])
+            .await
+            .unwrap();
+        assert!(result.is_empty());
     }
 
     #[tokio::test]
@@ -970,15 +986,9 @@ mod tests {
         let db_path = temp_dir.path().join("test.redb");
         let provider = RedbStateStoreProvider::new(&db_path).unwrap();
 
-        // Set multiple values atomically (new signature takes ownership)
+        // Set multiple values atomically
         provider
-            .set_many(
-                "store1",
-                vec![
-                    ("key1".to_string(), b"value1".to_vec()),
-                    ("key2".to_string(), b"value2".to_vec()),
-                ],
-            )
+            .set_many("store1", &[("key1", b"value1"), ("key2", b"value2")])
             .await
             .unwrap();
 
@@ -995,14 +1005,14 @@ mod tests {
         let db_path = temp_dir.path().join("test.redb");
         let provider = RedbStateStoreProvider::new(&db_path).unwrap();
 
-        // Set multiple values (new signature takes ownership)
+        // Set multiple values
         provider
             .set_many(
                 "store1",
-                vec![
-                    ("key1".to_string(), b"value1".to_vec()),
-                    ("key2".to_string(), b"value2".to_vec()),
-                    ("key3".to_string(), b"value3".to_vec()),
+                &[
+                    ("key1", b"value1"),
+                    ("key2", b"value2"),
+                    ("key3", b"value3"),
                 ],
             )
             .await
@@ -1159,5 +1169,512 @@ mod tests {
             let store_id = format!("store{i}");
             assert_eq!(provider.key_count(&store_id).await.unwrap(), 5);
         }
+    }
+
+    // =========================================================================
+    // Edge Case Tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_redb_empty_key() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+        // Empty key should work
+        provider.set("store1", "", b"value".to_vec()).await.unwrap();
+        let result = provider.get("store1", "").await.unwrap();
+        assert_eq!(result, Some(b"value".to_vec()));
+
+        // Should be listable
+        let keys = provider.list_keys("store1").await.unwrap();
+        assert_eq!(keys, vec![""]);
+    }
+
+    #[tokio::test]
+    async fn test_redb_empty_value() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+        // Empty value should work
+        provider.set("store1", "key", vec![]).await.unwrap();
+        let result = provider.get("store1", "key").await.unwrap();
+        assert_eq!(result, Some(vec![]));
+
+        // Key should exist and be counted
+        assert!(provider.contains_key("store1", "key").await.unwrap());
+        assert_eq!(provider.key_count("store1").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_redb_empty_store_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+        // Empty store_id should work (prefixed with "store_")
+        provider.set("", "key", b"value".to_vec()).await.unwrap();
+        let result = provider.get("", "key").await.unwrap();
+        assert_eq!(result, Some(b"value".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_redb_unicode_keys() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+        // Unicode in keys
+        provider
+            .set("store1", "キー", b"value".to_vec())
+            .await
+            .unwrap();
+        provider
+            .set("store1", "مفتاح", b"value2".to_vec())
+            .await
+            .unwrap();
+        provider
+            .set("store1", "🔑", b"value3".to_vec())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            provider.get("store1", "キー").await.unwrap(),
+            Some(b"value".to_vec())
+        );
+        assert_eq!(
+            provider.get("store1", "مفتاح").await.unwrap(),
+            Some(b"value2".to_vec())
+        );
+        assert_eq!(
+            provider.get("store1", "🔑").await.unwrap(),
+            Some(b"value3".to_vec())
+        );
+
+        assert_eq!(provider.key_count("store1").await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_redb_unicode_store_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+        // Unicode in store_id
+        provider
+            .set("商店", "key", b"value".to_vec())
+            .await
+            .unwrap();
+        provider
+            .set("متجر", "key", b"value2".to_vec())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            provider.get("商店", "key").await.unwrap(),
+            Some(b"value".to_vec())
+        );
+        assert_eq!(
+            provider.get("متجر", "key").await.unwrap(),
+            Some(b"value2".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_redb_special_characters() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+        // Special characters in keys
+        let special_keys = [
+            "key:with:colons",
+            "key/with/slashes",
+            "key\\with\\backslashes",
+            "key\twith\ttabs",
+            "key\nwith\nnewlines",
+            "key with spaces",
+            "key\0with\0nulls",
+            "key\"with\"quotes",
+            "key'with'apostrophes",
+        ];
+
+        for (i, key) in special_keys.iter().enumerate() {
+            provider.set("store1", key, vec![i as u8]).await.unwrap();
+        }
+
+        for (i, key) in special_keys.iter().enumerate() {
+            let result = provider.get("store1", key).await.unwrap();
+            assert_eq!(result, Some(vec![i as u8]), "Failed for key: {key:?}");
+        }
+
+        assert_eq!(
+            provider.key_count("store1").await.unwrap(),
+            special_keys.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_redb_large_value() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+        // Large value (1MB)
+        let large_value: Vec<u8> = (0..1_000_000).map(|i| (i % 256) as u8).collect();
+        provider
+            .set("store1", "large", large_value.clone())
+            .await
+            .unwrap();
+
+        let result = provider.get("store1", "large").await.unwrap();
+        assert_eq!(result, Some(large_value));
+    }
+
+    #[tokio::test]
+    async fn test_redb_long_key() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+        // Very long key (10KB)
+        let long_key: String = "k".repeat(10_000);
+        provider
+            .set("store1", &long_key, b"value".to_vec())
+            .await
+            .unwrap();
+
+        let result = provider.get("store1", &long_key).await.unwrap();
+        assert_eq!(result, Some(b"value".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_redb_long_store_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+        // Very long store_id (1KB - keeping shorter for table names)
+        let long_store_id: String = "s".repeat(1_000);
+        provider
+            .set(&long_store_id, "key", b"value".to_vec())
+            .await
+            .unwrap();
+
+        let result = provider.get(&long_store_id, "key").await.unwrap();
+        assert_eq!(result, Some(b"value".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_redb_overwrite() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+        // Overwrite existing key
+        provider
+            .set("store1", "key", b"value1".to_vec())
+            .await
+            .unwrap();
+        provider
+            .set("store1", "key", b"value2".to_vec())
+            .await
+            .unwrap();
+
+        let result = provider.get("store1", "key").await.unwrap();
+        assert_eq!(result, Some(b"value2".to_vec()));
+
+        // Should still be just 1 key
+        assert_eq!(provider.key_count("store1").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_redb_get_many_empty_keys() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+        provider
+            .set("store1", "key1", b"value1".to_vec())
+            .await
+            .unwrap();
+
+        // Empty keys array
+        let result = provider.get_many("store1", &[]).await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_redb_set_many_empty() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+        // Empty entries should succeed
+        provider.set_many("store1", &[]).await.unwrap();
+
+        // Store should not exist (no data added)
+        assert!(!provider.store_exists("store1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_redb_delete_many_empty() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+        provider
+            .set("store1", "key1", b"value1".to_vec())
+            .await
+            .unwrap();
+
+        // Empty keys array should delete nothing
+        let count = provider.delete_many("store1", &[]).await.unwrap();
+        assert_eq!(count, 0);
+
+        // Key should still exist
+        assert!(provider.contains_key("store1", "key1").await.unwrap());
+
+        // Delete from non-existent store should return 0
+        let count = provider
+            .delete_many("nonexistent_store", &["key1", "key2"])
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_redb_persistence_across_instances() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+
+        // First instance - write data
+        {
+            let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+            provider
+                .set_many(
+                    "store1",
+                    &[
+                        ("key1", b"value1"),
+                        ("key2", b"value2"),
+                        ("key3", b"value3"),
+                    ],
+                )
+                .await
+                .unwrap();
+        }
+
+        // Second instance - verify data persisted
+        {
+            let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+            assert!(provider.store_exists("store1").await.unwrap());
+            assert_eq!(provider.key_count("store1").await.unwrap(), 3);
+
+            let result = provider
+                .get_many("store1", &["key1", "key2", "key3"])
+                .await
+                .unwrap();
+            assert_eq!(result.len(), 3);
+            assert_eq!(result.get("key1"), Some(&b"value1".to_vec()));
+            assert_eq!(result.get("key2"), Some(&b"value2".to_vec()));
+            assert_eq!(result.get("key3"), Some(&b"value3".to_vec()));
+        }
+
+        // Third instance - modify and verify
+        {
+            let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+            // Delete one key
+            provider.delete("store1", "key2").await.unwrap();
+
+            // Update another
+            provider
+                .set("store1", "key1", b"updated".to_vec())
+                .await
+                .unwrap();
+
+            assert_eq!(provider.key_count("store1").await.unwrap(), 2);
+        }
+
+        // Fourth instance - verify final state
+        {
+            let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+            assert_eq!(
+                provider.get("store1", "key1").await.unwrap(),
+                Some(b"updated".to_vec())
+            );
+            assert_eq!(provider.get("store1", "key2").await.unwrap(), None);
+            assert_eq!(
+                provider.get("store1", "key3").await.unwrap(),
+                Some(b"value3".to_vec())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_redb_multiple_stores_persistence() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+
+        // Create multiple stores
+        {
+            let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+            for i in 0..5 {
+                let store_id = format!("store{i}");
+                for j in 0..3 {
+                    let key = format!("key{j}");
+                    let value = format!("value_{i}_{j}").into_bytes();
+                    provider.set(&store_id, &key, value).await.unwrap();
+                }
+            }
+        }
+
+        // Verify all stores persisted
+        {
+            let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+            for i in 0..5 {
+                let store_id = format!("store{i}");
+                assert!(provider.store_exists(&store_id).await.unwrap());
+                assert_eq!(provider.key_count(&store_id).await.unwrap(), 3);
+            }
+        }
+
+        // Clear one store and verify others unaffected
+        {
+            let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+            provider.clear_store("store2").await.unwrap();
+
+            assert!(!provider.store_exists("store2").await.unwrap());
+            assert!(provider.store_exists("store0").await.unwrap());
+            assert!(provider.store_exists("store4").await.unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_redb_table_name_cache_reuse() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+        // Access same store multiple times
+        for i in 0..10 {
+            provider
+                .set("store1", &format!("key{i}"), vec![i as u8])
+                .await
+                .unwrap();
+        }
+
+        // Should only have one cached table name
+        assert_eq!(provider.cached_table_name_count().await, 1);
+
+        // Access different stores
+        provider.set("store2", "key", vec![]).await.unwrap();
+        provider.set("store3", "key", vec![]).await.unwrap();
+
+        // Now should have 3 cached names
+        assert_eq!(provider.cached_table_name_count().await, 3);
+    }
+
+    #[tokio::test]
+    async fn test_redb_clear_and_reuse_store() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+        // Add data
+        provider
+            .set("store1", "key1", b"value1".to_vec())
+            .await
+            .unwrap();
+        provider
+            .set("store1", "key2", b"value2".to_vec())
+            .await
+            .unwrap();
+
+        assert_eq!(provider.key_count("store1").await.unwrap(), 2);
+
+        // Clear the store
+        let count = provider.clear_store("store1").await.unwrap();
+        assert_eq!(count, 2);
+        assert!(!provider.store_exists("store1").await.unwrap());
+
+        // Reuse the same store
+        provider
+            .set("store1", "newkey", b"newvalue".to_vec())
+            .await
+            .unwrap();
+
+        assert!(provider.store_exists("store1").await.unwrap());
+        assert_eq!(provider.key_count("store1").await.unwrap(), 1);
+        assert_eq!(
+            provider.get("store1", "newkey").await.unwrap(),
+            Some(b"newvalue".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_redb_batch_operations_atomicity() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let provider = Arc::new(RedbStateStoreProvider::new(&db_path).unwrap());
+
+        // Set many should be atomic
+        provider
+            .set_many(
+                "store1",
+                &[
+                    ("key1", b"value1"),
+                    ("key2", b"value2"),
+                    ("key3", b"value3"),
+                ],
+            )
+            .await
+            .unwrap();
+
+        // All should exist
+        assert_eq!(provider.key_count("store1").await.unwrap(), 3);
+
+        // Delete many should be atomic
+        let deleted = provider
+            .delete_many("store1", &["key1", "key2"])
+            .await
+            .unwrap();
+        assert_eq!(deleted, 2);
+        assert_eq!(provider.key_count("store1").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_redb_high_concurrency_same_store() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let provider = Arc::new(RedbStateStoreProvider::new(&db_path).unwrap());
+
+        // Spawn many concurrent tasks writing to same store
+        let mut handles = vec![];
+        for i in 0..50 {
+            let p = provider.clone();
+            handles.push(tokio::spawn(async move {
+                let key = format!("key{i}");
+                let value = vec![i as u8; 100];
+                p.set("store", &key, value.clone()).await.unwrap();
+
+                // Verify our write
+                let result = p.get("store", &key).await.unwrap();
+                assert_eq!(result, Some(value));
+            }));
+        }
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // Verify all keys written
+        assert_eq!(provider.key_count("store").await.unwrap(), 50);
     }
 }

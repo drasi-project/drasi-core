@@ -39,26 +39,44 @@ The `StateStoreProvider` trait defines the interface for all state store impleme
 ```rust
 #[async_trait]
 pub trait StateStoreProvider: Send + Sync {
-    // Get a single value
+    // Single-key operations
     async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>>;
-    
-    // Set a single value
     async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()>;
-    
-    // Delete a single key
     async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool>;
-    
+    async fn contains_key(&self, store_id: &str, key: &str) -> StateStoreResult<bool>;
+
     // Batch operations
     async fn get_many(&self, store_id: &str, keys: &[&str]) -> StateStoreResult<HashMap<String, Vec<u8>>>;
-    async fn set_many(&self, store_id: &str, entries: &[(&str, Vec<u8>)]) -> StateStoreResult<()>;
+    async fn set_many(&self, store_id: &str, entries: &[(&str, &[u8])]) -> StateStoreResult<()>;
     async fn delete_many(&self, store_id: &str, keys: &[&str]) -> StateStoreResult<usize>;
-    
+
     // Store management
     async fn clear_store(&self, store_id: &str) -> StateStoreResult<usize>;
     async fn list_keys(&self, store_id: &str) -> StateStoreResult<Vec<String>>;
-    async fn store_exists(&self, store_id: &str) -> bool;
+    async fn store_exists(&self, store_id: &str) -> StateStoreResult<bool>;
+    async fn key_count(&self, store_id: &str) -> StateStoreResult<usize>;
+
+    // Durability (default implementation is no-op)
+    async fn sync(&self) -> StateStoreResult<()> { Ok(()) }
 }
 ```
+
+### Method Reference
+
+| Method | Description |
+|--------|-------------|
+| `get` | Retrieve a value by key. Returns `Ok(None)` if key doesn't exist. |
+| `set` | Store a value. Overwrites if key exists. |
+| `delete` | Delete a key. Returns `true` if key existed. |
+| `contains_key` | Check if a key exists without retrieving the value. |
+| `get_many` | Batch get. Missing keys are not included in result. |
+| `set_many` | Batch set. Implementation clones data as needed. |
+| `delete_many` | Batch delete. Returns count of deleted keys. |
+| `clear_store` | Delete all keys in a store partition. Returns count. |
+| `list_keys` | Get all keys in a store partition. |
+| `store_exists` | Check if a store has any data. |
+| `key_count` | Count keys in a store partition. |
+| `sync` | Force durability. No-op for memory provider. |
 
 ### Partitioning with StoreId
 
@@ -113,6 +131,22 @@ let core = DrasiLib::builder()
 - **Crash Safety**: Data integrity guaranteed even on unexpected termination
 - **MVCC**: Multiple readers can access data concurrently without blocking
 - **Pure Rust**: No external dependencies or native libraries required
+
+#### Redb Memory Considerations
+
+The redb provider caches table names internally to improve performance. This cache uses a small amount of memory per unique `store_id` that is retained for the lifetime of the provider.
+
+For typical use cases with a bounded number of plugins (e.g., 10-50 stores), this is negligible. However, if your application dynamically creates many unique `store_id` values (thousands), memory usage will grow proportionally.
+
+```rust
+// Monitor cache size if needed
+let provider = RedbStateStoreProvider::new("/data/state.redb")?;
+let cached_count = provider.cached_table_name_count().await;
+println!("Cached table names: {}", cached_count);
+
+// Clear cache during idle periods if needed
+provider.clear_table_name_cache().await;
+```
 
 ## Accessing State Store in Plugins
 
@@ -233,10 +267,13 @@ All state store operations return `StateStoreResult<T>`, which is an alias for `
 
 ```rust
 pub enum StateStoreError {
+    /// The requested key was not found (rarely used - prefer Ok(None))
     KeyNotFound(String),
+    /// Failed to serialize or deserialize data
     SerializationError(String),
+    /// Failed to read or write to the underlying storage
     StorageError(String),
-    StoreNotFound(String),
+    /// Generic error for other failures
     Other(String),
 }
 ```
@@ -246,7 +283,7 @@ Handle errors appropriately in your plugin:
 ```rust
 match store.get(&self.id, "key").await {
     Ok(Some(value)) => { /* use value */ }
-    Ok(None) => { /* key doesn't exist */ }
+    Ok(None) => { /* key doesn't exist - this is the normal case */ }
     Err(StateStoreError::StorageError(e)) => { /* handle storage error */ }
     Err(e) => { /* handle other errors */ }
 }
