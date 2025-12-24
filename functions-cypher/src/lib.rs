@@ -34,6 +34,7 @@ impl CypherFunctionSet for Arc<FunctionRegistry> {
 pub fn register_default_cypher_functions(registry: &FunctionRegistry) {
     register_text_functions(registry);
     register_numeric_functions(registry);
+    register_trigonometric_functions(registry);
     register_cypher_scalar_functions(registry);
     register_list_functions(registry);
     register_metadata_functions(registry);
@@ -67,14 +68,17 @@ fn register_text_functions(registry: &FunctionRegistry) {
 fn register_numeric_functions(registry: &FunctionRegistry) {
     registry.register_function("abs", Function::Scalar(Arc::new(Abs {})));
     registry.register_function("ceil", Function::Scalar(Arc::new(Ceil {})));
-    registry.register_function("cos", Function::Scalar(Arc::new(Cos {})));
-    registry.register_function("degrees", Function::Scalar(Arc::new(Degrees {})));
     registry.register_function("floor", Function::Scalar(Arc::new(Floor {})));
-    registry.register_function("pi", Function::Scalar(Arc::new(Pi {})));
-    registry.register_function("radians", Function::Scalar(Arc::new(Radians {})));
     registry.register_function("rand", Function::Scalar(Arc::new(Rand {})));
     registry.register_function("round", Function::Scalar(Arc::new(Round {})));
     registry.register_function("sign", Function::Scalar(Arc::new(Sign {})));
+}
+
+fn register_trigonometric_functions(registry: &FunctionRegistry) {
+    registry.register_function("cos", Function::Scalar(Arc::new(Cos {})));
+    registry.register_function("degrees", Function::Scalar(Arc::new(Degrees {})));
+    registry.register_function("pi", Function::Scalar(Arc::new(Pi {})));
+    registry.register_function("radians", Function::Scalar(Arc::new(Radians {})));
     registry.register_function("sin", Function::Scalar(Arc::new(Sin {})));
     registry.register_function("tan", Function::Scalar(Arc::new(Tan {})));
 }
