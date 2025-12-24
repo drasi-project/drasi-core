@@ -19,17 +19,10 @@ use drasi_lib::plugin_core::{StateStoreError, StateStoreProvider, StateStoreResu
 use log::{debug, info};
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::collections::HashMap;
+use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-
-/// Table definition for storing key-value pairs.
-/// Each store_id gets its own table with string keys and byte array values.
-const fn table_definition(
-    name: &'static str,
-) -> TableDefinition<'static, &'static str, &'static [u8]> {
-    TableDefinition::new(name)
-}
 
 /// Redb-based state store provider.
 ///
@@ -46,6 +39,21 @@ const fn table_definition(
 /// All read and write operations are atomic. Batch operations (set_many, delete_many)
 /// are performed in a single transaction.
 ///
+/// # Memory Considerations
+///
+/// This implementation uses `Box::leak` to create static string references required
+/// by redb's `TableDefinition` API. Each unique `store_id` allocates a small amount
+/// of memory (the table name string) that is never freed during the process lifetime.
+///
+/// **Important Limitation**: If your application creates many unique `store_id` values
+/// (e.g., thousands of per-user or per-session stores), memory usage will grow
+/// unboundedly. For typical use cases with a bounded number of plugins/stores,
+/// this is negligible. The leaked memory is reclaimed when the process exits.
+///
+/// For applications that need to reclaim memory, use [`clear_table_name_cache()`]
+/// to clear the cache (note: this doesn't reclaim already-leaked strings, but
+/// prevents new allocations for the same store_ids).
+///
 /// # Example
 ///
 /// ```ignore
@@ -60,20 +68,25 @@ const fn table_definition(
 ///     .build()
 ///     .await?;
 /// ```
-///
-/// # Memory Considerations
-///
-/// This implementation uses `Box::leak` to create static string references required
-/// by redb's `TableDefinition` API. Each unique `store_id` allocates a small amount
-/// of memory (the table name string) that is never freed during the process lifetime.
-/// For typical use cases with a bounded number of plugins/stores, this is negligible.
-/// The leaked memory is reclaimed when the process exits.
 pub struct RedbStateStoreProvider {
     /// The redb database instance
     db: Arc<Database>,
     /// Cache of leaked table name references to avoid repeated allocations
     /// for the same store_id
     table_name_cache: Arc<RwLock<HashMap<String, &'static str>>>,
+}
+
+impl fmt::Debug for RedbStateStoreProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let cache_len = self
+            .table_name_cache
+            .try_read()
+            .map(|c| c.len())
+            .unwrap_or(0);
+        f.debug_struct("RedbStateStoreProvider")
+            .field("cached_table_names", &cache_len)
+            .finish_non_exhaustive()
+    }
 }
 
 impl RedbStateStoreProvider {
@@ -97,7 +110,10 @@ impl RedbStateStoreProvider {
     /// ```
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, StateStoreError> {
         let db = Database::create(path.as_ref()).map_err(|e| {
-            StateStoreError::StorageError(format!("Failed to create/open redb database: {e}"))
+            StateStoreError::StorageError(format!(
+                "Failed to create/open redb database at {:?}: {e}",
+                path.as_ref()
+            ))
         })?;
 
         info!("Opened redb state store at {:?}", path.as_ref());
@@ -108,10 +124,39 @@ impl RedbStateStoreProvider {
         })
     }
 
+    /// Clear the table name cache.
+    ///
+    /// This is useful for applications that create many unique `store_id` values
+    /// and want to reduce memory growth. Note that this doesn't reclaim
+    /// already-leaked strings, but it does prevent the cache from growing
+    /// and ensures new accesses will reuse existing leaked strings if available.
+    ///
+    /// # Warning
+    ///
+    /// Calling this while operations are in progress may cause those operations
+    /// to leak new table name strings. Only call this during idle periods.
+    pub async fn clear_table_name_cache(&self) {
+        let mut cache = self.table_name_cache.write().await;
+        cache.clear();
+    }
+
+    /// Get the number of cached table names.
+    ///
+    /// This is useful for monitoring memory usage from leaked table name strings.
+    pub async fn cached_table_name_count(&self) -> usize {
+        self.table_name_cache.read().await.len()
+    }
+
     /// Get the table name for a store_id.
     /// Table names are prefixed with "store_" to avoid conflicts.
     fn table_name(store_id: &str) -> String {
         format!("store_{store_id}")
+    }
+
+    /// Create a table definition from a static table name.
+    #[inline]
+    fn make_table_def(name: &'static str) -> TableDefinition<'static, &'static str, &'static [u8]> {
+        TableDefinition::new(name)
     }
 
     /// Get or create a static table name reference for a store_id.
@@ -119,25 +164,16 @@ impl RedbStateStoreProvider {
     async fn get_or_create_table_name(&self, store_id: &str) -> &'static str {
         let table_name = Self::table_name(store_id);
 
-        // First check if we already have this table name cached
-        {
-            let cache = self.table_name_cache.read().await;
-            if let Some(&name) = cache.get(&table_name) {
-                return name;
-            }
-        }
-
-        // If not, create and cache it
-        let mut cache = self.table_name_cache.write().await;
-        // Double-check in case another task added it while we were waiting for the write lock
-        if let Some(&name) = cache.get(&table_name) {
+        // Fast path: read lock
+        if let Some(&name) = self.table_name_cache.read().await.get(&table_name) {
             return name;
         }
 
-        // Leak the string to get a 'static reference (required by redb API)
-        let leaked: &'static str = Box::leak(table_name.clone().into_boxed_str());
-        cache.insert(table_name, leaked);
-        leaked
+        // Slow path: write lock with entry API
+        let mut cache = self.table_name_cache.write().await;
+        *cache
+            .entry(table_name.clone())
+            .or_insert_with(|| Box::leak(table_name.into_boxed_str()))
     }
 }
 
@@ -145,91 +181,173 @@ impl RedbStateStoreProvider {
 impl StateStoreProvider for RedbStateStoreProvider {
     async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
         let table_name = self.get_or_create_table_name(store_id).await;
+        let db = self.db.clone();
+        let key = key.to_string();
+        let store_id = store_id.to_string();
 
-        let read_txn = self.db.begin_read().map_err(|e| {
-            StateStoreError::StorageError(format!("Failed to begin read transaction: {e}"))
-        })?;
+        tokio::task::spawn_blocking(move || {
+            let read_txn = db.begin_read().map_err(|e| {
+                StateStoreError::StorageError(format!(
+                    "Failed to begin read transaction for store '{store_id}': {e}"
+                ))
+            })?;
 
-        // Try to open the table - it may not exist yet
-        let table_def: TableDefinition<&str, &[u8]> = TableDefinition::new(table_name);
+            let table_def = Self::make_table_def(table_name);
 
-        match read_txn.open_table(table_def) {
-            Ok(table) => {
-                let result = table.get(key).map_err(|e| {
-                    StateStoreError::StorageError(format!("Failed to get value: {e}"))
-                })?;
+            match read_txn.open_table(table_def) {
+                Ok(table) => {
+                    let result = table.get(key.as_str()).map_err(|e| {
+                        StateStoreError::StorageError(format!(
+                            "Failed to get key '{key}' from store '{store_id}': {e}"
+                        ))
+                    })?;
 
-                Ok(result.map(|v| v.value().to_vec()))
+                    Ok(result.map(|v| v.value().to_vec()))
+                }
+                Err(redb::TableError::TableDoesNotExist(_)) => Ok(None),
+                Err(e) => Err(StateStoreError::StorageError(format!(
+                    "Failed to open table for store '{store_id}': {e}"
+                ))),
             }
-            Err(redb::TableError::TableDoesNotExist(_)) => Ok(None),
-            Err(e) => Err(StateStoreError::StorageError(format!(
-                "Failed to open table: {e}"
-            ))),
-        }
+        })
+        .await
+        .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
     }
 
     async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
         let table_name = self.get_or_create_table_name(store_id).await;
+        let db = self.db.clone();
+        let key = key.to_string();
+        let store_id = store_id.to_string();
 
-        let write_txn = self.db.begin_write().map_err(|e| {
-            StateStoreError::StorageError(format!("Failed to begin write transaction: {e}"))
-        })?;
-
-        {
-            let table_def: TableDefinition<&str, &[u8]> = TableDefinition::new(table_name);
-
-            let mut table = write_txn
-                .open_table(table_def)
-                .map_err(|e| StateStoreError::StorageError(format!("Failed to open table: {e}")))?;
-
-            table.insert(key, value.as_slice()).map_err(|e| {
-                StateStoreError::StorageError(format!("Failed to insert value: {e}"))
+        tokio::task::spawn_blocking(move || {
+            let write_txn = db.begin_write().map_err(|e| {
+                StateStoreError::StorageError(format!(
+                    "Failed to begin write transaction for store '{store_id}': {e}"
+                ))
             })?;
-        }
 
-        write_txn.commit().map_err(|e| {
-            StateStoreError::StorageError(format!("Failed to commit transaction: {e}"))
-        })?;
+            let result = {
+                let table_def = Self::make_table_def(table_name);
 
-        debug!("Set key '{key}' in store '{store_id}'");
-        Ok(())
+                let mut table = write_txn.open_table(table_def).map_err(|e| {
+                    StateStoreError::StorageError(format!(
+                        "Failed to open table for store '{store_id}': {e}"
+                    ))
+                })?;
+
+                table.insert(key.as_str(), value.as_slice()).map_err(|e| {
+                    StateStoreError::StorageError(format!(
+                        "Failed to insert key '{key}' into store '{store_id}': {e}"
+                    ))
+                })?;
+
+                Ok::<_, StateStoreError>(())
+            };
+
+            match result {
+                Ok(()) => {
+                    write_txn.commit().map_err(|e| {
+                        StateStoreError::StorageError(format!(
+                            "Failed to commit transaction for store '{store_id}': {e}"
+                        ))
+                    })?;
+                    debug!("Set key '{key}' in store '{store_id}'");
+                    Ok(())
+                }
+                Err(e) => {
+                    // Transaction will be aborted on drop
+                    Err(e)
+                }
+            }
+        })
+        .await
+        .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
     }
 
     async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
         let table_name = self.get_or_create_table_name(store_id).await;
+        let db = self.db.clone();
+        let key = key.to_string();
+        let store_id = store_id.to_string();
 
-        let write_txn = self.db.begin_write().map_err(|e| {
-            StateStoreError::StorageError(format!("Failed to begin write transaction: {e}"))
-        })?;
+        tokio::task::spawn_blocking(move || {
+            let write_txn = db.begin_write().map_err(|e| {
+                StateStoreError::StorageError(format!(
+                    "Failed to begin write transaction for store '{store_id}': {e}"
+                ))
+            })?;
 
-        let existed = {
-            let table_def: TableDefinition<&str, &[u8]> = TableDefinition::new(table_name);
+            let result = {
+                let table_def = Self::make_table_def(table_name);
 
-            match write_txn.open_table(table_def) {
-                Ok(mut table) => {
-                    let result = table.remove(key).map_err(|e| {
-                        StateStoreError::StorageError(format!("Failed to remove key: {e}"))
+                match write_txn.open_table(table_def) {
+                    Ok(mut table) => {
+                        let removed = table.remove(key.as_str()).map_err(|e| {
+                            StateStoreError::StorageError(format!(
+                                "Failed to remove key '{key}' from store '{store_id}': {e}"
+                            ))
+                        })?;
+                        Ok(removed.is_some())
+                    }
+                    Err(redb::TableError::TableDoesNotExist(_)) => Ok(false),
+                    Err(e) => Err(StateStoreError::StorageError(format!(
+                        "Failed to open table for store '{store_id}': {e}"
+                    ))),
+                }
+            };
+
+            match result {
+                Ok(existed) => {
+                    write_txn.commit().map_err(|e| {
+                        StateStoreError::StorageError(format!(
+                            "Failed to commit transaction for store '{store_id}': {e}"
+                        ))
                     })?;
-                    result.is_some()
+                    if existed {
+                        debug!("Deleted key '{key}' from store '{store_id}'");
+                    }
+                    Ok(existed)
                 }
-                Err(redb::TableError::TableDoesNotExist(_)) => false,
-                Err(e) => {
-                    return Err(StateStoreError::StorageError(format!(
-                        "Failed to open table: {e}"
-                    )))
-                }
+                Err(e) => Err(e),
             }
-        };
+        })
+        .await
+        .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
+    }
 
-        write_txn.commit().map_err(|e| {
-            StateStoreError::StorageError(format!("Failed to commit transaction: {e}"))
-        })?;
+    async fn contains_key(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+        let table_name = self.get_or_create_table_name(store_id).await;
+        let db = self.db.clone();
+        let key = key.to_string();
+        let store_id = store_id.to_string();
 
-        if existed {
-            debug!("Deleted key '{key}' from store '{store_id}'");
-        }
+        tokio::task::spawn_blocking(move || {
+            let read_txn = db.begin_read().map_err(|e| {
+                StateStoreError::StorageError(format!(
+                    "Failed to begin read transaction for store '{store_id}': {e}"
+                ))
+            })?;
 
-        Ok(existed)
+            let table_def = Self::make_table_def(table_name);
+
+            match read_txn.open_table(table_def) {
+                Ok(table) => {
+                    let result = table.get(key.as_str()).map_err(|e| {
+                        StateStoreError::StorageError(format!(
+                            "Failed to check key '{key}' in store '{store_id}': {e}"
+                        ))
+                    })?;
+                    Ok(result.is_some())
+                }
+                Err(redb::TableError::TableDoesNotExist(_)) => Ok(false),
+                Err(e) => Err(StateStoreError::StorageError(format!(
+                    "Failed to open table for store '{store_id}': {e}"
+                ))),
+            }
+        })
+        .await
+        .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
     }
 
     async fn get_many(
@@ -238,203 +356,349 @@ impl StateStoreProvider for RedbStateStoreProvider {
         keys: &[&str],
     ) -> StateStoreResult<HashMap<String, Vec<u8>>> {
         let table_name = self.get_or_create_table_name(store_id).await;
-        let mut result = HashMap::new();
+        let db = self.db.clone();
+        let keys: Vec<String> = keys.iter().map(|k| (*k).to_string()).collect();
+        let store_id = store_id.to_string();
 
-        let read_txn = self.db.begin_read().map_err(|e| {
-            StateStoreError::StorageError(format!("Failed to begin read transaction: {e}"))
-        })?;
+        tokio::task::spawn_blocking(move || {
+            let read_txn = db.begin_read().map_err(|e| {
+                StateStoreError::StorageError(format!(
+                    "Failed to begin read transaction for store '{store_id}': {e}"
+                ))
+            })?;
 
-        let table_def: TableDefinition<&str, &[u8]> = TableDefinition::new(table_name);
+            let table_def = Self::make_table_def(table_name);
+            let mut result = HashMap::new();
 
-        match read_txn.open_table(table_def) {
-            Ok(table) => {
-                for key in keys {
-                    if let Some(value) = table.get(*key).map_err(|e| {
-                        StateStoreError::StorageError(format!("Failed to get value: {e}"))
-                    })? {
-                        result.insert((*key).to_string(), value.value().to_vec());
+            match read_txn.open_table(table_def) {
+                Ok(table) => {
+                    for key in keys {
+                        if let Some(value) = table.get(key.as_str()).map_err(|e| {
+                            StateStoreError::StorageError(format!(
+                                "Failed to get key '{key}' from store '{store_id}': {e}"
+                            ))
+                        })? {
+                            result.insert(key, value.value().to_vec());
+                        }
                     }
                 }
+                Err(redb::TableError::TableDoesNotExist(_)) => {
+                    // Table doesn't exist, return empty result
+                }
+                Err(e) => {
+                    return Err(StateStoreError::StorageError(format!(
+                        "Failed to open table for store '{store_id}': {e}"
+                    )))
+                }
             }
-            Err(redb::TableError::TableDoesNotExist(_)) => {
-                // Table doesn't exist, return empty result
-            }
-            Err(e) => {
-                return Err(StateStoreError::StorageError(format!(
-                    "Failed to open table: {e}"
-                )))
-            }
-        }
 
-        Ok(result)
+            Ok(result)
+        })
+        .await
+        .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
     }
 
-    async fn set_many(&self, store_id: &str, entries: &[(&str, Vec<u8>)]) -> StateStoreResult<()> {
+    async fn set_many(
+        &self,
+        store_id: &str,
+        entries: Vec<(String, Vec<u8>)>,
+    ) -> StateStoreResult<()> {
         let table_name = self.get_or_create_table_name(store_id).await;
+        let db = self.db.clone();
+        let store_id = store_id.to_string();
+        let entry_count = entries.len();
 
-        let write_txn = self.db.begin_write().map_err(|e| {
-            StateStoreError::StorageError(format!("Failed to begin write transaction: {e}"))
-        })?;
+        tokio::task::spawn_blocking(move || {
+            let write_txn = db.begin_write().map_err(|e| {
+                StateStoreError::StorageError(format!(
+                    "Failed to begin write transaction for store '{store_id}': {e}"
+                ))
+            })?;
 
-        {
-            let table_def: TableDefinition<&str, &[u8]> = TableDefinition::new(table_name);
+            let result = {
+                let table_def = Self::make_table_def(table_name);
 
-            let mut table = write_txn
-                .open_table(table_def)
-                .map_err(|e| StateStoreError::StorageError(format!("Failed to open table: {e}")))?;
-
-            for (key, value) in entries {
-                table.insert(*key, value.as_slice()).map_err(|e| {
-                    StateStoreError::StorageError(format!("Failed to insert value: {e}"))
+                let mut table = write_txn.open_table(table_def).map_err(|e| {
+                    StateStoreError::StorageError(format!(
+                        "Failed to open table for store '{store_id}': {e}"
+                    ))
                 })?;
+
+                for (key, value) in &entries {
+                    table.insert(key.as_str(), value.as_slice()).map_err(|e| {
+                        StateStoreError::StorageError(format!(
+                            "Failed to insert key '{key}' into store '{store_id}': {e}"
+                        ))
+                    })?;
+                }
+
+                Ok::<_, StateStoreError>(())
+            };
+
+            match result {
+                Ok(()) => {
+                    write_txn.commit().map_err(|e| {
+                        StateStoreError::StorageError(format!(
+                            "Failed to commit transaction for store '{store_id}': {e}"
+                        ))
+                    })?;
+                    debug!("Set {entry_count} entries in store '{store_id}'");
+                    Ok(())
+                }
+                Err(e) => Err(e),
             }
-        }
-
-        write_txn.commit().map_err(|e| {
-            StateStoreError::StorageError(format!("Failed to commit transaction: {e}"))
-        })?;
-
-        debug!("Set {} entries in store '{store_id}'", entries.len());
-        Ok(())
+        })
+        .await
+        .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
     }
 
     async fn delete_many(&self, store_id: &str, keys: &[&str]) -> StateStoreResult<usize> {
         let table_name = self.get_or_create_table_name(store_id).await;
+        let db = self.db.clone();
+        let keys: Vec<String> = keys.iter().map(|k| (*k).to_string()).collect();
+        let store_id = store_id.to_string();
 
-        let write_txn = self.db.begin_write().map_err(|e| {
-            StateStoreError::StorageError(format!("Failed to begin write transaction: {e}"))
-        })?;
+        tokio::task::spawn_blocking(move || {
+            let write_txn = db.begin_write().map_err(|e| {
+                StateStoreError::StorageError(format!(
+                    "Failed to begin write transaction for store '{store_id}': {e}"
+                ))
+            })?;
 
-        let count = {
-            let table_def: TableDefinition<&str, &[u8]> = TableDefinition::new(table_name);
+            let result = {
+                let table_def = Self::make_table_def(table_name);
 
-            match write_txn.open_table(table_def) {
-                Ok(mut table) => {
-                    let mut count = 0;
-                    for key in keys {
-                        let result = table.remove(*key).map_err(|e| {
-                            StateStoreError::StorageError(format!("Failed to remove key: {e}"))
-                        })?;
-                        if result.is_some() {
-                            count += 1;
+                match write_txn.open_table(table_def) {
+                    Ok(mut table) => {
+                        let mut count = 0;
+                        for key in &keys {
+                            let removed = table.remove(key.as_str()).map_err(|e| {
+                                StateStoreError::StorageError(format!(
+                                    "Failed to remove key '{key}' from store '{store_id}': {e}"
+                                ))
+                            })?;
+                            if removed.is_some() {
+                                count += 1;
+                            }
                         }
+                        Ok(count)
                     }
-                    count
+                    Err(redb::TableError::TableDoesNotExist(_)) => Ok(0),
+                    Err(e) => Err(StateStoreError::StorageError(format!(
+                        "Failed to open table for store '{store_id}': {e}"
+                    ))),
                 }
-                Err(redb::TableError::TableDoesNotExist(_)) => 0,
-                Err(e) => {
-                    return Err(StateStoreError::StorageError(format!(
-                        "Failed to open table: {e}"
-                    )))
+            };
+
+            match result {
+                Ok(count) => {
+                    write_txn.commit().map_err(|e| {
+                        StateStoreError::StorageError(format!(
+                            "Failed to commit transaction for store '{store_id}': {e}"
+                        ))
+                    })?;
+                    debug!("Deleted {count} keys from store '{store_id}'");
+                    Ok(count)
                 }
+                Err(e) => Err(e),
             }
-        };
-
-        write_txn.commit().map_err(|e| {
-            StateStoreError::StorageError(format!("Failed to commit transaction: {e}"))
-        })?;
-
-        debug!("Deleted {count} keys from store '{store_id}'");
-        Ok(count)
+        })
+        .await
+        .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
     }
 
     async fn clear_store(&self, store_id: &str) -> StateStoreResult<usize> {
         let table_name = self.get_or_create_table_name(store_id).await;
+        let db = self.db.clone();
+        let store_id = store_id.to_string();
 
-        let write_txn = self.db.begin_write().map_err(|e| {
-            StateStoreError::StorageError(format!("Failed to begin write transaction: {e}"))
-        })?;
+        tokio::task::spawn_blocking(move || {
+            let write_txn = db.begin_write().map_err(|e| {
+                StateStoreError::StorageError(format!(
+                    "Failed to begin write transaction for store '{store_id}': {e}"
+                ))
+            })?;
 
-        // First, try to get the count efficiently using len()
-        let count = {
-            let table_def: TableDefinition<&str, &[u8]> = TableDefinition::new(table_name);
+            // Get count and delete table in one pass
+            let table_def = Self::make_table_def(table_name);
 
-            match write_txn.open_table(table_def) {
+            let count = match write_txn.open_table(table_def) {
                 Ok(table) => {
                     let count = table.len().map_err(|e| {
-                        StateStoreError::StorageError(format!("Failed to count entries: {e}"))
-                    })?;
-                    count as usize
+                        StateStoreError::StorageError(format!(
+                            "Failed to count entries in store '{store_id}': {e}"
+                        ))
+                    })? as usize;
+                    // Need to drop table before we can delete it
+                    drop(table);
+                    count
                 }
-                Err(redb::TableError::TableDoesNotExist(_)) => 0,
+                Err(redb::TableError::TableDoesNotExist(_)) => return Ok(0),
                 Err(e) => {
                     return Err(StateStoreError::StorageError(format!(
-                        "Failed to open table: {e}"
+                        "Failed to open table for store '{store_id}': {e}"
                     )))
                 }
+            };
+
+            // Delete the table
+            if count > 0 {
+                let table_def = Self::make_table_def(table_name);
+                write_txn.delete_table(table_def).map_err(|e| {
+                    StateStoreError::StorageError(format!(
+                        "Failed to delete table for store '{store_id}': {e}"
+                    ))
+                })?;
             }
-        };
 
-        // Delete the table itself if it exists
-        if count > 0 {
-            let table_def: TableDefinition<&str, &[u8]> = TableDefinition::new(table_name);
-
-            write_txn.delete_table(table_def).map_err(|e| {
-                StateStoreError::StorageError(format!("Failed to delete table: {e}"))
+            write_txn.commit().map_err(|e| {
+                StateStoreError::StorageError(format!(
+                    "Failed to commit transaction for store '{store_id}': {e}"
+                ))
             })?;
-        }
 
-        write_txn.commit().map_err(|e| {
-            StateStoreError::StorageError(format!("Failed to commit transaction: {e}"))
-        })?;
-
-        debug!("Cleared store '{store_id}' ({count} entries)");
-        Ok(count)
+            debug!("Cleared store '{store_id}' ({count} entries)");
+            Ok(count)
+        })
+        .await
+        .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
     }
 
     async fn list_keys(&self, store_id: &str) -> StateStoreResult<Vec<String>> {
         let table_name = self.get_or_create_table_name(store_id).await;
-        let mut keys = Vec::new();
+        let db = self.db.clone();
+        let store_id = store_id.to_string();
 
-        let read_txn = self.db.begin_read().map_err(|e| {
-            StateStoreError::StorageError(format!("Failed to begin read transaction: {e}"))
-        })?;
+        tokio::task::spawn_blocking(move || {
+            let read_txn = db.begin_read().map_err(|e| {
+                StateStoreError::StorageError(format!(
+                    "Failed to begin read transaction for store '{store_id}': {e}"
+                ))
+            })?;
 
-        let table_def: TableDefinition<&str, &[u8]> = TableDefinition::new(table_name);
+            let table_def = Self::make_table_def(table_name);
+            let mut keys = Vec::new();
 
-        match read_txn.open_table(table_def) {
-            Ok(table) => {
-                let iter = table.iter().map_err(|e| {
-                    StateStoreError::StorageError(format!("Failed to iterate table: {e}"))
-                })?;
-
-                for entry in iter {
-                    let (key, _) = entry.map_err(|e| {
-                        StateStoreError::StorageError(format!("Failed to read entry: {e}"))
+            match read_txn.open_table(table_def) {
+                Ok(table) => {
+                    let iter = table.iter().map_err(|e| {
+                        StateStoreError::StorageError(format!(
+                            "Failed to iterate table for store '{store_id}': {e}"
+                        ))
                     })?;
-                    keys.push(key.value().to_string());
+
+                    for entry in iter {
+                        let (key, _) = entry.map_err(|e| {
+                            StateStoreError::StorageError(format!(
+                                "Failed to read entry from store '{store_id}': {e}"
+                            ))
+                        })?;
+                        keys.push(key.value().to_string());
+                    }
+                }
+                Err(redb::TableError::TableDoesNotExist(_)) => {
+                    // Table doesn't exist, return empty list
+                }
+                Err(e) => {
+                    return Err(StateStoreError::StorageError(format!(
+                        "Failed to open table for store '{store_id}': {e}"
+                    )))
                 }
             }
-            Err(redb::TableError::TableDoesNotExist(_)) => {
-                // Table doesn't exist, return empty list
-            }
-            Err(e) => {
-                return Err(StateStoreError::StorageError(format!(
-                    "Failed to open table: {e}"
-                )))
-            }
-        }
 
-        Ok(keys)
+            Ok(keys)
+        })
+        .await
+        .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
     }
 
-    async fn store_exists(&self, store_id: &str) -> bool {
+    async fn store_exists(&self, store_id: &str) -> StateStoreResult<bool> {
         let table_name = self.get_or_create_table_name(store_id).await;
+        let db = self.db.clone();
+        let store_id = store_id.to_string();
 
-        let read_txn = match self.db.begin_read() {
-            Ok(txn) => txn,
-            Err(_) => return false,
-        };
+        tokio::task::spawn_blocking(move || {
+            let read_txn = db.begin_read().map_err(|e| {
+                StateStoreError::StorageError(format!(
+                    "Failed to begin read transaction for store '{store_id}': {e}"
+                ))
+            })?;
 
-        let table_def: TableDefinition<&str, &[u8]> = TableDefinition::new(table_name);
+            let table_def = Self::make_table_def(table_name);
 
-        match read_txn.open_table(table_def) {
-            Ok(table) => {
-                // Check if the table has any entries
-                matches!(table.len(), Ok(len) if len > 0)
+            match read_txn.open_table(table_def) {
+                Ok(table) => {
+                    let len = table.len().map_err(|e| {
+                        StateStoreError::StorageError(format!(
+                            "Failed to get length of store '{store_id}': {e}"
+                        ))
+                    })?;
+                    Ok(len > 0)
+                }
+                Err(redb::TableError::TableDoesNotExist(_)) => Ok(false),
+                Err(e) => Err(StateStoreError::StorageError(format!(
+                    "Failed to open table for store '{store_id}': {e}"
+                ))),
             }
-            Err(_) => false,
-        }
+        })
+        .await
+        .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
+    }
+
+    async fn key_count(&self, store_id: &str) -> StateStoreResult<usize> {
+        let table_name = self.get_or_create_table_name(store_id).await;
+        let db = self.db.clone();
+        let store_id = store_id.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let read_txn = db.begin_read().map_err(|e| {
+                StateStoreError::StorageError(format!(
+                    "Failed to begin read transaction for store '{store_id}': {e}"
+                ))
+            })?;
+
+            let table_def = Self::make_table_def(table_name);
+
+            match read_txn.open_table(table_def) {
+                Ok(table) => {
+                    let len = table.len().map_err(|e| {
+                        StateStoreError::StorageError(format!(
+                            "Failed to get length of store '{store_id}': {e}"
+                        ))
+                    })?;
+                    Ok(len as usize)
+                }
+                Err(redb::TableError::TableDoesNotExist(_)) => Ok(0),
+                Err(e) => Err(StateStoreError::StorageError(format!(
+                    "Failed to open table for store '{store_id}': {e}"
+                ))),
+            }
+        })
+        .await
+        .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
+    }
+
+    async fn sync(&self) -> StateStoreResult<()> {
+        // redb commits are synchronous and durable by default,
+        // so sync is effectively a no-op. However, we can do a
+        // checkpoint operation for consistency.
+        let db = self.db.clone();
+
+        tokio::task::spawn_blocking(move || {
+            // Perform a write transaction with no changes to force a sync
+            let write_txn = db.begin_write().map_err(|e| {
+                StateStoreError::StorageError(format!("Failed to begin sync transaction: {e}"))
+            })?;
+
+            write_txn.commit().map_err(|e| {
+                StateStoreError::StorageError(format!("Failed to commit sync transaction: {e}"))
+            })?;
+
+            debug!("Synced redb state store");
+            Ok(())
+        })
+        .await
+        .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
     }
 }
 
@@ -489,6 +753,32 @@ mod tests {
         // Delete non-existent key
         let deleted = provider.delete("store1", "nonexistent").await.unwrap();
         assert!(!deleted);
+    }
+
+    #[tokio::test]
+    async fn test_redb_state_store_contains_key() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+        // Key doesn't exist
+        assert!(!provider.contains_key("store1", "key1").await.unwrap());
+
+        // Set a value
+        provider
+            .set("store1", "key1", b"value1".to_vec())
+            .await
+            .unwrap();
+
+        // Key now exists
+        assert!(provider.contains_key("store1", "key1").await.unwrap());
+
+        // Different key doesn't exist
+        assert!(!provider.contains_key("store1", "key2").await.unwrap());
+
+        // Delete the key
+        provider.delete("store1", "key1").await.unwrap();
+        assert!(!provider.contains_key("store1", "key1").await.unwrap());
     }
 
     #[tokio::test]
@@ -567,7 +857,7 @@ mod tests {
         assert_eq!(result, None);
 
         // Store should not exist anymore
-        assert!(!provider.store_exists("store1").await);
+        assert!(!provider.store_exists("store1").await.unwrap());
     }
 
     #[tokio::test]
@@ -603,18 +893,45 @@ mod tests {
         let provider = RedbStateStoreProvider::new(&db_path).unwrap();
 
         // Non-existent store
-        assert!(!provider.store_exists("store1").await);
+        assert!(!provider.store_exists("store1").await.unwrap());
 
         // Set a value
         provider
             .set("store1", "key1", b"value1".to_vec())
             .await
             .unwrap();
-        assert!(provider.store_exists("store1").await);
+        assert!(provider.store_exists("store1").await.unwrap());
 
         // Clear the store
         provider.clear_store("store1").await.unwrap();
-        assert!(!provider.store_exists("store1").await);
+        assert!(!provider.store_exists("store1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_redb_state_store_key_count() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+        // Empty store has 0 keys
+        assert_eq!(provider.key_count("store1").await.unwrap(), 0);
+
+        // Set values
+        provider
+            .set("store1", "key1", b"value1".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(provider.key_count("store1").await.unwrap(), 1);
+
+        provider
+            .set("store1", "key2", b"value2".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(provider.key_count("store1").await.unwrap(), 2);
+
+        // Delete a key
+        provider.delete("store1", "key1").await.unwrap();
+        assert_eq!(provider.key_count("store1").await.unwrap(), 1);
     }
 
     #[tokio::test]
@@ -653,11 +970,14 @@ mod tests {
         let db_path = temp_dir.path().join("test.redb");
         let provider = RedbStateStoreProvider::new(&db_path).unwrap();
 
-        // Set multiple values atomically
+        // Set multiple values atomically (new signature takes ownership)
         provider
             .set_many(
                 "store1",
-                &[("key1", b"value1".to_vec()), ("key2", b"value2".to_vec())],
+                vec![
+                    ("key1".to_string(), b"value1".to_vec()),
+                    ("key2".to_string(), b"value2".to_vec()),
+                ],
             )
             .await
             .unwrap();
@@ -675,14 +995,14 @@ mod tests {
         let db_path = temp_dir.path().join("test.redb");
         let provider = RedbStateStoreProvider::new(&db_path).unwrap();
 
-        // Set multiple values
+        // Set multiple values (new signature takes ownership)
         provider
             .set_many(
                 "store1",
-                &[
-                    ("key1", b"value1".to_vec()),
-                    ("key2", b"value2".to_vec()),
-                    ("key3", b"value3".to_vec()),
+                vec![
+                    ("key1".to_string(), b"value1".to_vec()),
+                    ("key2".to_string(), b"value2".to_vec()),
+                    ("key3".to_string(), b"value3".to_vec()),
                 ],
             )
             .await
@@ -718,5 +1038,126 @@ mod tests {
         // Retrieve and verify
         let result = provider.get("store1", "binary").await.unwrap();
         assert_eq!(result, Some(binary_data));
+    }
+
+    #[tokio::test]
+    async fn test_redb_state_store_sync() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+        // sync should succeed
+        provider.sync().await.unwrap();
+
+        // Set some data and sync again
+        provider
+            .set("store1", "key1", b"value1".to_vec())
+            .await
+            .unwrap();
+        provider.sync().await.unwrap();
+
+        // Verify data is still there
+        let result = provider.get("store1", "key1").await.unwrap();
+        assert_eq!(result, Some(b"value1".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_redb_state_store_debug_impl() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+        // Debug should work
+        let debug_str = format!("{provider:?}");
+        assert!(debug_str.contains("RedbStateStoreProvider"));
+        assert!(debug_str.contains("cached_table_names"));
+    }
+
+    #[tokio::test]
+    async fn test_redb_state_store_table_name_cache() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+        // Initially no cached names
+        assert_eq!(provider.cached_table_name_count().await, 0);
+
+        // Access a store
+        provider
+            .set("store1", "key1", b"value1".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(provider.cached_table_name_count().await, 1);
+
+        // Access another store
+        provider
+            .set("store2", "key1", b"value1".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(provider.cached_table_name_count().await, 2);
+
+        // Clear the cache
+        provider.clear_table_name_cache().await;
+        assert_eq!(provider.cached_table_name_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_redb_concurrent_access() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let provider = Arc::new(RedbStateStoreProvider::new(&db_path).unwrap());
+
+        // Spawn multiple concurrent tasks
+        let mut handles = vec![];
+        for i in 0..10 {
+            let p = provider.clone();
+            handles.push(tokio::spawn(async move {
+                let key = format!("key{i}");
+                let value = vec![i as u8; 10];
+                p.set("store", &key, value.clone()).await.unwrap();
+                let result = p.get("store", &key).await.unwrap();
+                assert_eq!(result, Some(value));
+            }));
+        }
+
+        // Wait for all to complete
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // Verify all keys exist
+        assert_eq!(provider.key_count("store").await.unwrap(), 10);
+    }
+
+    #[tokio::test]
+    async fn test_redb_concurrent_different_stores() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let provider = Arc::new(RedbStateStoreProvider::new(&db_path).unwrap());
+
+        // Spawn tasks that write to different stores concurrently
+        let mut handles = vec![];
+        for i in 0..10 {
+            let p = provider.clone();
+            handles.push(tokio::spawn(async move {
+                let store_id = format!("store{i}");
+                for j in 0..5 {
+                    let key = format!("key{j}");
+                    let value = vec![i as u8, j as u8];
+                    p.set(&store_id, &key, value).await.unwrap();
+                }
+            }));
+        }
+
+        // Wait for all to complete
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // Verify each store has 5 keys
+        for i in 0..10 {
+            let store_id = format!("store{i}");
+            assert_eq!(provider.key_count(&store_id).await.unwrap(), 5);
+        }
     }
 }

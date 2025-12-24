@@ -74,10 +74,6 @@ pub enum StateStoreError {
     #[error("Storage error: {0}")]
     StorageError(String),
 
-    /// An operation was attempted on a store that doesn't exist
-    #[error("Store not found: {0}")]
-    StoreNotFound(String),
-
     /// Generic error for other failures
     #[error("State store error: {0}")]
     Other(String),
@@ -169,6 +165,21 @@ pub trait StateStoreProvider: Send + Sync {
     /// * `Err(e)` - An error occurred
     async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool>;
 
+    /// Check if a key exists in a store partition without retrieving its value.
+    ///
+    /// This is more efficient than `get()` when you only need to check existence,
+    /// especially for large values.
+    ///
+    /// # Arguments
+    /// * `store_id` - The partition identifier (typically the plugin ID)
+    /// * `key` - The key to check
+    ///
+    /// # Returns
+    /// * `Ok(true)` - The key exists
+    /// * `Ok(false)` - The key doesn't exist
+    /// * `Err(e)` - An error occurred
+    async fn contains_key(&self, store_id: &str, key: &str) -> StateStoreResult<bool>;
+
     /// Get multiple values by keys from a store partition.
     ///
     /// # Arguments
@@ -190,12 +201,16 @@ pub trait StateStoreProvider: Send + Sync {
     ///
     /// # Arguments
     /// * `store_id` - The partition identifier (typically the plugin ID)
-    /// * `entries` - The key-value pairs to store
+    /// * `entries` - The key-value pairs to store (ownership is transferred)
     ///
     /// # Returns
     /// * `Ok(())` - All values were successfully stored
     /// * `Err(e)` - An error occurred (some values may have been stored)
-    async fn set_many(&self, store_id: &str, entries: &[(&str, Vec<u8>)]) -> StateStoreResult<()>;
+    async fn set_many(
+        &self,
+        store_id: &str,
+        entries: Vec<(String, Vec<u8>)>,
+    ) -> StateStoreResult<()>;
 
     /// Delete multiple keys from a store partition.
     ///
@@ -233,9 +248,32 @@ pub trait StateStoreProvider: Send + Sync {
     /// * `store_id` - The partition identifier to check
     ///
     /// # Returns
-    /// * `true` - The store partition exists and has at least one key
-    /// * `false` - The store partition doesn't exist or is empty
-    async fn store_exists(&self, store_id: &str) -> bool;
+    /// * `Ok(true)` - The store partition exists and has at least one key
+    /// * `Ok(false)` - The store partition doesn't exist or is empty
+    /// * `Err(e)` - An error occurred while checking
+    async fn store_exists(&self, store_id: &str) -> StateStoreResult<bool>;
+
+    /// Get the number of keys in a store partition.
+    ///
+    /// # Arguments
+    /// * `store_id` - The partition identifier
+    ///
+    /// # Returns
+    /// * `Ok(count)` - The number of keys in the store
+    /// * `Err(e)` - An error occurred
+    async fn key_count(&self, store_id: &str) -> StateStoreResult<usize>;
+
+    /// Force pending writes to persistent storage.
+    ///
+    /// For in-memory stores, this is a no-op. For persistent stores, this
+    /// ensures all data is durably written to disk.
+    ///
+    /// # Returns
+    /// * `Ok(())` - Sync completed successfully
+    /// * `Err(e)` - An error occurred during sync
+    async fn sync(&self) -> StateStoreResult<()> {
+        Ok(())
+    }
 }
 
 /// In-memory implementation of StateStoreProvider.
@@ -315,6 +353,13 @@ impl StateStoreProvider for MemoryStateStoreProvider {
         }
     }
 
+    async fn contains_key(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+        let stores = self.stores.read().await;
+        Ok(stores
+            .get(store_id)
+            .is_some_and(|store| store.contains_key(key)))
+    }
+
     async fn get_many(
         &self,
         store_id: &str,
@@ -334,12 +379,16 @@ impl StateStoreProvider for MemoryStateStoreProvider {
         Ok(result)
     }
 
-    async fn set_many(&self, store_id: &str, entries: &[(&str, Vec<u8>)]) -> StateStoreResult<()> {
+    async fn set_many(
+        &self,
+        store_id: &str,
+        entries: Vec<(String, Vec<u8>)>,
+    ) -> StateStoreResult<()> {
         let mut stores = self.stores.write().await;
         let store = stores.entry(store_id.to_string()).or_default();
 
         for (key, value) in entries {
-            store.insert((*key).to_string(), value.clone());
+            store.insert(key, value);
         }
 
         Ok(())
@@ -381,9 +430,14 @@ impl StateStoreProvider for MemoryStateStoreProvider {
             .unwrap_or_default())
     }
 
-    async fn store_exists(&self, store_id: &str) -> bool {
+    async fn store_exists(&self, store_id: &str) -> StateStoreResult<bool> {
         let stores = self.stores.read().await;
-        stores.get(store_id).is_some_and(|store| !store.is_empty())
+        Ok(stores.get(store_id).is_some_and(|store| !store.is_empty()))
+    }
+
+    async fn key_count(&self, store_id: &str) -> StateStoreResult<usize> {
+        let stores = self.stores.read().await;
+        Ok(stores.get(store_id).map(|store| store.len()).unwrap_or(0))
     }
 }
 
@@ -468,11 +522,14 @@ mod tests {
     async fn test_memory_state_store_set_many() {
         let provider = MemoryStateStoreProvider::new();
 
-        // Set multiple values
+        // Set multiple values (new signature takes ownership)
         provider
             .set_many(
                 "store1",
-                &[("key1", b"value1".to_vec()), ("key2", b"value2".to_vec())],
+                vec![
+                    ("key1".to_string(), b"value1".to_vec()),
+                    ("key2".to_string(), b"value2".to_vec()),
+                ],
             )
             .await
             .unwrap();
@@ -488,14 +545,14 @@ mod tests {
     async fn test_memory_state_store_delete_many() {
         let provider = MemoryStateStoreProvider::new();
 
-        // Set multiple values
+        // Set multiple values (new signature takes ownership)
         provider
             .set_many(
                 "store1",
-                &[
-                    ("key1", b"value1".to_vec()),
-                    ("key2", b"value2".to_vec()),
-                    ("key3", b"value3".to_vec()),
+                vec![
+                    ("key1".to_string(), b"value1".to_vec()),
+                    ("key2".to_string(), b"value2".to_vec()),
+                    ("key3".to_string(), b"value3".to_vec()),
                 ],
             )
             .await
@@ -579,18 +636,18 @@ mod tests {
         let provider = MemoryStateStoreProvider::new();
 
         // Non-existent store
-        assert!(!provider.store_exists("store1").await);
+        assert!(!provider.store_exists("store1").await.unwrap());
 
         // Set a value
         provider
             .set("store1", "key1", b"value1".to_vec())
             .await
             .unwrap();
-        assert!(provider.store_exists("store1").await);
+        assert!(provider.store_exists("store1").await.unwrap());
 
         // Delete the value (store should be cleaned up)
         provider.delete("store1", "key1").await.unwrap();
-        assert!(!provider.store_exists("store1").await);
+        assert!(!provider.store_exists("store1").await.unwrap());
     }
 
     #[tokio::test]
@@ -623,25 +680,103 @@ mod tests {
             .set("store1", "key1", b"value1".to_vec())
             .await
             .unwrap();
-        assert!(provider.store_exists("store1").await);
+        assert!(provider.store_exists("store1").await.unwrap());
 
         provider.delete("store1", "key1").await.unwrap();
-        assert!(!provider.store_exists("store1").await);
+        assert!(!provider.store_exists("store1").await.unwrap());
 
-        // Also test with delete_many
+        // Also test with delete_many (new signature takes ownership)
         provider
             .set_many(
                 "store2",
-                &[("key1", b"value1".to_vec()), ("key2", b"value2".to_vec())],
+                vec![
+                    ("key1".to_string(), b"value1".to_vec()),
+                    ("key2".to_string(), b"value2".to_vec()),
+                ],
             )
             .await
             .unwrap();
-        assert!(provider.store_exists("store2").await);
+        assert!(provider.store_exists("store2").await.unwrap());
 
         provider
             .delete_many("store2", &["key1", "key2"])
             .await
             .unwrap();
-        assert!(!provider.store_exists("store2").await);
+        assert!(!provider.store_exists("store2").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_memory_state_store_contains_key() {
+        let provider = MemoryStateStoreProvider::new();
+
+        // Key doesn't exist
+        assert!(!provider.contains_key("store1", "key1").await.unwrap());
+
+        // Set a value
+        provider
+            .set("store1", "key1", b"value1".to_vec())
+            .await
+            .unwrap();
+
+        // Key now exists
+        assert!(provider.contains_key("store1", "key1").await.unwrap());
+
+        // Different key doesn't exist
+        assert!(!provider.contains_key("store1", "key2").await.unwrap());
+
+        // Different store doesn't have the key
+        assert!(!provider.contains_key("store2", "key1").await.unwrap());
+
+        // Delete the key
+        provider.delete("store1", "key1").await.unwrap();
+        assert!(!provider.contains_key("store1", "key1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_memory_state_store_key_count() {
+        let provider = MemoryStateStoreProvider::new();
+
+        // Empty store has 0 keys
+        assert_eq!(provider.key_count("store1").await.unwrap(), 0);
+
+        // Set a value
+        provider
+            .set("store1", "key1", b"value1".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(provider.key_count("store1").await.unwrap(), 1);
+
+        // Set another value
+        provider
+            .set("store1", "key2", b"value2".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(provider.key_count("store1").await.unwrap(), 2);
+
+        // Different store is still 0
+        assert_eq!(provider.key_count("store2").await.unwrap(), 0);
+
+        // Delete a key
+        provider.delete("store1", "key1").await.unwrap();
+        assert_eq!(provider.key_count("store1").await.unwrap(), 1);
+
+        // Clear the store
+        provider.clear_store("store1").await.unwrap();
+        assert_eq!(provider.key_count("store1").await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_memory_state_store_sync() {
+        let provider = MemoryStateStoreProvider::new();
+
+        // sync is a no-op for memory provider but should succeed
+        provider.sync().await.unwrap();
+
+        // Set some data and sync again
+        provider
+            .set("store1", "key1", b"value1".to_vec())
+            .await
+            .unwrap();
+        provider.sync().await.unwrap();
     }
 }
