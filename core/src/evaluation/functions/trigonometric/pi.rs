@@ -37,16 +37,6 @@ impl ScalarFunction for Pi {
                 error: FunctionEvaluationError::InvalidArgumentCount,
             });
         }
-        Ok(VariableValue::Float(
-            match Float::from_f64(std::f64::consts::PI) {
-                Some(f) => f,
-                None => {
-                    return Err(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::OverflowError,
-                    })
-                }
-            },
-        ))
+        Ok(VariableValue::Float(Float::from(std::f64::consts::PI)))
     }
 }
