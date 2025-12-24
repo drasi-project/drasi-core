@@ -14,6 +14,7 @@
 
 use super::text;
 mod left_tests;
+mod random_uuid_tests;
 mod replace_tests;
 mod reverse_tests;
 mod right_tests;

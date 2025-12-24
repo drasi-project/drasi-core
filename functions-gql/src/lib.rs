@@ -37,6 +37,7 @@ impl GQLFunctionSet for Arc<FunctionRegistry> {
 pub fn register_default_gql_functions(registry: &FunctionRegistry) {
     register_text_functions(registry);
     register_numeric_functions(registry);
+    register_trigonometric_functions(registry);
     register_gql_scalar_functions(registry);
     register_list_functions(registry);
     register_metadata_functions(registry);
@@ -68,10 +69,20 @@ fn register_numeric_functions(registry: &FunctionRegistry) {
     registry.register_function("round", Function::Scalar(Arc::new(Round {})));
 }
 
+fn register_trigonometric_functions(registry: &FunctionRegistry) {
+    registry.register_function("cos", Function::Scalar(Arc::new(Cos {})));
+    registry.register_function("degrees", Function::Scalar(Arc::new(Degrees {})));
+    registry.register_function("pi", Function::Scalar(Arc::new(Pi {})));
+    registry.register_function("radians", Function::Scalar(Arc::new(Radians {})));
+    registry.register_function("sin", Function::Scalar(Arc::new(Sin {})));
+    registry.register_function("tan", Function::Scalar(Arc::new(Tan {})));
+}
+
 fn register_gql_scalar_functions(registry: &FunctionRegistry) {
     registry.register_function("char_length", Function::Scalar(Arc::new(CharLength {})));
     registry.register_function("size", Function::Scalar(Arc::new(Size {})));
     registry.register_function("coalesce", Function::Scalar(Arc::new(Coalesce {})));
+    registry.register_function("nullIf", Function::Scalar(Arc::new(NullIf {})));
     registry.register_function("last", Function::Scalar(Arc::new(CypherLast {})));
     registry.register_function("cast", Function::Scalar(Arc::new(Cast {})));
 }

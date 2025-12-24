@@ -34,6 +34,7 @@ impl CypherFunctionSet for Arc<FunctionRegistry> {
 pub fn register_default_cypher_functions(registry: &FunctionRegistry) {
     register_text_functions(registry);
     register_numeric_functions(registry);
+    register_trigonometric_functions(registry);
     register_cypher_scalar_functions(registry);
     register_list_functions(registry);
     register_metadata_functions(registry);
@@ -61,6 +62,7 @@ fn register_text_functions(registry: &FunctionRegistry) {
         "toStringOrNull",
         Function::Scalar(Arc::new(ToStringOrNull {})),
     );
+    registry.register_function("randomUUID", Function::Scalar(Arc::new(RandomUUID {})));
 }
 
 fn register_numeric_functions(registry: &FunctionRegistry) {
@@ -70,6 +72,15 @@ fn register_numeric_functions(registry: &FunctionRegistry) {
     registry.register_function("rand", Function::Scalar(Arc::new(Rand {})));
     registry.register_function("round", Function::Scalar(Arc::new(Round {})));
     registry.register_function("sign", Function::Scalar(Arc::new(Sign {})));
+}
+
+fn register_trigonometric_functions(registry: &FunctionRegistry) {
+    registry.register_function("cos", Function::Scalar(Arc::new(Cos {})));
+    registry.register_function("degrees", Function::Scalar(Arc::new(Degrees {})));
+    registry.register_function("pi", Function::Scalar(Arc::new(Pi {})));
+    registry.register_function("radians", Function::Scalar(Arc::new(Radians {})));
+    registry.register_function("sin", Function::Scalar(Arc::new(Sin {})));
+    registry.register_function("tan", Function::Scalar(Arc::new(Tan {})));
 }
 
 fn register_cypher_scalar_functions(registry: &FunctionRegistry) {
@@ -95,6 +106,8 @@ fn register_cypher_scalar_functions(registry: &FunctionRegistry) {
         Function::Scalar(Arc::new(ToBooleanOrNull {})),
     );
     registry.register_function("coalesce", Function::Scalar(Arc::new(Coalesce {})));
+    registry.register_function("nullIf", Function::Scalar(Arc::new(NullIf {})));
+    registry.register_function("isEmpty", Function::Scalar(Arc::new(IsEmpty {})));
     registry.register_function("head", Function::Scalar(Arc::new(Head {})));
     registry.register_function("last", Function::Scalar(Arc::new(CypherLast {})));
     registry.register_function("timestamp", Function::Scalar(Arc::new(Timestamp {})));
@@ -104,6 +117,9 @@ fn register_list_functions(registry: &FunctionRegistry) {
     registry.register_function("reduce", Function::LazyScalar(Arc::new(Reduce::new())));
     registry.register_function("tail", Function::Scalar(Arc::new(Tail {})));
     registry.register_function("range", Function::Scalar(Arc::new(Range {})));
+    registry.register_function("coll.distinct", Function::Scalar(Arc::new(Distinct {})));
+    registry.register_function("coll.indexOf", Function::Scalar(Arc::new(IndexOf {})));
+    registry.register_function("coll.insert", Function::Scalar(Arc::new(Insert {})));
 }
 
 fn register_metadata_functions(registry: &FunctionRegistry) {

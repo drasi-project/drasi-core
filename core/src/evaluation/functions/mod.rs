@@ -39,10 +39,11 @@ pub mod past;
 pub mod temporal_duration;
 pub mod temporal_instant;
 pub mod text;
+pub mod trigonometric;
 
 pub use self::{
     aggregation::*, context_mutators::*, cypher_scalar::*, drasi::*, list::*, metadata::*,
-    numeric::*, temporal_duration::*, temporal_instant::*, text::text::*,
+    numeric::*, temporal_duration::*, temporal_instant::*, text::text::*, trigonometric::*,
 };
 pub use aggregation::Accumulator;
 

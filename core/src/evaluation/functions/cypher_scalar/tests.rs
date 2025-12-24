@@ -14,7 +14,9 @@
 
 mod char_length_tests;
 mod head_tests;
+mod is_empty_tests;
 mod last_tests;
+mod null_if_tests;
 mod size_tests;
 mod to_boolean_tests;
 mod to_float_tests;
