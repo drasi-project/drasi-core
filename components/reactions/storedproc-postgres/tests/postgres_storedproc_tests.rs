@@ -200,6 +200,7 @@ fn test_config_custom_port() {
 fn test_config_validation_no_commands() {
     let config = PostgresStoredProcReactionConfig {
         user: "testuser".to_string(),
+        password: "testpass".to_string(),
         database: "testdb".to_string(),
         ..Default::default()
     };
@@ -230,6 +231,7 @@ fn test_config_validation_empty_user() {
 fn test_config_validation_empty_database() {
     let config = PostgresStoredProcReactionConfig {
         user: "testuser".to_string(),
+        password: "testpass".to_string(),
         database: "".to_string(),
         added_command: Some("CALL test()".to_string()),
         ..Default::default()
@@ -247,6 +249,7 @@ fn test_config_validation_empty_database() {
 fn test_config_validation_valid_with_added_command() {
     let config = PostgresStoredProcReactionConfig {
         user: "testuser".to_string(),
+        password: "testpass".to_string(),
         database: "testdb".to_string(),
         added_command: Some("CALL add_item(@id)".to_string()),
         ..Default::default()
@@ -259,6 +262,7 @@ fn test_config_validation_valid_with_added_command() {
 fn test_config_validation_valid_with_updated_command() {
     let config = PostgresStoredProcReactionConfig {
         user: "testuser".to_string(),
+        password: "testpass".to_string(),
         database: "testdb".to_string(),
         updated_command: Some("CALL update_item(@id)".to_string()),
         ..Default::default()
@@ -271,6 +275,7 @@ fn test_config_validation_valid_with_updated_command() {
 fn test_config_validation_valid_with_deleted_command() {
     let config = PostgresStoredProcReactionConfig {
         user: "testuser".to_string(),
+        password: "testpass".to_string(),
         database: "testdb".to_string(),
         deleted_command: Some("CALL delete_item(@id)".to_string()),
         ..Default::default()
@@ -283,6 +288,7 @@ fn test_config_validation_valid_with_deleted_command() {
 fn test_config_validation_valid_with_all_commands() {
     let config = PostgresStoredProcReactionConfig {
         user: "testuser".to_string(),
+        password: "testpass".to_string(),
         database: "testdb".to_string(),
         added_command: Some("CALL add_item(@id)".to_string()),
         updated_command: Some("CALL update_item(@id)".to_string()),

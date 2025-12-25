@@ -30,7 +30,9 @@ pub struct PostgresStoredProcReactionConfig {
     /// Database user
     pub user: String,
 
-    /// Database password
+    /// Database password or access token
+    /// For Azure Identity authentication, obtain a token using the drasi-auth-azure crate
+    /// and pass it here as the password
     pub password: String,
 
     /// Database name
@@ -108,6 +110,9 @@ impl PostgresStoredProcReactionConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.user.is_empty() {
             anyhow::bail!("Database user is required");
+        }
+        if self.password.is_empty() {
+            anyhow::bail!("Password is required");
         }
         if self.database.is_empty() {
             anyhow::bail!("Database name is required");

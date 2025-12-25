@@ -141,6 +141,94 @@ CALL add_user(1, 'Alice', 'alice@example.com')
 .with_added_command("CALL add_address(@user.id, @address.city)")
 ```
 
+## Azure Identity Authentication
+
+For Azure Database for PostgreSQL, you can use Azure Identity (Managed Identity, Service Principal, etc.) instead of password authentication.
+
+### Prerequisites
+
+Add the optional `azure` feature and the auth crate:
+
+```toml
+[dependencies]
+drasi-reaction-storedproc-postgres = { path = "...", features = ["azure"] }
+drasi-auth-azure = { path = "..." }
+```
+
+### Using Managed Identity
+
+```rust
+use drasi_reaction_storedproc_postgres::PostgresStoredProcReaction;
+use drasi_auth_azure::AzureIdentityAuth;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Get an access token using Azure Managed Identity
+    let azure_auth = AzureIdentityAuth::managed_identity();
+    let token = azure_auth.get_postgres_token().await?;
+
+    // Use the token as the password
+    let reaction = PostgresStoredProcReaction::builder("user-sync")
+        .with_hostname("myserver.postgres.database.azure.com")
+        .with_port(5432)
+        .with_database("mydb")
+        .with_user("myuser@myserver")  // Format: identity-name@server-name
+        .with_password(token)  // Pass the token as password
+        .with_ssl(true)  // SSL required for Azure
+        .with_query("user-changes")
+        .with_added_command("CALL add_user(@id, @name, @email)")
+        .build()
+        .await?;
+
+    // ... rest of setup
+    Ok(())
+}
+```
+
+### Using Service Principal
+
+```rust
+use drasi_auth_azure::AzureIdentityAuth;
+
+// Get token using Service Principal
+let azure_auth = AzureIdentityAuth::service_principal(
+    "tenant-id",
+    "client-id",
+    "client-secret"
+);
+let token = azure_auth.get_postgres_token().await?;
+
+// Use token as password in reaction builder
+let reaction = PostgresStoredProcReaction::builder("user-sync")
+    .with_password(token)
+    // ... rest of configuration
+    .build()
+    .await?;
+```
+
+### Convenience Helper Functions
+
+The `drasi-auth-azure` crate provides convenient helper functions:
+
+```rust
+use drasi_auth_azure::get_postgres_token_with_managed_identity;
+
+// Quick way to get a token with managed identity
+let token = get_postgres_token_with_managed_identity(None).await?;
+
+// Or with a specific client ID for user-assigned managed identity
+let token = get_postgres_token_with_managed_identity(
+    Some("my-client-id".to_string())
+).await?;
+```
+
+### Important Notes
+
+- When using Azure Identity, SSL must be enabled (`.with_ssl(true)`)
+- The username format should be: `identity-name@server-name`
+- For Managed Identity: the identity name is typically the VM/App Service name
+- Tokens expire and need to be refreshed periodically (consider implementing token refresh logic for long-running applications)
+
 ## Error Handling
 
 The reaction includes automatic retry logic with exponential backoff:

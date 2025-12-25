@@ -355,7 +355,10 @@ impl PostgresStoredProcReactionBuilder {
         self
     }
 
-    /// Set the database password
+    /// Set the database password or access token
+    ///
+    /// For Azure Identity authentication, use the drasi-auth-azure crate to obtain
+    /// a token and pass it here as the password.
     pub fn with_password(mut self, password: impl Into<String>) -> Self {
         self.config.password = password.into();
         self

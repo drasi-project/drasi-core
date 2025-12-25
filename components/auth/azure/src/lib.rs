@@ -35,7 +35,7 @@
 
 use anyhow::Result;
 use azure_core::auth::TokenCredential;
-use azure_identity::{DefaultAzureCredential, DefaultAzureCredentialBuilder};
+use azure_identity::{DefaultAzureCredential, TokenCredentialOptions};
 use log::debug;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -103,20 +103,19 @@ impl AzureIdentityAuth {
         match self {
             Self::Default => {
                 debug!("Building DefaultAzureCredential");
-                let credential = DefaultAzureCredential::default();
+                let credential = DefaultAzureCredential::create(TokenCredentialOptions::default())?;
                 Ok(Arc::new(credential))
             }
             Self::ManagedIdentity { client_id } => {
                 debug!("Building ManagedIdentityCredential");
-                let mut builder = DefaultAzureCredentialBuilder::new();
 
-                // If a client ID is provided, configure it
+                // If a client ID is provided, set it via environment variable
                 if let Some(id) = client_id {
                     debug!("Using managed identity with client ID: {}", id);
-                    builder = builder.with_managed_identity_client_id(id.clone());
+                    std::env::set_var("AZURE_CLIENT_ID", id);
                 }
 
-                let credential = builder.build();
+                let credential = DefaultAzureCredential::create(TokenCredentialOptions::default())?;
                 Ok(Arc::new(credential))
             }
             Self::ServicePrincipal {
@@ -131,7 +130,7 @@ impl AzureIdentityAuth {
                 std::env::set_var("AZURE_CLIENT_ID", client_id);
                 std::env::set_var("AZURE_CLIENT_SECRET", client_secret);
 
-                let credential = DefaultAzureCredential::default();
+                let credential = DefaultAzureCredential::create(TokenCredentialOptions::default())?;
                 Ok(Arc::new(credential))
             }
         }
@@ -145,6 +144,81 @@ impl AzureIdentityAuth {
         let token = credential.get_token(scopes).await?;
         Ok(token.token.secret().to_string())
     }
+
+    /// Get an access token for Azure Database for PostgreSQL
+    ///
+    /// This is a convenience method specifically for PostgreSQL authentication.
+    /// The token can be used as the password field in PostgreSQL connection strings.
+    pub async fn get_postgres_token(&self) -> Result<String> {
+        debug!("Requesting PostgreSQL access token");
+        self.get_token(&["https://ossrdbms-aad.database.windows.net/.default"])
+            .await
+    }
+
+    /// Get an access token for Azure SQL Database
+    ///
+    /// This is a convenience method specifically for Azure SQL authentication.
+    /// The token can be used as the password field in SQL connection strings.
+    pub async fn get_sql_token(&self) -> Result<String> {
+        debug!("Requesting SQL Database access token");
+        self.get_token(&["https://database.windows.net/.default"])
+            .await
+    }
+}
+
+/// Helper function to get a PostgreSQL token using managed identity
+///
+/// This is a convenience function for the common case of using managed identity
+/// with Azure Database for PostgreSQL.
+///
+/// # Example
+/// ```rust,ignore
+/// let token = get_postgres_token_with_managed_identity(None).await?;
+/// // Use token as password in connection string
+/// ```
+pub async fn get_postgres_token_with_managed_identity(
+    client_id: Option<String>,
+) -> Result<String> {
+    let auth = if let Some(id) = client_id {
+        AzureIdentityAuth::managed_identity_with_client(id)
+    } else {
+        AzureIdentityAuth::managed_identity()
+    };
+    auth.get_postgres_token().await
+}
+
+/// Helper function to get a PostgreSQL token using default Azure credential
+///
+/// This tries multiple credential types in order (environment, managed identity, etc.)
+///
+/// # Example
+/// ```rust,ignore
+/// let token = get_postgres_token_with_default_credential().await?;
+/// // Use token as password in connection string
+/// ```
+pub async fn get_postgres_token_with_default_credential() -> Result<String> {
+    let auth = AzureIdentityAuth::default();
+    auth.get_postgres_token().await
+}
+
+/// Helper function to get a PostgreSQL token using service principal
+///
+/// # Example
+/// ```rust,ignore
+/// let token = get_postgres_token_with_service_principal(
+///     "tenant-id",
+///     "client-id",
+///     "client-secret"
+/// ).await?;
+/// // Use token as password in connection string
+/// ```
+pub async fn get_postgres_token_with_service_principal(
+    tenant_id: impl Into<String>,
+    client_id: impl Into<String>,
+    client_secret: impl Into<String>,
+) -> Result<String> {
+    let auth = AzureIdentityAuth::service_principal(tenant_id, client_id, client_secret);
+    auth.get_postgres_token().await
 }
 
 #[cfg(test)]
