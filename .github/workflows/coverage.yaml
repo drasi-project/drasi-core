@@ -85,6 +85,7 @@ jobs:
       - name: Generate Code Coverage
         env:
           REDIS_URL: redis://localhost:6379
+          CARGO_INCREMENTAL: 0
         run: |
           cargo tarpaulin --release --out Xml
           mv cobertura.xml drasi-core-tarpaulin-report.xml
