@@ -68,6 +68,7 @@ pub mod bootstrap;
 pub mod index;
 pub mod reaction;
 pub mod source;
+pub mod state_store;
 
 // Re-export core traits for convenience
 // Note: Base implementations are in sources::base and reactions::common::base
@@ -83,3 +84,8 @@ pub use bootstrap::BootstrapProvider;
 
 // Index backend plugin trait
 pub use index::IndexBackendPlugin;
+
+// State store plugin trait and default implementation
+pub use state_store::{
+    MemoryStateStoreProvider, StateStoreError, StateStoreProvider, StateStoreResult,
+};

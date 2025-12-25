@@ -527,6 +527,57 @@ For detailed information on building plugins:
 - **[Source Developer Guide](../components/sources/README.md)** - Creating custom data sources
 - **[Reaction Developer Guide](../components/reactions/README.md)** - Creating custom reactions
 - **[Bootstrap Provider Guide](../components/bootstrappers/README.md)** - Creating bootstrap providers
+- **[State Store Provider Guide](../components/state_stores/README.md)** - Creating state store providers
+
+---
+
+## State Store Providers
+
+State store providers allow plugins (Sources, BootstrapProviders, and Reactions) to persist runtime state that survives restarts of DrasiLib.
+
+### Default (Memory) Provider
+
+By default, DrasiLib uses an in-memory state store that does not persist across restarts:
+
+```rust
+let core = DrasiLib::builder()
+    .with_id("my-app")
+    .build()  // Uses MemoryStateStoreProvider by default
+    .await?;
+```
+
+### Redb Provider
+
+For ACID-compliant persistent storage, use the redb state store provider:
+
+```rust
+use drasi_state_store_redb::RedbStateStoreProvider;
+use std::sync::Arc;
+
+let state_store = RedbStateStoreProvider::new("/data/state.redb")?;
+let core = DrasiLib::builder()
+    .with_id("my-app")
+    .with_state_store_provider(Arc::new(state_store))
+    .build()
+    .await?;
+```
+
+### Using State Store in Plugins
+
+When a Source or Reaction is added to DrasiLib, the state store is automatically injected. Plugins can override `inject_state_store()` to receive the provider:
+
+```rust
+use drasi_lib::plugin_core::{Source, StateStoreProvider};
+
+impl Source for MySource {
+    async fn inject_state_store(&self, state_store: Arc<dyn StateStoreProvider>) {
+        // Store the reference for later use
+        *self.state_store.write().await = Some(state_store);
+    }
+}
+```
+
+See the **[State Store Provider Guide](../components/state_stores/README.md)** for full documentation.
 
 ---
 
