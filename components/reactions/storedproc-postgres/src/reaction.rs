@@ -27,9 +27,10 @@ use drasi_lib::managers::log_component_start;
 use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 
-use crate::config::PostgresStoredProcReactionConfig;
+use crate::config::{PostgresStoredProcReactionConfig, QueryConfig};
 use crate::executor::PostgresExecutor;
 use crate::parser::ParameterParser;
+use drasi_lib::reactions::common::OperationType;
 
 /// PostgreSQL Stored Procedure reaction
 ///
@@ -152,12 +153,10 @@ impl PostgresStoredProcReaction {
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown");
 
-                    // Determine which command to execute based on operation type
-                    let command = match result_type.to_lowercase().as_str() {
-                        "add" => &config.added_command,
-                        "update" => &config.updated_command,
-                        "delete" => &config.deleted_command,
-                        _ => {
+                    // Parse operation type
+                    let operation = match OperationType::from_str(result_type) {
+                        Some(op) => op,
+                        None => {
                             debug!(
                                 "[{reaction_id}] Unknown operation type: {result_type}, skipping"
                             );
@@ -165,13 +164,16 @@ impl PostgresStoredProcReaction {
                         }
                     };
 
+                    // Get the command template for this query and operation type
+                    let command = config.get_command_template(&query_result.query_id, operation);
+
                     // Execute the stored procedure if a command is configured
                     if let Some(cmd) = command {
                         let data = result_item.get("data");
 
                         if let Some(data_value) = data {
                             // Parse command and extract parameters
-                            match parser.parse_command(cmd, data_value) {
+                            match parser.parse_command(&cmd, data_value) {
                                 Ok((proc_name, params)) => {
                                     debug!(
                                         "[{reaction_id}] Executing procedure: {proc_name} with {params_len} parameters for {result_type} operation",
@@ -367,19 +369,34 @@ impl PostgresStoredProcReactionBuilder {
         self
     }
 
-    /// Set the stored procedure command for added results
+    /// Set the default template configuration
+    pub fn with_default_template(mut self, template: QueryConfig) -> Self {
+        self.config.default_template = Some(template);
+        self
+    }
+
+    /// Add a query-specific template route
+    pub fn with_route(mut self, query_id: impl Into<String>, template: QueryConfig) -> Self {
+        self.config.routes.insert(query_id.into(), template);
+        self
+    }
+
+    /// Set the stored procedure command for added results (deprecated - use with_default_template)
+    #[deprecated(note = "Use with_default_template instead")]
     pub fn with_added_command(mut self, command: impl Into<String>) -> Self {
         self.config.added_command = Some(command.into());
         self
     }
 
-    /// Set the stored procedure command for updated results
+    /// Set the stored procedure command for updated results (deprecated - use with_default_template)
+    #[deprecated(note = "Use with_default_template instead")]
     pub fn with_updated_command(mut self, command: impl Into<String>) -> Self {
         self.config.updated_command = Some(command.into());
         self
     }
 
-    /// Set the stored procedure command for deleted results
+    /// Set the stored procedure command for deleted results (deprecated - use with_default_template)
+    #[deprecated(note = "Use with_default_template instead")]
     pub fn with_deleted_command(mut self, command: impl Into<String>) -> Self {
         self.config.deleted_command = Some(command.into());
         self

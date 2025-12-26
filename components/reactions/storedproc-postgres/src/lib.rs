@@ -37,5 +37,5 @@ pub mod executor;
 pub mod parser;
 pub mod reaction;
 
-pub use config::PostgresStoredProcReactionConfig;
+pub use config::{PostgresStoredProcReactionConfig, QueryConfig, TemplateSpec};
 pub use reaction::PostgresStoredProcReaction;

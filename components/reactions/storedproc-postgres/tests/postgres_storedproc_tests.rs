@@ -23,10 +23,11 @@ use drasi_lib::plugin_core::Reaction;
 use drasi_reaction_storedproc_postgres::config::PostgresStoredProcReactionConfig;
 use drasi_reaction_storedproc_postgres::executor::PostgresExecutor;
 use drasi_reaction_storedproc_postgres::parser::ParameterParser;
-use drasi_reaction_storedproc_postgres::PostgresStoredProcReaction;
+use drasi_reaction_storedproc_postgres::{PostgresStoredProcReaction, QueryConfig, TemplateSpec};
 use postgres_helpers::{setup_postgres, PostgresConfig};
 use serde_json::json;
 use serial_test::serial;
+use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -179,6 +180,8 @@ fn test_config_default_values() {
     assert_eq!(config.password, "");
     assert_eq!(config.database, "");
     assert!(!config.ssl);
+    assert!(config.routes.is_empty());
+    assert_eq!(config.default_template, None);
     assert_eq!(config.added_command, None);
     assert_eq!(config.updated_command, None);
     assert_eq!(config.deleted_command, None);
@@ -217,7 +220,11 @@ fn test_config_validation_empty_user() {
     let config = PostgresStoredProcReactionConfig {
         user: "".to_string(),
         database: "testdb".to_string(),
-        added_command: Some("CALL test()".to_string()),
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL test()")),
+            updated: None,
+            deleted: None,
+        }),
         ..Default::default()
     };
 
@@ -231,7 +238,11 @@ fn test_config_validation_empty_database() {
     let config = PostgresStoredProcReactionConfig {
         user: "testuser".to_string(),
         database: "".to_string(),
-        added_command: Some("CALL test()".to_string()),
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL test()")),
+            updated: None,
+            deleted: None,
+        }),
         ..Default::default()
     };
 
@@ -244,11 +255,15 @@ fn test_config_validation_empty_database() {
 }
 
 #[test]
-fn test_config_validation_valid_with_added_command() {
+fn test_config_validation_valid_with_added_template() {
     let config = PostgresStoredProcReactionConfig {
         user: "testuser".to_string(),
         database: "testdb".to_string(),
-        added_command: Some("CALL add_item(@id)".to_string()),
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL add_item(@after.id)")),
+            updated: None,
+            deleted: None,
+        }),
         ..Default::default()
     };
 
@@ -256,11 +271,15 @@ fn test_config_validation_valid_with_added_command() {
 }
 
 #[test]
-fn test_config_validation_valid_with_updated_command() {
+fn test_config_validation_valid_with_updated_template() {
     let config = PostgresStoredProcReactionConfig {
         user: "testuser".to_string(),
         database: "testdb".to_string(),
-        updated_command: Some("CALL update_item(@id)".to_string()),
+        default_template: Some(QueryConfig {
+            added: None,
+            updated: Some(TemplateSpec::new("CALL update_item(@after.id)")),
+            deleted: None,
+        }),
         ..Default::default()
     };
 
@@ -268,11 +287,15 @@ fn test_config_validation_valid_with_updated_command() {
 }
 
 #[test]
-fn test_config_validation_valid_with_deleted_command() {
+fn test_config_validation_valid_with_deleted_template() {
     let config = PostgresStoredProcReactionConfig {
         user: "testuser".to_string(),
         database: "testdb".to_string(),
-        deleted_command: Some("CALL delete_item(@id)".to_string()),
+        default_template: Some(QueryConfig {
+            added: None,
+            updated: None,
+            deleted: Some(TemplateSpec::new("CALL delete_item(@before.id)")),
+        }),
         ..Default::default()
     };
 
@@ -280,13 +303,15 @@ fn test_config_validation_valid_with_deleted_command() {
 }
 
 #[test]
-fn test_config_validation_valid_with_all_commands() {
+fn test_config_validation_valid_with_all_templates() {
     let config = PostgresStoredProcReactionConfig {
         user: "testuser".to_string(),
         database: "testdb".to_string(),
-        added_command: Some("CALL add_item(@id)".to_string()),
-        updated_command: Some("CALL update_item(@id)".to_string()),
-        deleted_command: Some("CALL delete_item(@id)".to_string()),
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL add_item(@after.id)")),
+            updated: Some(TemplateSpec::new("CALL update_item(@after.id)")),
+            deleted: Some(TemplateSpec::new("CALL delete_item(@before.id)")),
+        }),
         ..Default::default()
     };
 
@@ -302,9 +327,15 @@ fn test_config_serialization() {
         password: "secret".to_string(),
         database: "mydb".to_string(),
         ssl: true,
-        added_command: Some("CALL add_user(@id, @name)".to_string()),
-        updated_command: Some("CALL update_user(@id, @name)".to_string()),
-        deleted_command: Some("CALL delete_user(@id)".to_string()),
+        routes: std::collections::HashMap::new(),
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL add_user(@after.id, @after.name)")),
+            updated: Some(TemplateSpec::new("CALL update_user(@after.id, @after.name)")),
+            deleted: Some(TemplateSpec::new("CALL delete_user(@before.id)")),
+        }),
+        added_command: None,
+        updated_command: None,
+        deleted_command: None,
         command_timeout_ms: 10000,
         retry_attempts: 5,
     };
@@ -449,11 +480,12 @@ async fn test_postgres_config_validation() {
         password: "password".to_string(),
         database: "testdb".to_string(),
         ssl: false,
-        added_command: Some("CALL add_user(@id)".to_string()),
-        updated_command: None,
-        deleted_command: None,
-        command_timeout_ms: 30000,
-        retry_attempts: 3,
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL add_user(@after.id)")),
+            updated: None,
+            deleted: None,
+        }),
+        ..Default::default()
     };
 
     assert!(config.validate().is_ok());
@@ -470,7 +502,7 @@ async fn test_postgres_config_validation() {
 
     // Invalid: no commands
     let mut invalid = config.clone();
-    invalid.added_command = None;
+    invalid.default_template = None;
     assert!(invalid.validate().is_err());
 }
 
@@ -492,11 +524,14 @@ async fn test_postgres_executor_connection() {
         password: pg_config.password.clone(),
         database: pg_config.database.clone(),
         ssl: false,
-        added_command: Some("CALL test()".to_string()),
-        updated_command: None,
-        deleted_command: None,
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL test()")),
+            updated: None,
+            deleted: None,
+        }),
         command_timeout_ms: 5000,
         retry_attempts: 3,
+        ..Default::default()
     };
 
     let executor = PostgresExecutor::new(&config).await;
@@ -529,11 +564,14 @@ async fn test_postgres_executor_procedure_execution() {
         password: pg_config.password.clone(),
         database: pg_config.database.clone(),
         ssl: false,
-        added_command: Some("CALL log_sensor_added(@sensor_id, @temperature)".to_string()),
-        updated_command: None,
-        deleted_command: None,
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
+            updated: None,
+            deleted: None,
+        }),
         command_timeout_ms: 5000,
         retry_attempts: 3,
+        ..Default::default()
     };
 
     let executor = PostgresExecutor::new(&config).await.unwrap();
@@ -582,11 +620,14 @@ async fn test_postgres_executor_multiple_operations() {
         password: pg_config.password.clone(),
         database: pg_config.database.clone(),
         ssl: false,
-        added_command: Some("CALL log_sensor_added(@sensor_id, @temperature)".to_string()),
-        updated_command: Some("CALL log_sensor_updated(@sensor_id, @temperature)".to_string()),
-        deleted_command: Some("CALL log_sensor_deleted(@sensor_id)".to_string()),
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
+            updated: Some(TemplateSpec::new("CALL log_sensor_updated(@after.sensor_id, @after.temperature)")),
+            deleted: Some(TemplateSpec::new("CALL log_sensor_deleted(@before.sensor_id)")),
+        }),
         command_timeout_ms: 5000,
         retry_attempts: 3,
+        ..Default::default()
     };
 
     let executor = PostgresExecutor::new(&config).await.unwrap();
@@ -642,7 +683,13 @@ async fn test_postgres_parser_with_executor() {
         password: pg_config.password.clone(),
         database: pg_config.database.clone(),
         ssl: false,
-        added_command: Some("CALL log_sensor_added(@sensor_id, @temperature)".to_string()),
+        routes: HashMap::new(),
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
+            updated: None,
+            deleted: None,
+        }),
+        added_command: None,
         updated_command: None,
         deleted_command: None,
         command_timeout_ms: 5000,
@@ -697,7 +744,13 @@ async fn test_postgres_reaction_creation() {
         password: pg_config.password.clone(),
         database: pg_config.database.clone(),
         ssl: false,
-        added_command: Some("CALL log_sensor_added(@sensor_id, @temperature)".to_string()),
+        routes: HashMap::new(),
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
+            updated: None,
+            deleted: None,
+        }),
+        added_command: None,
         updated_command: None,
         deleted_command: None,
         command_timeout_ms: 5000,
@@ -737,7 +790,11 @@ async fn test_postgres_reaction_builder() {
         .with_user(&pg_config.user)
         .with_password(&pg_config.password)
         .with_ssl(false)
-        .with_added_command("CALL log_sensor_added(@sensor_id, @temperature)")
+        .with_default_template(QueryConfig {
+            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
+            updated: None,
+            deleted: None,
+        })
         .with_query("test-query")
         .with_command_timeout_ms(5000)
         .with_retry_attempts(3)
@@ -773,7 +830,13 @@ async fn test_postgres_executor_with_special_characters() {
         password: pg_config.password.clone(),
         database: pg_config.database.clone(),
         ssl: false,
-        added_command: Some("CALL log_sensor_added(@sensor_id, @temperature)".to_string()),
+        routes: HashMap::new(),
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
+            updated: None,
+            deleted: None,
+        }),
+        added_command: None,
         updated_command: None,
         deleted_command: None,
         command_timeout_ms: 5000,
@@ -822,9 +885,11 @@ async fn test_postgres_reaction_lifecycle() {
         .with_user(&pg_config.user)
         .with_password(&pg_config.password)
         .with_ssl(false)
-        .with_added_command("CALL log_sensor_added(@sensor_id, @temperature)")
-        .with_updated_command("CALL log_sensor_updated(@sensor_id, @temperature)")
-        .with_deleted_command("CALL log_sensor_deleted(@sensor_id)")
+        .with_default_template(QueryConfig {
+            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
+            updated: Some(TemplateSpec::new("CALL log_sensor_updated(@after.sensor_id, @after.temperature)")),
+            deleted: Some(TemplateSpec::new("CALL log_sensor_deleted(@before.sensor_id)")),
+        })
         .with_query("sensor-query")
         .with_auto_start(false) // Don't auto-start for this test
         .build()
@@ -889,7 +954,13 @@ async fn test_postgres_executor_retry_on_failure() {
         password: pg_config.password.clone(),
         database: pg_config.database.clone(),
         ssl: false,
-        added_command: Some("CALL non_existent()".to_string()),
+        routes: HashMap::new(),
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL non_existent()")),
+            updated: None,
+            deleted: None,
+        }),
+        added_command: None,
         updated_command: None,
         deleted_command: None,
         command_timeout_ms: 1000,
