@@ -381,27 +381,6 @@ impl PostgresStoredProcReactionBuilder {
         self
     }
 
-    /// Set the stored procedure command for added results (deprecated - use with_default_template)
-    #[deprecated(note = "Use with_default_template instead")]
-    pub fn with_added_command(mut self, command: impl Into<String>) -> Self {
-        self.config.added_command = Some(command.into());
-        self
-    }
-
-    /// Set the stored procedure command for updated results (deprecated - use with_default_template)
-    #[deprecated(note = "Use with_default_template instead")]
-    pub fn with_updated_command(mut self, command: impl Into<String>) -> Self {
-        self.config.updated_command = Some(command.into());
-        self
-    }
-
-    /// Set the stored procedure command for deleted results (deprecated - use with_default_template)
-    #[deprecated(note = "Use with_default_template instead")]
-    pub fn with_deleted_command(mut self, command: impl Into<String>) -> Self {
-        self.config.deleted_command = Some(command.into());
-        self
-    }
-
     /// Add a query to subscribe to
     pub fn with_query(mut self, query_id: impl Into<String>) -> Self {
         self.queries.push(query_id.into());

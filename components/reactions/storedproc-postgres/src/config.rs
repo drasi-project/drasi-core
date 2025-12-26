@@ -24,11 +24,11 @@ pub use common::{QueryConfig, TemplateSpec};
 /// Configuration for the PostgreSQL Stored Procedure reaction
 ///
 /// Supports Handlebars templates for stored procedure commands.
-/// Commands use @fieldName syntax to reference query result fields and support Handlebars templates.
+/// Commands use @after.fieldName and @before.fieldName syntax to reference query result fields.
 ///
 /// Commands can be configured at two levels:
-/// 1. **Default commands**: Applied to all queries unless overridden (using added_command, updated_command, deleted_command)
-/// 2. **Per-query commands**: Override default for specific queries (using routes)
+/// 1. **Default templates**: Applied to all queries unless overridden (using `default_template`)
+/// 2. **Per-query templates**: Override default for specific queries (using `routes`)
 ///
 /// ## Template Variables
 ///
@@ -39,7 +39,7 @@ pub use common::{QueryConfig, TemplateSpec};
 /// - `query_name` - The name of the query that produced the result
 /// - `operation` - The operation type ("ADD", "UPDATE", or "DELETE")
 ///
-/// ## Example with Default Commands (Backward Compatible)
+/// ## Example with Default Template
 ///
 /// ```rust,ignore
 /// let config = PostgresStoredProcReactionConfig {
@@ -47,29 +47,25 @@ pub use common::{QueryConfig, TemplateSpec};
 ///     database: "mydb".to_string(),
 ///     user: "postgres".to_string(),
 ///     password: "password".to_string(),
-///     added_command: Some("CALL add_user(@id, @name, @email)".to_string()),
-///     updated_command: Some("CALL update_user(@id, @name, @email)".to_string()),
-///     deleted_command: Some("CALL delete_user(@id)".to_string()),
+///     default_template: Some(QueryConfig {
+///         added: Some(TemplateSpec::new("CALL add_user(@after.id, @after.name, @after.email)")),
+///         updated: Some(TemplateSpec::new("CALL update_user(@after.id, @after.name, @after.email)")),
+///         deleted: Some(TemplateSpec::new("CALL delete_user(@before.id)")),
+///     }),
 ///     ..Default::default()
 /// };
 /// ```
 ///
-/// ## Example with Per-Query Commands and Templates
+/// ## Example with Per-Query Templates
 ///
 /// ```rust,ignore
 /// use std::collections::HashMap;
 ///
 /// let mut routes = HashMap::new();
 /// routes.insert("user-query".to_string(), QueryConfig {
-///     added: Some(TemplateSpec {
-///         template: "CALL add_user(@after.id, @after.name, @after.email)".to_string(),
-///     }),
-///     updated: Some(TemplateSpec {
-///         template: "CALL update_user(@after.id, @after.name, @after.email)".to_string(),
-///     }),
-///     deleted: Some(TemplateSpec {
-///         template: "CALL delete_user(@before.id)".to_string(),
-///     }),
+///     added: Some(TemplateSpec::new("CALL add_user(@after.id, @after.name, @after.email)")),
+///     updated: Some(TemplateSpec::new("CALL update_user(@after.id, @after.name, @after.email)")),
+///     deleted: Some(TemplateSpec::new("CALL delete_user(@before.id)")),
 /// });
 ///
 /// let config = PostgresStoredProcReactionConfig {
@@ -109,30 +105,8 @@ pub struct PostgresStoredProcReactionConfig {
     pub routes: HashMap<String, QueryConfig>,
 
     /// Default template configuration used when no query-specific route is defined.
-    /// If not set, falls back to legacy command fields (added_command, updated_command, deleted_command).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_template: Option<QueryConfig>,
-
-    /// Legacy: Stored procedure command for added results
-    /// Use @fieldName to reference query result fields
-    /// Example: "CALL add_user(@id, @name, @email)"
-    /// NOTE: This is deprecated in favor of routes/default_template, but kept for backward compatibility
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub added_command: Option<String>,
-
-    /// Legacy: Stored procedure command for updated results
-    /// Use @fieldName to reference query result fields
-    /// Example: "CALL update_user(@id, @name, @email)"
-    /// NOTE: This is deprecated in favor of routes/default_template, but kept for backward compatibility
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub updated_command: Option<String>,
-
-    /// Legacy: Stored procedure command for deleted results
-    /// Use @fieldName to reference query result fields
-    /// Example: "CALL delete_user(@id)"
-    /// NOTE: This is deprecated in favor of routes/default_template, but kept for backward compatibility
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deleted_command: Option<String>,
 
     /// Command timeout in milliseconds
     #[serde(default = "default_timeout_ms")]
@@ -154,9 +128,6 @@ impl Default for PostgresStoredProcReactionConfig {
             ssl: false,
             routes: HashMap::new(),
             default_template: None,
-            added_command: None,
-            updated_command: None,
-            deleted_command: None,
             command_timeout_ms: default_timeout_ms(),
             retry_attempts: default_retry_attempts(),
         }
@@ -194,27 +165,20 @@ impl PostgresStoredProcReactionConfig {
 
     /// Get the command template for a specific query and operation type
     ///
-    /// This method supports both the new template routing system and legacy command fields.
     /// Priority order:
     /// 1. Query-specific route template
     /// 2. Default template
-    /// 3. Legacy command field (added_command, updated_command, deleted_command)
     pub fn get_command_template(
         &self,
         query_id: &str,
         operation: common::OperationType,
     ) -> Option<String> {
         // Try to get from routes or default_template first
-        if let Some(spec) = self.get_template_spec(query_id, operation) {
+        let spec = self.get_template_spec(query_id, operation);
+        if let Some(spec) = spec {
             return Some(spec.template.clone());
         }
-
-        // Fall back to legacy command fields
-        match operation {
-            common::OperationType::Add => self.added_command.clone(),
-            common::OperationType::Update => self.updated_command.clone(),
-            common::OperationType::Delete => self.deleted_command.clone(),
-        }
+        None
     }
 
     /// Validate the configuration
@@ -226,15 +190,12 @@ impl PostgresStoredProcReactionConfig {
             anyhow::bail!("Database name is required");
         }
 
-        // Check if at least one command is configured (either via routes, default_template, or legacy fields)
+        // Check if at least one command is configured
         let has_routes = !self.routes.is_empty();
         let has_default_template = self.default_template.is_some();
-        let has_legacy_commands = self.added_command.is_some()
-            || self.updated_command.is_some()
-            || self.deleted_command.is_some();
 
-        if !has_routes && !has_default_template && !has_legacy_commands {
-            anyhow::bail!("At least one command must be specified (via routes, default_template, or legacy command fields)");
+        if !has_routes && !has_default_template {
+            anyhow::bail!("At least one command must be specified (via routes or default_template)");
         }
 
         Ok(())

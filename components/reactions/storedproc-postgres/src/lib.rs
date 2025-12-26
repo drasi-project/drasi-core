@@ -16,19 +16,21 @@
 //!
 //! This plugin implements reactions that invoke PostgreSQL stored procedures when
 //! continuous query results change. It supports different procedures for
-//! ADD, UPDATE, and DELETE operations.
+//! ADD, UPDATE, and DELETE operations using Handlebars templates.
 //!
 //! # Example
 //!
 //! ```rust,ignore
-//! use drasi_reaction_storedproc_postgres::PostgresStoredProcReaction;
+//! use drasi_reaction_storedproc_postgres::{PostgresStoredProcReaction, QueryConfig, TemplateSpec};
 //!
 //! let reaction = PostgresStoredProcReaction::builder("user-sync")
 //!     .with_connection("localhost", 5432, "mydb", "postgres", "password")
 //!     .with_query("user-changes")
-//!     .with_added_command("CALL add_user(@id, @name, @email)")
-//!     .with_updated_command("CALL update_user(@id, @name, @email)")
-//!     .with_deleted_command("CALL delete_user(@id)")
+//!     .with_default_template(QueryConfig {
+//!         added: Some(TemplateSpec::new("CALL add_user(@after.id, @after.name, @after.email)")),
+//!         updated: Some(TemplateSpec::new("CALL update_user(@after.id, @after.name, @after.email)")),
+//!         deleted: Some(TemplateSpec::new("CALL delete_user(@before.id)")),
+//!     })
 //!     .build()?;
 //! ```
 

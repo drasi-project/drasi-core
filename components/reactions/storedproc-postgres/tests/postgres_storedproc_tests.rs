@@ -182,9 +182,6 @@ fn test_config_default_values() {
     assert!(!config.ssl);
     assert!(config.routes.is_empty());
     assert_eq!(config.default_template, None);
-    assert_eq!(config.added_command, None);
-    assert_eq!(config.updated_command, None);
-    assert_eq!(config.deleted_command, None);
     assert_eq!(config.command_timeout_ms, 30000);
     assert_eq!(config.retry_attempts, 3);
 }
@@ -333,9 +330,6 @@ fn test_config_serialization() {
             updated: Some(TemplateSpec::new("CALL update_user(@after.id, @after.name)")),
             deleted: Some(TemplateSpec::new("CALL delete_user(@before.id)")),
         }),
-        added_command: None,
-        updated_command: None,
-        deleted_command: None,
         command_timeout_ms: 10000,
         retry_attempts: 5,
     };
@@ -359,7 +353,11 @@ fn test_config_deserialization_with_defaults() {
         "user": "testuser",
         "password": "testpass",
         "database": "testdb",
-        "added_command": "CALL test()"
+        "default_template": {
+            "added": {
+                "template": "CALL test()"
+            }
+        }
     }"#;
 
     let config: PostgresStoredProcReactionConfig = serde_json::from_str(json).unwrap();
@@ -370,6 +368,11 @@ fn test_config_deserialization_with_defaults() {
     assert!(!config.ssl); // default
     assert_eq!(config.command_timeout_ms, 30000); // default
     assert_eq!(config.retry_attempts, 3); // default
+    assert!(config.default_template.is_some());
+    assert_eq!(
+        config.default_template.as_ref().unwrap().added.as_ref().unwrap().template,
+        "CALL test()"
+    );
 }
 
 // ============================================================================
@@ -689,9 +692,6 @@ async fn test_postgres_parser_with_executor() {
             updated: None,
             deleted: None,
         }),
-        added_command: None,
-        updated_command: None,
-        deleted_command: None,
         command_timeout_ms: 5000,
         retry_attempts: 3,
     };
@@ -750,9 +750,6 @@ async fn test_postgres_reaction_creation() {
             updated: None,
             deleted: None,
         }),
-        added_command: None,
-        updated_command: None,
-        deleted_command: None,
         command_timeout_ms: 5000,
         retry_attempts: 3,
     };
@@ -836,9 +833,6 @@ async fn test_postgres_executor_with_special_characters() {
             updated: None,
             deleted: None,
         }),
-        added_command: None,
-        updated_command: None,
-        deleted_command: None,
         command_timeout_ms: 5000,
         retry_attempts: 3,
     };
@@ -960,9 +954,6 @@ async fn test_postgres_executor_retry_on_failure() {
             updated: None,
             deleted: None,
         }),
-        added_command: None,
-        updated_command: None,
-        deleted_command: None,
         command_timeout_ms: 1000,
         retry_attempts: 2,
     };
