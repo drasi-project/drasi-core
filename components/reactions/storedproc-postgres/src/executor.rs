@@ -23,6 +23,8 @@ use tokio::sync::RwLock;
 use tokio::time::timeout;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::{Client, NoTls};
+use postgres_native_tls::MakeTlsConnector;
+use native_tls::TlsConnector;
 
 use crate::config::PostgresStoredProcReactionConfig;
 
@@ -38,29 +40,53 @@ impl PostgresExecutor {
     pub async fn new(config: &PostgresStoredProcReactionConfig) -> Result<Self> {
         let port = config.get_port();
 
-        // Build connection string
-        let ssl_mode = if config.ssl { "require" } else { "disable" };
+        // Build connection string (without sslmode, we handle TLS via connector)
         let connection_string = format!(
-            "host={} port={} user={} password={} dbname={} sslmode={}",
-            config.hostname, port, config.user, config.password, config.database, ssl_mode
+            "host={} port={} user={} password={} dbname={}",
+            config.hostname, port, config.user, config.password, config.database
         );
 
         info!(
-            "Connecting to PostgreSQL: {}:{}/{}",
-            config.hostname, port, config.database
+            "Connecting to PostgreSQL: {}:{}/{} (SSL: {})",
+            config.hostname, port, config.database, config.ssl
         );
 
-        // Connect to database
-        let (client, connection) = tokio_postgres::connect(&connection_string, NoTls)
-            .await
-            .map_err(|e| anyhow!("Failed to connect to database: {e}"))?;
+        // Connect to database with appropriate TLS configuration
+        let client = if config.ssl {
+            // Use TLS connector for SSL connections (required for Azure PostgreSQL)
+            let tls_connector = TlsConnector::builder()
+                .danger_accept_invalid_certs(false)
+                .build()
+                .map_err(|e| anyhow!("Failed to create TLS connector: {e}"))?;
+            let tls = MakeTlsConnector::new(tls_connector);
 
-        // Spawn connection handler
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                log::error!("PostgreSQL connection error: {e}");
-            }
-        });
+            let (client, connection) = tokio_postgres::connect(&connection_string, tls)
+                .await
+                .map_err(|e| anyhow!("Failed to connect to database: {e}"))?;
+
+            // Spawn connection handler
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    log::error!("PostgreSQL connection error: {e}");
+                }
+            });
+
+            client
+        } else {
+            // Use NoTls for non-SSL connections
+            let (client, connection) = tokio_postgres::connect(&connection_string, NoTls)
+                .await
+                .map_err(|e| anyhow!("Failed to connect to database: {e}"))?;
+
+            // Spawn connection handler
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    log::error!("PostgreSQL connection error: {e}");
+                }
+            });
+
+            client
+        };
 
         info!(
             "Connected to PostgreSQL: {}:{}/{}",
