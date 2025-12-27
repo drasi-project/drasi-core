@@ -125,6 +125,47 @@ impl PostgresStoredProcReaction {
         })
     }
 
+    /// Prepare context data with after/before fields based on operation type
+    fn prepare_context(operation: OperationType, data: &serde_json::Value) -> serde_json::Value {
+        use serde_json::json;
+
+        match operation {
+            OperationType::Add => {
+                // For ADD, data goes into "after"
+                json!({
+                    "after": data.clone()
+                })
+            }
+            OperationType::Update => {
+                // For UPDATE, check if data already has before/after fields
+                if let Some(obj) = data.as_object() {
+                    let mut context = serde_json::Map::new();
+                    if let Some(before) = obj.get("before") {
+                        context.insert("before".to_string(), before.clone());
+                    }
+                    if let Some(after) = obj.get("after") {
+                        context.insert("after".to_string(), after.clone());
+                    }
+                    // If no before/after, treat entire data as after
+                    if context.is_empty() {
+                        context.insert("after".to_string(), data.clone());
+                    }
+                    json!(context)
+                } else {
+                    json!({
+                        "after": data.clone()
+                    })
+                }
+            }
+            OperationType::Delete => {
+                // For DELETE, data goes into "before"
+                json!({
+                    "before": data.clone()
+                })
+            }
+        }
+    }
+
     /// Spawn the processing task that handles query results
     fn spawn_processing_task(&self) -> JoinHandle<()> {
         let priority_queue = self.base.priority_queue.clone();
@@ -172,8 +213,12 @@ impl PostgresStoredProcReaction {
                         let data = result_item.get("data");
 
                         if let Some(data_value) = data {
+                            // Prepare context with after/before fields based on operation type
+                            let context = Self::prepare_context(operation, data_value);
+                            debug!("[{reaction_id}] Context data: {}", serde_json::to_string_pretty(&context).unwrap_or_else(|_| "<<invalid>>".to_string()));
+
                             // Parse command and extract parameters
-                            match parser.parse_command(&cmd, data_value) {
+                            match parser.parse_command(&cmd, &context) {
                                 Ok((proc_name, params)) => {
                                     debug!(
                                         "[{reaction_id}] Executing procedure: {proc_name} with {params_len} parameters for {result_type} operation",

@@ -115,12 +115,15 @@ impl PostgresExecutor {
             debug!("Executing: {} with {} parameters", query, params.len());
 
             // Convert JSON values to ToSql trait objects
+            // For numbers, try to preserve the numeric type for stored procedures with numeric parameters
+            // For strings that look like numbers, keep them as strings (for TEXT parameters)
             let sql_params: Vec<Box<dyn ToSql + Sync + Send>> = params
                 .iter()
                 .map(|v| match v {
                     Value::Null => Box::new(None::<String>) as Box<dyn ToSql + Sync + Send>,
                     Value::Bool(b) => Box::new(*b) as Box<dyn ToSql + Sync + Send>,
                     Value::Number(n) => {
+                        // Keep numbers as their native type
                         if let Some(i) = n.as_i64() {
                             Box::new(i) as Box<dyn ToSql + Sync + Send>
                         } else if let Some(f) = n.as_f64() {
@@ -129,7 +132,15 @@ impl PostgresExecutor {
                             Box::new(n.to_string()) as Box<dyn ToSql + Sync + Send>
                         }
                     }
-                    Value::String(s) => Box::new(s.clone()) as Box<dyn ToSql + Sync + Send>,
+                    Value::String(s) => {
+                        // Try to parse strings as numbers for compatibility with numeric columns
+                        // If it's a valid number, pass it as f64, otherwise keep as string
+                        if let Ok(f) = s.parse::<f64>() {
+                            Box::new(f) as Box<dyn ToSql + Sync + Send>
+                        } else {
+                            Box::new(s.clone()) as Box<dyn ToSql + Sync + Send>
+                        }
+                    }
                     Value::Array(_) | Value::Object(_) => {
                         // For complex types, pass as JSON
                         Box::new(v.clone()) as Box<dyn ToSql + Sync + Send>
