@@ -14,39 +14,12 @@
 
 //! Configuration types for log reaction.
 
+use drasi_lib::reactions::common::{self, TemplateRouting};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Specification for log output template.
-///
-/// This type is used to configure log templates for different operation types (added, updated, deleted).
-/// All template fields support Handlebars template syntax for dynamic content generation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct TemplateSpec {
-    /// Output template as a Handlebars template.
-    /// If empty, displays the raw JSON data.
-    #[serde(default)]
-    pub template: String,
-}
-
-/// Configuration for query-specific log output.
-///
-/// Defines different template specifications for each operation type (added, updated, deleted).
-/// Each operation type can have its own formatting template.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct QueryConfig {
-    /// Template specification for ADD operations (new rows in query results).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub added: Option<TemplateSpec>,
-
-    /// Template specification for UPDATE operations (modified rows in query results).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub updated: Option<TemplateSpec>,
-
-    /// Template specification for DELETE operations (removed rows from query results).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deleted: Option<TemplateSpec>,
-}
+// Re-export common template types for backward compatibility
+pub use common::{QueryConfig, TemplateSpec};
 
 /// Log reaction configuration
 ///
@@ -116,4 +89,14 @@ pub struct LogReactionConfig {
     /// If not set, falls back to raw JSON output.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_template: Option<QueryConfig>,
+}
+
+impl TemplateRouting for LogReactionConfig {
+    fn routes(&self) -> &HashMap<String, QueryConfig> {
+        &self.routes
+    }
+
+    fn default_template(&self) -> Option<&QueryConfig> {
+        self.default_template.as_ref()
+    }
 }

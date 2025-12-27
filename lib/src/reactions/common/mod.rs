@@ -16,6 +16,8 @@
 
 pub mod base;
 pub mod config;
+pub mod templates;
 
 pub use base::ReactionBase;
 pub use config::AdaptiveBatchConfig;
+pub use templates::{OperationType, QueryConfig, TemplateRouting, TemplateSpec};

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::*;
+use crate::config::SseExtension;
 use drasi_lib::plugin_core::Reaction;
 
 #[test]
@@ -118,17 +119,21 @@ fn test_sse_type_name() {
 fn test_sse_builder_with_routes() {
     let query_config = QueryConfig {
         added: Some(TemplateSpec {
-            path: Some("/custom/added".to_string()),
             template: r#"{"event": "add", "data": {{json after}}}"#.to_string(),
+            extension: SseExtension {
+                path: Some("/custom/added".to_string()),
+            },
         }),
         updated: Some(TemplateSpec {
-            path: None,
             template: r#"{"event": "update", "before": {{json before}}, "after": {{json after}}}"#
                 .to_string(),
+            extension: SseExtension { path: None },
         }),
         deleted: Some(TemplateSpec {
-            path: Some("/custom/deleted".to_string()),
             template: r#"{"event": "delete", "data": {{json before}}}"#.to_string(),
+            extension: SseExtension {
+                path: Some("/custom/deleted".to_string()),
+            },
         }),
     };
 
@@ -149,8 +154,8 @@ fn test_sse_config_with_routes_serialization() {
         "test-query".to_string(),
         QueryConfig {
             added: Some(TemplateSpec {
-                path: None,
-                template: r#"{"type": "added", "data": {{json after}}}"#.to_string(),
+                                template: r#"{"type": "added", "data": {{json after}}}"#.to_string(),
+                extension: SseExtension { path: None },
             }),
             updated: None,
             deleted: None,
@@ -175,11 +180,13 @@ fn test_sse_config_with_routes_serialization() {
 #[test]
 fn test_template_spec_creation() {
     let spec = TemplateSpec {
-        path: Some("/custom/path".to_string()),
         template: r#"{"message": "test"}"#.to_string(),
+        extension: SseExtension {
+            path: Some("/custom/path".to_string()),
+        },
     };
 
-    assert_eq!(spec.path, Some("/custom/path".to_string()));
+    assert_eq!(spec.extension.path, Some("/custom/path".to_string()));
     assert_eq!(spec.template, r#"{"message": "test"}"#);
 }
 
@@ -187,16 +194,16 @@ fn test_template_spec_creation() {
 fn test_query_config_all_operations() {
     let config = QueryConfig {
         added: Some(TemplateSpec {
-            path: None,
-            template: "add template".to_string(),
+                        template: "add template".to_string(),
+            extension: SseExtension { path: None },
         }),
         updated: Some(TemplateSpec {
-            path: None,
-            template: "update template".to_string(),
+                        template: "update template".to_string(),
+            extension: SseExtension { path: None },
         }),
         deleted: Some(TemplateSpec {
-            path: None,
-            template: "delete template".to_string(),
+                        template: "delete template".to_string(),
+            extension: SseExtension { path: None },
         }),
     };
 
@@ -216,16 +223,16 @@ fn test_config_default_routes_empty() {
 fn test_sse_builder_with_default_template() {
     let default_template = QueryConfig {
         added: Some(TemplateSpec {
-            path: None,
-            template: r#"{"event": "add", "data": {{json after}}}"#.to_string(),
+                        template: r#"{"event": "add", "data": {{json after}}}"#.to_string(),
+            extension: SseExtension { path: None },
         }),
         updated: Some(TemplateSpec {
-            path: None,
-            template: r#"{"event": "update", "data": {{json after}}}"#.to_string(),
+                        template: r#"{"event": "update", "data": {{json after}}}"#.to_string(),
+            extension: SseExtension { path: None },
         }),
         deleted: Some(TemplateSpec {
-            path: None,
-            template: r#"{"event": "delete", "data": {{json before}}}"#.to_string(),
+                        template: r#"{"event": "delete", "data": {{json before}}}"#.to_string(),
+            extension: SseExtension { path: None },
         }),
     };
 
@@ -243,8 +250,8 @@ fn test_sse_builder_with_default_template() {
 fn test_sse_builder_invalid_template_fails() {
     let invalid_template = QueryConfig {
         added: Some(TemplateSpec {
-            path: None,
-            template: r#"{{invalid syntax"#.to_string(),
+                        template: r#"{{invalid syntax"#.to_string(),
+            extension: SseExtension { path: None },
         }),
         updated: None,
         deleted: None,
@@ -263,8 +270,8 @@ fn test_sse_builder_invalid_template_fails() {
 fn test_sse_builder_route_validation_passes() {
     let route_config = QueryConfig {
         added: Some(TemplateSpec {
-            path: None,
-            template: r#"{"data": {{json after}}}"#.to_string(),
+                        template: r#"{"data": {{json after}}}"#.to_string(),
+            extension: SseExtension { path: None },
         }),
         updated: None,
         deleted: None,
@@ -282,8 +289,8 @@ fn test_sse_builder_route_validation_passes() {
 fn test_sse_builder_route_validation_fails() {
     let route_config = QueryConfig {
         added: Some(TemplateSpec {
-            path: None,
-            template: r#"{"data": {{json after}}}"#.to_string(),
+                        template: r#"{"data": {{json after}}}"#.to_string(),
+            extension: SseExtension { path: None },
         }),
         updated: None,
         deleted: None,
@@ -305,8 +312,8 @@ fn test_sse_builder_route_validation_fails() {
 fn test_sse_builder_route_validation_dotted_notation() {
     let route_config = QueryConfig {
         added: Some(TemplateSpec {
-            path: None,
-            template: r#"{"data": {{json after}}}"#.to_string(),
+                        template: r#"{"data": {{json after}}}"#.to_string(),
+            extension: SseExtension { path: None },
         }),
         updated: None,
         deleted: None,
@@ -325,8 +332,8 @@ fn test_sse_builder_route_validation_dotted_notation() {
 fn test_config_with_default_template_serialization() {
     let default_template = QueryConfig {
         added: Some(TemplateSpec {
-            path: None,
-            template: r#"{"event": "add"}"#.to_string(),
+                        template: r#"{"event": "add"}"#.to_string(),
+            extension: SseExtension { path: None },
         }),
         updated: None,
         deleted: None,

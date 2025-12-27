@@ -43,7 +43,7 @@ fn pre_create_broadcaster_for_template_spec(
     template_spec: &super::config::TemplateSpec,
     base_sse_path: &str,
 ) {
-    if let Some(custom_path) = &template_spec.path {
+    if let Some(custom_path) = &template_spec.extension.path {
         // Only pre-create broadcasters for static paths (no template variables)
         if !custom_path.contains("{{") {
             let resolved_path = if custom_path.starts_with('/') {
@@ -406,7 +406,7 @@ impl Reaction for SseReaction {
 
                                 // Determine the SSE path for this event
                                 let sse_path = SseReaction::resolve_sse_path(
-                                    spec.path.as_ref(),
+                                    spec.extension.path.as_ref(),
                                     &base_sse_path,
                                     &handlebars,
                                     &context,
