@@ -276,6 +276,14 @@ impl DrasiLib {
             .inject_query_subscriber(query_subscriber)
             .await;
 
+        // Inject StateStoreProvider into SourceManager and ReactionManager
+        // This allows sources and reactions to persist state
+        let state_store = self.config.state_store_provider.clone();
+        self.source_manager
+            .inject_state_store(state_store.clone())
+            .await;
+        self.reaction_manager.inject_state_store(state_store).await;
+
         // Load configuration
         let lifecycle = self.lifecycle.read().await;
         lifecycle.load_configuration().await?;

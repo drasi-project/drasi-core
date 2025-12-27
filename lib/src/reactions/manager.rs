@@ -21,13 +21,15 @@ use tokio::sync::RwLock;
 use crate::channels::*;
 use crate::config::ReactionRuntime;
 use crate::managers::{is_operation_valid, log_component_error, Operation};
-use crate::plugin_core::{QuerySubscriber, Reaction};
+use crate::plugin_core::{QuerySubscriber, Reaction, StateStoreProvider};
 
 pub struct ReactionManager {
     reactions: Arc<RwLock<HashMap<String, Arc<dyn Reaction>>>>,
     event_tx: ComponentEventSender,
     /// Query subscriber for reactions to access queries (injected after DrasiLib is constructed)
     query_subscriber: Arc<RwLock<Option<Arc<dyn QuerySubscriber>>>>,
+    /// State store provider for reactions to persist state
+    state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
 }
 
 impl ReactionManager {
@@ -37,6 +39,7 @@ impl ReactionManager {
             reactions: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
             query_subscriber: Arc::new(RwLock::new(None)),
+            state_store: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -45,6 +48,13 @@ impl ReactionManager {
     /// This allows reactions to look up queries when they start.
     pub async fn inject_query_subscriber(&self, qs: Arc<dyn QuerySubscriber>) {
         *self.query_subscriber.write().await = Some(qs);
+    }
+
+    /// Inject the state store provider (called after DrasiLib is fully constructed)
+    ///
+    /// This allows reactions to access the state store when they are added.
+    pub async fn inject_state_store(&self, state_store: Arc<dyn StateStoreProvider>) {
+        *self.state_store.write().await = Some(state_store);
     }
 
     /// Add a reaction instance, taking ownership and wrapping it in an Arc internally.
@@ -60,8 +70,8 @@ impl ReactionManager {
     /// The reaction will NOT be auto-started. Call `start_reaction` separately
     /// if you need to start it after adding.
     ///
-    /// Dependencies (event channel and query subscriber) are automatically injected
-    /// into the reaction before it is stored.
+    /// Dependencies (event channel, query subscriber, and state store) are automatically
+    /// injected into the reaction before it is stored.
     ///
     /// # Example
     /// ```ignore
@@ -78,6 +88,11 @@ impl ReactionManager {
         // Inject query subscriber if available
         if let Some(qs) = self.query_subscriber.read().await.as_ref() {
             reaction.inject_query_subscriber(qs.clone()).await;
+        }
+
+        // Inject state store if available
+        if let Some(state_store) = self.state_store.read().await.as_ref() {
+            reaction.inject_state_store(state_store.clone()).await;
         }
 
         // Use a single write lock to atomically check and insert

@@ -41,6 +41,9 @@ members = [
   "components/indexes/rocksdb",
   "components/indexes/garnet",
 
+  # State Store Plugins
+  "components/state_stores/redb",
+
   # Internal
   "shared-tests",
   "query-perf",
