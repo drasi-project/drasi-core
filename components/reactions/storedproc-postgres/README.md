@@ -185,6 +185,70 @@ let reaction = PostgresStoredProcReaction::builder("my-reaction")
     .await?;
 ```
 
+## Advanced Example: Multiple Queries with Default and Custom Routes
+
+This example shows a reaction handling multiple queries with different stored procedure requirements:
+
+```rust
+use drasi_reaction_storedproc_postgres::{PostgresStoredProcReaction, QueryConfig, TemplateSpec};
+
+// Create a reaction that:
+// 1. Subscribes to 3 different queries: "user-changes", "product-changes", "order-changes"
+// 2. Has a default template for most operations
+// 3. Overrides only the "product-changes" query with custom procedures
+
+let reaction = PostgresStoredProcReaction::builder("multi-query-sync")
+    .with_hostname("localhost")
+    .with_port(5432)
+    .with_database("mydb")
+    .with_user("postgres")
+    .with_password("secret")
+    // Subscribe to multiple queries
+    .with_query("user-changes")
+    .with_query("product-changes")
+    .with_query("order-changes")
+    // Default template applies to "user-changes" and "order-changes"
+    .with_default_template(QueryConfig {
+        added: Some(TemplateSpec::new("CALL log_entity_added(@after.id, @after.type)")),
+        updated: Some(TemplateSpec::new("CALL log_entity_updated(@after.id, @after.type)")),
+        deleted: Some(TemplateSpec::new("CALL log_entity_deleted(@before.id, @before.type)")),
+    })
+    // Override "product-changes" with specific procedures
+    .with_route("product-changes", QueryConfig {
+        added: Some(TemplateSpec::new(
+            "CALL sync_product_added(@after.product_id, @after.name, @after.price, @after.inventory)"
+        )),
+        updated: Some(TemplateSpec::new(
+            "CALL sync_product_updated(@after.product_id, @after.price, @after.inventory)"
+        )),
+        // Product deletes don't need a custom procedure - will fall back to default
+        deleted: None,
+    })
+    .with_command_timeout_ms(5000)
+    .with_retry_attempts(3)
+    .build()
+    .await?;
+```
+
+**How it works:**
+
+1. **"user-changes" query** → Uses default template
+   - Add: `CALL log_entity_added(@after.id, @after.type)`
+   - Update: `CALL log_entity_updated(@after.id, @after.type)`
+   - Delete: `CALL log_entity_deleted(@before.id, @before.type)`
+
+2. **"product-changes" query** → Uses custom route (with fallback to default for delete)
+   - Add: `CALL sync_product_added(@after.product_id, @after.name, @after.price, @after.inventory)`
+   - Update: `CALL sync_product_updated(@after.product_id, @after.price, @after.inventory)`
+   - Delete: `CALL log_entity_deleted(@before.id, @before.type)` *(falls back to default)*
+
+3. **"order-changes" query** → Uses default template
+   - Add: `CALL log_entity_added(@after.id, @after.type)`
+   - Update: `CALL log_entity_updated(@after.id, @after.type)`
+   - Delete: `CALL log_entity_deleted(@before.id, @before.type)`
+
+**Note:** If a route specifies `None` for an operation (like `deleted: None` for product-changes), the reaction will check the default template. If the default template also has `None` for that operation, no procedure will be called.
+
 ## Error Handling
 
 The reaction includes automatic retry logic with exponential backoff:
