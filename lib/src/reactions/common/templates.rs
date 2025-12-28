@@ -299,7 +299,7 @@ impl std::str::FromStr for OperationType {
             "add" => Ok(Self::Add),
             "update" => Ok(Self::Update),
             "delete" => Ok(Self::Delete),
-            _ => Err(format!("Invalid operation type: {}", s)),
+            _ => Err(format!("Invalid operation type: {s}")),
         }
     }
 }
