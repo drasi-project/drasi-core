@@ -20,6 +20,7 @@
 mod postgres_helpers;
 
 use drasi_lib::plugin_core::Reaction;
+use drasi_lib::reactions::common;
 use drasi_reaction_storedproc_postgres::config::PostgresStoredProcReactionConfig;
 use drasi_reaction_storedproc_postgres::executor::PostgresExecutor;
 use drasi_reaction_storedproc_postgres::parser::ParameterParser;
@@ -969,6 +970,568 @@ async fn test_postgres_executor_retry_on_failure() {
         result.is_err(),
         "Should fail after exhausting retry attempts"
     );
+
+    pg.cleanup().await;
+}
+
+// ============================================================================
+// Template and Route Tests
+// ============================================================================
+
+#[tokio::test]
+#[serial]
+async fn test_default_template_applies_to_all_queries() {
+    env_logger::builder()
+        .is_test(true)
+        .filter_level(log::LevelFilter::Debug)
+        .try_init()
+        .ok();
+
+    let pg = setup_postgres().await;
+    let pg_config = pg.config();
+    setup_stored_procedures(pg_config).await;
+
+    // Setup additional stored procedures for testing
+    let client = tokio_postgres::connect(
+        &format!(
+            "host={} port={} user={} password={} dbname={}",
+            pg_config.host, pg_config.port, pg_config.user, pg_config.password, pg_config.database
+        ),
+        tokio_postgres::NoTls,
+    )
+    .await
+    .unwrap()
+    .0;
+
+    client
+        .execute(
+            "CREATE OR REPLACE PROCEDURE log_query_event(
+                p_query_name TEXT,
+                p_sensor_id TEXT
+            )
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                INSERT INTO sensor_log (operation, sensor_id, temperature)
+                VALUES (p_query_name, p_sensor_id, 0);
+            END;
+            $$;",
+            &[],
+        )
+        .await
+        .unwrap();
+
+    let config = PostgresStoredProcReactionConfig {
+        hostname: pg_config.host.clone(),
+        port: Some(pg_config.port),
+        user: pg_config.user.clone(),
+        password: pg_config.password.clone(),
+        database: pg_config.database.clone(),
+        ssl: false,
+        routes: HashMap::new(), // No routes specified
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new(
+                "CALL log_query_event(@query_name, @after.sensor_id)",
+            )),
+            updated: None,
+            deleted: None,
+        }),
+        command_timeout_ms: 5000,
+        retry_attempts: 3,
+    };
+
+    let executor = PostgresExecutor::new(&config).await.unwrap();
+    let parser = ParameterParser::new();
+
+    // Test that default template is used for query1
+    let data = json!({
+        "query_name": "query1",
+        "sensor_id": "sensor-001"
+    });
+
+    let (proc_name, params) = parser
+        .parse_command("CALL log_query_event(@query_name, @sensor_id)", &data)
+        .expect("Should parse");
+
+    executor
+        .execute_procedure(&proc_name, params)
+        .await
+        .expect("Should execute");
+
+    // Test that default template is used for query2
+    let data = json!({
+        "query_name": "query2",
+        "sensor_id": "sensor-002"
+    });
+
+    let (proc_name, params) = parser
+        .parse_command("CALL log_query_event(@query_name, @sensor_id)", &data)
+        .expect("Should parse");
+
+    executor
+        .execute_procedure(&proc_name, params)
+        .await
+        .expect("Should execute");
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Verify both queries used the default template
+    let entries = get_log_entries(pg_config).await;
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].1, "sensor-001");
+    assert_eq!(entries[1].1, "sensor-002");
+
+    pg.cleanup().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_route_overrides_default_template() {
+    env_logger::builder()
+        .is_test(true)
+        .filter_level(log::LevelFilter::Debug)
+        .try_init()
+        .ok();
+
+    let pg = setup_postgres().await;
+    let pg_config = pg.config();
+    setup_stored_procedures(pg_config).await;
+
+    // Setup additional stored procedure
+    let client = tokio_postgres::connect(
+        &format!(
+            "host={} port={} user={} password={} dbname={}",
+            pg_config.host, pg_config.port, pg_config.user, pg_config.password, pg_config.database
+        ),
+        tokio_postgres::NoTls,
+    )
+    .await
+    .unwrap()
+    .0;
+
+    client
+        .execute(
+            "CREATE OR REPLACE PROCEDURE log_special_event(
+                p_sensor_id TEXT,
+                p_temperature DOUBLE PRECISION
+            )
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                INSERT INTO sensor_log (operation, sensor_id, temperature)
+                VALUES ('SPECIAL', p_sensor_id, p_temperature);
+            END;
+            $$;",
+            &[],
+        )
+        .await
+        .unwrap();
+
+    let mut routes = HashMap::new();
+    routes.insert(
+        "special-query".to_string(),
+        QueryConfig {
+            added: Some(TemplateSpec::new(
+                "CALL log_special_event(@after.sensor_id, @after.temperature)",
+            )),
+            updated: None,
+            deleted: None,
+        },
+    );
+
+    let config = PostgresStoredProcReactionConfig {
+        hostname: pg_config.host.clone(),
+        port: Some(pg_config.port),
+        user: pg_config.user.clone(),
+        password: pg_config.password.clone(),
+        database: pg_config.database.clone(),
+        ssl: false,
+        routes,
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new(
+                "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
+            )),
+            updated: None,
+            deleted: None,
+        }),
+        command_timeout_ms: 5000,
+        retry_attempts: 3,
+    };
+
+    let executor = PostgresExecutor::new(&config).await.unwrap();
+    let parser = ParameterParser::new();
+
+    // Execute with route-specific template
+    let data = json!({
+        "sensor_id": "sensor-special",
+        "temperature": 99.9
+    });
+
+    let (proc_name, params) = parser
+        .parse_command(
+            "CALL log_special_event(@sensor_id, @temperature)",
+            &data,
+        )
+        .expect("Should parse");
+
+    executor
+        .execute_procedure(&proc_name, params)
+        .await
+        .expect("Should execute");
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Verify it used the special route (SPECIAL operation vs ADD)
+    let entries = get_log_entries(pg_config).await;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0, "SPECIAL");
+    assert_eq!(entries[0].1, "sensor-special");
+
+    pg.cleanup().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_route_with_none_falls_back_to_default() {
+    env_logger::builder()
+        .is_test(true)
+        .filter_level(log::LevelFilter::Debug)
+        .try_init()
+        .ok();
+
+    let pg = setup_postgres().await;
+    let pg_config = pg.config();
+    setup_stored_procedures(pg_config).await;
+
+    let mut routes = HashMap::new();
+    routes.insert(
+        "partial-query".to_string(),
+        QueryConfig {
+            added: Some(TemplateSpec::new(
+                "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
+            )),
+            updated: None, // Will fall back to default
+            deleted: None,
+        },
+    );
+
+    let config = PostgresStoredProcReactionConfig {
+        hostname: pg_config.host.clone(),
+        port: Some(pg_config.port),
+        user: pg_config.user.clone(),
+        password: pg_config.password.clone(),
+        database: pg_config.database.clone(),
+        ssl: false,
+        routes,
+        default_template: Some(QueryConfig {
+            added: None,
+            updated: Some(TemplateSpec::new(
+                "CALL log_sensor_updated(@after.sensor_id, @after.temperature)",
+            )),
+            deleted: None,
+        }),
+        command_timeout_ms: 5000,
+        retry_attempts: 3,
+    };
+
+    // Get the UPDATE template for "partial-query"
+    let template = config.get_command_template("partial-query", common::OperationType::Update);
+
+    // Should fall back to default template
+    assert!(template.is_some());
+    assert_eq!(
+        template.unwrap(),
+        "CALL log_sensor_updated(@after.sensor_id, @after.temperature)"
+    );
+
+    pg.cleanup().await;
+}
+
+// ============================================================================
+// Data Type Tests
+// ============================================================================
+
+#[tokio::test]
+#[serial]
+async fn test_executor_with_various_data_types() {
+    env_logger::builder()
+        .is_test(true)
+        .filter_level(log::LevelFilter::Debug)
+        .try_init()
+        .ok();
+
+    let pg = setup_postgres().await;
+    let pg_config = pg.config();
+
+    // Create a comprehensive test table
+    let client = tokio_postgres::connect(
+        &format!(
+            "host={} port={} user={} password={} dbname={}",
+            pg_config.host, pg_config.port, pg_config.user, pg_config.password, pg_config.database
+        ),
+        tokio_postgres::NoTls,
+    )
+    .await
+    .unwrap()
+    .0;
+
+    client
+        .execute(
+            "CREATE TABLE IF NOT EXISTS data_type_test (
+                id SERIAL PRIMARY KEY,
+                text_col TEXT,
+                int_col INTEGER,
+                float_col DOUBLE PRECISION,
+                bool_col BOOLEAN,
+                json_col JSONB
+            )",
+            &[],
+        )
+        .await
+        .unwrap();
+
+    client
+        .execute(
+            "CREATE OR REPLACE PROCEDURE test_data_types(
+                p_text TEXT,
+                p_int INTEGER,
+                p_float DOUBLE PRECISION,
+                p_bool BOOLEAN,
+                p_json JSONB
+            )
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                INSERT INTO data_type_test (text_col, int_col, float_col, bool_col, json_col)
+                VALUES (p_text, p_int, p_float, p_bool, p_json);
+            END;
+            $$;",
+            &[],
+        )
+        .await
+        .unwrap();
+
+    let config = PostgresStoredProcReactionConfig {
+        hostname: pg_config.host.clone(),
+        port: Some(pg_config.port),
+        user: pg_config.user.clone(),
+        password: pg_config.password.clone(),
+        database: pg_config.database.clone(),
+        ssl: false,
+        routes: HashMap::new(),
+        default_template: None,
+        command_timeout_ms: 5000,
+        retry_attempts: 3,
+    };
+
+    let executor = PostgresExecutor::new(&config).await.unwrap();
+
+    // Test with various data types
+    let params = vec![
+        json!("test string"),                     // TEXT
+        json!(42),                                 // INTEGER
+        json!(3.14159),                            // DOUBLE PRECISION
+        json!(true),                               // BOOLEAN
+        json!({"key": "value", "count": 123}),     // JSONB
+    ];
+
+    let result = executor.execute_procedure("test_data_types", params).await;
+    assert!(result.is_ok(), "Should handle various data types: {:?}", result.err());
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Verify the data was inserted correctly
+    let rows = client
+        .query("SELECT text_col, int_col, float_col, bool_col, json_col FROM data_type_test", &[])
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row.get::<_, String>(0), "test string");
+    assert_eq!(row.get::<_, i32>(1), 42);
+    assert!((row.get::<_, f64>(2) - 3.14159).abs() < 0.00001);
+    assert_eq!(row.get::<_, bool>(3), true);
+
+    pg.cleanup().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_executor_with_string_numbers() {
+    env_logger::builder()
+        .is_test(true)
+        .filter_level(log::LevelFilter::Debug)
+        .try_init()
+        .ok();
+
+    let pg = setup_postgres().await;
+    let pg_config = pg.config();
+
+    let client = tokio_postgres::connect(
+        &format!(
+            "host={} port={} user={} password={} dbname={}",
+            pg_config.host, pg_config.port, pg_config.user, pg_config.password, pg_config.database
+        ),
+        tokio_postgres::NoTls,
+    )
+    .await
+    .unwrap()
+    .0;
+
+    client
+        .execute(
+            "CREATE TABLE IF NOT EXISTS string_number_test (
+                id SERIAL PRIMARY KEY,
+                numeric_value DOUBLE PRECISION
+            )",
+            &[],
+        )
+        .await
+        .unwrap();
+
+    client
+        .execute(
+            "CREATE OR REPLACE PROCEDURE test_string_number(
+                p_value DOUBLE PRECISION
+            )
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                INSERT INTO string_number_test (numeric_value) VALUES (p_value);
+            END;
+            $$;",
+            &[],
+        )
+        .await
+        .unwrap();
+
+    let config = PostgresStoredProcReactionConfig {
+        hostname: pg_config.host.clone(),
+        port: Some(pg_config.port),
+        user: pg_config.user.clone(),
+        password: pg_config.password.clone(),
+        database: pg_config.database.clone(),
+        ssl: false,
+        routes: HashMap::new(),
+        default_template: None,
+        command_timeout_ms: 5000,
+        retry_attempts: 3,
+    };
+
+    let executor = PostgresExecutor::new(&config).await.unwrap();
+
+    // Test with string that looks like a number (simulating MockSource behavior)
+    let params = vec![json!("25.789")];
+
+    let result = executor.execute_procedure("test_string_number", params).await;
+    assert!(
+        result.is_ok(),
+        "Should parse string numbers: {:?}",
+        result.err()
+    );
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Verify it was stored as a number
+    let rows = client
+        .query("SELECT numeric_value FROM string_number_test", &[])
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 1);
+    let value = rows[0].get::<_, f64>(0);
+    assert!((value - 25.789).abs() < 0.00001);
+
+    pg.cleanup().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_executor_with_null_values() {
+    env_logger::builder()
+        .is_test(true)
+        .filter_level(log::LevelFilter::Debug)
+        .try_init()
+        .ok();
+
+    let pg = setup_postgres().await;
+    let pg_config = pg.config();
+
+    let client = tokio_postgres::connect(
+        &format!(
+            "host={} port={} user={} password={} dbname={}",
+            pg_config.host, pg_config.port, pg_config.user, pg_config.password, pg_config.database
+        ),
+        tokio_postgres::NoTls,
+    )
+    .await
+    .unwrap()
+    .0;
+
+    client
+        .execute(
+            "CREATE TABLE IF NOT EXISTS null_test (
+                id SERIAL PRIMARY KEY,
+                nullable_text TEXT,
+                nullable_int INTEGER
+            )",
+            &[],
+        )
+        .await
+        .unwrap();
+
+    client
+        .execute(
+            "CREATE OR REPLACE PROCEDURE test_null_values(
+                p_text TEXT,
+                p_int INTEGER
+            )
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                INSERT INTO null_test (nullable_text, nullable_int) VALUES (p_text, p_int);
+            END;
+            $$;",
+            &[],
+        )
+        .await
+        .unwrap();
+
+    let config = PostgresStoredProcReactionConfig {
+        hostname: pg_config.host.clone(),
+        port: Some(pg_config.port),
+        user: pg_config.user.clone(),
+        password: pg_config.password.clone(),
+        database: pg_config.database.clone(),
+        ssl: false,
+        routes: HashMap::new(),
+        default_template: None,
+        command_timeout_ms: 5000,
+        retry_attempts: 3,
+    };
+
+    let executor = PostgresExecutor::new(&config).await.unwrap();
+
+    // Test with NULL values
+    let params = vec![json!(null), json!(null)];
+
+    let result = executor.execute_procedure("test_null_values", params).await;
+    assert!(result.is_ok(), "Should handle NULL values: {:?}", result.err());
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Verify NULLs were stored
+    let rows = client
+        .query("SELECT nullable_text, nullable_int FROM null_test", &[])
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 1);
+    let text_val: Option<String> = rows[0].get(0);
+    let int_val: Option<i32> = rows[0].get(1);
+    assert!(text_val.is_none());
+    assert!(int_val.is_none());
 
     pg.cleanup().await;
 }
