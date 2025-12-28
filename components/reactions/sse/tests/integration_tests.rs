@@ -16,7 +16,7 @@
 
 use anyhow::Result;
 use drasi_lib::{DrasiLib, Query};
-use drasi_reaction_sse::{QueryConfig, SseReaction, TemplateSpec, SseExtension};
+use drasi_reaction_sse::{QueryConfig, SseExtension, SseReaction, TemplateSpec};
 use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
 use futures_util::StreamExt;
 use std::collections::HashMap;
@@ -269,7 +269,9 @@ async fn test_sse_multi_path_integration() -> Result<()> {
     let person_config = QueryConfig {
         added: Some(TemplateSpec::with_extension(
             r#"{"type":"person","name":"{{after.name}}"}"#,
-            SseExtension { path: Some("/persons".to_string()) },
+            SseExtension {
+                path: Some("/persons".to_string()),
+            },
         )),
         updated: None,
         deleted: None,
@@ -278,7 +280,9 @@ async fn test_sse_multi_path_integration() -> Result<()> {
     let company_config = QueryConfig {
         added: Some(TemplateSpec::with_extension(
             r#"{"type":"company","name":"{{after.name}}"}"#,
-            SseExtension { path: Some("/companies".to_string()) },
+            SseExtension {
+                path: Some("/companies".to_string()),
+            },
         )),
         updated: None,
         deleted: None,

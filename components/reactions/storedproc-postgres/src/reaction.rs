@@ -195,9 +195,9 @@ impl PostgresStoredProcReaction {
                         .unwrap_or("unknown");
 
                     // Parse operation type
-                    let operation = match OperationType::from_str(result_type) {
-                        Some(op) => op,
-                        None => {
+                    let operation = match result_type.parse::<OperationType>() {
+                        Ok(op) => op,
+                        Err(_) => {
                             debug!(
                                 "[{reaction_id}] Unknown operation type: {result_type}, skipping"
                             );
@@ -215,7 +215,11 @@ impl PostgresStoredProcReaction {
                         if let Some(data_value) = data {
                             // Prepare context with after/before fields based on operation type
                             let context = Self::prepare_context(operation, data_value);
-                            debug!("[{reaction_id}] Context data: {}", serde_json::to_string_pretty(&context).unwrap_or_else(|_| "<<invalid>>".to_string()));
+                            debug!(
+                                "[{reaction_id}] Context data: {}",
+                                serde_json::to_string_pretty(&context)
+                                    .unwrap_or_else(|_| "<<invalid>>".to_string())
+                            );
 
                             // Parse command and extract parameters
                             match parser.parse_command(&cmd, &context) {

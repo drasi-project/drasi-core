@@ -213,7 +213,7 @@ mod tests {
             default_template: Some(QueryConfig {
                 added: Some(TemplateSpec {
                     template: "Default {{after.id}}".to_string(),
-                    ..Default::default()    
+                    ..Default::default()
                 }),
                 updated: None,
                 deleted: None,

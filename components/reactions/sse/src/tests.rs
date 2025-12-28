@@ -154,7 +154,7 @@ fn test_sse_config_with_routes_serialization() {
         "test-query".to_string(),
         QueryConfig {
             added: Some(TemplateSpec {
-                                template: r#"{"type": "added", "data": {{json after}}}"#.to_string(),
+                template: r#"{"type": "added", "data": {{json after}}}"#.to_string(),
                 extension: SseExtension { path: None },
             }),
             updated: None,
@@ -194,15 +194,15 @@ fn test_template_spec_creation() {
 fn test_query_config_all_operations() {
     let config = QueryConfig {
         added: Some(TemplateSpec {
-                        template: "add template".to_string(),
+            template: "add template".to_string(),
             extension: SseExtension { path: None },
         }),
         updated: Some(TemplateSpec {
-                        template: "update template".to_string(),
+            template: "update template".to_string(),
             extension: SseExtension { path: None },
         }),
         deleted: Some(TemplateSpec {
-                        template: "delete template".to_string(),
+            template: "delete template".to_string(),
             extension: SseExtension { path: None },
         }),
     };
@@ -223,15 +223,15 @@ fn test_config_default_routes_empty() {
 fn test_sse_builder_with_default_template() {
     let default_template = QueryConfig {
         added: Some(TemplateSpec {
-                        template: r#"{"event": "add", "data": {{json after}}}"#.to_string(),
+            template: r#"{"event": "add", "data": {{json after}}}"#.to_string(),
             extension: SseExtension { path: None },
         }),
         updated: Some(TemplateSpec {
-                        template: r#"{"event": "update", "data": {{json after}}}"#.to_string(),
+            template: r#"{"event": "update", "data": {{json after}}}"#.to_string(),
             extension: SseExtension { path: None },
         }),
         deleted: Some(TemplateSpec {
-                        template: r#"{"event": "delete", "data": {{json before}}}"#.to_string(),
+            template: r#"{"event": "delete", "data": {{json before}}}"#.to_string(),
             extension: SseExtension { path: None },
         }),
     };
@@ -250,7 +250,7 @@ fn test_sse_builder_with_default_template() {
 fn test_sse_builder_invalid_template_fails() {
     let invalid_template = QueryConfig {
         added: Some(TemplateSpec {
-                        template: r#"{{invalid syntax"#.to_string(),
+            template: r#"{{invalid syntax"#.to_string(),
             extension: SseExtension { path: None },
         }),
         updated: None,
@@ -270,7 +270,7 @@ fn test_sse_builder_invalid_template_fails() {
 fn test_sse_builder_route_validation_passes() {
     let route_config = QueryConfig {
         added: Some(TemplateSpec {
-                        template: r#"{"data": {{json after}}}"#.to_string(),
+            template: r#"{"data": {{json after}}}"#.to_string(),
             extension: SseExtension { path: None },
         }),
         updated: None,
@@ -289,7 +289,7 @@ fn test_sse_builder_route_validation_passes() {
 fn test_sse_builder_route_validation_fails() {
     let route_config = QueryConfig {
         added: Some(TemplateSpec {
-                        template: r#"{"data": {{json after}}}"#.to_string(),
+            template: r#"{"data": {{json after}}}"#.to_string(),
             extension: SseExtension { path: None },
         }),
         updated: None,
@@ -312,7 +312,7 @@ fn test_sse_builder_route_validation_fails() {
 fn test_sse_builder_route_validation_dotted_notation() {
     let route_config = QueryConfig {
         added: Some(TemplateSpec {
-                        template: r#"{"data": {{json after}}}"#.to_string(),
+            template: r#"{"data": {{json after}}}"#.to_string(),
             extension: SseExtension { path: None },
         }),
         updated: None,
@@ -332,7 +332,7 @@ fn test_sse_builder_route_validation_dotted_notation() {
 fn test_config_with_default_template_serialization() {
     let default_template = QueryConfig {
         added: Some(TemplateSpec {
-                        template: r#"{"event": "add"}"#.to_string(),
+            template: r#"{"event": "add"}"#.to_string(),
             extension: SseExtension { path: None },
         }),
         updated: None,

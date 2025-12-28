@@ -328,7 +328,9 @@ fn test_config_serialization() {
         routes: std::collections::HashMap::new(),
         default_template: Some(QueryConfig {
             added: Some(TemplateSpec::new("CALL add_user(@after.id, @after.name)")),
-            updated: Some(TemplateSpec::new("CALL update_user(@after.id, @after.name)")),
+            updated: Some(TemplateSpec::new(
+                "CALL update_user(@after.id, @after.name)",
+            )),
             deleted: Some(TemplateSpec::new("CALL delete_user(@before.id)")),
         }),
         command_timeout_ms: 10000,
@@ -371,7 +373,14 @@ fn test_config_deserialization_with_defaults() {
     assert_eq!(config.retry_attempts, 3); // default
     assert!(config.default_template.is_some());
     assert_eq!(
-        config.default_template.as_ref().unwrap().added.as_ref().unwrap().template,
+        config
+            .default_template
+            .as_ref()
+            .unwrap()
+            .added
+            .as_ref()
+            .unwrap()
+            .template,
         "CALL test()"
     );
 }
@@ -569,7 +578,9 @@ async fn test_postgres_executor_procedure_execution() {
         database: pg_config.database.clone(),
         ssl: false,
         default_template: Some(QueryConfig {
-            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
+            added: Some(TemplateSpec::new(
+                "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
+            )),
             updated: None,
             deleted: None,
         }),
@@ -625,9 +636,15 @@ async fn test_postgres_executor_multiple_operations() {
         database: pg_config.database.clone(),
         ssl: false,
         default_template: Some(QueryConfig {
-            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
-            updated: Some(TemplateSpec::new("CALL log_sensor_updated(@after.sensor_id, @after.temperature)")),
-            deleted: Some(TemplateSpec::new("CALL log_sensor_deleted(@before.sensor_id)")),
+            added: Some(TemplateSpec::new(
+                "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
+            )),
+            updated: Some(TemplateSpec::new(
+                "CALL log_sensor_updated(@after.sensor_id, @after.temperature)",
+            )),
+            deleted: Some(TemplateSpec::new(
+                "CALL log_sensor_deleted(@before.sensor_id)",
+            )),
         }),
         command_timeout_ms: 5000,
         retry_attempts: 3,
@@ -689,7 +706,9 @@ async fn test_postgres_parser_with_executor() {
         ssl: false,
         routes: HashMap::new(),
         default_template: Some(QueryConfig {
-            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
+            added: Some(TemplateSpec::new(
+                "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
+            )),
             updated: None,
             deleted: None,
         }),
@@ -747,7 +766,9 @@ async fn test_postgres_reaction_creation() {
         ssl: false,
         routes: HashMap::new(),
         default_template: Some(QueryConfig {
-            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
+            added: Some(TemplateSpec::new(
+                "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
+            )),
             updated: None,
             deleted: None,
         }),
@@ -789,7 +810,9 @@ async fn test_postgres_reaction_builder() {
         .with_password(&pg_config.password)
         .with_ssl(false)
         .with_default_template(QueryConfig {
-            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
+            added: Some(TemplateSpec::new(
+                "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
+            )),
             updated: None,
             deleted: None,
         })
@@ -830,7 +853,9 @@ async fn test_postgres_executor_with_special_characters() {
         ssl: false,
         routes: HashMap::new(),
         default_template: Some(QueryConfig {
-            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
+            added: Some(TemplateSpec::new(
+                "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
+            )),
             updated: None,
             deleted: None,
         }),
@@ -881,9 +906,15 @@ async fn test_postgres_reaction_lifecycle() {
         .with_password(&pg_config.password)
         .with_ssl(false)
         .with_default_template(QueryConfig {
-            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
-            updated: Some(TemplateSpec::new("CALL log_sensor_updated(@after.sensor_id, @after.temperature)")),
-            deleted: Some(TemplateSpec::new("CALL log_sensor_deleted(@before.sensor_id)")),
+            added: Some(TemplateSpec::new(
+                "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
+            )),
+            updated: Some(TemplateSpec::new(
+                "CALL log_sensor_updated(@after.sensor_id, @after.temperature)",
+            )),
+            deleted: Some(TemplateSpec::new(
+                "CALL log_sensor_deleted(@before.sensor_id)",
+            )),
         })
         .with_query("sensor-query")
         .with_auto_start(false) // Don't auto-start for this test
@@ -1168,10 +1199,7 @@ async fn test_route_overrides_default_template() {
     });
 
     let (proc_name, params) = parser
-        .parse_command(
-            "CALL log_special_event(@sensor_id, @temperature)",
-            &data,
-        )
+        .parse_command("CALL log_special_event(@sensor_id, @temperature)", &data)
         .expect("Should parse");
 
     executor
@@ -1328,21 +1356,28 @@ async fn test_executor_with_various_data_types() {
 
     // Test with various data types
     let params = vec![
-        json!("test string"),                     // TEXT
-        json!(42),                                 // INTEGER
-        json!(3.14159),                            // DOUBLE PRECISION
-        json!(true),                               // BOOLEAN
-        json!({"key": "value", "count": 123}),     // JSONB
+        json!("test string"),                  // TEXT
+        json!(42),                             // INTEGER
+        json!(3.14159),                        // DOUBLE PRECISION
+        json!(true),                           // BOOLEAN
+        json!({"key": "value", "count": 123}), // JSONB
     ];
 
     let result = executor.execute_procedure("test_data_types", params).await;
-    assert!(result.is_ok(), "Should handle various data types: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Should handle various data types: {:?}",
+        result.err()
+    );
 
     sleep(Duration::from_millis(100)).await;
 
     // Verify the data was inserted correctly
     let rows = client
-        .query("SELECT text_col, int_col, float_col, bool_col, json_col FROM data_type_test", &[])
+        .query(
+            "SELECT text_col, int_col, float_col, bool_col, json_col FROM data_type_test",
+            &[],
+        )
         .await
         .unwrap();
 
@@ -1424,7 +1459,9 @@ async fn test_executor_with_string_numbers() {
     // Test with string that looks like a number (simulating MockSource behavior)
     let params = vec![json!("25.789")];
 
-    let result = executor.execute_procedure("test_string_number", params).await;
+    let result = executor
+        .execute_procedure("test_string_number", params)
+        .await;
     assert!(
         result.is_ok(),
         "Should parse string numbers: {:?}",
@@ -1517,7 +1554,11 @@ async fn test_executor_with_null_values() {
     let params = vec![json!(null), json!(null)];
 
     let result = executor.execute_procedure("test_null_values", params).await;
-    assert!(result.is_ok(), "Should handle NULL values: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Should handle NULL values: {:?}",
+        result.err()
+    );
 
     sleep(Duration::from_millis(100)).await;
 

@@ -268,7 +268,10 @@ where
     }
 
     /// Helper to get spec from a QueryConfig based on operation type
-    fn get_spec_from_config(config: &QueryConfig<T>, operation: OperationType) -> Option<&TemplateSpec<T>> {
+    fn get_spec_from_config(
+        config: &QueryConfig<T>,
+        operation: OperationType,
+    ) -> Option<&TemplateSpec<T>> {
         match operation {
             OperationType::Add => config.added.as_ref(),
             OperationType::Update => config.updated.as_ref(),
@@ -288,17 +291,20 @@ pub enum OperationType {
     Delete,
 }
 
-impl OperationType {
-    /// Parse operation type from string
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for OperationType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "add" => Some(Self::Add),
-            "update" => Some(Self::Update),
-            "delete" => Some(Self::Delete),
-            _ => None,
+            "add" => Ok(Self::Add),
+            "update" => Ok(Self::Update),
+            "delete" => Ok(Self::Delete),
+            _ => Err(format!("Invalid operation type: {}", s)),
         }
     }
+}
 
+impl OperationType {
     /// Convert to string representation
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -315,13 +321,14 @@ mod tests {
 
     #[test]
     fn test_operation_type_from_str() {
-        assert_eq!(OperationType::from_str("add"), Some(OperationType::Add));
-        assert_eq!(OperationType::from_str("ADD"), Some(OperationType::Add));
-        assert_eq!(OperationType::from_str("update"), Some(OperationType::Update));
-        assert_eq!(OperationType::from_str("UPDATE"), Some(OperationType::Update));
-        assert_eq!(OperationType::from_str("delete"), Some(OperationType::Delete));
-        assert_eq!(OperationType::from_str("DELETE"), Some(OperationType::Delete));
-        assert_eq!(OperationType::from_str("invalid"), None);
+        use std::str::FromStr;
+        assert_eq!(OperationType::from_str("add"), Ok(OperationType::Add));
+        assert_eq!(OperationType::from_str("ADD"), Ok(OperationType::Add));
+        assert_eq!(OperationType::from_str("update"), Ok(OperationType::Update));
+        assert_eq!(OperationType::from_str("UPDATE"), Ok(OperationType::Update));
+        assert_eq!(OperationType::from_str("delete"), Ok(OperationType::Delete));
+        assert_eq!(OperationType::from_str("DELETE"), Ok(OperationType::Delete));
+        assert!(OperationType::from_str("invalid").is_err());
     }
 
     #[test]

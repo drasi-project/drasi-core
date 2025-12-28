@@ -195,7 +195,9 @@ impl PostgresStoredProcReactionConfig {
         let has_default_template = self.default_template.is_some();
 
         if !has_routes && !has_default_template {
-            anyhow::bail!("At least one command must be specified (via routes or default_template)");
+            anyhow::bail!(
+                "At least one command must be specified (via routes or default_template)"
+            );
         }
 
         Ok(())
