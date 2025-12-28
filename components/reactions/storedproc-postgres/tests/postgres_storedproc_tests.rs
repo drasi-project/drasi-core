@@ -1358,7 +1358,7 @@ async fn test_executor_with_various_data_types() {
     let params = vec![
         json!("test string"),                  // TEXT
         json!(42),                             // INTEGER
-        json!(3.14159),                        // DOUBLE PRECISION
+        json!(std::f64::consts::PI),           // DOUBLE PRECISION
         json!(true),                           // BOOLEAN
         json!({"key": "value", "count": 123}), // JSONB
     ];
@@ -1385,8 +1385,8 @@ async fn test_executor_with_various_data_types() {
     let row = &rows[0];
     assert_eq!(row.get::<_, String>(0), "test string");
     assert_eq!(row.get::<_, i32>(1), 42);
-    assert!((row.get::<_, f64>(2) - 3.14159).abs() < 0.00001);
-    assert_eq!(row.get::<_, bool>(3), true);
+    assert!((row.get::<_, f64>(2) - std::f64::consts::PI).abs() < 0.00001);
+    assert!(row.get::<_, bool>(3));
 
     pg.cleanup().await;
 }
