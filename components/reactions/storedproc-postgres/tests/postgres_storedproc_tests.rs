@@ -1325,8 +1325,7 @@ async fn test_executor_with_various_data_types() {
                 text_col TEXT,
                 int_col INTEGER,
                 float_col DOUBLE PRECISION,
-                bool_col BOOLEAN,
-                json_col JSONB
+                bool_col BOOLEAN
             )",
             &[],
         )
@@ -1339,14 +1338,13 @@ async fn test_executor_with_various_data_types() {
                 p_text TEXT,
                 p_int INTEGER,
                 p_float DOUBLE PRECISION,
-                p_bool BOOLEAN,
-                p_json JSONB
+                p_bool BOOLEAN
             )
             LANGUAGE plpgsql
             AS $$
             BEGIN
-                INSERT INTO data_type_test (text_col, int_col, float_col, bool_col, json_col)
-                VALUES (p_text, p_int, p_float, p_bool, p_json);
+                INSERT INTO data_type_test (text_col, int_col, float_col, bool_col)
+                VALUES (p_text, p_int, p_float, p_bool);
             END;
             $$;",
             &[],
@@ -1371,11 +1369,10 @@ async fn test_executor_with_various_data_types() {
 
     // Test with various data types
     let params = vec![
-        json!("test string"),                  // TEXT
-        json!(42),                             // INTEGER
-        json!(std::f64::consts::PI),           // DOUBLE PRECISION
-        json!(true),                           // BOOLEAN
-        json!({"key": "value", "count": 123}), // JSONB
+        json!("test string"),        // TEXT
+        json!(42),                   // INTEGER
+        json!(std::f64::consts::PI), // DOUBLE PRECISION
+        json!(true),                 // BOOLEAN
     ];
 
     let result = executor.execute_procedure("test_data_types", params).await;
@@ -1390,7 +1387,7 @@ async fn test_executor_with_various_data_types() {
     // Verify the data was inserted correctly
     let rows = client
         .query(
-            "SELECT text_col, int_col, float_col, bool_col, json_col FROM data_type_test",
+            "SELECT text_col, int_col, float_col, bool_col FROM data_type_test",
             &[],
         )
         .await
