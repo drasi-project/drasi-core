@@ -8,6 +8,8 @@ permissions:
   actions: read
   issues: read
   pull-requests: read
+tools:
+  github:
 safe-outputs:
   add-comment:
     max: 10
