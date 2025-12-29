@@ -3618,6 +3618,10 @@ jobs:
           name: aw_info.json
           path: /tmp/gh-aw/aw_info.json
           if-no-files-found: warn
+      - name: Confirm repo directory presence
+        run: |
+          ls -al /home/runner/work/drasi-core/
+          ls -al /home/runner/work/drasi-core/drasi-core
       - name: Execute GitHub Copilot CLI
         id: agentic_execution
         # Copilot CLI tool arguments (sorted):
