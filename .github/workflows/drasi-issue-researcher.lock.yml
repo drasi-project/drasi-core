@@ -3618,32 +3618,22 @@ jobs:
           name: aw_info.json
           path: /tmp/gh-aw/aw_info.json
           if-no-files-found: warn
-      - name: Confirm repo directory presence
+      - name: Fix workspace permissions for awf
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
         run: |
-          echo "=== Environment Check ==="
-          echo "GITHUB_WORKSPACE: ${GITHUB_WORKSPACE}"
-          echo "PWD: $(pwd)"
-          echo "USER: $(whoami)"
-          echo ""
-          echo "=== Directory Listing ==="
-          ls -al /home/runner/work/drasi-core/
-          ls -al /home/runner/work/drasi-core/drasi-core
-          echo ""
-          echo "=== Testing awf access ==="
-          echo "Test 1: Basic awf with allow-domains"
-          sudo -E awf --env-all --allow-domains github.com --container-workdir "${GITHUB_WORKSPACE}" --mount "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}:rw" -- /bin/ls -la "${GITHUB_WORKSPACE}" || echo "AWF Test 1 failed with exit code: $?"
-          echo ""
-          echo "Test 2: awf with full mount configuration (matching actual execution)"
-          sudo -E awf --env-all \
-            --container-workdir "${GITHUB_WORKSPACE}" \
-            --mount /tmp:/tmp:rw \
-            --mount "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}:rw" \
-            --mount /usr/bin/date:/usr/bin/date:ro \
-            --allow-domains github.com \
-            --log-level info \
-            -- /usr/bin/date || echo "AWF Test 2 failed with exit code: $?"
+          echo "Current workspace permissions:"
+          ls -ld "${GITHUB_WORKSPACE}"
+
+          echo "Setting workspace permissions to allow awfuser (UID 1000) access..."
+          # Make the workspace readable and executable by others so awfuser can access it
+          sudo chmod -R o+rX "${GITHUB_WORKSPACE}"
+
+          echo "Updated workspace permissions:"
+          ls -ld "${GITHUB_WORKSPACE}"
+
+          echo "Verifying awf can access workspace..."
+          sudo -E awf --env-all --allow-domains github.com --container-workdir "${GITHUB_WORKSPACE}" --mount "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}:rw" -- /bin/ls -la "${GITHUB_WORKSPACE}" | head -20
       - name: Execute GitHub Copilot CLI
         id: agentic_execution
         # Copilot CLI tool arguments (sorted):
