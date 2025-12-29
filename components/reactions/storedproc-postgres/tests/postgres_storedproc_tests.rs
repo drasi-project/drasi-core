@@ -1023,7 +1023,7 @@ async fn test_default_template_applies_to_all_queries() {
     setup_stored_procedures(pg_config).await;
 
     // Setup additional stored procedures for testing
-    let client = tokio_postgres::connect(
+    let (client, connection) = tokio_postgres::connect(
         &format!(
             "host={} port={} user={} password={} dbname={}",
             pg_config.host, pg_config.port, pg_config.user, pg_config.password, pg_config.database
@@ -1031,8 +1031,13 @@ async fn test_default_template_applies_to_all_queries() {
         tokio_postgres::NoTls,
     )
     .await
-    .unwrap()
-    .0;
+    .unwrap();
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("Connection error: {e}");
+        }
+    });
 
     client
         .execute(
@@ -1129,7 +1134,7 @@ async fn test_route_overrides_default_template() {
     setup_stored_procedures(pg_config).await;
 
     // Setup additional stored procedure
-    let client = tokio_postgres::connect(
+    let (client, connection) = tokio_postgres::connect(
         &format!(
             "host={} port={} user={} password={} dbname={}",
             pg_config.host, pg_config.port, pg_config.user, pg_config.password, pg_config.database
@@ -1137,8 +1142,13 @@ async fn test_route_overrides_default_template() {
         tokio_postgres::NoTls,
     )
     .await
-    .unwrap()
-    .0;
+    .unwrap();
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("Connection error: {e}");
+        }
+    });
 
     client
         .execute(
@@ -1292,7 +1302,7 @@ async fn test_executor_with_various_data_types() {
     let pg_config = pg.config();
 
     // Create a comprehensive test table
-    let client = tokio_postgres::connect(
+    let (client, connection) = tokio_postgres::connect(
         &format!(
             "host={} port={} user={} password={} dbname={}",
             pg_config.host, pg_config.port, pg_config.user, pg_config.password, pg_config.database
@@ -1300,8 +1310,13 @@ async fn test_executor_with_various_data_types() {
         tokio_postgres::NoTls,
     )
     .await
-    .unwrap()
-    .0;
+    .unwrap();
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("Connection error: {e}");
+        }
+    });
 
     client
         .execute(
@@ -1403,7 +1418,7 @@ async fn test_executor_with_string_numbers() {
     let pg = setup_postgres().await;
     let pg_config = pg.config();
 
-    let client = tokio_postgres::connect(
+    let (client, connection) = tokio_postgres::connect(
         &format!(
             "host={} port={} user={} password={} dbname={}",
             pg_config.host, pg_config.port, pg_config.user, pg_config.password, pg_config.database
@@ -1411,8 +1426,13 @@ async fn test_executor_with_string_numbers() {
         tokio_postgres::NoTls,
     )
     .await
-    .unwrap()
-    .0;
+    .unwrap();
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("Connection error: {e}");
+        }
+    });
 
     client
         .execute(
@@ -1495,7 +1515,7 @@ async fn test_executor_with_null_values() {
     let pg = setup_postgres().await;
     let pg_config = pg.config();
 
-    let client = tokio_postgres::connect(
+    let (client, connection) = tokio_postgres::connect(
         &format!(
             "host={} port={} user={} password={} dbname={}",
             pg_config.host, pg_config.port, pg_config.user, pg_config.password, pg_config.database
@@ -1503,8 +1523,13 @@ async fn test_executor_with_null_values() {
         tokio_postgres::NoTls,
     )
     .await
-    .unwrap()
-    .0;
+    .unwrap();
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("Connection error: {e}");
+        }
+    });
 
     client
         .execute(
