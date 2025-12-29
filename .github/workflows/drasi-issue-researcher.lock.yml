@@ -3632,8 +3632,18 @@ jobs:
           ls -al /home/runner/work/drasi-core/drasi-core
           echo ""
           echo "=== Testing awf access ==="
-          echo "Running: sudo -E awf --env-all --container-workdir \"${GITHUB_WORKSPACE}\" --mount \"${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}:rw\" -- /bin/ls -la \"${GITHUB_WORKSPACE}\""
-          sudo -E awf --env-all --container-workdir "${GITHUB_WORKSPACE}" --mount "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}:rw" -- /bin/ls -la "${GITHUB_WORKSPACE}" || echo "AWF failed with exit code: $?"
+          echo "Test 1: Basic awf with allow-domains"
+          sudo -E awf --env-all --allow-domains github.com --container-workdir "${GITHUB_WORKSPACE}" --mount "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}:rw" -- /bin/ls -la "${GITHUB_WORKSPACE}" || echo "AWF Test 1 failed with exit code: $?"
+          echo ""
+          echo "Test 2: awf with full mount configuration (matching actual execution)"
+          sudo -E awf --env-all \
+            --container-workdir "${GITHUB_WORKSPACE}" \
+            --mount /tmp:/tmp:rw \
+            --mount "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}:rw" \
+            --mount /usr/bin/date:/usr/bin/date:ro \
+            --allow-domains github.com \
+            --log-level info \
+            -- /usr/bin/date || echo "AWF Test 2 failed with exit code: $?"
       - name: Execute GitHub Copilot CLI
         id: agentic_execution
         # Copilot CLI tool arguments (sorted):
