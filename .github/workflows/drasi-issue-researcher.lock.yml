@@ -3622,6 +3622,7 @@ jobs:
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
         run: |
+          echo "=== Fixing permissions for awf container access ==="
           echo "Current workspace permissions:"
           ls -ld "${GITHUB_WORKSPACE}"
 
@@ -3632,8 +3633,12 @@ jobs:
           echo "Updated workspace permissions:"
           ls -ld "${GITHUB_WORKSPACE}"
 
+          echo "Ensuring /tmp/gh-aw has correct permissions..."
+          sudo chmod -R o+rwX /tmp/gh-aw
+          ls -ld /tmp/gh-aw
+
           echo "Verifying awf can access workspace..."
-          sudo -E awf --env-all --allow-domains github.com --container-workdir "${GITHUB_WORKSPACE}" --mount "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}:rw" -- /bin/ls -la "${GITHUB_WORKSPACE}" | head -20
+          sudo -E awf --env-all --allow-domains github.com --container-workdir "${GITHUB_WORKSPACE}" --mount "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}:rw" --mount /tmp:/tmp:rw -- /bin/ls -la "${GITHUB_WORKSPACE}" | head -20
       - name: Execute GitHub Copilot CLI
         id: agentic_execution
         # Copilot CLI tool arguments (sorted):
