@@ -185,8 +185,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use drasi_lib::channels::{DispatchMode, *};
-use drasi_lib::plugin_core::Source;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
+use drasi_lib::Source;
 
 /// PostgreSQL replication source that captures changes via logical replication.
 ///

@@ -67,12 +67,12 @@ use crate::config::{
     DrasiLibConfig, QueryConfig, QueryJoinConfig, QueryLanguage, SourceSubscriptionConfig,
 };
 use crate::error::{DrasiError, Result};
+use crate::indexes::IndexBackendPlugin;
 use crate::indexes::StorageBackendConfig;
 use crate::lib_core::DrasiLib;
-use crate::plugin_core::IndexBackendPlugin;
-use crate::plugin_core::Reaction as ReactionTrait;
-use crate::plugin_core::Source as SourceTrait;
-use crate::plugin_core::StateStoreProvider;
+use crate::reactions::Reaction as ReactionTrait;
+use crate::sources::Source as SourceTrait;
+use crate::state_store::StateStoreProvider;
 use drasi_core::models::SourceMiddlewareConfig;
 
 // ============================================================================

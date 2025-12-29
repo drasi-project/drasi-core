@@ -22,7 +22,7 @@ use crate::component_ops::map_state_error;
 use crate::config::ReactionRuntime;
 use crate::error::{DrasiError, Result};
 use crate::lib_core::DrasiLib;
-use crate::plugin_core::Reaction;
+use crate::reactions::Reaction;
 
 impl DrasiLib {
     /// Add a reaction instance to a running server, taking ownership.

@@ -567,7 +567,7 @@ let core = DrasiLib::builder()
 When a Source or Reaction is added to DrasiLib, the state store is automatically injected. Plugins can override `inject_state_store()` to receive the provider:
 
 ```rust
-use drasi_lib::plugin_core::{Source, StateStoreProvider};
+use drasi_lib::{Source, StateStoreProvider};
 
 impl Source for MySource {
     async fn inject_state_store(&self, state_store: Arc<dyn StateStoreProvider>) {

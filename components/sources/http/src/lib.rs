@@ -196,8 +196,8 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use drasi_lib::channels::*;
-use drasi_lib::plugin_core::Source;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
+use drasi_lib::Source;
 
 use crate::adaptive_batcher::{AdaptiveBatchConfig, AdaptiveBatcher};
 

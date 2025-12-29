@@ -21,7 +21,7 @@
 
 use crate::channels::dispatcher::{ChangeDispatcher, ChannelChangeDispatcher};
 use crate::channels::*;
-use crate::plugin_core::Source;
+use crate::sources::Source;
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_core::models::SourceChange;

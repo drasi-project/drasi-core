@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::*;
-use drasi_lib::plugin_core::Reaction;
+use drasi_lib::Reaction;
 
 #[test]
 fn test_sse_builder_defaults() {

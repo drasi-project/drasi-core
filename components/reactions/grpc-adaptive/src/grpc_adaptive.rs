@@ -11,8 +11,8 @@ use tokio::sync::mpsc;
 use tonic::transport::Channel;
 
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
-use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
+use drasi_lib::{QuerySubscriber, Reaction};
 
 use crate::adaptive_batcher::{AdaptiveBatchConfig, AdaptiveBatcher};
 

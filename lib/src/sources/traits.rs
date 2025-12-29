@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Plugin core module for source abstractions
+//! Source trait module
 //!
 //! This module provides the core trait that all source plugins must implement.
 //! It separates the plugin contract from the source manager and implementation details.
@@ -47,8 +47,8 @@ use crate::channels::*;
 /// # Example Implementation
 ///
 /// ```ignore
-/// use drasi_lib::plugin_core::Source;
-/// use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
+/// use drasi_lib::Source;
+/// use drasi_lib::sources::{SourceBase, SourceBaseParams};
 ///
 /// pub struct MySource {
 ///     base: SourceBase,
@@ -170,7 +170,7 @@ pub trait Source: Send + Sync {
     /// to read/write state data. The store_id used should typically be the source's ID.
     async fn inject_state_store(
         &self,
-        _state_store: std::sync::Arc<dyn crate::plugin_core::StateStoreProvider>,
+        _state_store: std::sync::Arc<dyn crate::state_store::StateStoreProvider>,
     ) {
         // Default implementation does nothing - sources that need state storage
         // should override this to store the reference
@@ -246,7 +246,7 @@ impl Source for Box<dyn Source + 'static> {
 
     async fn inject_state_store(
         &self,
-        state_store: std::sync::Arc<dyn crate::plugin_core::StateStoreProvider>,
+        state_store: std::sync::Arc<dyn crate::state_store::StateStoreProvider>,
     ) {
         (**self).inject_state_store(state_store).await
     }

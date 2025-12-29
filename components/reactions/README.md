@@ -79,13 +79,13 @@ Both are automatically called by DrasiLib when the reaction is added via `add_re
 
 ## The Reaction Trait
 
-All reactions must implement the `Reaction` trait from `drasi_lib::plugin_core`:
+All reactions must implement the `Reaction` trait from `drasi_lib`:
 
 ```rust
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
-use drasi_lib::plugin_core::{Reaction, QuerySubscriber};
+use drasi_lib::{Reaction, QuerySubscriber};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -430,7 +430,7 @@ pub use config::MyReactionConfig;
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
-use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
+use drasi_lib::{QuerySubscriber, Reaction};
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use log::{debug, info};
 use std::collections::HashMap;
@@ -824,7 +824,7 @@ async fn test_reaction_with_drasi() {
 
 | File | Description |
 |------|-------------|
-| `lib/src/plugin_core/reaction.rs` | `Reaction` trait definition |
+| `lib/src/reactions/traits.rs` | `Reaction` trait definition |
 | `lib/src/reactions/common/base.rs` | `ReactionBase` implementation |
 | `lib/src/reactions/manager.rs` | `ReactionManager` lifecycle management |
 | `lib/src/channels/events.rs` | Event types (`QueryResult`, `ComponentStatus`, etc.) |

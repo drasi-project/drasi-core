@@ -71,14 +71,14 @@ DrasiLib has no knowledge of which plugins exist - it only knows about the `Sour
 
 ## The Source Trait
 
-All sources must implement the `Source` trait from `drasi_lib::plugin_core`:
+All sources must implement the `Source` trait from `drasi_lib`:
 
 ```rust
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_lib::channels::*;
 use drasi_lib::config::SourceSubscriptionSettings;
-use drasi_lib::plugin_core::Source;
+use drasi_lib::Source;
 use std::collections::HashMap;
 
 #[async_trait]
@@ -645,7 +645,7 @@ use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
 use drasi_lib::channels::*;
-use drasi_lib::plugin_core::Source;
+use drasi_lib::Source;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use log::{debug, error, info};
 use std::collections::HashMap;
@@ -918,7 +918,7 @@ let core = DrasiLib::builder()
 
 ```rust
 use drasi_lib::DrasiLib;
-use drasi_lib::plugin_core::Source;  // Required for set_bootstrap_provider
+use drasi_lib::Source;  // Required for set_bootstrap_provider
 use my_source_plugin::{MySource, MySourceConfig};
 use drasi_bootstrap_scriptfile::ScriptFileBootstrapProvider;
 
@@ -1074,7 +1074,7 @@ async fn test_source_with_drasi() {
 
 | File | Description |
 |------|-------------|
-| `lib/src/plugin_core/source.rs` | `Source` trait definition |
+| `lib/src/sources/traits.rs` | `Source` trait definition |
 | `lib/src/sources/base.rs` | `SourceBase` implementation |
 | `lib/src/config/schema.rs` | `SourceSubscriptionSettings` and configuration types |
 | `lib/src/channels/events.rs` | Event types (`SourceChange`, `SourceEvent`, etc.) |

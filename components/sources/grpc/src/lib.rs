@@ -115,8 +115,8 @@ use tonic::{transport::Server, Request, Response, Status};
 
 use drasi_lib::channels::{DispatchMode, *};
 use drasi_lib::managers::{log_component_start, log_component_stop};
-use drasi_lib::plugin_core::Source;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
+use drasi_lib::Source;
 
 // Include generated protobuf code
 // Allow unwrap in generated proto code - tonic generates code with unwrap() for HTTP response building
