@@ -3619,9 +3619,21 @@ jobs:
           path: /tmp/gh-aw/aw_info.json
           if-no-files-found: warn
       - name: Confirm repo directory presence
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
         run: |
+          echo "=== Environment Check ==="
+          echo "GITHUB_WORKSPACE: ${GITHUB_WORKSPACE}"
+          echo "PWD: $(pwd)"
+          echo "USER: $(whoami)"
+          echo ""
+          echo "=== Directory Listing ==="
           ls -al /home/runner/work/drasi-core/
           ls -al /home/runner/work/drasi-core/drasi-core
+          echo ""
+          echo "=== Testing awf access ==="
+          echo "Running: sudo -E awf --env-all --container-workdir \"${GITHUB_WORKSPACE}\" --mount \"${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}:rw\" -- /bin/ls -la \"${GITHUB_WORKSPACE}\""
+          sudo -E awf --env-all --container-workdir "${GITHUB_WORKSPACE}" --mount "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}:rw" -- /bin/ls -la "${GITHUB_WORKSPACE}" || echo "AWF failed with exit code: $?"
       - name: Execute GitHub Copilot CLI
         id: agentic_execution
         # Copilot CLI tool arguments (sorted):
