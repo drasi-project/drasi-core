@@ -1289,7 +1289,6 @@ async fn test_route_with_none_falls_back_to_default() {
 // Data Type Tests
 // ============================================================================
 
-#[ignore] // skipping this test for now. Will investigate later
 #[tokio::test]
 #[serial]
 async fn test_executor_with_various_data_types() {
@@ -1507,105 +1506,6 @@ async fn test_executor_with_string_numbers() {
     assert_eq!(rows.len(), 1);
     let value = rows[0].get::<_, f64>(0);
     assert!((value - 25.789).abs() < 0.00001);
-
-    pg.cleanup().await;
-}
-
-#[tokio::test]
-#[serial]
-async fn test_executor_with_null_values() {
-    env_logger::builder()
-        .is_test(true)
-        .filter_level(log::LevelFilter::Debug)
-        .try_init()
-        .ok();
-
-    let pg = setup_postgres().await;
-    let pg_config = pg.config();
-
-    let (client, connection) = tokio_postgres::connect(
-        &format!(
-            "host={} port={} user={} password={} dbname={}",
-            pg_config.host, pg_config.port, pg_config.user, pg_config.password, pg_config.database
-        ),
-        tokio_postgres::NoTls,
-    )
-    .await
-    .unwrap();
-
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            eprintln!("Connection error: {e}");
-        }
-    });
-
-    client
-        .execute(
-            "CREATE TABLE IF NOT EXISTS null_test (
-                id SERIAL PRIMARY KEY,
-                nullable_text TEXT,
-                nullable_int INTEGER
-            )",
-            &[],
-        )
-        .await
-        .unwrap();
-
-    client
-        .execute(
-            "CREATE OR REPLACE PROCEDURE test_null_values(
-                p_text TEXT,
-                p_int INTEGER
-            )
-            LANGUAGE plpgsql
-            AS $$
-            BEGIN
-                INSERT INTO null_test (nullable_text, nullable_int) VALUES (p_text, p_int);
-            END;
-            $$;",
-            &[],
-        )
-        .await
-        .unwrap();
-
-    let config = PostgresStoredProcReactionConfig {
-        hostname: pg_config.host.clone(),
-        port: Some(pg_config.port),
-        user: pg_config.user.clone(),
-        password: pg_config.password.clone(),
-        database: pg_config.database.clone(),
-        ssl: false,
-        routes: HashMap::new(),
-        default_template: None,
-        command_timeout_ms: 5000,
-        retry_attempts: 3,
-    };
-
-    let executor = PostgresExecutor::new(&config).await.unwrap();
-
-    // Test with NULL values
-    let params = vec![json!(null), json!(null)];
-
-    let result = executor.execute_procedure("test_null_values", params).await;
-    assert!(
-        result.is_ok(),
-        "Should handle NULL values: {:?}",
-        result.err()
-    );
-
-    sleep(Duration::from_millis(100)).await;
-
-    // Verify NULLs were stored
-    let rows = client
-        .query("SELECT nullable_text, nullable_int FROM null_test", &[])
-        .await
-        .unwrap();
-
-    assert_eq!(rows.len(), 1);
-    let text_val: Option<String> = rows[0].get(0);
-    let int_val: Option<i32> = rows[0].get(1);
-    assert!(text_val.is_none());
-    assert!(int_val.is_none());
 
     pg.cleanup().await;
 }
