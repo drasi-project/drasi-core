@@ -57,7 +57,7 @@ use std::collections::HashMap;
 /// use drasi_lib::reactions::common::TemplateSpec;
 /// use serde::{Deserialize, Serialize};
 ///
-/// #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 /// struct MyExtension {
 ///     custom_field: String,
 /// }
@@ -141,7 +141,7 @@ impl<T: Default> Default for TemplateSpec<T> {
     /// ```rust
     /// use drasi_lib::reactions::common::TemplateSpec;
     ///
-    /// let spec = TemplateSpec {
+    /// let spec: TemplateSpec<()> = TemplateSpec {
     ///     template: "{{after.id}}".to_string(),
     ///     ..Default::default()
     /// };

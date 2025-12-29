@@ -19,8 +19,8 @@
 
 mod postgres_helpers;
 
-use drasi_lib::plugin_core::Reaction;
 use drasi_lib::reactions::common;
+use drasi_lib::Reaction;
 use drasi_reaction_storedproc_postgres::config::PostgresStoredProcReactionConfig;
 use drasi_reaction_storedproc_postgres::executor::PostgresExecutor;
 use drasi_reaction_storedproc_postgres::parser::ParameterParser;

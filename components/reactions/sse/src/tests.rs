@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use super::*;
-use drasi_lib::Reaction;
 use crate::config::SseExtension;
+use drasi_lib::Reaction;
 
 #[test]
 fn test_sse_builder_defaults() {
