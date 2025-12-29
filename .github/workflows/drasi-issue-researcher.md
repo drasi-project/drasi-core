@@ -2,10 +2,12 @@
 on:
   issues:
     types: [labeled]
-    names: [needs-research]
+    names: [needs-research, bug]
 permissions:
   contents: read
   actions: read
+  issues: read
+  pull-requests: read
 safe-outputs:
   add-comment:
     max: 10

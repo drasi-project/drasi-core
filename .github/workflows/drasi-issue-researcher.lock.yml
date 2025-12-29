@@ -25,10 +25,12 @@
 # on:
 #   issues:
 #     types: [labeled]
-#     names: [needs-research]
+#     names: [needs-research, bug]
 # permissions:
 #   contents: read
 #   actions: read
+#   issues: read
+#   pull-requests: read
 # safe-outputs:
 #   add-comment:
 #     max: 10
@@ -133,6 +135,7 @@ name: "drasi-issue-researcher"
   issues:
     # names: # Label filtering applied via job conditions
     # - needs-research # Label filtering applied via job conditions
+    # - bug # Label filtering applied via job conditions
     types:
     - labeled
 
@@ -148,7 +151,7 @@ jobs:
     needs: pre_activation
     if: >
       (needs.pre_activation.outputs.activated == 'true') && ((github.event_name != 'issues') || ((github.event.action != 'labeled') ||
-      (github.event.label.name == 'needs-research')))
+      (github.event.label.name == 'needs-research' || github.event.label.name == 'bug')))
     runs-on: ubuntu-slim
     permissions:
       contents: read
@@ -1367,6 +1370,8 @@ jobs:
     permissions:
       actions: read
       contents: read
+      issues: read
+      pull-requests: read
     env:
       GH_AW_MCP_LOG_DIR: /tmp/gh-aw/mcp-logs/safeoutputs
       GH_AW_SAFE_OUTPUTS: /tmp/gh-aw/safeoutputs/outputs.jsonl
@@ -8027,7 +8032,9 @@ jobs:
           if-no-files-found: ignore
 
   pre_activation:
-    if: (github.event_name != 'issues') || ((github.event.action != 'labeled') || (github.event.label.name == 'needs-research'))
+    if: >
+      (github.event_name != 'issues') || ((github.event.action != 'labeled') || (github.event.label.name == 'needs-research' ||
+      github.event.label.name == 'bug'))
     runs-on: ubuntu-slim
     outputs:
       activated: ${{ steps.check_membership.outputs.is_team_member == 'true' }}
