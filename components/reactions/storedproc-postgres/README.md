@@ -178,12 +178,62 @@ let reaction = PostgresStoredProcReaction::builder("my-reaction")
     .with_query("user-query")
     .with_route("user-query", QueryConfig {
         added: Some(TemplateSpec::new("CALL user_added(@after.id, @after.name)")),
-        updated: None,
-        deleted: None,
+        ..Default::default()  // updated and deleted will use default template
     })
     .build()
     .await?;
 ```
+
+## Advanced Example: Partial Route Overrides
+
+This example shows how to override only specific operations for a query while falling back to defaults for others:
+
+```rust
+use drasi_reaction_storedproc_postgres::{PostgresStoredProcReaction, QueryConfig, TemplateSpec};
+
+let reaction = PostgresStoredProcReaction::builder("multi-query-sensor-sync")
+    .with_hostname("localhost")
+    .with_port(5432)
+    .with_database("drasi_test")
+    .with_user("postgres")
+    .with_password("mysecret")
+    // Subscribe to multiple queries
+    .with_query("high-temp")
+    .with_query("low-temp")
+    .with_query("critical-temp")
+    // Default template - applies to "high-temp" and "low-temp"
+    .with_default_template(QueryConfig {
+        added: Some(TemplateSpec::new(
+            "CALL log_sensor_added(@after.id, @after.temperature, @after.timestamp)"
+        )),
+        updated: Some(TemplateSpec::new(
+            "CALL log_sensor_updated(@after.id, @after.temperature)"
+        )),
+        deleted: Some(TemplateSpec::new(
+            "CALL log_sensor_deleted(@before.id)"
+        )),
+    })
+    // Custom route for critical temperature readings
+    // Only handles ADD operations, falls back to default for UPDATE/DELETE
+    .with_route("critical-temp", QueryConfig {
+        added: Some(TemplateSpec::new(
+            "CALL log_critical_alert(@after.id, @after.temperature, @after.timestamp)"
+        )),
+        ..Default::default()  // updated and deleted will use default template
+    })
+    .with_command_timeout_ms(5000)
+    .with_retry_attempts(3)
+    .build()
+    .await?;
+```
+
+**How it works:**
+
+- **"high-temp" and "low-temp" queries** → Use default template for all operations
+- **"critical-temp" query**:
+  - ADD: `CALL log_critical_alert(...)` *(custom route)*
+  - UPDATE: `CALL log_sensor_updated(...)` *(falls back to default)*
+  - DELETE: `CALL log_sensor_deleted(...)` *(falls back to default)*
 
 ## Advanced Example: Multiple Queries with Default and Custom Routes
 
@@ -221,8 +271,7 @@ let reaction = PostgresStoredProcReaction::builder("multi-query-sync")
         updated: Some(TemplateSpec::new(
             "CALL sync_product_updated(@after.product_id, @after.price, @after.inventory)"
         )),
-        // Product deletes don't need a custom procedure - will fall back to default
-        deleted: None,
+        ..Default::default()  // deleted will fall back to default template
     })
     .with_command_timeout_ms(5000)
     .with_retry_attempts(3)

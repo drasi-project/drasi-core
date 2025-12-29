@@ -183,6 +183,18 @@ impl<T: Default> Default for TemplateSpec<T> {
 ///     }),
 /// };
 /// ```
+///
+/// # Example (Omitting fields with Default)
+///
+/// ```rust
+/// use drasi_lib::reactions::common::{QueryConfig, TemplateSpec};
+///
+/// // Only specify the added operation, others will be None
+/// let config: QueryConfig = QueryConfig {
+///     added: Some(TemplateSpec::new("[ADD] {{after.id}}")),
+///     ..Default::default()
+/// };
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(bound(deserialize = "T: Deserialize<'de> + Default"))]
 pub struct QueryConfig<T = ()>
@@ -200,6 +212,16 @@ where
     /// Template specification for DELETE operations (removed rows from query results).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deleted: Option<TemplateSpec<T>>,
+}
+
+impl<T: Default> Default for QueryConfig<T> {
+    fn default() -> Self {
+        Self {
+            added: None,
+            updated: None,
+            deleted: None,
+        }
+    }
 }
 
 /// Template routing configuration for reactions.
