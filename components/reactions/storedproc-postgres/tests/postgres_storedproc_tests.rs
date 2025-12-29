@@ -1378,7 +1378,10 @@ async fn test_executor_with_various_data_types() {
     });
 
     let (proc_name, params) = parser
-        .parse_command("CALL test_data_types(@text_val, @int_val, @float_val, @bool_val)", &data)
+        .parse_command(
+            "CALL test_data_types(@text_val, @int_val, @float_val, @bool_val)",
+            &data,
+        )
         .expect("Should parse command");
 
     assert_eq!(proc_name, "test_data_types");
