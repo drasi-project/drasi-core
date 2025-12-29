@@ -33,12 +33,15 @@ mod tests {
         let default_template = QueryConfig {
             added: Some(TemplateSpec {
                 template: "[NEW] Item {{after.id}}".to_string(),
+                ..Default::default()
             }),
             updated: Some(TemplateSpec {
                 template: "[CHG] {{before.value}} -> {{after.value}}".to_string(),
+                ..Default::default()
             }),
             deleted: Some(TemplateSpec {
                 template: "[DEL] Item {{before.id}}".to_string(),
+                ..Default::default()
             }),
         };
 
@@ -60,9 +63,11 @@ mod tests {
             QueryConfig {
                 added: Some(TemplateSpec {
                     template: "[SENSOR] New: {{after.id}}".to_string(),
+                    ..Default::default()
                 }),
                 updated: Some(TemplateSpec {
                     template: "[SENSOR-UPD] {{after.id}}".to_string(),
+                    ..Default::default()
                 }),
                 deleted: None,
             },
@@ -71,10 +76,12 @@ mod tests {
         let default_template = QueryConfig {
             added: Some(TemplateSpec {
                 template: "[DEFAULT] {{after.id}}".to_string(),
+                ..Default::default()
             }),
             updated: None,
             deleted: Some(TemplateSpec {
                 template: "[DEFAULT-DEL] {{before.id}}".to_string(),
+                ..Default::default()
             }),
         };
 
@@ -101,12 +108,15 @@ mod tests {
         let default_template = QueryConfig {
             added: Some(TemplateSpec {
                 template: "[ADD] {{after.name}}".to_string(),
+                ..Default::default()
             }),
             updated: Some(TemplateSpec {
                 template: "[UPD] {{after.name}}".to_string(),
+                ..Default::default()
             }),
             deleted: Some(TemplateSpec {
                 template: "[DEL] {{before.name}}".to_string(),
+                ..Default::default()
             }),
         };
 
@@ -142,22 +152,27 @@ mod tests {
         let sensor_config = QueryConfig {
             added: Some(TemplateSpec {
                 template: "[SENSOR-ADD] {{after.id}}: {{after.temperature}}°C".to_string(),
+                ..Default::default()
             }),
             updated: Some(TemplateSpec {
                 template: "[SENSOR-UPD] {{before.temperature}}°C -> {{after.temperature}}°C"
                     .to_string(),
+                ..Default::default()
             }),
             deleted: Some(TemplateSpec {
                 template: "[SENSOR-DEL] {{before.id}}".to_string(),
+                ..Default::default()
             }),
         };
 
         let default_template = QueryConfig {
             added: Some(TemplateSpec {
                 template: "[DEFAULT] Added {{after.id}}".to_string(),
+                ..Default::default()
             }),
             updated: Some(TemplateSpec {
                 template: "[DEFAULT] Updated {{after.id}}".to_string(),
+                ..Default::default()
             }),
             deleted: None,
         };
@@ -186,6 +201,7 @@ mod tests {
             QueryConfig {
                 added: Some(TemplateSpec {
                     template: "Test {{after.id}}".to_string(),
+                    ..Default::default()
                 }),
                 updated: None,
                 deleted: None,
@@ -197,6 +213,7 @@ mod tests {
             default_template: Some(QueryConfig {
                 added: Some(TemplateSpec {
                     template: "Default {{after.id}}".to_string(),
+                    ..Default::default()
                 }),
                 updated: None,
                 deleted: None,
@@ -218,6 +235,7 @@ mod tests {
         let default_template = QueryConfig {
             added: Some(TemplateSpec {
                 template: "[ADD] {{after.id".to_string(), // Missing closing brace
+                ..Default::default()
             }),
             updated: None,
             deleted: None,
@@ -242,6 +260,7 @@ mod tests {
             QueryConfig {
                 added: Some(TemplateSpec {
                     template: "[ADD] {{after.id}}".to_string(),
+                    ..Default::default()
                 }),
                 updated: None,
                 deleted: None,
@@ -273,6 +292,7 @@ mod tests {
             QueryConfig {
                 added: Some(TemplateSpec {
                     template: "[SENSOR] {{after.id}}".to_string(),
+                    ..Default::default()
                 }),
                 updated: None,
                 deleted: None,
@@ -298,6 +318,7 @@ mod tests {
         let invalid_template = QueryConfig {
             added: Some(TemplateSpec {
                 template: "{{unclosed".to_string(),
+                ..Default::default()
             }),
             updated: None,
             deleted: None,
@@ -318,6 +339,7 @@ mod tests {
         let sensor_config = QueryConfig {
             added: Some(TemplateSpec {
                 template: "[SENSOR] {{after.id}}".to_string(),
+                ..Default::default()
             }),
             updated: None,
             deleted: None,
@@ -341,14 +363,17 @@ mod tests {
             added: Some(TemplateSpec {
                 template: r#"{"event": "added", "id": "{{after.id}}", "data": {{json after}}}"#
                     .to_string(),
+                ..Default::default()
             }),
             updated: Some(TemplateSpec {
                 template:
                     r#"{"event": "updated", "before": {{json before}}, "after": {{json after}}}"#
                         .to_string(),
+                ..Default::default()
             }),
             deleted: Some(TemplateSpec {
                 template: r#"{"event": "deleted", "id": "{{before.id}}"}"#.to_string(),
+                ..Default::default()
             }),
         };
 
@@ -366,6 +391,7 @@ mod tests {
         let empty_template = QueryConfig {
             added: Some(TemplateSpec {
                 template: String::new(), // Empty template should be valid
+                ..Default::default()
             }),
             updated: None,
             deleted: None,
