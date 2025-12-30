@@ -564,15 +564,37 @@ let core = DrasiLib::builder()
 
 ### Using State Store in Plugins
 
-When a Source or Reaction is added to DrasiLib, the state store is automatically injected. Plugins can override `inject_state_store()` to receive the provider:
+When a Source or Reaction is added to DrasiLib, a runtime context is provided via the `initialize()` method. The context contains all DrasiLib-provided services, including the state store (if configured):
 
 ```rust
-use drasi_lib::{Source, StateStoreProvider};
+use drasi_lib::{Source, SourceRuntimeContext};
 
+#[async_trait]
 impl Source for MySource {
-    async fn inject_state_store(&self, state_store: Arc<dyn StateStoreProvider>) {
-        // Store the reference for later use
-        *self.state_store.write().await = Some(state_store);
+    async fn initialize(&self, context: SourceRuntimeContext) {
+        // Store the context for later use
+        self.base.initialize(context).await;
+
+        // Access state store from context (may be None if not configured)
+        if let Some(state_store) = self.base.state_store().await {
+            // Use state_store for persistent state
+        }
+    }
+}
+```
+
+For reactions, use `ReactionRuntimeContext` which also provides access to `QueryProvider`:
+
+```rust
+use drasi_lib::{Reaction, ReactionRuntimeContext};
+
+#[async_trait]
+impl Reaction for MyReaction {
+    async fn initialize(&self, context: ReactionRuntimeContext) {
+        self.base.initialize(context).await;
+
+        // Access query provider for subscribing to query results
+        let query_provider = self.base.query_provider().await;
     }
 }
 ```

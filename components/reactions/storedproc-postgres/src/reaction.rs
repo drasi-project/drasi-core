@@ -25,7 +25,7 @@ use tokio::task::JoinHandle;
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::{QuerySubscriber, Reaction};
+use drasi_lib::{QueryProvider, Reaction};
 
 use crate::config::{PostgresStoredProcReactionConfig, QueryConfig};
 use crate::executor::PostgresExecutor;
@@ -294,12 +294,8 @@ impl Reaction for PostgresStoredProcReaction {
         self.base.get_auto_start()
     }
 
-    async fn inject_query_subscriber(&self, query_subscriber: Arc<dyn QuerySubscriber>) {
-        self.base.inject_query_subscriber(query_subscriber).await;
-    }
-
-    async fn inject_event_tx(&self, tx: ComponentEventSender) {
-        self.base.inject_event_tx(tx).await;
+    async fn initialize(&self, context: drasi_lib::context::ReactionRuntimeContext) {
+        self.base.initialize(context).await;
     }
 
     async fn start(&self) -> Result<()> {

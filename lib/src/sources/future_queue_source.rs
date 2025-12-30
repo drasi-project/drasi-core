@@ -351,8 +351,9 @@ impl crate::sources::Source for FutureQueueSource {
         self
     }
 
-    async fn inject_event_tx(&self, _tx: ComponentEventSender) {
-        // FutureQueueSource doesn't emit lifecycle events
+    async fn initialize(&self, _context: crate::context::SourceRuntimeContext) {
+        // FutureQueueSource doesn't use the runtime context - it's an internal source
+        // managed by the query system
     }
 }
 

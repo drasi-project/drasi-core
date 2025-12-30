@@ -26,6 +26,7 @@ use std::collections::BTreeMap;
 
 use crate::channels::*;
 use crate::config::SourceRuntime;
+use crate::context::SourceRuntimeContext;
 use crate::managers::{is_operation_valid, log_component_error, Operation};
 use crate::sources::Source;
 use crate::state_store::StateStoreProvider;
@@ -111,8 +112,8 @@ impl SourceManager {
     /// The source will NOT be auto-started. Call `start_source` separately
     /// if you need to start it after adding.
     ///
-    /// The event channel and state store provider are automatically injected
-    /// into the source before it is stored.
+    /// The source is automatically initialized with the runtime context before
+    /// it is stored.
     ///
     /// # Example
     /// ```ignore
@@ -123,13 +124,15 @@ impl SourceManager {
         let source: Arc<dyn Source> = Arc::new(source);
         let source_id = source.id().to_string();
 
-        // Inject the event channel before storing
-        source.inject_event_tx(self.event_tx.clone()).await;
+        // Construct runtime context for this source
+        let context = SourceRuntimeContext::new(
+            &source_id,
+            self.event_tx.clone(),
+            self.state_store.read().await.clone(),
+        );
 
-        // Inject the state store if available
-        if let Some(state_store) = self.state_store.read().await.as_ref() {
-            source.inject_state_store(state_store.clone()).await;
-        }
+        // Initialize the source with its runtime context
+        source.initialize(context).await;
 
         // Use a single write lock to atomically check and insert
         // This eliminates the TOCTOU race condition from separate read-then-write
