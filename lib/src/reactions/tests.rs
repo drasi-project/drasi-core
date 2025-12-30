@@ -16,11 +16,24 @@
 mod manager_tests {
     use super::super::*;
     use crate::channels::*;
+    use crate::queries::Query;
+    use crate::reactions::QuerySubscriber;
+    use anyhow::Result;
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::mpsc;
     use tokio::sync::RwLock;
+
+    // Mock QuerySubscriber for testing ReactionManager
+    struct MockQuerySubscriber;
+
+    #[async_trait]
+    impl QuerySubscriber for MockQuerySubscriber {
+        async fn get_query_instance(&self, _id: &str) -> Result<Arc<dyn Query>> {
+            Err(anyhow::anyhow!("MockQuerySubscriber: query not found"))
+        }
+    }
 
     /// A simple test mock reaction for unit testing the ReactionManager.
     struct TestMockReaction {
@@ -80,11 +93,8 @@ mod manager_tests {
             self.auto_start
         }
 
-        async fn inject_query_subscriber(
-            &self,
-            _query_subscriber: Arc<dyn crate::reactions::QuerySubscriber>,
-        ) {
-            // No-op for test mock - real reactions would store this
+        async fn initialize(&self, _context: crate::context::ReactionRuntimeContext) {
+            // TestMockReaction already has event_tx from constructor
         }
 
         async fn start(&self) -> anyhow::Result<()> {
@@ -142,10 +152,6 @@ mod manager_tests {
         async fn status(&self) -> ComponentStatus {
             self.status.read().await.clone()
         }
-
-        async fn inject_event_tx(&self, _tx: ComponentEventSender) {
-            // No-op for tests
-        }
     }
 
     /// Helper to create a TestMockReaction instance
@@ -164,6 +170,10 @@ mod manager_tests {
     ) {
         let (event_tx, event_rx) = mpsc::channel(100);
         let manager = Arc::new(ReactionManager::new(event_tx.clone()));
+        // Inject mock QuerySubscriber so add_reaction() can construct ReactionRuntimeContext
+        manager
+            .inject_query_subscriber(Arc::new(MockQuerySubscriber))
+            .await;
         (manager, event_rx, event_tx)
     }
 

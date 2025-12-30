@@ -20,6 +20,7 @@ use tokio::sync::RwLock;
 
 use crate::channels::*;
 use crate::config::ReactionRuntime;
+use crate::context::ReactionRuntimeContext;
 use crate::managers::{is_operation_valid, log_component_error, Operation};
 use crate::reactions::{QuerySubscriber, Reaction};
 use crate::state_store::StateStoreProvider;
@@ -65,14 +66,14 @@ impl ReactionManager {
     ///
     /// # Returns
     /// - `Ok(())` if the reaction was added successfully
-    /// - `Err` if a reaction with the same ID already exists
+    /// - `Err` if a reaction with the same ID already exists, or if query subscriber not injected
     ///
     /// # Note
     /// The reaction will NOT be auto-started. Call `start_reaction` separately
     /// if you need to start it after adding.
     ///
-    /// Dependencies (event channel, query subscriber, and state store) are automatically
-    /// injected into the reaction before it is stored.
+    /// The reaction is automatically initialized with the runtime context before
+    /// it is stored.
     ///
     /// # Example
     /// ```ignore
@@ -83,18 +84,23 @@ impl ReactionManager {
         let reaction: Arc<dyn Reaction> = Arc::new(reaction);
         let reaction_id = reaction.id().to_string();
 
-        // Inject dependencies before storing
-        reaction.inject_event_tx(self.event_tx.clone()).await;
+        // Query subscriber must be available for reactions
+        let query_subscriber = self.query_subscriber.read().await.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "QuerySubscriber not injected - was ReactionManager initialized properly?"
+            )
+        })?;
 
-        // Inject query subscriber if available
-        if let Some(qs) = self.query_subscriber.read().await.as_ref() {
-            reaction.inject_query_subscriber(qs.clone()).await;
-        }
+        // Construct runtime context for this reaction
+        let context = ReactionRuntimeContext::new(
+            &reaction_id,
+            self.event_tx.clone(),
+            self.state_store.read().await.clone(),
+            query_subscriber,
+        );
 
-        // Inject state store if available
-        if let Some(state_store) = self.state_store.read().await.as_ref() {
-            reaction.inject_state_store(state_store.clone()).await;
-        }
+        // Initialize the reaction with its runtime context
+        reaction.initialize(context).await;
 
         // Use a single write lock to atomically check and insert
         // This eliminates the TOCTOU race condition from separate read-then-write

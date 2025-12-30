@@ -19,6 +19,9 @@
 /// Fluent builders for DrasiLib and components
 pub mod builder;
 
+/// Runtime context types for plugin service injection
+pub mod context;
+
 /// State store provider for persistent plugin state
 pub mod state_store;
 
@@ -131,6 +134,9 @@ pub use indexes::IndexBackendPlugin;
 pub use state_store::{
     MemoryStateStoreProvider, StateStoreError, StateStoreProvider, StateStoreResult,
 };
+
+/// Runtime context types for plugin initialization
+pub use context::{ReactionRuntimeContext, SourceRuntimeContext};
 
 pub use reactions::{ReactionBase, ReactionBaseParams};
 /// Base implementations for source and reaction plugins

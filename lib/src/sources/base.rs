@@ -36,7 +36,9 @@ use tokio::sync::RwLock;
 
 use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 use crate::channels::*;
+use crate::context::SourceRuntimeContext;
 use crate::profiling;
+use crate::state_store::StateStoreProvider;
 use drasi_core::models::SourceChange;
 
 /// Parameters for creating a SourceBase instance.
@@ -145,8 +147,12 @@ pub struct SourceBase {
     /// subscribers (queries). When a source produces a change event, it broadcasts
     /// it to all dispatchers in this vector.
     pub dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
-    /// Channel for sending component lifecycle events (injected by DrasiLib when added)
-    event_tx: Arc<RwLock<Option<ComponentEventSender>>>,
+    /// Runtime context (set by initialize())
+    context: Arc<RwLock<Option<SourceRuntimeContext>>>,
+    /// Channel for sending component status events (extracted from context for convenience)
+    status_tx: Arc<RwLock<Option<ComponentEventSender>>>,
+    /// State store provider (extracted from context for convenience)
+    state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
     /// Handle to the source's main task
     pub task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     /// Sender for shutdown signal
@@ -158,8 +164,8 @@ pub struct SourceBase {
 impl SourceBase {
     /// Create a new SourceBase with the given parameters
     ///
-    /// The event channel is not required during construction - it will be
-    /// injected by DrasiLib when the source is added via `inject_event_tx()`.
+    /// The status channel is not required during construction - it will be
+    /// provided via the `SourceRuntimeContext` when `initialize()` is called.
     ///
     /// If a bootstrap provider is specified in params, it will be set during
     /// construction (no async needed since nothing is shared yet).
@@ -192,7 +198,9 @@ impl SourceBase {
             auto_start: params.auto_start,
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
             dispatchers: Arc::new(RwLock::new(dispatchers)),
-            event_tx: Arc::new(RwLock::new(None)), // Injected later by DrasiLib
+            context: Arc::new(RwLock::new(None)), // Set by initialize()
+            status_tx: Arc::new(RwLock::new(None)), // Extracted from context
+            state_store: Arc::new(RwLock::new(None)), // Extracted from context
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
             bootstrap_provider: Arc::new(RwLock::new(bootstrap_provider)),
@@ -204,22 +212,49 @@ impl SourceBase {
         self.auto_start
     }
 
-    /// Inject the event channel (called by DrasiLib when source is added)
+    /// Initialize the source with runtime context.
     ///
     /// This method is called automatically by DrasiLib's `add_source()` method.
     /// Plugin developers do not need to call this directly.
-    pub async fn inject_event_tx(&self, tx: ComponentEventSender) {
-        *self.event_tx.write().await = Some(tx);
+    ///
+    /// The context provides access to:
+    /// - `source_id`: The source's unique identifier
+    /// - `status_tx`: Channel for reporting component status events
+    /// - `state_store`: Optional persistent state storage
+    pub async fn initialize(&self, context: SourceRuntimeContext) {
+        // Store context for later use
+        *self.context.write().await = Some(context.clone());
+
+        // Extract services for convenience
+        *self.status_tx.write().await = Some(context.status_tx.clone());
+
+        if let Some(state_store) = context.state_store.as_ref() {
+            *self.state_store.write().await = Some(state_store.clone());
+        }
     }
 
-    /// Get the event channel Arc for internal use by spawned tasks
+    /// Get the runtime context if initialized.
     ///
-    /// This returns the internal event_tx wrapped in Arc<RwLock<Option<...>>>
-    /// which allows background tasks to send component events.
+    /// Returns `None` if `initialize()` has not been called yet.
+    pub async fn context(&self) -> Option<SourceRuntimeContext> {
+        self.context.read().await.clone()
+    }
+
+    /// Get the state store if configured.
+    ///
+    /// Returns `None` if no state store was provided in the context.
+    pub async fn state_store(&self) -> Option<Arc<dyn StateStoreProvider>> {
+        self.state_store.read().await.clone()
+    }
+
+    /// Get the status channel Arc for internal use by spawned tasks
+    ///
+    /// This returns the internal status_tx wrapped in Arc<RwLock<Option<...>>>
+    /// which allows background tasks to send component status events.
     ///
     /// Returns a clone of the Arc that can be moved into spawned tasks.
-    pub fn event_tx(&self) -> Arc<RwLock<Option<ComponentEventSender>>> {
-        self.event_tx.clone()
+    pub fn status_tx(&self) -> Arc<RwLock<Option<ComponentEventSender>>> {
+        self.status_tx.clone()
     }
 
     /// Clone the SourceBase with shared Arc references
@@ -234,7 +269,9 @@ impl SourceBase {
             auto_start: self.auto_start,
             status: self.status.clone(),
             dispatchers: self.dispatchers.clone(),
-            event_tx: self.event_tx.clone(),
+            context: self.context.clone(),
+            status_tx: self.status_tx.clone(),
+            state_store: self.state_store.clone(),
             task_handle: self.task_handle.clone(),
             shutdown_tx: self.shutdown_tx.clone(),
             bootstrap_provider: self.bootstrap_provider.clone(),
@@ -580,7 +617,7 @@ impl SourceBase {
 
     /// Send a component event
     ///
-    /// If the event channel has not been injected yet, this method silently
+    /// If the status channel has not been initialized yet, this method silently
     /// succeeds without sending anything. This allows sources to be used
     /// in a standalone fashion without DrasiLib if needed.
     pub async fn send_component_event(
@@ -596,12 +633,12 @@ impl SourceBase {
             message,
         };
 
-        if let Some(ref tx) = *self.event_tx.read().await {
+        if let Some(ref tx) = *self.status_tx.read().await {
             if let Err(e) = tx.send(event).await {
                 error!("Failed to send component event: {e}");
             }
         }
-        // If event_tx is None, silently skip - injection happens before start()
+        // If status_tx is None, silently skip - initialization happens before start()
         Ok(())
     }
 }

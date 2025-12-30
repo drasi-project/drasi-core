@@ -279,6 +279,42 @@ cargo check
 
 ## Key Implementation Patterns
 
+### Plugin Runtime Context
+
+Sources and Reactions receive a runtime context during initialization that provides access to DrasiLib-provided services. This uses a context-based dependency injection pattern.
+
+**SourceRuntimeContext** (provided to Sources):
+- `source_id`: Unique identifier for this source instance
+- `status_tx`: Channel for reporting component status events (Starting, Running, Stopped, Error)
+- `state_store`: Optional persistent state storage (if configured)
+
+**ReactionRuntimeContext** (provided to Reactions):
+- `reaction_id`: Unique identifier for this reaction instance
+- `status_tx`: Channel for reporting component status events (Starting, Running, Stopped, Error)
+- `state_store`: Optional persistent state storage (if configured)
+- `query_subscriber`: Access to query instances for subscription
+
+**Usage Pattern**:
+```rust
+// For Sources
+#[async_trait]
+impl Source for MySource {
+    async fn initialize(&self, context: SourceRuntimeContext) {
+        self.base.initialize(context).await;  // SourceBase stores context
+    }
+}
+
+// For Reactions
+#[async_trait]
+impl Reaction for MyReaction {
+    async fn initialize(&self, context: ReactionRuntimeContext) {
+        self.base.initialize(context).await;  // ReactionBase stores context
+    }
+}
+```
+
+**Context Module**: See `src/context/mod.rs` for context type definitions.
+
 ### Internal Sources/Reactions
 Internal components use application handles for direct integration:
 - Sources implement trait from `sources::application`
@@ -360,14 +396,15 @@ sources:
 
 ## Important Directories
 - `src/sources/` - Source implementations (postgres, http, grpc, mock, application, platform)
-- `src/reactions/internal/` - Internal reaction implementations
+- `src/reactions/` - Reaction implementations (log, http, grpc, sse, profiler, storedproc-postgres)
+- `src/context/` - Runtime context types for plugin service injection (SourceRuntimeContext, ReactionRuntimeContext)
 - `src/bootstrap/` - Bootstrap provider system
 - `src/bootstrap/providers/` - Bootstrap provider implementations
 - `src/routers/` - Event routing components
 - `src/channels/` - Channel definitions and types
+- `src/state_store/` - State store provider interfaces and memory implementation
 - `tests/` - Test suite
 - `proto/` - Protocol buffer definitions
-- `sdks/rust/` - Rust SDK for extensions
 
 ## Library Integration
 To use DrasiLib as a dependency:

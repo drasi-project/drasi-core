@@ -38,7 +38,9 @@ use crate::channels::priority_queue::PriorityQueue;
 use crate::channels::{
     ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, QueryResult,
 };
+use crate::context::ReactionRuntimeContext;
 use crate::reactions::QuerySubscriber;
+use crate::state_store::StateStoreProvider;
 
 /// Parameters for creating a ReactionBase instance.
 ///
@@ -102,10 +104,14 @@ pub struct ReactionBase {
     pub auto_start: bool,
     /// Current component status
     pub status: Arc<RwLock<ComponentStatus>>,
-    /// Channel for sending component lifecycle events (injected by DrasiLib when added)
-    event_tx: Arc<RwLock<Option<ComponentEventSender>>>,
-    /// Query subscriber for accessing queries (injected by DrasiLib when added)
+    /// Runtime context (set by initialize())
+    context: Arc<RwLock<Option<ReactionRuntimeContext>>>,
+    /// Channel for sending component status events (extracted from context for convenience)
+    status_tx: Arc<RwLock<Option<ComponentEventSender>>>,
+    /// Query subscriber for accessing queries (extracted from context)
     query_subscriber: Arc<RwLock<Option<Arc<dyn QuerySubscriber>>>>,
+    /// State store provider (extracted from context for convenience)
+    state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
     /// Priority queue for timestamp-ordered result processing
     pub priority_queue: PriorityQueue<QueryResult>,
     /// Handles to subscription forwarder tasks
@@ -119,8 +125,8 @@ pub struct ReactionBase {
 impl ReactionBase {
     /// Create a new ReactionBase with the given parameters
     ///
-    /// Dependencies (event channel and query subscriber) are not required during
-    /// construction - they will be injected by DrasiLib when the reaction is added.
+    /// Dependencies (event channel, query subscriber, state store) are not required during
+    /// construction - they will be provided via `initialize()` when the reaction is added to DrasiLib.
     pub fn new(params: ReactionBaseParams) -> Self {
         Self {
             priority_queue: PriorityQueue::new(params.priority_queue_capacity.unwrap_or(10000)),
@@ -128,28 +134,51 @@ impl ReactionBase {
             queries: params.queries,
             auto_start: params.auto_start,
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            event_tx: Arc::new(RwLock::new(None)), // Injected later by DrasiLib
-            query_subscriber: Arc::new(RwLock::new(None)), // Injected later by DrasiLib
+            context: Arc::new(RwLock::new(None)), // Set by initialize()
+            status_tx: Arc::new(RwLock::new(None)), // Extracted from context
+            query_subscriber: Arc::new(RwLock::new(None)), // Extracted from context
+            state_store: Arc::new(RwLock::new(None)), // Extracted from context
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
             processing_task: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
         }
     }
 
-    /// Inject the event channel (called by DrasiLib when reaction is added)
+    /// Initialize the reaction with runtime context.
     ///
     /// This method is called automatically by DrasiLib's `add_reaction()` method.
     /// Plugin developers do not need to call this directly.
-    pub async fn inject_event_tx(&self, tx: ComponentEventSender) {
-        *self.event_tx.write().await = Some(tx);
+    ///
+    /// The context provides access to:
+    /// - `reaction_id`: The reaction's unique identifier
+    /// - `status_tx`: Channel for reporting component status events
+    /// - `state_store`: Optional persistent state storage
+    /// - `query_subscriber`: Access to query instances for subscription
+    pub async fn initialize(&self, context: ReactionRuntimeContext) {
+        // Store context for later use
+        *self.context.write().await = Some(context.clone());
+
+        // Extract services for convenience
+        *self.status_tx.write().await = Some(context.status_tx.clone());
+        *self.query_subscriber.write().await = Some(context.query_subscriber.clone());
+
+        if let Some(state_store) = context.state_store.as_ref() {
+            *self.state_store.write().await = Some(state_store.clone());
+        }
     }
 
-    /// Inject the query subscriber (called by DrasiLib when reaction is added)
+    /// Get the runtime context if initialized.
     ///
-    /// This method is called automatically by DrasiLib's `add_reaction()` method.
-    /// Plugin developers do not need to call this directly.
-    pub async fn inject_query_subscriber(&self, qs: Arc<dyn QuerySubscriber>) {
-        *self.query_subscriber.write().await = Some(qs);
+    /// Returns `None` if `initialize()` has not been called yet.
+    pub async fn context(&self) -> Option<ReactionRuntimeContext> {
+        self.context.read().await.clone()
+    }
+
+    /// Get the state store if configured.
+    ///
+    /// Returns `None` if no state store was provided in the context.
+    pub async fn state_store(&self) -> Option<Arc<dyn StateStoreProvider>> {
+        self.state_store.read().await.clone()
     }
 
     /// Get whether this reaction should auto-start
@@ -157,14 +186,14 @@ impl ReactionBase {
         self.auto_start
     }
 
-    /// Get the event channel Arc for internal use by spawned tasks
+    /// Get the status channel Arc for internal use by spawned tasks
     ///
-    /// This returns the internal event_tx wrapped in Arc<RwLock<Option<...>>>
-    /// which allows background tasks to send component events.
+    /// This returns the internal status_tx wrapped in Arc<RwLock<Option<...>>>
+    /// which allows background tasks to send component status events.
     ///
     /// Returns a clone of the Arc that can be moved into spawned tasks.
-    pub fn event_tx(&self) -> Arc<RwLock<Option<ComponentEventSender>>> {
-        self.event_tx.clone()
+    pub fn status_tx(&self) -> Arc<RwLock<Option<ComponentEventSender>>> {
+        self.status_tx.clone()
     }
 
     /// Clone the ReactionBase with shared Arc references
@@ -177,8 +206,10 @@ impl ReactionBase {
             queries: self.queries.clone(),
             auto_start: self.auto_start,
             status: self.status.clone(),
-            event_tx: self.event_tx.clone(),
+            context: self.context.clone(),
+            status_tx: self.status_tx.clone(),
             query_subscriber: self.query_subscriber.clone(),
+            state_store: self.state_store.clone(),
             priority_queue: self.priority_queue.clone(),
             subscription_tasks: self.subscription_tasks.clone(),
             processing_task: self.processing_task.clone(),
@@ -231,12 +262,12 @@ impl ReactionBase {
             message,
         };
 
-        if let Some(ref tx) = *self.event_tx.read().await {
+        if let Some(ref tx) = *self.status_tx.read().await {
             if let Err(e) = tx.send(event).await {
                 error!("Failed to send component event: {e}");
             }
         }
-        // If event_tx is None, silently skip - injection happens before start()
+        // If status_tx is None, silently skip - initialization happens before start()
         Ok(())
     }
 
@@ -434,12 +465,35 @@ mod tests {
 
     #[tokio::test]
     async fn test_status_transitions() {
-        let (event_tx, mut event_rx) = mpsc::channel(100);
+        use crate::context::ReactionRuntimeContext;
+        use crate::queries::Query;
+
+        // Mock QuerySubscriber for testing
+        struct MockQuerySubscriber;
+
+        #[async_trait::async_trait]
+        impl crate::reactions::QuerySubscriber for MockQuerySubscriber {
+            async fn get_query_instance(
+                &self,
+                _id: &str,
+            ) -> anyhow::Result<std::sync::Arc<dyn Query>> {
+                Err(anyhow::anyhow!("MockQuerySubscriber: query not found"))
+            }
+        }
+
+        let (status_tx, mut event_rx) = mpsc::channel(100);
         let params = ReactionBaseParams::new("test-reaction", vec![]);
 
         let base = ReactionBase::new(params);
-        // Inject event_tx to test event sending
-        base.inject_event_tx(event_tx).await;
+
+        // Create context and initialize
+        let context = ReactionRuntimeContext::new(
+            "test-reaction",
+            status_tx,
+            None,
+            std::sync::Arc::new(MockQuerySubscriber),
+        );
+        base.initialize(context).await;
 
         // Test status transition
         base.set_status_with_event(ComponentStatus::Starting, Some("Starting test".to_string()))
@@ -479,13 +533,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_event_without_injection() {
-        // Test that send_component_event works even without event_tx injection
+    async fn test_event_without_initialization() {
+        // Test that send_component_event works even without context initialization
         let params = ReactionBaseParams::new("test-reaction", vec![]);
 
         let base = ReactionBase::new(params);
 
-        // This should succeed without panicking (silently does nothing)
+        // This should succeed without panicking (silently does nothing when status_tx is None)
         base.send_component_event(ComponentStatus::Starting, None)
             .await
             .unwrap();

@@ -41,7 +41,7 @@ pub struct ReplicationStream {
         >,
     >,
     #[allow(dead_code)]
-    event_tx: Arc<RwLock<Option<ComponentEventSender>>>,
+    status_tx: Arc<RwLock<Option<ComponentEventSender>>>,
     status: Arc<RwLock<ComponentStatus>>,
     current_lsn: u64,
     last_feedback_time: std::time::Instant,
@@ -71,7 +71,7 @@ impl ReplicationStream {
                 >,
             >,
         >,
-        event_tx: Arc<RwLock<Option<ComponentEventSender>>>,
+        status_tx: Arc<RwLock<Option<ComponentEventSender>>>,
         status: Arc<RwLock<ComponentStatus>>,
     ) -> Self {
         Self {
@@ -80,7 +80,7 @@ impl ReplicationStream {
             connection: None,
             decoder: PgOutputDecoder::new(),
             dispatchers,
-            event_tx,
+            status_tx,
             status,
             current_lsn: 0,
             last_feedback_time: std::time::Instant::now(),

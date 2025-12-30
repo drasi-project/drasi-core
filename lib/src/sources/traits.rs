@@ -27,16 +27,20 @@
 //!
 //! drasi-lib has no knowledge of which plugins exist - it only knows about this trait.
 //!
-//! # Event Channel Injection
+//! # Runtime Context Initialization
 //!
-//! Sources do not need to receive an event channel during construction.
-//! DrasiLib automatically injects the event channel when the source is added
-//! via `add_source()`. This simplifies the plugin constructor API.
+//! Sources receive all drasi-lib services through a single `initialize()` call
+//! when added to DrasiLib. The `SourceRuntimeContext` provides:
+//! - `event_tx`: Channel for component lifecycle events
+//! - `state_store`: Optional persistent state storage
+//!
+//! This replaces the previous `inject_*` methods with a cleaner single-call pattern.
 
 use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::channels::*;
+use crate::context::SourceRuntimeContext;
 
 /// Trait defining the interface for all source implementations.
 ///
@@ -49,6 +53,7 @@ use crate::channels::*;
 /// ```ignore
 /// use drasi_lib::Source;
 /// use drasi_lib::sources::{SourceBase, SourceBaseParams};
+/// use drasi_lib::context::SourceRuntimeContext;
 ///
 /// pub struct MySource {
 ///     base: SourceBase,
@@ -56,7 +61,6 @@ use crate::channels::*;
 /// }
 ///
 /// impl MySource {
-///     // No event_tx needed - it's injected automatically by DrasiLib
 ///     pub fn new(config: MySourceConfig) -> Result<Self> {
 ///         let params = SourceBaseParams::new(&config.id)
 ///             .with_dispatch_mode(config.dispatch_mode)
@@ -82,8 +86,8 @@ use crate::channels::*;
 ///         // Return plugin-specific properties
 ///     }
 ///
-///     async fn inject_event_tx(&self, tx: ComponentEventSender) {
-///         self.base.inject_event_tx(tx).await;
+///     async fn initialize(&self, context: SourceRuntimeContext) {
+///         self.base.initialize(context).await;
 ///     }
 ///
 ///     // ... implement other methods
@@ -153,28 +157,18 @@ pub trait Source: Send + Sync {
     /// Downcast helper for testing - allows access to concrete types
     fn as_any(&self) -> &dyn std::any::Any;
 
-    /// Inject the event channel for component lifecycle events
+    /// Initialize the source with runtime context.
     ///
     /// This method is called automatically by DrasiLib when the source is added
     /// via `add_source()`. Plugin developers do not need to call this directly.
     ///
-    /// Implementation should delegate to `self.base.inject_event_tx(tx).await`.
-    async fn inject_event_tx(&self, tx: ComponentEventSender);
-
-    /// Inject the state store provider for persistent state storage
+    /// The context provides access to:
+    /// - `source_id`: The source's unique identifier
+    /// - `event_tx`: Channel for reporting component lifecycle events
+    /// - `state_store`: Optional persistent state storage
     ///
-    /// This method is called automatically by DrasiLib when the source is added
-    /// via `add_source()`. Plugin developers do not need to call this directly.
-    ///
-    /// Sources that need to persist state should store this reference and use it
-    /// to read/write state data. The store_id used should typically be the source's ID.
-    async fn inject_state_store(
-        &self,
-        _state_store: std::sync::Arc<dyn crate::state_store::StateStoreProvider>,
-    ) {
-        // Default implementation does nothing - sources that need state storage
-        // should override this to store the reference
-    }
+    /// Implementation should delegate to `self.base.initialize(context).await`.
+    async fn initialize(&self, context: SourceRuntimeContext);
 
     /// Set the bootstrap provider for this source
     ///
@@ -240,15 +234,8 @@ impl Source for Box<dyn Source + 'static> {
         (**self).as_any()
     }
 
-    async fn inject_event_tx(&self, tx: ComponentEventSender) {
-        (**self).inject_event_tx(tx).await
-    }
-
-    async fn inject_state_store(
-        &self,
-        state_store: std::sync::Arc<dyn crate::state_store::StateStoreProvider>,
-    ) {
-        (**self).inject_state_store(state_store).await
+    async fn initialize(&self, context: SourceRuntimeContext) {
+        (**self).initialize(context).await
     }
 
     async fn set_bootstrap_provider(

@@ -294,12 +294,8 @@ impl Reaction for PostgresStoredProcReaction {
         self.base.get_auto_start()
     }
 
-    async fn inject_query_subscriber(&self, query_subscriber: Arc<dyn QuerySubscriber>) {
-        self.base.inject_query_subscriber(query_subscriber).await;
-    }
-
-    async fn inject_event_tx(&self, tx: ComponentEventSender) {
-        self.base.inject_event_tx(tx).await;
+    async fn initialize(&self, context: drasi_lib::context::ReactionRuntimeContext) {
+        self.base.initialize(context).await;
     }
 
     async fn start(&self) -> Result<()> {
