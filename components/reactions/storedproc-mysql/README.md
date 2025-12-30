@@ -6,8 +6,9 @@ A Drasi reaction plugin that invokes MySQL stored procedures when continuous que
 
 The MySQL Stored Procedure reaction enables you to:
 - Execute different stored procedures for ADD, UPDATE, and DELETE operations
-- Map query result fields to stored procedure parameters using `@fieldName` syntax
-- Handle multiple queries with a single reaction
+- Map query result fields to stored procedure parameters using `@after.fieldName` and `@before.fieldName` syntax
+- Configure default templates for all queries or per-query routes for specific queries
+- Handle multiple queries with different stored procedure configurations
 - Automatically retry failed procedure calls with exponential backoff
 - Configure connection pooling and timeouts
 
@@ -61,23 +62,23 @@ DELIMITER ;
 ### 2. Create the Reaction
 
 ```rust
-use drasi_reaction_storedproc_mysql::MySqlStoredProcReaction;
+use drasi_reaction_storedproc_mysql::{MySqlStoredProcReaction, QueryConfig, TemplateSpec};
 use drasi_lib::DrasiLib;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let reaction = MySqlStoredProcReaction::builder("user-sync")
-        .with_connection(
-            "localhost",
-            3306,
-            "mydb",
-            "root",
-            "password"
-        )
+        .with_hostname("localhost")
+        .with_port(3306)
+        .with_database("mydb")
+        .with_user("root")
+        .with_password("password")
         .with_query("user-changes")
-        .with_added_command("CALL add_user(@id, @name, @email)")
-        .with_updated_command("CALL update_user(@id, @name, @email)")
-        .with_deleted_command("CALL delete_user(@id)")
+        .with_default_template(QueryConfig {
+            added: Some(TemplateSpec::new("CALL add_user(@after.id, @after.name, @after.email)")),
+            updated: Some(TemplateSpec::new("CALL update_user(@after.id, @after.name, @after.email)")),
+            deleted: Some(TemplateSpec::new("CALL delete_user(@before.id)")),
+        })
         .build()
         .await?;
 
@@ -96,9 +97,13 @@ async fn main() -> anyhow::Result<()> {
 
 ## Configuration
 
-### Builder API
+### Builder API with Default Template
+
+Use a default template that applies to all queries:
 
 ```rust
+use drasi_reaction_storedproc_mysql::{MySqlStoredProcReaction, QueryConfig, TemplateSpec};
+
 let reaction = MySqlStoredProcReaction::builder("my-reaction")
     .with_hostname("localhost")
     .with_port(3306)
@@ -107,11 +112,44 @@ let reaction = MySqlStoredProcReaction::builder("my-reaction")
     .with_password("secret")
     .with_ssl(true)  // Enable SSL/TLS
     .with_query("query1")
-    .with_added_command("CALL add_record(@id, @name)")
-    .with_updated_command("CALL update_record(@id, @name)")
-    .with_deleted_command("CALL delete_record(@id)")
+    .with_default_template(QueryConfig {
+        added: Some(TemplateSpec::new("CALL add_record(@after.id, @after.name)")),
+        updated: Some(TemplateSpec::new("CALL update_record(@after.id, @after.name)")),
+        deleted: Some(TemplateSpec::new("CALL delete_record(@before.id)")),
+    })
     .with_command_timeout_ms(30000)
     .with_retry_attempts(3)
+    .build()
+    .await?;
+```
+
+### Builder API with Query-Specific Routes
+
+Configure different stored procedures for different queries:
+
+```rust
+use drasi_reaction_storedproc_mysql::{MySqlStoredProcReaction, QueryConfig, TemplateSpec};
+
+let reaction = MySqlStoredProcReaction::builder("my-reaction")
+    .with_hostname("localhost")
+    .with_port(3306)
+    .with_database("mydb")
+    .with_user("root")
+    .with_password("secret")
+    .with_query("user-changes")
+    .with_query("order-changes")
+    // Default template for most queries
+    .with_default_template(QueryConfig {
+        added: Some(TemplateSpec::new("CALL default_add(@after.id)")),
+        updated: None,
+        deleted: None,
+    })
+    // Special route for critical queries
+    .with_route("order-changes", QueryConfig {
+        added: Some(TemplateSpec::new("CALL process_order(@after.order_id, @after.total)")),
+        updated: Some(TemplateSpec::new("CALL update_order(@after.order_id, @after.status)")),
+        deleted: Some(TemplateSpec::new("CALL cancel_order(@before.order_id)")),
+    })
     .build()
     .await?;
 ```
@@ -126,9 +164,8 @@ let reaction = MySqlStoredProcReaction::builder("my-reaction")
 | `password` | Database password | `String` | Required |
 | `database` | Database name | `String` | Required |
 | `ssl` | Enable SSL/TLS | `bool` | `false` |
-| `added_command` | Procedure for ADD operations | `Option<String>` | `None` |
-| `updated_command` | Procedure for UPDATE operations | `Option<String>` | `None` |
-| `deleted_command` | Procedure for DELETE operations | `Option<String>` | `None` |
+| `default_template` | Default template for all queries | `Option<QueryConfig>` | `None` |
+| `routes` | Per-query template configurations | `HashMap<String, QueryConfig>` | Empty |
 | `command_timeout_ms` | Command timeout | `u64` | `30000` |
 | `retry_attempts` | Number of retries | `u32` | `3` |
 

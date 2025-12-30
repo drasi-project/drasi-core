@@ -177,7 +177,8 @@ async fn test_default_template_applies_to_all_queries() {
             added: Some(TemplateSpec::new(
                 "CALL log_query_event(@query_name, @after.sensor_id)",
             )),
-            ..Default::default()
+            updated: None,
+            deleted: None,
         }),
         command_timeout_ms: 5000,
         retry_attempts: 3,
@@ -293,7 +294,8 @@ async fn test_route_overrides_default_template() {
             added: Some(TemplateSpec::new(
                 "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
             )),
-            ..Default::default()
+            updated: None,
+            deleted: None,
         }),
         command_timeout_ms: 5000,
         retry_attempts: 3,
@@ -372,7 +374,7 @@ async fn test_route_with_none_falls_back_to_default() {
             updated: Some(TemplateSpec::new(
                 "CALL log_sensor_updated(@after.sensor_id, @after.temperature)",
             )),
-            ..Default::default()
+            deleted: None,
         }),
         command_timeout_ms: 5000,
         retry_attempts: 3,
@@ -459,7 +461,8 @@ async fn test_multiple_queries_with_different_routes() {
             added: Some(TemplateSpec::new(
                 "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
             )),
-            ..Default::default()
+            updated: None,
+            deleted: None,
         }),
         command_timeout_ms: 5000,
         retry_attempts: 3,
