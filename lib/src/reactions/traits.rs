@@ -33,7 +33,7 @@
 //! when added to DrasiLib. The `ReactionRuntimeContext` provides:
 //! - `event_tx`: Channel for component lifecycle events
 //! - `state_store`: Optional persistent state storage
-//! - `query_subscriber`: Access to query instances for subscription
+//! - `query_provider`: Access to query instances for subscription
 //!
 //! This replaces the previous `inject_*` methods with a cleaner single-call pattern.
 
@@ -45,12 +45,12 @@ use crate::channels::ComponentStatus;
 use crate::context::ReactionRuntimeContext;
 use crate::queries::Query;
 
-/// Trait for subscribing to queries without requiring full DrasiLib dependency.
+/// Trait for providing access to queries without requiring full DrasiLib dependency.
 ///
 /// This trait provides a way for reactions to access query instances for subscription
 /// without needing a direct dependency on the server core.
 #[async_trait]
-pub trait QuerySubscriber: Send + Sync {
+pub trait QueryProvider: Send + Sync {
     /// Get a query instance by ID
     async fn get_query_instance(&self, id: &str) -> Result<Arc<dyn Query>>;
 }
@@ -72,8 +72,8 @@ pub trait QuerySubscriber: Send + Sync {
 /// # Subscription Model
 ///
 /// Reactions manage their own subscriptions to queries using the broadcast channel pattern:
-/// - QuerySubscriber is injected via `inject_query_subscriber()` at add time
-/// - Reactions access queries via `query_subscriber.get_query_instance()`
+/// - QueryProvider is injected via `inject_query_provider()` at add time
+/// - Reactions access queries via `query_provider.get_query_instance()`
 /// - For each query, reactions call `query.subscribe(reaction_id)`
 /// - Each subscription provides a broadcast receiver for that query's results
 /// - Reactions use a priority queue to process results from multiple queries in timestamp order
@@ -81,7 +81,7 @@ pub trait QuerySubscriber: Send + Sync {
 /// # Example Implementation
 ///
 /// ```ignore
-/// use drasi_lib::{Reaction, QuerySubscriber};
+/// use drasi_lib::{Reaction, QueryProvider};
 /// use drasi_lib::reactions::{ReactionBase, ReactionBaseParams};
 /// use drasi_lib::context::ReactionRuntimeContext;
 ///
@@ -163,7 +163,7 @@ pub trait Reaction: Send + Sync {
     /// - `reaction_id`: The reaction's unique identifier
     /// - `event_tx`: Channel for reporting component lifecycle events
     /// - `state_store`: Optional persistent state storage
-    /// - `query_subscriber`: Access to query instances for subscription
+    /// - `query_provider`: Access to query instances for subscription
     ///
     /// Implementation should delegate to `self.base.initialize(context).await`.
     async fn initialize(&self, context: ReactionRuntimeContext);
@@ -171,11 +171,11 @@ pub trait Reaction: Send + Sync {
     /// Start the reaction
     ///
     /// The reaction should:
-    /// 1. Subscribe to all configured queries (using injected QuerySubscriber)
+    /// 1. Subscribe to all configured queries (using injected QueryProvider)
     /// 2. Start its processing loop
     /// 3. Update its status to Running
     ///
-    /// Note: QuerySubscriber is already available via `inject_query_subscriber()` which
+    /// Note: QueryProvider is already available via `inject_query_provider()` which
     /// is called when the reaction is added to DrasiLib.
     async fn start(&self) -> Result<()>;
 

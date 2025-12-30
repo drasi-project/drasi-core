@@ -122,7 +122,7 @@ pub use indexes::{StorageBackendConfig, StorageBackendRef, StorageBackendSpec};
 pub use sources::Source;
 
 /// Reaction traits for implementing reaction plugins
-pub use reactions::{QuerySubscriber, Reaction};
+pub use reactions::{QueryProvider, Reaction};
 
 /// Bootstrap provider trait for implementing bootstrap plugins
 pub use bootstrap::BootstrapProvider;

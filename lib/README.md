@@ -583,7 +583,7 @@ impl Source for MySource {
 }
 ```
 
-For reactions, use `ReactionRuntimeContext` which also provides access to `QuerySubscriber`:
+For reactions, use `ReactionRuntimeContext` which also provides access to `QueryProvider`:
 
 ```rust
 use drasi_lib::{Reaction, ReactionRuntimeContext};
@@ -593,8 +593,8 @@ impl Reaction for MyReaction {
     async fn initialize(&self, context: ReactionRuntimeContext) {
         self.base.initialize(context).await;
 
-        // Access query subscriber for subscribing to query results
-        let query_subscriber = self.base.query_subscriber().await;
+        // Access query provider for subscribing to query results
+        let query_provider = self.base.query_provider().await;
     }
 }
 ```

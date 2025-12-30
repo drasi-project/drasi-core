@@ -22,14 +22,14 @@ use crate::channels::*;
 use crate::config::ReactionRuntime;
 use crate::context::ReactionRuntimeContext;
 use crate::managers::{is_operation_valid, log_component_error, Operation};
-use crate::reactions::{QuerySubscriber, Reaction};
+use crate::reactions::{QueryProvider, Reaction};
 use crate::state_store::StateStoreProvider;
 
 pub struct ReactionManager {
     reactions: Arc<RwLock<HashMap<String, Arc<dyn Reaction>>>>,
     event_tx: ComponentEventSender,
-    /// Query subscriber for reactions to access queries (injected after DrasiLib is constructed)
-    query_subscriber: Arc<RwLock<Option<Arc<dyn QuerySubscriber>>>>,
+    /// Query provider for reactions to access queries (injected after DrasiLib is constructed)
+    query_provider: Arc<RwLock<Option<Arc<dyn QueryProvider>>>>,
     /// State store provider for reactions to persist state
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
 }
@@ -40,16 +40,16 @@ impl ReactionManager {
         Self {
             reactions: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
-            query_subscriber: Arc::new(RwLock::new(None)),
+            query_provider: Arc::new(RwLock::new(None)),
             state_store: Arc::new(RwLock::new(None)),
         }
     }
 
-    /// Inject the query subscriber (called after DrasiLib is fully constructed)
+    /// Inject the query provider (called after DrasiLib is fully constructed)
     ///
     /// This allows reactions to look up queries when they start.
-    pub async fn inject_query_subscriber(&self, qs: Arc<dyn QuerySubscriber>) {
-        *self.query_subscriber.write().await = Some(qs);
+    pub async fn inject_query_provider(&self, qp: Arc<dyn QueryProvider>) {
+        *self.query_provider.write().await = Some(qp);
     }
 
     /// Inject the state store provider (called after DrasiLib is fully constructed)
@@ -84,10 +84,10 @@ impl ReactionManager {
         let reaction: Arc<dyn Reaction> = Arc::new(reaction);
         let reaction_id = reaction.id().to_string();
 
-        // Query subscriber must be available for reactions
-        let query_subscriber = self.query_subscriber.read().await.clone().ok_or_else(|| {
+        // Query provider must be available for reactions
+        let query_provider = self.query_provider.read().await.clone().ok_or_else(|| {
             anyhow::anyhow!(
-                "QuerySubscriber not injected - was ReactionManager initialized properly?"
+                "QueryProvider not injected - was ReactionManager initialized properly?"
             )
         })?;
 
@@ -96,7 +96,7 @@ impl ReactionManager {
             &reaction_id,
             self.event_tx.clone(),
             self.state_store.read().await.clone(),
-            query_subscriber,
+            query_provider,
         );
 
         // Initialize the reaction with its runtime context

@@ -292,7 +292,7 @@ Sources and Reactions receive a runtime context during initialization that provi
 - `reaction_id`: Unique identifier for this reaction instance
 - `status_tx`: Channel for reporting component status events (Starting, Running, Stopped, Error)
 - `state_store`: Optional persistent state storage (if configured)
-- `query_subscriber`: Access to query instances for subscription
+- `query_provider`: Access to query instances for subscription
 
 **Usage Pattern**:
 ```rust

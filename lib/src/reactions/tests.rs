@@ -17,7 +17,7 @@ mod manager_tests {
     use super::super::*;
     use crate::channels::*;
     use crate::queries::Query;
-    use crate::reactions::QuerySubscriber;
+    use crate::reactions::QueryProvider;
     use anyhow::Result;
     use async_trait::async_trait;
     use std::collections::HashMap;
@@ -25,13 +25,13 @@ mod manager_tests {
     use tokio::sync::mpsc;
     use tokio::sync::RwLock;
 
-    // Mock QuerySubscriber for testing ReactionManager
-    struct MockQuerySubscriber;
+    // Mock QueryProvider for testing ReactionManager
+    struct MockQueryProvider;
 
     #[async_trait]
-    impl QuerySubscriber for MockQuerySubscriber {
+    impl QueryProvider for MockQueryProvider {
         async fn get_query_instance(&self, _id: &str) -> Result<Arc<dyn Query>> {
-            Err(anyhow::anyhow!("MockQuerySubscriber: query not found"))
+            Err(anyhow::anyhow!("MockQueryProvider: query not found"))
         }
     }
 
@@ -170,9 +170,9 @@ mod manager_tests {
     ) {
         let (event_tx, event_rx) = mpsc::channel(100);
         let manager = Arc::new(ReactionManager::new(event_tx.clone()));
-        // Inject mock QuerySubscriber so add_reaction() can construct ReactionRuntimeContext
+        // Inject mock QueryProvider so add_reaction() can construct ReactionRuntimeContext
         manager
-            .inject_query_subscriber(Arc::new(MockQuerySubscriber))
+            .inject_query_provider(Arc::new(MockQueryProvider))
             .await;
         (manager, event_rx, event_tx)
     }

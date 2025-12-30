@@ -25,7 +25,7 @@ use tokio::task::JoinHandle;
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::{QuerySubscriber, Reaction};
+use drasi_lib::{QueryProvider, Reaction};
 
 use crate::config::{PostgresStoredProcReactionConfig, QueryConfig};
 use crate::executor::PostgresExecutor;

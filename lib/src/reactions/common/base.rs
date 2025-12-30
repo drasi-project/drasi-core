@@ -39,7 +39,7 @@ use crate::channels::{
     ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, QueryResult,
 };
 use crate::context::ReactionRuntimeContext;
-use crate::reactions::QuerySubscriber;
+use crate::reactions::QueryProvider;
 use crate::state_store::StateStoreProvider;
 
 /// Parameters for creating a ReactionBase instance.
@@ -108,8 +108,8 @@ pub struct ReactionBase {
     context: Arc<RwLock<Option<ReactionRuntimeContext>>>,
     /// Channel for sending component status events (extracted from context for convenience)
     status_tx: Arc<RwLock<Option<ComponentEventSender>>>,
-    /// Query subscriber for accessing queries (extracted from context)
-    query_subscriber: Arc<RwLock<Option<Arc<dyn QuerySubscriber>>>>,
+    /// Query provider for accessing queries (extracted from context)
+    query_provider: Arc<RwLock<Option<Arc<dyn QueryProvider>>>>,
     /// State store provider (extracted from context for convenience)
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
     /// Priority queue for timestamp-ordered result processing
@@ -136,7 +136,7 @@ impl ReactionBase {
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
             context: Arc::new(RwLock::new(None)), // Set by initialize()
             status_tx: Arc::new(RwLock::new(None)), // Extracted from context
-            query_subscriber: Arc::new(RwLock::new(None)), // Extracted from context
+            query_provider: Arc::new(RwLock::new(None)), // Extracted from context
             state_store: Arc::new(RwLock::new(None)), // Extracted from context
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
             processing_task: Arc::new(RwLock::new(None)),
@@ -153,14 +153,14 @@ impl ReactionBase {
     /// - `reaction_id`: The reaction's unique identifier
     /// - `status_tx`: Channel for reporting component status events
     /// - `state_store`: Optional persistent state storage
-    /// - `query_subscriber`: Access to query instances for subscription
+    /// - `query_provider`: Access to query instances for subscription
     pub async fn initialize(&self, context: ReactionRuntimeContext) {
         // Store context for later use
         *self.context.write().await = Some(context.clone());
 
         // Extract services for convenience
         *self.status_tx.write().await = Some(context.status_tx.clone());
-        *self.query_subscriber.write().await = Some(context.query_subscriber.clone());
+        *self.query_provider.write().await = Some(context.query_provider.clone());
 
         if let Some(state_store) = context.state_store.as_ref() {
             *self.state_store.write().await = Some(state_store.clone());
@@ -208,7 +208,7 @@ impl ReactionBase {
             status: self.status.clone(),
             context: self.context.clone(),
             status_tx: self.status_tx.clone(),
-            query_subscriber: self.query_subscriber.clone(),
+            query_provider: self.query_provider.clone(),
             state_store: self.state_store.clone(),
             priority_queue: self.priority_queue.clone(),
             subscription_tasks: self.subscription_tasks.clone(),
@@ -284,23 +284,23 @@ impl ReactionBase {
     /// Subscribe to all configured queries and spawn forwarder tasks
     ///
     /// This method handles the common pattern of:
-    /// 1. Getting query instances via the injected QuerySubscriber
+    /// 1. Getting query instances via the injected QueryProvider
     /// 2. Subscribing to each configured query
     /// 3. Spawning forwarder tasks to enqueue results to priority queue
     ///
     /// # Prerequisites
-    /// * `inject_query_subscriber()` must have been called (done automatically by DrasiLib)
+    /// * `inject_query_provider()` must have been called (done automatically by DrasiLib)
     ///
     /// # Returns
     /// * `Ok(())` if all subscriptions succeeded
-    /// * `Err(...)` if QuerySubscriber not injected or any subscription failed
+    /// * `Err(...)` if QueryProvider not injected or any subscription failed
     pub async fn subscribe_to_queries(&self) -> Result<()> {
-        // Get the injected query subscriber (clone the Arc to release the lock)
-        let query_subscriber = {
-            let qs_guard = self.query_subscriber.read().await;
-            qs_guard.as_ref().cloned().ok_or_else(|| {
+        // Get the injected query provider (clone the Arc to release the lock)
+        let query_provider = {
+            let qp_guard = self.query_provider.read().await;
+            qp_guard.as_ref().cloned().ok_or_else(|| {
                 anyhow::anyhow!(
-                    "QuerySubscriber not injected - was reaction '{}' added to DrasiLib?",
+                    "QueryProvider not injected - was reaction '{}' added to DrasiLib?",
                     self.id
                 )
             })?
@@ -308,8 +308,8 @@ impl ReactionBase {
 
         // Subscribe to all configured queries and spawn forwarder tasks
         for query_id in &self.queries {
-            // Get the query instance via QuerySubscriber
-            let query = query_subscriber.get_query_instance(query_id).await?;
+            // Get the query instance via QueryProvider
+            let query = query_provider.get_query_instance(query_id).await?;
 
             // Subscribe to the query
             let subscription_response = query
@@ -468,16 +468,16 @@ mod tests {
         use crate::context::ReactionRuntimeContext;
         use crate::queries::Query;
 
-        // Mock QuerySubscriber for testing
-        struct MockQuerySubscriber;
+        // Mock QueryProvider for testing
+        struct MockQueryProvider;
 
         #[async_trait::async_trait]
-        impl crate::reactions::QuerySubscriber for MockQuerySubscriber {
+        impl crate::reactions::QueryProvider for MockQueryProvider {
             async fn get_query_instance(
                 &self,
                 _id: &str,
             ) -> anyhow::Result<std::sync::Arc<dyn Query>> {
-                Err(anyhow::anyhow!("MockQuerySubscriber: query not found"))
+                Err(anyhow::anyhow!("MockQueryProvider: query not found"))
             }
         }
 
@@ -491,7 +491,7 @@ mod tests {
             "test-reaction",
             status_tx,
             None,
-            std::sync::Arc::new(MockQuerySubscriber),
+            std::sync::Arc::new(MockQueryProvider),
         );
         base.initialize(context).await;
 
