@@ -299,7 +299,7 @@ impl Source for GrpcSource {
         // Start the gRPC server
         let status = Arc::clone(&self.base.status);
         let source_id = self.base.id.clone();
-        let event_tx = self.base.event_tx();
+        let status_tx = self.base.status_tx();
 
         let task = tokio::spawn(async move {
             *status.write().await = ComponentStatus::Running;
@@ -312,7 +312,7 @@ impl Source for GrpcSource {
                 message: Some(format!("gRPC source listening on {addr}")),
             };
 
-            if let Some(ref tx) = *event_tx.read().await {
+            if let Some(ref tx) = *status_tx.read().await {
                 if let Err(e) = tx.send(running_event).await {
                     error!("Failed to send component event: {e}");
                 }
@@ -359,8 +359,8 @@ impl Source for GrpcSource {
         self
     }
 
-    async fn inject_event_tx(&self, tx: ComponentEventSender) {
-        self.base.inject_event_tx(tx).await;
+    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.initialize(context).await;
     }
 
     async fn set_bootstrap_provider(

@@ -410,7 +410,7 @@ The Platform Reaction follows a modular architecture:
 
 ### Processing Flow
 
-1. **Subscription**: Reaction subscribes to configured query IDs using the QuerySubscriber
+1. **Subscription**: Reaction subscribes to configured query IDs using the QueryProvider
 2. **Reception**: Query results arrive via the priority queue (ordered by timestamp)
 3. **Transformation**: Results are transformed from QueryResult to ResultEvent format
 4. **CloudEvent Wrapping**: Events are wrapped in CloudEvent envelopes

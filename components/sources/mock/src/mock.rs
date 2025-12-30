@@ -403,8 +403,8 @@ impl Source for MockSource {
         self
     }
 
-    async fn inject_event_tx(&self, tx: ComponentEventSender) {
-        self.base.inject_event_tx(tx).await;
+    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.initialize(context).await;
     }
 
     async fn set_bootstrap_provider(

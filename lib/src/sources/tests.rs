@@ -178,8 +178,8 @@ impl Source for TestMockSource {
         self
     }
 
-    async fn inject_event_tx(&self, _tx: ComponentEventSender) {
-        // TestMockSource already has event_tx from constructor
+    async fn initialize(&self, _context: crate::context::SourceRuntimeContext) {
+        // TestMockSource already has event_tx from constructor, so we don't need to store it again
     }
 }
 

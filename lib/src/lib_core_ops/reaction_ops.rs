@@ -107,7 +107,7 @@ impl DrasiLib {
     /// Start a stopped reaction
     ///
     /// This will create the necessary subscriptions to query result streams.
-    /// The QuerySubscriber was already injected when the reaction was added via `add_reaction()`.
+    /// The QueryProvider was already injected when the reaction was added via `add_reaction()`.
     ///
     /// # Example
     /// ```no_run
@@ -120,7 +120,7 @@ impl DrasiLib {
     pub async fn start_reaction(&self, id: &str) -> Result<()> {
         self.state_guard.require_initialized().await?;
 
-        // Start the reaction (QuerySubscriber was injected when reaction was added)
+        // Start the reaction (QueryProvider was injected when reaction was added)
         map_state_error(
             self.reaction_manager.start_reaction(id.to_string()).await,
             "reaction",
