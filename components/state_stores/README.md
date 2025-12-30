@@ -155,7 +155,7 @@ When a Source or Reaction is added to DrasiLib, the state store provider is auto
 ### Example: Source with State Storage
 
 ```rust
-use drasi_lib::plugin_core::{Source, StateStoreProvider};
+use drasi_lib::{Source, StateStoreProvider};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -211,7 +211,7 @@ To create a custom state store provider:
 ### Example: Custom Provider
 
 ```rust
-use drasi_lib::plugin_core::{StateStoreProvider, StateStoreError, StateStoreResult};
+use drasi_lib::{StateStoreProvider, StateStoreError, StateStoreResult};
 use async_trait::async_trait;
 use std::collections::HashMap;
 

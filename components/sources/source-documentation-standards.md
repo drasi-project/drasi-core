@@ -258,7 +258,7 @@ mod tests {
 
     mod construction {
         use super::*;
-        use drasi_lib::plugin_core::Source;
+        use drasi_lib::Source;
 
         #[test]
         fn test_new_with_valid_config() {
@@ -295,7 +295,7 @@ mod tests {
 
     mod properties {
         use super::*;
-        use drasi_lib::plugin_core::Source;
+        use drasi_lib::Source;
 
         #[test]
         fn test_id_returns_correct_value() {
@@ -332,7 +332,7 @@ mod tests {
     mod lifecycle {
         use super::*;
         use drasi_lib::channels::ComponentStatus;
-        use drasi_lib::plugin_core::Source;
+        use drasi_lib::Source;
 
         #[tokio::test]
         async fn test_initial_status_is_stopped() {

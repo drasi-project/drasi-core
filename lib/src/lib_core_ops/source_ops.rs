@@ -22,7 +22,7 @@ use crate::component_ops::map_component_error;
 use crate::config::SourceRuntime;
 use crate::error::{DrasiError, Result};
 use crate::lib_core::DrasiLib;
-use crate::plugin_core::Source;
+use crate::sources::Source;
 
 impl DrasiLib {
     /// Add a source instance to a running server, taking ownership.

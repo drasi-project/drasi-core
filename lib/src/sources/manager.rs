@@ -27,7 +27,8 @@ use std::collections::BTreeMap;
 use crate::channels::*;
 use crate::config::SourceRuntime;
 use crate::managers::{is_operation_valid, log_component_error, Operation};
-use crate::plugin_core::{Source, StateStoreProvider};
+use crate::sources::Source;
+use crate::state_store::StateStoreProvider;
 
 // Convert JSON value to ElementValue
 pub fn convert_json_to_element_value(value: &Value) -> Result<ElementValue> {

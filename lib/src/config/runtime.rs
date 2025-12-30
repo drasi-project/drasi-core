@@ -18,8 +18,9 @@ use std::sync::Arc;
 
 use super::schema::QueryConfig;
 use crate::channels::ComponentStatus;
+use crate::indexes::IndexBackendPlugin;
 use crate::indexes::IndexFactory;
-use crate::plugin_core::{IndexBackendPlugin, MemoryStateStoreProvider, StateStoreProvider};
+use crate::state_store::{MemoryStateStoreProvider, StateStoreProvider};
 
 /// Runtime representation of a source with execution status
 ///

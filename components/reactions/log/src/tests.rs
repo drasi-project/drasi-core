@@ -17,7 +17,7 @@ mod tests {
     use crate::config::{QueryConfig, TemplateSpec};
     use crate::{LogReaction, LogReactionConfig};
     use drasi_lib::channels::ComponentStatus;
-    use drasi_lib::plugin_core::Reaction;
+    use drasi_lib::Reaction;
     use std::collections::HashMap;
 
     #[tokio::test]

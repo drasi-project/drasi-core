@@ -175,9 +175,9 @@ use drasi_lib::channels::{
     ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, ControlOperation,
     DispatchMode, SourceControl, SourceEvent, SourceEventWrapper, SubscriptionResponse,
 };
-use drasi_lib::plugin_core::Source;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::manager::convert_json_to_element_properties;
+use drasi_lib::Source;
 
 #[cfg(test)]
 mod tests;

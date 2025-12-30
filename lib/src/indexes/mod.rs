@@ -71,3 +71,6 @@ pub mod factory;
 
 pub use config::{StorageBackendConfig, StorageBackendRef, StorageBackendSpec};
 pub use factory::{IndexError, IndexFactory, IndexSet};
+
+// Re-export IndexBackendPlugin from drasi_core for plugin developers
+pub use drasi_core::interface::IndexBackendPlugin;

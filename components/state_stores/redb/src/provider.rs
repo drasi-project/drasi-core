@@ -15,7 +15,7 @@
 //! Redb-based state store provider implementation.
 
 use async_trait::async_trait;
-use drasi_lib::plugin_core::{StateStoreError, StateStoreProvider, StateStoreResult};
+use drasi_lib::{StateStoreError, StateStoreProvider, StateStoreResult};
 use log::{debug, info};
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::collections::HashMap;
