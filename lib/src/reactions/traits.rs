@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Plugin core module for reaction abstractions
+//! Reaction trait module
 //!
 //! This module provides the core traits that all reaction plugins must implement.
 //! It separates the plugin contract from the reaction manager and implementation details.
@@ -79,8 +79,8 @@ pub trait QuerySubscriber: Send + Sync {
 /// # Example Implementation
 ///
 /// ```ignore
-/// use drasi_lib::plugin_core::{Reaction, QuerySubscriber};
-/// use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
+/// use drasi_lib::{Reaction, QuerySubscriber};
+/// use drasi_lib::reactions::{ReactionBase, ReactionBaseParams};
 ///
 /// pub struct MyReaction {
 ///     base: ReactionBase,
@@ -188,6 +188,21 @@ pub trait Reaction: Send + Sync {
     ///
     /// Implementation should delegate to `self.base.inject_event_tx(tx).await`.
     async fn inject_event_tx(&self, tx: ComponentEventSender);
+
+    /// Inject the state store provider for persistent state storage
+    ///
+    /// This method is called automatically by DrasiLib when the reaction is added
+    /// via `add_reaction()`. Plugin developers do not need to call this directly.
+    ///
+    /// Reactions that need to persist state should store this reference and use it
+    /// to read/write state data. The store_id used should typically be the reaction's ID.
+    async fn inject_state_store(
+        &self,
+        _state_store: std::sync::Arc<dyn crate::state_store::StateStoreProvider>,
+    ) {
+        // Default implementation does nothing - reactions that need state storage
+        // should override this to store the reference
+    }
 }
 
 /// Blanket implementation of Reaction for Box<dyn Reaction>
@@ -233,5 +248,12 @@ impl Reaction for Box<dyn Reaction + 'static> {
 
     async fn inject_event_tx(&self, tx: ComponentEventSender) {
         (**self).inject_event_tx(tx).await
+    }
+
+    async fn inject_state_store(
+        &self,
+        state_store: std::sync::Arc<dyn crate::state_store::StateStoreProvider>,
+    ) {
+        (**self).inject_state_store(state_store).await
     }
 }

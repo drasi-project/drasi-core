@@ -67,10 +67,12 @@ use crate::config::{
     DrasiLibConfig, QueryConfig, QueryJoinConfig, QueryLanguage, SourceSubscriptionConfig,
 };
 use crate::error::{DrasiError, Result};
+use crate::indexes::IndexBackendPlugin;
 use crate::indexes::StorageBackendConfig;
 use crate::lib_core::DrasiLib;
-use crate::plugin_core::Reaction as ReactionTrait;
-use crate::plugin_core::Source as SourceTrait;
+use crate::reactions::Reaction as ReactionTrait;
+use crate::sources::Source as SourceTrait;
+use crate::state_store::StateStoreProvider;
 use drasi_core::models::SourceMiddlewareConfig;
 
 // ============================================================================
@@ -121,6 +123,8 @@ pub struct DrasiLibBuilder {
     query_configs: Vec<QueryConfig>,
     source_instances: Vec<Box<dyn SourceTrait>>,
     reaction_instances: Vec<Box<dyn ReactionTrait>>,
+    index_provider: Option<Arc<dyn IndexBackendPlugin>>,
+    state_store_provider: Option<Arc<dyn StateStoreProvider>>,
 }
 
 impl Default for DrasiLibBuilder {
@@ -140,6 +144,8 @@ impl DrasiLibBuilder {
             query_configs: Vec::new(),
             source_instances: Vec::new(),
             reaction_instances: Vec::new(),
+            index_provider: None,
+            state_store_provider: None,
         }
     }
 
@@ -164,6 +170,56 @@ impl DrasiLibBuilder {
     /// Add a storage backend configuration.
     pub fn add_storage_backend(mut self, config: StorageBackendConfig) -> Self {
         self.storage_backends.push(config);
+        self
+    }
+
+    /// Set the index backend provider for persistent storage.
+    ///
+    /// When using RocksDB or Redis/Garnet storage backends, you must provide
+    /// an index provider that implements `IndexBackendPlugin`. The provider
+    /// is responsible for creating the actual index instances.
+    ///
+    /// If no index provider is set, only in-memory storage backends can be used.
+    /// Attempting to use RocksDB or Redis backends without a provider will result
+    /// in an error.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use drasi_index_rocksdb::RocksDbIndexProvider;
+    /// use std::sync::Arc;
+    ///
+    /// let provider = RocksDbIndexProvider::new("/data/drasi", true, false);
+    /// let core = DrasiLib::builder()
+    ///     .with_index_provider(Arc::new(provider))
+    ///     .build()
+    ///     .await?;
+    /// ```
+    pub fn with_index_provider(mut self, provider: Arc<dyn IndexBackendPlugin>) -> Self {
+        self.index_provider = Some(provider);
+        self
+    }
+
+    /// Set the state store provider for plugin state persistence.
+    ///
+    /// State store providers allow plugins (Sources, BootstrapProviders, and Reactions)
+    /// to store and retrieve runtime state that can persist across runs of DrasiLib.
+    ///
+    /// If no state store provider is set, the default in-memory provider will be used.
+    /// The in-memory provider does not persist state across restarts.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use drasi_state_store_json::JsonStateStoreProvider;
+    /// use std::sync::Arc;
+    ///
+    /// let state_store = JsonStateStoreProvider::new("/data/state");
+    /// let core = DrasiLib::builder()
+    ///     .with_state_store_provider(Arc::new(state_store))
+    ///     .build()
+    ///     .await?;
+    /// ```
+    pub fn with_state_store_provider(mut self, provider: Arc<dyn StateStoreProvider>) -> Self {
+        self.state_store_provider = Some(provider);
         self
     }
 
@@ -228,8 +284,12 @@ impl DrasiLibBuilder {
             .validate()
             .map_err(|e| DrasiError::startup_validation(e.to_string()))?;
 
-        // Create runtime config and server
-        let runtime_config = Arc::new(crate::config::RuntimeConfig::from(config));
+        // Create runtime config and server with optional index and state store providers
+        let runtime_config = Arc::new(crate::config::RuntimeConfig::new(
+            config,
+            self.index_provider,
+            self.state_store_provider,
+        ));
         let mut core = DrasiLib::new(runtime_config);
 
         // Initialize the server

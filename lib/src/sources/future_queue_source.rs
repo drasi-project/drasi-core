@@ -294,7 +294,7 @@ impl FutureQueueSource {
 
 // Implement the Source trait for FutureQueueSource
 #[async_trait::async_trait]
-impl crate::plugin_core::Source for FutureQueueSource {
+impl crate::sources::Source for FutureQueueSource {
     fn id(&self) -> &str {
         FUTURE_QUEUE_SOURCE_ID
     }
@@ -367,7 +367,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_future_queue_source_lifecycle() {
-        use crate::plugin_core::Source;
+        use crate::sources::Source;
 
         let future_queue = Arc::new(InMemoryFutureQueue::new());
         let source = FutureQueueSource::new(future_queue, "test-query".to_string());
@@ -395,7 +395,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_future_queue_source_emits_events() {
-        use crate::plugin_core::Source;
+        use crate::sources::Source;
 
         let sub_settings = SourceSubscriptionSettings {
             source_id: FUTURE_QUEUE_SOURCE_ID.to_string(),
@@ -452,7 +452,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_future_queue_source_waits_for_due_time() {
-        use crate::plugin_core::Source;
+        use crate::sources::Source;
 
         let sub_settings = SourceSubscriptionSettings {
             source_id: FUTURE_QUEUE_SOURCE_ID.to_string(),
@@ -506,7 +506,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_future_queue_source_preserves_source_id() {
-        use crate::plugin_core::Source;
+        use crate::sources::Source;
 
         let sub_settings = SourceSubscriptionSettings {
             source_id: FUTURE_QUEUE_SOURCE_ID.to_string(),

@@ -303,7 +303,7 @@ let reaction = GrpcReaction::builder("high-throughput-pipeline")
 
 ```rust
 use drasi_reaction_grpc::GrpcReaction;
-use drasi_lib::plugin_core::Reaction;
+use drasi_lib::Reaction;
 
 // Create reaction without auto-start for manual control
 let reaction = GrpcReaction::builder("manual-control")

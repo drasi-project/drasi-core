@@ -15,8 +15,8 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
-use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
+use drasi_lib::{QuerySubscriber, Reaction};
 
 use crate::adaptive_batcher::{AdaptiveBatchConfig, AdaptiveBatcher};
 

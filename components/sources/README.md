@@ -71,13 +71,14 @@ DrasiLib has no knowledge of which plugins exist - it only knows about the `Sour
 
 ## The Source Trait
 
-All sources must implement the `Source` trait from `drasi_lib::plugin_core`:
+All sources must implement the `Source` trait from `drasi_lib`:
 
 ```rust
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_lib::channels::*;
-use drasi_lib::plugin_core::Source;
+use drasi_lib::config::SourceSubscriptionSettings;
+use drasi_lib::Source;
 use std::collections::HashMap;
 
 #[async_trait]
@@ -97,6 +98,13 @@ pub trait Source: Send + Sync {
         DispatchMode::Channel
     }
 
+    /// Whether this source should auto-start when DrasiLib starts.
+    /// Default is `true`. Override to return `false` if this source
+    /// should only be started manually via `start_source()`.
+    fn auto_start(&self) -> bool {
+        true
+    }
+
     /// Start the source - begins data ingestion and event generation
     async fn start(&self) -> Result<()>;
 
@@ -106,22 +114,36 @@ pub trait Source: Send + Sync {
     /// Get the current status of the source
     async fn status(&self) -> ComponentStatus;
 
-    /// Subscribe to this source for change events
+    /// Subscribe to this source for change events.
     /// Called by queries to receive data changes from this source.
+    ///
+    /// The `settings` parameter contains:
+    /// - `source_id`: The source being subscribed to
+    /// - `query_id`: ID of the subscribing query
+    /// - `enable_bootstrap`: Whether to request initial data
+    /// - `nodes`: Set of node labels the query is interested in
+    /// - `relations`: Set of relation labels the query is interested in
     async fn subscribe(
         &self,
-        query_id: String,
-        enable_bootstrap: bool,
-        node_labels: Vec<String>,
-        relation_labels: Vec<String>,
+        settings: SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse>;
 
     /// Downcast helper for testing - allows access to concrete types
     fn as_any(&self) -> &dyn std::any::Any;
 
-    /// Inject the event channel for component lifecycle events
+    /// Inject the event channel for component lifecycle events.
     /// Called automatically by DrasiLib when the source is added.
     async fn inject_event_tx(&self, tx: ComponentEventSender);
+
+    /// Set the bootstrap provider for this source.
+    /// This method allows setting a bootstrap provider after source construction.
+    /// Sources without a bootstrap provider will report that bootstrap is not available.
+    async fn set_bootstrap_provider(
+        &self,
+        _provider: Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>,
+    ) {
+        // Default implementation does nothing
+    }
 }
 ```
 
@@ -130,6 +152,35 @@ pub trait Source: Send + Sync {
 - **No event_tx in constructor**: Sources don't need the event channel during construction. DrasiLib automatically injects it when the source is added via `add_source()`.
 - **Async lifecycle**: All lifecycle methods (`start`, `stop`, `subscribe`) are async.
 - **Generic properties**: The `properties()` method returns a HashMap for API inspection, while the actual typed configuration is owned by the plugin.
+- **Query context in subscribe**: The `subscribe()` method receives `SourceSubscriptionSettings` which includes the specific node and relation labels the query needs, enabling sources and bootstrap providers to filter data at the source level.
+- **Auto-start control**: Sources can override `auto_start()` to control whether they start automatically when DrasiLib starts.
+
+## SourceSubscriptionSettings
+
+When queries subscribe to sources, they pass `SourceSubscriptionSettings` which contains query context information:
+
+```rust
+use std::collections::HashSet;
+
+#[derive(Debug, Clone)]
+pub struct SourceSubscriptionSettings {
+    /// ID of the source being subscribed to
+    pub source_id: String,
+    /// Whether to request initial data (bootstrap)
+    pub enable_bootstrap: bool,
+    /// ID of the subscribing query
+    pub query_id: String,
+    /// Set of node labels the query is interested in from this source
+    pub nodes: HashSet<String>,
+    /// Set of relation labels the query is interested in from this source
+    pub relations: HashSet<String>,
+}
+```
+
+This enables:
+- **Label filtering at source**: Sources can pre-filter data to only send relevant labels
+- **Bootstrap optimization**: Bootstrap providers can fetch only the data types needed
+- **Efficient joins**: Multi-source queries receive label allocations for each source
 
 ## Using SourceBase
 
@@ -169,14 +220,18 @@ impl MySource {
 ```rust
 pub struct SourceBaseParams {
     pub id: String,
-    pub dispatch_mode: Option<DispatchMode>,        // Default: Channel
-    pub dispatch_buffer_capacity: Option<usize>,    // Default: 1000
+    pub dispatch_mode: Option<DispatchMode>,                              // Default: Channel
+    pub dispatch_buffer_capacity: Option<usize>,                          // Default: 1000
+    pub bootstrap_provider: Option<Box<dyn BootstrapProvider + 'static>>, // Default: None
+    pub auto_start: bool,                                                 // Default: true
 }
 
 impl SourceBaseParams {
     pub fn new(id: impl Into<String>) -> Self;
     pub fn with_dispatch_mode(self, mode: DispatchMode) -> Self;
     pub fn with_dispatch_buffer_capacity(self, capacity: usize) -> Self;
+    pub fn with_bootstrap_provider(self, provider: impl BootstrapProvider + 'static) -> Self;
+    pub fn with_auto_start(self, auto_start: bool) -> Self;
 }
 ```
 
@@ -188,6 +243,9 @@ impl SourceBase {
     pub async fn get_status(&self) -> ComponentStatus;
     pub async fn set_status(&self, status: ComponentStatus);
     pub async fn set_status_with_event(&self, status: ComponentStatus, message: Option<String>) -> Result<()>;
+
+    // Component lifecycle events
+    pub async fn send_component_event(&self, status: ComponentStatus, message: Option<String>) -> Result<()>;
 
     // Event dispatching
     pub async fn dispatch_source_change(&self, change: SourceChange) -> Result<()>;
@@ -201,20 +259,17 @@ impl SourceBase {
         source_id: &str,
     ) -> Result<()>;
 
-    // Subscription handling
+    // Subscription handling - uses SourceSubscriptionSettings for query context
     pub async fn subscribe_with_bootstrap(
         &self,
-        query_id: String,
-        enable_bootstrap: bool,
-        node_labels: Vec<String>,
-        relation_labels: Vec<String>,
+        settings: &SourceSubscriptionSettings,
         source_type: &str,
     ) -> Result<SubscriptionResponse>;
 
     pub async fn create_streaming_receiver(&self) -> Result<Box<dyn ChangeReceiver<SourceEventWrapper>>>;
 
-    // Bootstrap provider
-    pub async fn set_bootstrap_provider(&self, provider: Arc<dyn BootstrapProvider>);
+    // Bootstrap provider - takes ownership via impl trait
+    pub async fn set_bootstrap_provider(&self, provider: impl BootstrapProvider + 'static);
 
     // Task management
     pub async fn set_task_handle(&self, handle: tokio::task::JoinHandle<()>);
@@ -224,6 +279,9 @@ impl SourceBase {
     // Event channel (injected by DrasiLib)
     pub async fn inject_event_tx(&self, tx: ComponentEventSender);
     pub fn event_tx(&self) -> Arc<RwLock<Option<ComponentEventSender>>>;
+
+    // Auto-start configuration
+    pub fn get_auto_start(&self) -> bool;
 
     // Cloning for spawned tasks
     pub fn clone_shared(&self) -> Self;
@@ -386,11 +444,21 @@ Bootstrap provides initial data to newly subscribing queries. The bootstrap syst
 ```rust
 #[async_trait]
 pub trait BootstrapProvider: Send + Sync {
+    /// Perform bootstrap operation for the given request.
+    /// Sends bootstrap events to the provided channel.
+    /// Returns the number of elements sent.
+    ///
+    /// # Arguments
+    /// * `request` - Bootstrap request with query ID and labels
+    /// * `context` - Bootstrap context with source information
+    /// * `event_tx` - Channel to send bootstrap events
+    /// * `settings` - Optional subscription settings with additional query context
     async fn bootstrap(
         &self,
         request: BootstrapRequest,
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
+        settings: Option<&SourceSubscriptionSettings>,
     ) -> Result<usize>;  // Returns count of events sent
 }
 
@@ -405,14 +473,22 @@ pub struct BootstrapContext {
     pub server_id: String,
     pub source_id: String,
     pub sequence_counter: Arc<AtomicU64>,
-    // ... properties
+    properties: Arc<HashMap<String, serde_json::Value>>,
 }
 
-pub struct BootstrapEvent {
-    pub source_id: String,
-    pub change: SourceChange,
-    pub timestamp: DateTime<Utc>,
-    pub sequence: u64,
+impl BootstrapContext {
+    /// Create a minimal bootstrap context with just server and source IDs
+    pub fn new_minimal(server_id: String, source_id: String) -> Self;
+
+    /// Create a bootstrap context with properties
+    pub fn with_properties(
+        server_id: String,
+        source_id: String,
+        properties: HashMap<String, serde_json::Value>,
+    ) -> Self;
+
+    /// Get the next sequence number for bootstrap events
+    pub fn next_sequence(&self) -> u64;
 }
 ```
 
@@ -569,7 +645,7 @@ use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
 use drasi_lib::channels::*;
-use drasi_lib::plugin_core::Source;
+use drasi_lib::Source;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use log::{debug, error, info};
 use std::collections::HashMap;
@@ -742,22 +818,17 @@ impl Source for MySource {
         self.base.get_status().await
     }
 
+    fn auto_start(&self) -> bool {
+        self.base.get_auto_start()
+    }
+
     async fn subscribe(
         &self,
-        query_id: String,
-        enable_bootstrap: bool,
-        node_labels: Vec<String>,
-        relation_labels: Vec<String>,
+        settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
         // Delegate to SourceBase for standard handling
         self.base
-            .subscribe_with_bootstrap(
-                query_id,
-                enable_bootstrap,
-                node_labels,
-                relation_labels,
-                "MySource",
-            )
+            .subscribe_with_bootstrap(&settings, "MySource")
             .await
     }
 
@@ -767,6 +838,13 @@ impl Source for MySource {
 
     async fn inject_event_tx(&self, tx: ComponentEventSender) {
         self.base.inject_event_tx(tx).await;
+    }
+
+    async fn set_bootstrap_provider(
+        &self,
+        provider: Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>,
+    ) {
+        self.base.set_bootstrap_provider(provider).await;
     }
 }
 ```
@@ -814,12 +892,35 @@ let core = DrasiLib::builder()
 
 ### With Bootstrap Provider
 
-Bootstrap providers are set before adding to DrasiLib. Note: If you need to set a bootstrap provider, you must create the source first, set the provider, then add it:
+Bootstrap providers can be set in two ways:
+
+**Method 1: Using the Builder Pattern (Recommended)**
 
 ```rust
 use drasi_lib::DrasiLib;
+use my_source_plugin::MySource;
+use drasi_bootstrap_scriptfile::ScriptFileBootstrapProvider;
+
+let source = MySource::builder("my-source-1")
+    .with_host("localhost")
+    .with_port(8080)
+    .with_interval_ms(500)
+    .with_bootstrap_provider(ScriptFileBootstrapProvider::new("/data/initial.jsonl"))
+    .build()?;
+
+let core = DrasiLib::builder()
+    .with_source(source)
+    .build()
+    .await?;
+```
+
+**Method 2: Using the Source Trait Method**
+
+```rust
+use drasi_lib::DrasiLib;
+use drasi_lib::Source;  // Required for set_bootstrap_provider
 use my_source_plugin::{MySource, MySourceConfig};
-use scriptfile_bootstrap::ScriptFileBootstrapProvider;
+use drasi_bootstrap_scriptfile::ScriptFileBootstrapProvider;
 
 let config = MySourceConfig {
     host: "localhost".to_string(),
@@ -830,14 +931,13 @@ let config = MySourceConfig {
 
 let source = MySource::new("my-source-1", config)?;
 
-// Create and set bootstrap provider (ownership transferred)
-let bootstrap = ScriptFileBootstrapProvider::builder()
-    .with_file("/data/initial.jsonl")
-    .build();
-source.base.set_bootstrap_provider(bootstrap).await;
+// Set bootstrap provider via the Source trait method
+source.set_bootstrap_provider(Box::new(
+    ScriptFileBootstrapProvider::new("/data/initial.jsonl")
+)).await;
 
 let core = DrasiLib::builder()
-    .with_source(source)  // Ownership transferred
+    .with_source(source)
     .build()
     .await?;
 ```
@@ -913,21 +1013,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_subscribe_with_bootstrap() {
+    async fn test_subscribe_with_settings() {
+        use drasi_lib::config::SourceSubscriptionSettings;
+        use std::collections::HashSet;
+
         let config = MySourceConfig::default();
         let source = MySource::new("test-source", config).unwrap();
 
         source.start().await.unwrap();
 
-        let response = source
-            .subscribe(
-                "test-query".to_string(),
-                false,  // no bootstrap
-                vec!["Item".to_string()],
-                vec![],
-            )
-            .await
-            .unwrap();
+        // Create subscription settings with query context
+        let settings = SourceSubscriptionSettings {
+            source_id: "test-source".to_string(),
+            query_id: "test-query".to_string(),
+            enable_bootstrap: false,
+            nodes: ["Item"].iter().map(|s| s.to_string()).collect(),
+            relations: HashSet::new(),
+        };
+
+        let response = source.subscribe(settings).await.unwrap();
 
         assert_eq!(response.source_id, "test-source");
         assert_eq!(response.query_id, "test-query");
@@ -970,8 +1074,9 @@ async fn test_source_with_drasi() {
 
 | File | Description |
 |------|-------------|
-| `lib/src/plugin_core/source.rs` | `Source` trait definition |
+| `lib/src/sources/traits.rs` | `Source` trait definition |
 | `lib/src/sources/base.rs` | `SourceBase` implementation |
+| `lib/src/config/schema.rs` | `SourceSubscriptionSettings` and configuration types |
 | `lib/src/channels/events.rs` | Event types (`SourceChange`, `SourceEvent`, etc.) |
 | `lib/src/channels/dispatcher.rs` | Dispatcher traits and implementations |
 | `lib/src/bootstrap/mod.rs` | Bootstrap provider traits and types |
@@ -987,19 +1092,182 @@ When creating a new source plugin:
   - [ ] `id()` - return source identifier
   - [ ] `type_name()` - return source type string
   - [ ] `properties()` - return config as HashMap
+  - [ ] `auto_start()` - delegate to SourceBase (optional, defaults to true)
   - [ ] `start()` - initialize and spawn processing task
   - [ ] `stop()` - gracefully shutdown
   - [ ] `status()` - return current status
-  - [ ] `subscribe()` - handle query subscriptions
+  - [ ] `subscribe(settings)` - handle query subscriptions with SourceSubscriptionSettings
   - [ ] `as_any()` - return self for downcasting
   - [ ] `inject_event_tx()` - delegate to SourceBase
+  - [ ] `set_bootstrap_provider()` - delegate to SourceBase (optional)
 - [ ] Use `SourceBase` for common functionality
 - [ ] Handle status transitions properly
 - [ ] Dispatch events with profiling metadata
 - [ ] Optional: Implement bootstrap provider
+- [ ] Optional: Implement builder pattern for ergonomic construction
 - [ ] Add unit tests
 - [ ] Add integration tests
 - [ ] Document configuration options
+
+## Best Practices
+
+### Builder Pattern
+
+Consider implementing a builder pattern for ergonomic source construction. This is the approach used by all built-in source plugins:
+
+```rust
+pub struct MySourceBuilder {
+    id: String,
+    // Configuration fields with defaults
+    host: String,
+    port: u16,
+    dispatch_mode: Option<DispatchMode>,
+    dispatch_buffer_capacity: Option<usize>,
+    bootstrap_provider: Option<Box<dyn BootstrapProvider + 'static>>,
+    auto_start: bool,
+}
+
+impl MySourceBuilder {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            host: "localhost".to_string(),
+            port: 8080,
+            dispatch_mode: None,
+            dispatch_buffer_capacity: None,
+            bootstrap_provider: None,
+            auto_start: true,
+        }
+    }
+
+    pub fn with_host(mut self, host: impl Into<String>) -> Self {
+        self.host = host.into();
+        self
+    }
+
+    pub fn with_port(mut self, port: u16) -> Self {
+        self.port = port;
+        self
+    }
+
+    pub fn with_dispatch_mode(mut self, mode: DispatchMode) -> Self {
+        self.dispatch_mode = Some(mode);
+        self
+    }
+
+    pub fn with_bootstrap_provider(
+        mut self,
+        provider: impl BootstrapProvider + 'static,
+    ) -> Self {
+        self.bootstrap_provider = Some(Box::new(provider));
+        self
+    }
+
+    pub fn with_auto_start(mut self, auto_start: bool) -> Self {
+        self.auto_start = auto_start;
+        self
+    }
+
+    pub fn build(self) -> Result<MySource> {
+        let config = MySourceConfig {
+            host: self.host,
+            port: self.port,
+            ..Default::default()
+        };
+
+        let mut params = SourceBaseParams::new(&self.id)
+            .with_auto_start(self.auto_start);
+
+        if let Some(mode) = self.dispatch_mode {
+            params = params.with_dispatch_mode(mode);
+        }
+        if let Some(capacity) = self.dispatch_buffer_capacity {
+            params = params.with_dispatch_buffer_capacity(capacity);
+        }
+        if let Some(provider) = self.bootstrap_provider {
+            params = params.with_bootstrap_provider(provider);
+        }
+
+        Ok(MySource {
+            base: SourceBase::new(params)?,
+            config,
+        })
+    }
+}
+
+impl MySource {
+    pub fn builder(id: impl Into<String>) -> MySourceBuilder {
+        MySourceBuilder::new(id)
+    }
+}
+```
+
+This pattern enables clean, fluent construction:
+
+```rust
+let source = MySource::builder("my-source")
+    .with_host("db.example.com")
+    .with_port(5432)
+    .with_dispatch_mode(DispatchMode::Broadcast)
+    .with_bootstrap_provider(ScriptFileBootstrapProvider::new("/data/init.jsonl"))
+    .with_auto_start(false)
+    .build()?;
+```
+
+### Error Handling in Spawned Tasks
+
+When dispatching events from spawned tasks, use `SourceBase::dispatch_from_task()`:
+
+```rust
+// Clone what we need before spawning
+let dispatchers = self.base.dispatchers.clone();
+let source_id = self.base.id.clone();
+
+tokio::spawn(async move {
+    // Create and dispatch events
+    let wrapper = SourceEventWrapper::new(/* ... */);
+
+    if let Err(e) = SourceBase::dispatch_from_task(
+        dispatchers.clone(),
+        wrapper,
+        &source_id,
+    ).await {
+        debug!("Failed to dispatch: {e}");
+    }
+});
+```
+
+### Status Transitions
+
+Follow the standard lifecycle state machine:
+
+```
+Stopped → Starting → Running → Stopping → Stopped
+              ↓
+            Error
+```
+
+Always send component events when transitioning states:
+
+```rust
+async fn start(&self) -> Result<()> {
+    self.base.set_status(ComponentStatus::Starting).await;
+    self.base.send_component_event(
+        ComponentStatus::Starting,
+        Some("Connecting to database".to_string()),
+    ).await?;
+
+    // ... initialization logic ...
+
+    self.base.set_status(ComponentStatus::Running).await;
+    self.base.send_component_event(
+        ComponentStatus::Running,
+        Some("Connected successfully".to_string()),
+    ).await?;
+
+    Ok(())
+}
+```
 
 ## Additional Resources
 

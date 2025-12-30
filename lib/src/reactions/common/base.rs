@@ -38,7 +38,7 @@ use crate::channels::priority_queue::PriorityQueue;
 use crate::channels::{
     ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, QueryResult,
 };
-use crate::plugin_core::QuerySubscriber;
+use crate::reactions::QuerySubscriber;
 
 /// Parameters for creating a ReactionBase instance.
 ///

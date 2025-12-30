@@ -12,7 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! RocksDB Index Backend for Drasi
+//!
+//! This crate provides a persistent storage backend for Drasi queries using RocksDB.
+//!
+//! # Usage
+//!
+//! ```ignore
+//! use drasi_index_rocksdb::RocksDbIndexProvider;
+//! use drasi_lib::DrasiLib;
+//! use std::sync::Arc;
+//!
+//! let provider = RocksDbIndexProvider::new("/data/drasi", true, false);
+//! let drasi = DrasiLib::builder()
+//!     .with_index_provider(Arc::new(provider))
+//!     .build()?;
+//! ```
+
 pub mod element_index;
 pub mod future_queue;
+mod plugin;
 pub mod result_index;
 mod storage_models;
+
+// Re-export the plugin provider for easy access
+pub use plugin::RocksDbIndexProvider;

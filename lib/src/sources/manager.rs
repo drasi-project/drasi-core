@@ -27,7 +27,8 @@ use std::collections::BTreeMap;
 use crate::channels::*;
 use crate::config::SourceRuntime;
 use crate::managers::{is_operation_valid, log_component_error, Operation};
-use crate::plugin_core::Source;
+use crate::sources::Source;
+use crate::state_store::StateStoreProvider;
 
 // Convert JSON value to ElementValue
 pub fn convert_json_to_element_value(value: &Value) -> Result<ElementValue> {
@@ -72,8 +73,8 @@ pub fn convert_json_to_element_properties(
 
 pub struct SourceManager {
     sources: Arc<RwLock<HashMap<String, Arc<dyn Source>>>>,
-    #[allow(dead_code)]
     event_tx: ComponentEventSender,
+    state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
 }
 
 impl SourceManager {
@@ -82,7 +83,15 @@ impl SourceManager {
         Self {
             sources: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
+            state_store: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Inject the state store provider (called after DrasiLib is fully constructed)
+    ///
+    /// This allows sources to access the state store when they are added.
+    pub async fn inject_state_store(&self, state_store: Arc<dyn StateStoreProvider>) {
+        *self.state_store.write().await = Some(state_store);
     }
 
     pub async fn get_source_instance(&self, id: &str) -> Option<Arc<dyn Source>> {
@@ -102,7 +111,8 @@ impl SourceManager {
     /// The source will NOT be auto-started. Call `start_source` separately
     /// if you need to start it after adding.
     ///
-    /// The event channel is automatically injected into the source before it is stored.
+    /// The event channel and state store provider are automatically injected
+    /// into the source before it is stored.
     ///
     /// # Example
     /// ```ignore
@@ -115,6 +125,11 @@ impl SourceManager {
 
         // Inject the event channel before storing
         source.inject_event_tx(self.event_tx.clone()).await;
+
+        // Inject the state store if available
+        if let Some(state_store) = self.state_store.read().await.as_ref() {
+            source.inject_state_store(state_store.clone()).await;
+        }
 
         // Use a single write lock to atomically check and insert
         // This eliminates the TOCTOU race condition from separate read-then-write

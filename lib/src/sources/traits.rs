@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Plugin core module for source abstractions
+//! Source trait module
 //!
 //! This module provides the core trait that all source plugins must implement.
 //! It separates the plugin contract from the source manager and implementation details.
@@ -47,8 +47,8 @@ use crate::channels::*;
 /// # Example Implementation
 ///
 /// ```ignore
-/// use drasi_lib::plugin_core::Source;
-/// use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
+/// use drasi_lib::Source;
+/// use drasi_lib::sources::{SourceBase, SourceBaseParams};
 ///
 /// pub struct MySource {
 ///     base: SourceBase,
@@ -161,6 +161,21 @@ pub trait Source: Send + Sync {
     /// Implementation should delegate to `self.base.inject_event_tx(tx).await`.
     async fn inject_event_tx(&self, tx: ComponentEventSender);
 
+    /// Inject the state store provider for persistent state storage
+    ///
+    /// This method is called automatically by DrasiLib when the source is added
+    /// via `add_source()`. Plugin developers do not need to call this directly.
+    ///
+    /// Sources that need to persist state should store this reference and use it
+    /// to read/write state data. The store_id used should typically be the source's ID.
+    async fn inject_state_store(
+        &self,
+        _state_store: std::sync::Arc<dyn crate::state_store::StateStoreProvider>,
+    ) {
+        // Default implementation does nothing - sources that need state storage
+        // should override this to store the reference
+    }
+
     /// Set the bootstrap provider for this source
     ///
     /// This method allows setting a bootstrap provider after source construction.
@@ -227,6 +242,13 @@ impl Source for Box<dyn Source + 'static> {
 
     async fn inject_event_tx(&self, tx: ComponentEventSender) {
         (**self).inject_event_tx(tx).await
+    }
+
+    async fn inject_state_store(
+        &self,
+        state_store: std::sync::Arc<dyn crate::state_store::StateStoreProvider>,
+    ) {
+        (**self).inject_state_store(state_store).await
     }
 
     async fn set_bootstrap_provider(

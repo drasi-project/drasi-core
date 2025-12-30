@@ -19,8 +19,8 @@
 /// Fluent builders for DrasiLib and components
 pub mod builder;
 
-/// Plugin core infrastructure for extending drasi-lib
-pub mod plugin_core;
+/// State store provider for persistent plugin state
+pub mod state_store;
 
 /// Error types for drasi-lib
 pub mod error;
@@ -112,19 +112,30 @@ pub use config::{
 pub use indexes::{StorageBackendConfig, StorageBackendRef, StorageBackendSpec};
 
 // ============================================================================
-// Plugin Core Types (for plugin development)
+// Plugin Traits (for plugin development)
 // ============================================================================
 
-/// Plugin core traits for implementing sources, reactions, and bootstrap providers
-/// Note: Traits are named with 'Trait' suffix to avoid conflicts with builder API types
-pub use plugin_core::{
-    BootstrapProvider, QuerySubscriber, Reaction as ReactionTrait, Source as SourceTrait,
+/// Source trait for implementing source plugins
+pub use sources::Source;
+
+/// Reaction traits for implementing reaction plugins
+pub use reactions::{QuerySubscriber, Reaction};
+
+/// Bootstrap provider trait for implementing bootstrap plugins
+pub use bootstrap::BootstrapProvider;
+
+/// Index backend plugin trait for implementing storage backends
+pub use indexes::IndexBackendPlugin;
+
+/// State store provider traits and default implementation
+pub use state_store::{
+    MemoryStateStoreProvider, StateStoreError, StateStoreProvider, StateStoreResult,
 };
 
-pub use reactions::common::base::{ReactionBase, ReactionBaseParams};
+pub use reactions::{ReactionBase, ReactionBaseParams};
 /// Base implementations for source and reaction plugins
 /// These are used by plugin developers, not by drasi-lib itself
-pub use sources::base::{SourceBase, SourceBaseParams};
+pub use sources::{SourceBase, SourceBaseParams};
 
 // ============================================================================
 // Builder Types (for fluent configuration)

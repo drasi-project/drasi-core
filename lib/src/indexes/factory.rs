@@ -13,18 +13,11 @@
 // limitations under the License.
 
 use crate::indexes::config::{StorageBackendConfig, StorageBackendRef, StorageBackendSpec};
+use crate::indexes::IndexBackendPlugin;
 use drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex;
 use drasi_core::in_memory_index::in_memory_future_queue::InMemoryFutureQueue;
 use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
-use drasi_core::index_cache::cached_element_index::CachedElementIndex;
-use drasi_core::index_cache::cached_result_index::CachedResultIndex;
 use drasi_core::interface::{ElementArchiveIndex, ElementIndex, FutureQueue, ResultIndex};
-use drasi_index_garnet::element_index::GarnetElementIndex;
-use drasi_index_garnet::future_queue::GarnetFutureQueue;
-use drasi_index_garnet::result_index::GarnetResultIndex;
-use drasi_index_rocksdb::element_index::{RocksDbElementIndex, RocksIndexOptions};
-use drasi_index_rocksdb::future_queue::RocksDbFutureQueue;
-use drasi_index_rocksdb::result_index::RocksDbResultIndex;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -98,33 +91,56 @@ impl fmt::Debug for IndexSet {
 }
 
 /// Factory for creating index sets based on storage backend configuration
-#[derive(Debug)]
 pub struct IndexFactory {
     /// Map of backend ID to backend specification
     backends: HashMap<String, StorageBackendSpec>,
+    /// Optional index backend plugin for persistent storage (RocksDB, Redis/Garnet)
+    plugin: Option<Arc<dyn IndexBackendPlugin>>,
+}
+
+impl fmt::Debug for IndexFactory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IndexFactory")
+            .field("backends", &self.backends)
+            .field("plugin", &self.plugin.as_ref().map(|_| "<plugin>"))
+            .finish()
+    }
 }
 
 impl IndexFactory {
     /// Create a new IndexFactory from a list of backend configurations
     ///
+    /// # Arguments
+    ///
+    /// * `backends` - List of storage backend configurations
+    /// * `plugin` - Optional index backend plugin for persistent storage (RocksDB, Redis/Garnet).
+    ///   When using RocksDB or Redis backends, this plugin MUST be provided.
+    ///
     /// # Example
     /// ```no_run
     /// # use drasi_lib::indexes::{IndexFactory, StorageBackendConfig, StorageBackendSpec};
+    /// // For in-memory only (no plugin needed)
     /// let backends = vec![
     ///     StorageBackendConfig {
-    ///         id: "rocks_persistent".to_string(),
-    ///         spec: StorageBackendSpec::RocksDb {
-    ///             path: "/data/drasi".to_string(),
+    ///         id: "memory_test".to_string(),
+    ///         spec: StorageBackendSpec::Memory {
     ///             enable_archive: true,
-    ///             direct_io: false,
     ///         },
     ///     },
     /// ];
-    /// let factory = IndexFactory::new(backends);
+    /// let factory = IndexFactory::new(backends, None);
+    ///
+    /// // For persistent storage (plugin required)
+    /// // use drasi_index_rocksdb::RocksDbIndexProvider;
+    /// // let provider = RocksDbIndexProvider::new("/data/drasi", true, false);
+    /// // let factory = IndexFactory::new(backends, Some(Arc::new(provider)));
     /// ```
-    pub fn new(backends: Vec<StorageBackendConfig>) -> Self {
+    pub fn new(
+        backends: Vec<StorageBackendConfig>,
+        plugin: Option<Arc<dyn IndexBackendPlugin>>,
+    ) -> Self {
         let backends = backends.into_iter().map(|b| (b.id, b.spec)).collect();
-        Self { backends }
+        Self { backends, plugin }
     }
 
     /// Build an IndexSet for a query using the specified storage backend
@@ -167,17 +183,16 @@ impl IndexFactory {
             StorageBackendSpec::Memory { enable_archive } => {
                 self.build_memory_indexes(*enable_archive)
             }
-            StorageBackendSpec::RocksDb {
-                path,
-                enable_archive,
-                direct_io,
-            } => self.build_rocksdb_indexes(query_id, path, *enable_archive, *direct_io),
-            StorageBackendSpec::Redis {
-                connection_string,
-                cache_size,
-            } => {
-                self.build_redis_indexes(query_id, connection_string, *cache_size)
-                    .await
+            StorageBackendSpec::RocksDb { .. } | StorageBackendSpec::Redis { .. } => {
+                // Delegate to the plugin for persistent storage backends
+                match &self.plugin {
+                    Some(plugin) => self.build_from_plugin(plugin, query_id).await,
+                    None => Err(IndexError::InitializationFailed(
+                        "RocksDB or Redis backend requested but no index provider configured. \
+                         Use DrasiLib::builder().with_index_provider(...) to provide one."
+                            .to_string(),
+                    )),
+                }
             }
         }
     }
@@ -200,133 +215,46 @@ impl IndexFactory {
         })
     }
 
-    /// Build RocksDB indexes
-    fn build_rocksdb_indexes(
+    /// Build indexes using the provided plugin
+    async fn build_from_plugin(
         &self,
+        plugin: &Arc<dyn IndexBackendPlugin>,
         query_id: &str,
-        path: &str,
-        enable_archive: bool,
-        direct_io: bool,
     ) -> Result<IndexSet, IndexError> {
-        let options = RocksIndexOptions {
-            archive_enabled: enable_archive,
-            direct_io,
-        };
-
-        let element_index = RocksDbElementIndex::new(query_id, path, options).map_err(|e| {
-            log::error!(
-                "Failed to create RocksDB element index for query '{query_id}' at path '{path}': {e}"
-            );
-            IndexError::PathError(format!(
-                "Failed to initialize RocksDB at '{path}' for query '{query_id}': {e}"
+        let element_index = plugin.create_element_index(query_id).await.map_err(|e| {
+            log::error!("Failed to create element index for query '{query_id}': {e}");
+            IndexError::InitializationFailed(format!(
+                "Failed to create element index for query '{query_id}': {e}"
             ))
         })?;
-        let element_index = Arc::new(element_index);
 
-        let result_index = RocksDbResultIndex::new(query_id, path).map_err(|e| {
-            log::error!(
-                "Failed to create RocksDB result index for query '{query_id}' at path '{path}': {e}"
-            );
-            IndexError::PathError(format!(
-                "Failed to initialize RocksDB result index at '{path}' for query '{query_id}': {e}"
+        let archive_index = plugin.create_archive_index(query_id).await.map_err(|e| {
+            log::error!("Failed to create archive index for query '{query_id}': {e}");
+            IndexError::InitializationFailed(format!(
+                "Failed to create archive index for query '{query_id}': {e}"
             ))
         })?;
-        let result_index = Arc::new(result_index);
 
-        let future_queue = RocksDbFutureQueue::new(query_id, path).map_err(|e| {
-            log::error!(
-                "Failed to create RocksDB future queue for query '{query_id}' at path '{path}': {e}"
-            );
-            IndexError::PathError(format!(
-                "Failed to initialize RocksDB future queue at '{path}' for query '{query_id}': {e}"
+        let result_index = plugin.create_result_index(query_id).await.map_err(|e| {
+            log::error!("Failed to create result index for query '{query_id}': {e}");
+            IndexError::InitializationFailed(format!(
+                "Failed to create result index for query '{query_id}': {e}"
             ))
         })?;
-        let future_queue = Arc::new(future_queue);
+
+        let future_queue = plugin.create_future_queue(query_id).await.map_err(|e| {
+            log::error!("Failed to create future queue for query '{query_id}': {e}");
+            IndexError::InitializationFailed(format!(
+                "Failed to create future queue for query '{query_id}': {e}"
+            ))
+        })?;
 
         Ok(IndexSet {
-            element_index: element_index.clone(),
-            archive_index: element_index,
+            element_index,
+            archive_index,
             result_index,
             future_queue,
         })
-    }
-
-    /// Build Redis/Garnet indexes with optional caching
-    async fn build_redis_indexes(
-        &self,
-        query_id: &str,
-        connection_string: &str,
-        cache_size: Option<usize>,
-    ) -> Result<IndexSet, IndexError> {
-        let element_index = GarnetElementIndex::connect(query_id, connection_string)
-            .await
-            .map_err(|e| {
-                log::error!(
-                    "Failed to connect to Redis/Garnet element index for query '{query_id}' at '{connection_string}': {e}"
-                );
-                IndexError::ConnectionFailed(format!(
-                    "Failed to connect to Redis/Garnet at '{connection_string}' for query '{query_id}': {e}"
-                ))
-            })?;
-        let element_index = Arc::new(element_index);
-
-        let result_index = GarnetResultIndex::connect(query_id, connection_string)
-            .await
-            .map_err(|e| {
-                log::error!(
-                    "Failed to connect to Redis/Garnet result index for query '{query_id}' at '{connection_string}': {e}"
-                );
-                IndexError::ConnectionFailed(format!(
-                    "Failed to connect to Redis/Garnet result index at '{connection_string}' for query '{query_id}': {e}"
-                ))
-            })?;
-        let result_index = Arc::new(result_index);
-
-        let future_queue = GarnetFutureQueue::connect(query_id, connection_string)
-            .await
-            .map_err(|e| {
-                log::error!(
-                    "Failed to connect to Redis/Garnet future queue for query '{query_id}' at '{connection_string}': {e}"
-                );
-                IndexError::ConnectionFailed(format!(
-                    "Failed to connect to Redis/Garnet future queue at '{connection_string}' for query '{query_id}': {e}"
-                ))
-            })?;
-        let future_queue = Arc::new(future_queue);
-
-        // Apply caching if configured
-        match cache_size {
-            Some(cache_size) => {
-                let cached_element_index =
-                    CachedElementIndex::new(element_index.clone(), cache_size).map_err(|e| {
-                        log::error!(
-                            "Failed to create cached element index for query '{query_id}': {e}"
-                        );
-                        IndexError::NotSupported
-                    })?;
-
-                let cached_result_index = CachedResultIndex::new(result_index, cache_size)
-                    .map_err(|e| {
-                        log::error!(
-                            "Failed to create cached result index for query '{query_id}': {e}"
-                        );
-                        IndexError::NotSupported
-                    })?;
-
-                Ok(IndexSet {
-                    element_index: Arc::new(cached_element_index),
-                    archive_index: element_index,
-                    result_index: Arc::new(cached_result_index),
-                    future_queue,
-                })
-            }
-            None => Ok(IndexSet {
-                element_index: element_index.clone(),
-                archive_index: element_index,
-                result_index,
-                future_queue,
-            }),
-        }
     }
 
     /// Check if a storage backend is volatile (requires re-bootstrap after restart)
@@ -370,7 +298,7 @@ mod tests {
             },
         ];
 
-        let factory = IndexFactory::new(backends);
+        let factory = IndexFactory::new(backends, None);
         assert_eq!(factory.backends.len(), 2);
         assert!(factory.backends.contains_key("memory_test"));
         assert!(factory.backends.contains_key("rocks_test"));
@@ -385,7 +313,7 @@ mod tests {
             },
         }];
 
-        let factory = IndexFactory::new(backends);
+        let factory = IndexFactory::new(backends, None);
         let backend_ref = StorageBackendRef::Named("memory_test".to_string());
         let result = factory.build(&backend_ref, "test_query").await;
 
@@ -394,7 +322,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_unknown_backend() {
-        let factory = IndexFactory::new(vec![]);
+        let factory = IndexFactory::new(vec![], None);
         let backend_ref = StorageBackendRef::Named("nonexistent".to_string());
         let result = factory.build(&backend_ref, "test_query").await;
 
@@ -409,13 +337,52 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_inline_memory() {
-        let factory = IndexFactory::new(vec![]);
+        let factory = IndexFactory::new(vec![], None);
         let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Memory {
             enable_archive: false,
         });
         let result = factory.build(&backend_ref, "test_query").await;
 
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_build_rocksdb_without_plugin_errors() {
+        // Verify that attempting to use RocksDB without a plugin returns an error
+        let factory = IndexFactory::new(vec![], None);
+        let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
+            path: "/data/test".to_string(),
+            enable_archive: false,
+            direct_io: false,
+        });
+        let result = factory.build(&backend_ref, "test_query").await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            IndexError::InitializationFailed(msg) => {
+                assert!(msg.contains("no index provider configured"));
+            }
+            _ => panic!("Expected InitializationFailed error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_build_redis_without_plugin_errors() {
+        // Verify that attempting to use Redis without a plugin returns an error
+        let factory = IndexFactory::new(vec![], None);
+        let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Redis {
+            connection_string: "redis://localhost:6379".to_string(), // DevSkim: ignore DS162092
+            cache_size: None,
+        });
+        let result = factory.build(&backend_ref, "test_query").await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            IndexError::InitializationFailed(msg) => {
+                assert!(msg.contains("no index provider configured"));
+            }
+            _ => panic!("Expected InitializationFailed error"),
+        }
     }
 
     #[test]
@@ -427,7 +394,7 @@ mod tests {
             },
         }];
 
-        let factory = IndexFactory::new(backends);
+        let factory = IndexFactory::new(backends, None);
         let backend_ref = StorageBackendRef::Named("memory_test".to_string());
         assert!(factory.is_volatile(&backend_ref));
     }
@@ -443,14 +410,14 @@ mod tests {
             },
         }];
 
-        let factory = IndexFactory::new(backends);
+        let factory = IndexFactory::new(backends, None);
         let backend_ref = StorageBackendRef::Named("rocks_test".to_string());
         assert!(!factory.is_volatile(&backend_ref));
     }
 
     #[test]
     fn test_is_volatile_inline() {
-        let factory = IndexFactory::new(vec![]);
+        let factory = IndexFactory::new(vec![], None);
         let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Memory {
             enable_archive: false,
         });
@@ -462,5 +429,206 @@ mod tests {
             direct_io: false,
         });
         assert!(!factory.is_volatile(&backend_ref));
+    }
+
+    #[test]
+    fn test_is_volatile_inline_redis() {
+        let factory = IndexFactory::new(vec![], None);
+        let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Redis {
+            connection_string: "redis://localhost:6379".to_string(), // DevSkim: ignore DS162092
+            cache_size: Some(1000),
+        });
+        assert!(!factory.is_volatile(&backend_ref));
+    }
+
+    #[test]
+    fn test_is_volatile_unknown_backend() {
+        // When a named backend doesn't exist, is_volatile returns false
+        let factory = IndexFactory::new(vec![], None);
+        let backend_ref = StorageBackendRef::Named("nonexistent".to_string());
+        assert!(!factory.is_volatile(&backend_ref));
+    }
+
+    #[test]
+    fn test_index_error_display_unknown_store() {
+        let error = IndexError::UnknownStore("my_backend".to_string());
+        let display = format!("{error}");
+        assert!(display.contains("Unknown storage backend"));
+        assert!(display.contains("my_backend"));
+    }
+
+    #[test]
+    fn test_index_error_display_connection_failed() {
+        let error = IndexError::ConnectionFailed("Connection refused".to_string());
+        let display = format!("{error}");
+        assert!(display.contains("Failed to connect"));
+        assert!(display.contains("Connection refused"));
+    }
+
+    #[test]
+    fn test_index_error_display_path_error() {
+        let error = IndexError::PathError("/invalid/path".to_string());
+        let display = format!("{error}");
+        assert!(display.contains("Storage path error"));
+        assert!(display.contains("/invalid/path"));
+    }
+
+    #[test]
+    fn test_index_error_display_initialization_failed() {
+        let error = IndexError::InitializationFailed("Database init failed".to_string());
+        let display = format!("{error}");
+        assert!(display.contains("Failed to initialize"));
+        assert!(display.contains("Database init failed"));
+    }
+
+    #[test]
+    fn test_index_error_display_not_supported() {
+        let error = IndexError::NotSupported;
+        let display = format!("{error}");
+        assert!(display.contains("not supported"));
+    }
+
+    #[test]
+    fn test_index_error_is_std_error() {
+        let error = IndexError::UnknownStore("test".to_string());
+        // Verify it implements std::error::Error
+        let _: &dyn std::error::Error = &error;
+    }
+
+    #[test]
+    fn test_index_error_from_drasi_core_index_error() {
+        // Create a std::io::Error to wrap in IndexError::other
+        let io_error = std::io::Error::new(std::io::ErrorKind::Other, "test error");
+        let core_error = drasi_core::interface::IndexError::other(io_error);
+        let error: IndexError = core_error.into();
+        match error {
+            IndexError::InitializationFailed(msg) => {
+                assert!(msg.contains("test error"));
+            }
+            _ => panic!("Expected InitializationFailed error"),
+        }
+    }
+
+    #[test]
+    fn test_index_set_debug() {
+        // We can't easily construct an IndexSet without going through the factory,
+        // but we can test via build
+        let backends = vec![StorageBackendConfig {
+            id: "memory_test".to_string(),
+            spec: StorageBackendSpec::Memory {
+                enable_archive: false,
+            },
+        }];
+        let factory = IndexFactory::new(backends, None);
+
+        // Use tokio runtime for async test
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let index_set = rt
+            .block_on(factory.build(&StorageBackendRef::Named("memory_test".to_string()), "q1"))
+            .unwrap();
+
+        let debug_str = format!("{index_set:?}");
+        assert!(debug_str.contains("IndexSet"));
+        assert!(debug_str.contains("element_index"));
+        assert!(debug_str.contains("archive_index"));
+        assert!(debug_str.contains("result_index"));
+        assert!(debug_str.contains("future_queue"));
+    }
+
+    #[test]
+    fn test_index_factory_debug() {
+        let backends = vec![StorageBackendConfig {
+            id: "memory_test".to_string(),
+            spec: StorageBackendSpec::Memory {
+                enable_archive: true,
+            },
+        }];
+        let factory = IndexFactory::new(backends, None);
+        let debug_str = format!("{factory:?}");
+        assert!(debug_str.contains("IndexFactory"));
+        assert!(debug_str.contains("backends"));
+        assert!(debug_str.contains("memory_test"));
+    }
+
+    #[test]
+    fn test_index_factory_debug_with_plugin() {
+        use crate::indexes::IndexBackendPlugin;
+        use async_trait::async_trait;
+
+        // Create a mock plugin for testing
+        struct MockPlugin;
+
+        #[async_trait]
+        impl IndexBackendPlugin for MockPlugin {
+            async fn create_element_index(
+                &self,
+                _query_id: &str,
+            ) -> Result<
+                Arc<dyn drasi_core::interface::ElementIndex>,
+                drasi_core::interface::IndexError,
+            > {
+                unimplemented!()
+            }
+
+            async fn create_archive_index(
+                &self,
+                _query_id: &str,
+            ) -> Result<
+                Arc<dyn drasi_core::interface::ElementArchiveIndex>,
+                drasi_core::interface::IndexError,
+            > {
+                unimplemented!()
+            }
+
+            async fn create_result_index(
+                &self,
+                _query_id: &str,
+            ) -> Result<
+                Arc<dyn drasi_core::interface::ResultIndex>,
+                drasi_core::interface::IndexError,
+            > {
+                unimplemented!()
+            }
+
+            async fn create_future_queue(
+                &self,
+                _query_id: &str,
+            ) -> Result<
+                Arc<dyn drasi_core::interface::FutureQueue>,
+                drasi_core::interface::IndexError,
+            > {
+                unimplemented!()
+            }
+
+            fn is_volatile(&self) -> bool {
+                false
+            }
+        }
+
+        let factory = IndexFactory::new(vec![], Some(Arc::new(MockPlugin)));
+        let debug_str = format!("{factory:?}");
+        assert!(debug_str.contains("IndexFactory"));
+        assert!(debug_str.contains("plugin"));
+        assert!(debug_str.contains("<plugin>"));
+    }
+
+    #[tokio::test]
+    async fn test_build_memory_without_archive() {
+        let factory = IndexFactory::new(vec![], None);
+        let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Memory {
+            enable_archive: false,
+        });
+        let result = factory.build(&backend_ref, "test_query").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_build_memory_with_archive() {
+        let factory = IndexFactory::new(vec![], None);
+        let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Memory {
+            enable_archive: true,
+        });
+        let result = factory.build(&backend_ref, "test_query").await;
+        assert!(result.is_ok());
     }
 }

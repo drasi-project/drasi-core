@@ -170,7 +170,7 @@ impl HttpReactionBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use drasi_lib::plugin_core::Reaction;
+    use drasi_lib::Reaction;
 
     #[test]
     fn test_http_builder_defaults() {

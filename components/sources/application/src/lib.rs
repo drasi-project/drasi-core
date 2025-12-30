@@ -152,8 +152,8 @@ use tokio::sync::{mpsc, RwLock};
 
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ComponentType, *};
-use drasi_lib::plugin_core::Source;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
+use drasi_lib::Source;
 
 /// Handle for programmatic event injection into an Application Source
 ///
