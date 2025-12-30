@@ -171,18 +171,30 @@ let reaction = MySqlStoredProcReaction::builder("my-reaction")
 
 ## Parameter Mapping
 
-Use the `@fieldName` syntax to reference fields from query results:
+### Context-Aware Field Access
+
+The reaction uses context-aware field mapping with `@after` and `@before` prefixes:
+
+#### ADD Operations
+Use `@after.fieldName` to access the newly added data:
 
 ```rust
-.with_added_command("CALL add_user(@id, @name, @email)")
+QueryConfig {
+    added: Some(TemplateSpec::new("CALL add_user(@after.id, @after.name, @after.email)")),
+    updated: None,
+    deleted: None,
+}
 ```
 
-Query result:
+Query result for ADD:
 ```json
 {
-  "id": 1,
-  "name": "Alice",
-  "email": "alice@example.com"
+  "type": "add",
+  "data": {
+    "id": 1,
+    "name": "Alice",
+    "email": "alice@example.com"
+  }
 }
 ```
 
@@ -191,11 +203,134 @@ Executes:
 CALL add_user(1, 'Alice', 'alice@example.com')
 ```
 
-### Nested Field Access
+#### UPDATE Operations
+Use `@before.fieldName` for old values and `@after.fieldName` for new values:
 
 ```rust
-.with_added_command("CALL add_address(@user.id, @address.city)")
+QueryConfig {
+    added: None,
+    updated: Some(TemplateSpec::new("CALL update_user(@after.id, @before.email, @after.email)")),
+    deleted: None,
+}
 ```
+
+Query result for UPDATE:
+```json
+{
+  "type": "update",
+  "data": {
+    "before": {
+      "id": 1,
+      "email": "alice@oldmail.com"
+    },
+    "after": {
+      "id": 1,
+      "email": "alice@newmail.com"
+    }
+  }
+}
+```
+
+Executes:
+```sql
+CALL update_user(1, 'alice@oldmail.com', 'alice@newmail.com')
+```
+
+#### DELETE Operations
+Use `@before.fieldName` to access the deleted data:
+
+```rust
+QueryConfig {
+    added: None,
+    updated: None,
+    deleted: Some(TemplateSpec::new("CALL delete_user(@before.id)")),
+}
+```
+
+Query result for DELETE:
+```json
+{
+  "type": "delete",
+  "data": {
+    "id": 1,
+    "name": "Alice"
+  }
+}
+```
+
+Executes:
+```sql
+CALL delete_user(1)
+```
+
+### Nested Field Access
+
+Access deeply nested fields using dot notation:
+
+```rust
+TemplateSpec::new("CALL add_address(@after.user.id, @after.location.city, @after.location.floor)")
+```
+
+Query result:
+```json
+{
+  "user": {
+    "id": 123
+  },
+  "location": {
+    "city": "Seattle",
+    "floor": 5
+  }
+}
+```
+
+Executes:
+```sql
+CALL add_address(123, 'Seattle', 5)
+```
+
+## Template Routing Priority
+
+When a query result arrives, the reaction determines which stored procedure to call using the following priority:
+
+1. **Query-specific route**: If a route exists for the query ID, use its template
+2. **Default template**: If no route exists, use the default template
+3. **Skip**: If neither exists for the operation type, skip processing
+
+Example:
+
+```rust
+let reaction = MySqlStoredProcReaction::builder("my-reaction")
+    .with_hostname("localhost")
+    .with_port(3306)
+    .with_database("mydb")
+    .with_user("root")
+    .with_password("secret")
+    // Default template - used by most queries
+    .with_default_template(QueryConfig {
+        added: Some(TemplateSpec::new("CALL default_add(@after.id)")),
+        updated: Some(TemplateSpec::new("CALL default_update(@after.id)")),
+        deleted: None,  // No default for deletes
+    })
+    // Special handling for critical-query
+    .with_route("critical-query", QueryConfig {
+        added: Some(TemplateSpec::new("CALL critical_add(@after.id, @after.priority)")),
+        updated: None,  // Falls back to default_update
+        deleted: Some(TemplateSpec::new("CALL critical_delete(@before.id)")),
+    })
+    .with_query("normal-query")
+    .with_query("critical-query")
+    .build()
+    .await?;
+```
+
+In this example:
+- `normal-query` ADD → Uses `default_add`
+- `normal-query` UPDATE → Uses `default_update`
+- `normal-query` DELETE → Skipped (no template)
+- `critical-query` ADD → Uses `critical_add` (route override)
+- `critical-query` UPDATE → Uses `default_update` (fallback)
+- `critical-query` DELETE → Uses `critical_delete` (route)
 
 ## Error Handling
 

@@ -182,7 +182,6 @@ async fn test_default_template_applies_to_all_queries() {
         }),
         command_timeout_ms: 5000,
         retry_attempts: 3,
-        ..Default::default()
     };
 
     let executor = MySqlExecutor::new(&config).await.unwrap();
@@ -299,7 +298,6 @@ async fn test_route_overrides_default_template() {
         }),
         command_timeout_ms: 5000,
         retry_attempts: 3,
-        ..Default::default()
     };
 
     let executor = MySqlExecutor::new(&config).await.unwrap();
@@ -378,7 +376,6 @@ async fn test_route_with_none_falls_back_to_default() {
         }),
         command_timeout_ms: 5000,
         retry_attempts: 3,
-        ..Default::default()
     };
 
     // Get the UPDATE template for "partial-query"
@@ -466,7 +463,6 @@ async fn test_multiple_queries_with_different_routes() {
         }),
         command_timeout_ms: 5000,
         retry_attempts: 3,
-        ..Default::default()
     };
 
     let executor = MySqlExecutor::new(&config).await.unwrap();
