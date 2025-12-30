@@ -193,7 +193,7 @@ let profiler = ProfilerReaction::builder("production-profiler")
 Create a profiler that doesn't auto-start for controlled profiling sessions:
 
 ```rust
-use drasi_lib::plugin_core::Reaction;
+use drasi_lib::Reaction;
 
 let profiler = ProfilerReaction::builder("controlled-profiler")
     .with_query("test-query")

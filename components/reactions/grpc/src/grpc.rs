@@ -23,8 +23,8 @@ use tonic::transport::Channel;
 
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
 use drasi_lib::managers::log_component_start;
-use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
+use drasi_lib::{QueryProvider, Reaction};
 
 pub use super::config::GrpcReactionConfig;
 use super::GrpcReactionBuilder;
@@ -381,8 +381,8 @@ impl Reaction for GrpcReaction {
         self.base.get_auto_start()
     }
 
-    async fn inject_query_subscriber(&self, query_subscriber: Arc<dyn QuerySubscriber>) {
-        self.base.inject_query_subscriber(query_subscriber).await;
+    async fn initialize(&self, context: drasi_lib::context::ReactionRuntimeContext) {
+        self.base.initialize(context).await;
     }
 
     async fn start(&self) -> Result<()> {
@@ -402,7 +402,7 @@ impl Reaction for GrpcReaction {
             .await?;
 
         // Subscribe to all configured queries using ReactionBase
-        // QuerySubscriber was injected via inject_query_subscriber() when reaction was added
+        // QueryProvider is available from initialize() context
         self.base.subscribe_to_queries().await?;
 
         // Transition to Running
@@ -811,9 +811,5 @@ impl Reaction for GrpcReaction {
 
     async fn status(&self) -> ComponentStatus {
         self.base.get_status().await
-    }
-
-    async fn inject_event_tx(&self, tx: ComponentEventSender) {
-        self.base.inject_event_tx(tx).await;
     }
 }

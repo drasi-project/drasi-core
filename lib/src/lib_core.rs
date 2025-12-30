@@ -269,12 +269,20 @@ impl DrasiLib {
 
         info!("Initializing Drasi Server Core");
 
-        // Inject QuerySubscriber into ReactionManager
+        // Inject QueryProvider into ReactionManager
         // This allows reactions to access queries when they start
-        let query_subscriber: Arc<dyn crate::plugin_core::QuerySubscriber> = self.as_arc();
+        let query_provider: Arc<dyn crate::reactions::QueryProvider> = self.as_arc();
         self.reaction_manager
-            .inject_query_subscriber(query_subscriber)
+            .inject_query_provider(query_provider)
             .await;
+
+        // Inject StateStoreProvider into SourceManager and ReactionManager
+        // This allows sources and reactions to persist state
+        let state_store = self.config.state_store_provider.clone();
+        self.source_manager
+            .inject_state_store(state_store.clone())
+            .await;
+        self.reaction_manager.inject_state_store(state_store).await;
 
         // Load configuration
         let lifecycle = self.lifecycle.read().await;
@@ -569,13 +577,13 @@ impl DrasiLib {
 }
 
 // ============================================================================
-// QuerySubscriber Trait Implementation
+// QueryProvider Trait Implementation
 // ============================================================================
 
-// Implement QuerySubscriber trait for DrasiLib
+// Implement QueryProvider trait for DrasiLib
 // This breaks the circular dependency by providing a minimal interface for reactions
 #[async_trait::async_trait]
-impl crate::plugin_core::QuerySubscriber for DrasiLib {
+impl crate::reactions::QueryProvider for DrasiLib {
     async fn get_query_instance(&self, id: &str) -> Result<Arc<dyn crate::queries::Query>> {
         self.query_manager
             .get_query_instance(id)

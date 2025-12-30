@@ -152,8 +152,8 @@ use tokio::sync::{mpsc, RwLock};
 
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ComponentType, *};
-use drasi_lib::plugin_core::Source;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
+use drasi_lib::Source;
 
 /// Handle for programmatic event injection into an Application Source
 ///
@@ -395,13 +395,13 @@ impl ApplicationSource {
 
         let source_name = self.base.id.clone();
         let base_dispatchers = self.base.dispatchers.clone();
-        let event_tx = self.base.event_tx();
+        let status_tx = self.base.status_tx();
         let status = self.base.status.clone();
 
         let handle = tokio::spawn(async move {
             info!("ApplicationSource '{source_name}' event processor started");
 
-            if let Some(ref tx) = *event_tx.read().await {
+            if let Some(ref tx) = *status_tx.read().await {
                 let _ = tx
                     .send(ComponentEvent {
                         component_id: source_name.clone(),
@@ -518,8 +518,8 @@ impl Source for ApplicationSource {
         self
     }
 
-    async fn inject_event_tx(&self, tx: ComponentEventSender) {
-        self.base.inject_event_tx(tx).await;
+    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.initialize(context).await;
     }
 
     async fn set_bootstrap_provider(

@@ -488,7 +488,7 @@ let source = MockSource::builder("my-source")
 ### Using Source Trait Method
 
 ```rust
-use drasi_lib::plugin_core::Source;
+use drasi_lib::Source;
 use drasi_source_http::HttpSource;
 use drasi_bootstrap_postgres::PostgresBootstrapProvider;
 

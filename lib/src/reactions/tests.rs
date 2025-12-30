@@ -16,11 +16,24 @@
 mod manager_tests {
     use super::super::*;
     use crate::channels::*;
+    use crate::queries::Query;
+    use crate::reactions::QueryProvider;
+    use anyhow::Result;
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::mpsc;
     use tokio::sync::RwLock;
+
+    // Mock QueryProvider for testing ReactionManager
+    struct MockQueryProvider;
+
+    #[async_trait]
+    impl QueryProvider for MockQueryProvider {
+        async fn get_query_instance(&self, _id: &str) -> Result<Arc<dyn Query>> {
+            Err(anyhow::anyhow!("MockQueryProvider: query not found"))
+        }
+    }
 
     /// A simple test mock reaction for unit testing the ReactionManager.
     struct TestMockReaction {
@@ -59,7 +72,7 @@ mod manager_tests {
     }
 
     #[async_trait]
-    impl crate::plugin_core::Reaction for TestMockReaction {
+    impl crate::reactions::Reaction for TestMockReaction {
         fn id(&self) -> &str {
             &self.id
         }
@@ -80,11 +93,8 @@ mod manager_tests {
             self.auto_start
         }
 
-        async fn inject_query_subscriber(
-            &self,
-            _query_subscriber: Arc<dyn crate::plugin_core::QuerySubscriber>,
-        ) {
-            // No-op for test mock - real reactions would store this
+        async fn initialize(&self, _context: crate::context::ReactionRuntimeContext) {
+            // TestMockReaction already has event_tx from constructor
         }
 
         async fn start(&self) -> anyhow::Result<()> {
@@ -142,10 +152,6 @@ mod manager_tests {
         async fn status(&self) -> ComponentStatus {
             self.status.read().await.clone()
         }
-
-        async fn inject_event_tx(&self, _tx: ComponentEventSender) {
-            // No-op for tests
-        }
     }
 
     /// Helper to create a TestMockReaction instance
@@ -164,6 +170,10 @@ mod manager_tests {
     ) {
         let (event_tx, event_rx) = mpsc::channel(100);
         let manager = Arc::new(ReactionManager::new(event_tx.clone()));
+        // Inject mock QueryProvider so add_reaction() can construct ReactionRuntimeContext
+        manager
+            .inject_query_provider(Arc::new(MockQueryProvider))
+            .await;
         (manager, event_rx, event_tx)
     }
 
@@ -427,7 +437,7 @@ mod manager_tests {
         let reaction = create_test_mock_reaction("default-reaction".to_string(), vec![], event_tx);
 
         // Verify auto_start is true
-        use crate::plugin_core::Reaction;
+        use crate::reactions::Reaction;
         assert!(reaction.auto_start(), "Default auto_start should be true");
 
         manager.add_reaction(reaction).await.unwrap();

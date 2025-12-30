@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::indexes::config::{StorageBackendConfig, StorageBackendRef, StorageBackendSpec};
-use crate::plugin_core::IndexBackendPlugin;
+use crate::indexes::IndexBackendPlugin;
 use drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex;
 use drasi_core::in_memory_index::in_memory_future_queue::InMemoryFutureQueue;
 use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
@@ -552,7 +552,7 @@ mod tests {
 
     #[test]
     fn test_index_factory_debug_with_plugin() {
-        use crate::plugin_core::IndexBackendPlugin;
+        use crate::indexes::IndexBackendPlugin;
         use async_trait::async_trait;
 
         // Create a mock plugin for testing

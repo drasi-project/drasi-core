@@ -21,7 +21,7 @@
 
 use crate::channels::dispatcher::{ChangeDispatcher, ChannelChangeDispatcher};
 use crate::channels::*;
-use crate::plugin_core::Source;
+use crate::sources::Source;
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_core::models::SourceChange;
@@ -178,8 +178,8 @@ impl Source for TestMockSource {
         self
     }
 
-    async fn inject_event_tx(&self, _tx: ComponentEventSender) {
-        // TestMockSource already has event_tx from constructor
+    async fn initialize(&self, _context: crate::context::SourceRuntimeContext) {
+        // TestMockSource already has event_tx from constructor, so we don't need to store it again
     }
 }
 

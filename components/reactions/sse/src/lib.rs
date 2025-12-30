@@ -33,7 +33,7 @@ use std::collections::HashMap;
 pub mod config;
 pub mod sse;
 
-pub use config::{QueryConfig, SseReactionConfig, TemplateSpec};
+pub use config::{QueryConfig, SseExtension, SseReactionConfig, TemplateSpec};
 pub use sse::SseReaction;
 
 /// Helper function to register the json helper in a Handlebars instance
@@ -192,7 +192,7 @@ impl SseReactionBuilder {
             // Validate body template
             Self::validate_template(handlebars, &added.template)?;
             // Validate path template (if present)
-            if let Some(path) = &added.path {
+            if let Some(path) = &added.extension.path {
                 Self::validate_template(handlebars, path)?;
             }
         }
@@ -200,7 +200,7 @@ impl SseReactionBuilder {
             // Validate body template
             Self::validate_template(handlebars, &updated.template)?;
             // Validate path template (if present)
-            if let Some(path) = &updated.path {
+            if let Some(path) = &updated.extension.path {
                 Self::validate_template(handlebars, path)?;
             }
         }
@@ -208,7 +208,7 @@ impl SseReactionBuilder {
             // Validate body template
             Self::validate_template(handlebars, &deleted.template)?;
             // Validate path template (if present)
-            if let Some(path) = &deleted.path {
+            if let Some(path) = &deleted.extension.path {
                 Self::validate_template(handlebars, path)?;
             }
         }

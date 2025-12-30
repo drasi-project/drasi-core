@@ -69,23 +69,25 @@ Each reaction plugin:
 
 DrasiLib has no knowledge of which plugins exist - it only knows about the `Reaction` trait.
 
-### Dependency Injection
+### Context-based Initialization
 
-Unlike sources, reactions receive dependencies through injection methods rather than constructor parameters:
-- `inject_event_tx()` - Event channel for component lifecycle events
-- `inject_query_subscriber()` - Query subscriber for accessing queries
+Reactions receive dependencies through a single `initialize()` method that provides a `ReactionRuntimeContext`:
+- `status_tx` - Channel for reporting component status events (Starting, Running, Stopped, Error)
+- `query_provider` - Query provider for accessing queries
+- `state_store` - Optional persistent state storage (if configured)
+- `reaction_id` - The reaction's unique identifier
 
-Both are automatically called by DrasiLib when the reaction is added via `add_reaction()`.
+The context is automatically provided by DrasiLib when the reaction is added via `add_reaction()`.
 
 ## The Reaction Trait
 
-All reactions must implement the `Reaction` trait from `drasi_lib::plugin_core`:
+All reactions must implement the `Reaction` trait from `drasi_lib`:
 
 ```rust
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
-use drasi_lib::plugin_core::{Reaction, QuerySubscriber};
+use drasi_lib::{Reaction, QueryProvider};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -110,13 +112,14 @@ pub trait Reaction: Send + Sync {
         true
     }
 
-    /// Inject the query subscriber for accessing queries.
+    /// Initialize the reaction with runtime context.
     /// Called automatically by DrasiLib when the reaction is added.
-    async fn inject_query_subscriber(&self, query_subscriber: Arc<dyn QuerySubscriber>);
+    /// The context provides access to status_tx, query_provider, and state_store.
+    async fn initialize(&self, context: ReactionRuntimeContext);
 
     /// Start the reaction.
     /// The reaction should:
-    /// 1. Subscribe to all configured queries (using injected QuerySubscriber)
+    /// 1. Subscribe to all configured queries (using injected QueryProvider)
     /// 2. Start its processing loop
     /// 3. Update its status to Running
     async fn start(&self) -> Result<()>;
@@ -126,28 +129,24 @@ pub trait Reaction: Send + Sync {
 
     /// Get the current status of the reaction
     async fn status(&self) -> ComponentStatus;
-
-    /// Inject the event channel for component lifecycle events.
-    /// Called automatically by DrasiLib when the reaction is added.
-    async fn inject_event_tx(&self, tx: ComponentEventSender);
 }
 ```
 
 ### Key Design Points
 
-- **Dependency injection**: Reactions don't need QuerySubscriber or event_tx during construction. DrasiLib automatically injects them when the reaction is added via `add_reaction()`.
+- **Context-based initialization**: Reactions receive a `ReactionRuntimeContext` via `initialize()` when added to DrasiLib. The context provides access to status_tx, query_provider, state_store, and other DrasiLib services.
 - **Async lifecycle**: All lifecycle methods (`start`, `stop`) are async.
 - **Multi-query subscription**: Reactions can subscribe to multiple queries via `query_ids()`.
 - **Priority queue processing**: Results from all queries are merged in timestamp order.
 - **Auto-start control**: Reactions can override `auto_start()` to control whether they start automatically.
 
-### QuerySubscriber Trait
+### QueryProvider Trait
 
-The `QuerySubscriber` trait provides decoupled access to queries:
+The `QueryProvider` trait provides decoupled access to queries:
 
 ```rust
 #[async_trait]
-pub trait QuerySubscriber: Send + Sync {
+pub trait QueryProvider: Send + Sync {
     /// Get a query instance by ID
     async fn get_query_instance(&self, id: &str) -> Result<Arc<dyn Query>>;
 }
@@ -214,9 +213,10 @@ impl ReactionBase {
     // Component lifecycle events
     pub async fn send_component_event(&self, status: ComponentStatus, message: Option<String>) -> Result<()>;
 
-    // Dependency injection (called automatically by DrasiLib)
-    pub async fn inject_event_tx(&self, tx: ComponentEventSender);
-    pub async fn inject_query_subscriber(&self, qs: Arc<dyn QuerySubscriber>);
+    // Context initialization (called automatically by DrasiLib)
+    pub async fn initialize(&self, context: ReactionRuntimeContext);
+    pub async fn query_provider(&self) -> Option<Arc<dyn QueryProvider>>;
+    pub async fn state_store(&self) -> Option<Arc<dyn StateStoreProvider>>;
 
     // Query subscription - subscribes to all configured queries
     pub async fn subscribe_to_queries(&self) -> Result<()>;
@@ -430,7 +430,7 @@ pub use config::MyReactionConfig;
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
-use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
+use drasi_lib::{QueryProvider, Reaction};
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use log::{debug, info};
 use std::collections::HashMap;
@@ -485,8 +485,8 @@ impl Reaction for MyReaction {
         self.base.get_auto_start()
     }
 
-    async fn inject_query_subscriber(&self, query_subscriber: Arc<dyn QuerySubscriber>) {
-        self.base.inject_query_subscriber(query_subscriber).await;
+    async fn initialize(&self, context: drasi_lib::context::ReactionRuntimeContext) {
+        self.base.initialize(context).await;
     }
 
     async fn start(&self) -> Result<()> {
@@ -501,7 +501,7 @@ impl Reaction for MyReaction {
             .await?;
 
         // Subscribe to all configured queries using ReactionBase
-        // QuerySubscriber was injected via inject_query_subscriber() when reaction was added
+        // QueryProvider was injected via inject_query_provider() when reaction was added
         self.base.subscribe_to_queries().await?;
 
         // Transition to Running
@@ -579,10 +579,6 @@ impl Reaction for MyReaction {
 
     async fn status(&self) -> ComponentStatus {
         self.base.get_status().await
-    }
-
-    async fn inject_event_tx(&self, tx: ComponentEventSender) {
-        self.base.inject_event_tx(tx).await;
     }
 }
 
@@ -769,14 +765,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_event_injection() {
-        let (event_tx, mut event_rx) = mpsc::channel(100);
+    async fn test_status_reporting() {
+        use drasi_lib::context::ReactionRuntimeContext;
+
+        let (status_tx, mut event_rx) = mpsc::channel(100);
         let reaction = MyReaction::builder("test-reaction")
             .with_query("query1")
             .build();
 
-        // Inject event_tx to test event sending
-        reaction.inject_event_tx(event_tx).await;
+        // Create a mock query subscriber for the context
+        struct MockQueryProvider;
+        #[async_trait::async_trait]
+        impl drasi_lib::QueryProvider for MockQueryProvider {
+            async fn get_query_instance(&self, _id: &str) -> anyhow::Result<std::sync::Arc<dyn drasi_lib::Query>> {
+                Err(anyhow::anyhow!("MockQueryProvider: query not found"))
+            }
+        }
+
+        // Initialize with context
+        let context = ReactionRuntimeContext::new(
+            "test-reaction",
+            status_tx,
+            None,
+            std::sync::Arc::new(MockQueryProvider),
+        );
+        reaction.base.initialize(context).await;
 
         // Manually trigger a status event
         reaction.base.set_status_with_event(
@@ -824,7 +837,7 @@ async fn test_reaction_with_drasi() {
 
 | File | Description |
 |------|-------------|
-| `lib/src/plugin_core/reaction.rs` | `Reaction` trait definition |
+| `lib/src/reactions/traits.rs` | `Reaction` trait definition |
 | `lib/src/reactions/common/base.rs` | `ReactionBase` implementation |
 | `lib/src/reactions/manager.rs` | `ReactionManager` lifecycle management |
 | `lib/src/channels/events.rs` | Event types (`QueryResult`, `ComponentStatus`, etc.) |
@@ -844,8 +857,7 @@ When creating a new reaction plugin:
   - [ ] `properties()` - return config as HashMap
   - [ ] `query_ids()` - return list of subscribed query IDs
   - [ ] `auto_start()` - delegate to ReactionBase (optional, defaults to true)
-  - [ ] `inject_query_subscriber()` - delegate to ReactionBase
-  - [ ] `inject_event_tx()` - delegate to ReactionBase
+  - [ ] `initialize(context)` - delegate to ReactionBase
   - [ ] `start()` - subscribe to queries and spawn processing task
   - [ ] `stop()` - use ReactionBase.stop_common() and update status
   - [ ] `status()` - delegate to ReactionBase
@@ -987,7 +999,7 @@ async fn start(&self) -> Result<()> {
 ### Processing Multiple Queries
 
 When subscribing to multiple queries, `ReactionBase.subscribe_to_queries()` automatically:
-1. Gets each query instance via QuerySubscriber
+1. Gets each query instance via QueryProvider
 2. Subscribes to each query
 3. Spawns forwarder tasks that enqueue results to the priority queue
 4. Uses the appropriate enqueue strategy based on dispatch mode
