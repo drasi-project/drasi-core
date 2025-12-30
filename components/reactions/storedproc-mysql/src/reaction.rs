@@ -24,12 +24,13 @@ use tokio::task::JoinHandle;
 
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
 use drasi_lib::managers::log_component_start;
-use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
+use drasi_lib::{QueryProvider, Reaction};
 
-use crate::config::MySqlStoredProcReactionConfig;
+use crate::config::{MySqlStoredProcReactionConfig, QueryConfig};
 use crate::executor::MySqlExecutor;
 use crate::parser::ParameterParser;
+use drasi_lib::reactions::common::OperationType;
 
 /// MySQL Stored Procedure reaction
 ///
@@ -124,6 +125,47 @@ impl MySqlStoredProcReaction {
         })
     }
 
+    /// Prepare context data with after/before fields based on operation type
+    fn prepare_context(operation: OperationType, data: &serde_json::Value) -> serde_json::Value {
+        use serde_json::json;
+
+        match operation {
+            OperationType::Add => {
+                // For ADD, data goes into "after"
+                json!({
+                    "after": data.clone()
+                })
+            }
+            OperationType::Update => {
+                // For UPDATE, check if data already has before/after fields
+                if let Some(obj) = data.as_object() {
+                    let mut context = serde_json::Map::new();
+                    if let Some(before) = obj.get("before") {
+                        context.insert("before".to_string(), before.clone());
+                    }
+                    if let Some(after) = obj.get("after") {
+                        context.insert("after".to_string(), after.clone());
+                    }
+                    // If no before/after, treat entire data as after
+                    if context.is_empty() {
+                        context.insert("after".to_string(), data.clone());
+                    }
+                    json!(context)
+                } else {
+                    json!({
+                        "after": data.clone()
+                    })
+                }
+            }
+            OperationType::Delete => {
+                // For DELETE, data goes into "before"
+                json!({
+                    "before": data.clone()
+                })
+            }
+        }
+    }
+
     /// Spawn the processing task that handles query results
     fn spawn_processing_task(&self) -> JoinHandle<()> {
         let priority_queue = self.base.priority_queue.clone();
@@ -134,7 +176,6 @@ impl MySqlStoredProcReaction {
 
         tokio::spawn(async move {
             info!("[{reaction_id}] Starting processing loop");
-
             loop {
                 // Dequeue next result (blocks until available)
                 let query_result_arc = priority_queue.dequeue().await;
@@ -153,12 +194,10 @@ impl MySqlStoredProcReaction {
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown");
 
-                    // Determine which command to execute based on operation type
-                    let command = match result_type.to_lowercase().as_str() {
-                        "add" => &config.added_command,
-                        "update" => &config.updated_command,
-                        "delete" => &config.deleted_command,
-                        _ => {
+                    // Parse operation type
+                    let operation = match result_type.parse::<OperationType>() {
+                        Ok(op) => op,
+                        Err(_) => {
                             debug!(
                                 "[{reaction_id}] Unknown operation type: {result_type}, skipping"
                             );
@@ -166,29 +205,41 @@ impl MySqlStoredProcReaction {
                         }
                     };
 
+                    // Get the command template for this query and operation type
+                    let command = config.get_command_template(&query_result.query_id, operation);
+
                     // Execute the stored procedure if a command is configured
                     if let Some(cmd) = command {
                         let data = result_item.get("data");
 
                         if let Some(data_value) = data {
+                            // Prepare context with after/before fields based on operation type
+                            let context = Self::prepare_context(operation, data_value);
+                            debug!(
+                                "[{reaction_id}] Context data: {}",
+                                serde_json::to_string_pretty(&context)
+                                    .unwrap_or_else(|_| "<<invalid>>".to_string())
+                            );
+
                             // Parse command and extract parameters
-                            match parser.parse_command(cmd, data_value) {
+                            match parser.parse_command(&cmd, &context) {
                                 Ok((proc_name, params)) => {
                                     debug!(
-                                        "[{}] Executing procedure: {} with {} parameters for {} operation",
-                                        reaction_id,
-                                        proc_name,
-                                        params.len(),
-                                        result_type
+                                        "[{reaction_id}] Executing procedure: {proc_name} with {params_len} parameters for {result_type} operation",
+                                        params_len = params.len()
                                     );
 
                                     // Execute stored procedure
                                     match executor.execute_procedure(&proc_name, params).await {
                                         Ok(()) => {
-                                            debug!("[{reaction_id}] Successfully executed {proc_name} for {result_type} operation");
+                                            debug!(
+                                                "[{reaction_id}] Successfully executed {proc_name} for {result_type} operation"
+                                            );
                                         }
                                         Err(e) => {
-                                            error!("[{reaction_id}] Failed to execute {proc_name}: {e}");
+                                            error!(
+                                                "[{reaction_id}] Failed to execute {proc_name}: {e}"
+                                            );
                                         }
                                     }
                                 }
@@ -200,7 +251,9 @@ impl MySqlStoredProcReaction {
                             error!("[{reaction_id}] No data available for {result_type} operation");
                         }
                     } else {
-                        debug!("[{reaction_id}] No command configured for {result_type} operation, skipping");
+                        debug!(
+                            "[{reaction_id}] No command configured for {result_type} operation, skipping"
+                        );
                     }
                 }
             }
@@ -241,12 +294,8 @@ impl Reaction for MySqlStoredProcReaction {
         self.base.get_auto_start()
     }
 
-    async fn inject_query_subscriber(&self, query_subscriber: Arc<dyn QuerySubscriber>) {
-        self.base.inject_query_subscriber(query_subscriber).await;
-    }
-
-    async fn inject_event_tx(&self, tx: ComponentEventSender) {
-        self.base.inject_event_tx(tx).await;
+    async fn initialize(&self, context: drasi_lib::context::ReactionRuntimeContext) {
+        self.base.initialize(context).await;
     }
 
     async fn start(&self) -> Result<()> {
@@ -365,21 +414,15 @@ impl MySqlStoredProcReactionBuilder {
         self
     }
 
-    /// Set the stored procedure command for added results
-    pub fn with_added_command(mut self, command: impl Into<String>) -> Self {
-        self.config.added_command = Some(command.into());
+    /// Set the default template configuration
+    pub fn with_default_template(mut self, template: QueryConfig) -> Self {
+        self.config.default_template = Some(template);
         self
     }
 
-    /// Set the stored procedure command for updated results
-    pub fn with_updated_command(mut self, command: impl Into<String>) -> Self {
-        self.config.updated_command = Some(command.into());
-        self
-    }
-
-    /// Set the stored procedure command for deleted results
-    pub fn with_deleted_command(mut self, command: impl Into<String>) -> Self {
-        self.config.deleted_command = Some(command.into());
+    /// Add a query-specific template route
+    pub fn with_route(mut self, query_id: impl Into<String>, template: QueryConfig) -> Self {
+        self.config.routes.insert(query_id.into(), template);
         self
     }
 

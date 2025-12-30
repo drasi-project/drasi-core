@@ -19,8 +19,8 @@
 
 mod mysql_helpers;
 
-use drasi_lib::plugin_core::Reaction;
-use drasi_reaction_storedproc_mysql::config::MySqlStoredProcReactionConfig;
+use drasi_lib::Reaction;
+use drasi_reaction_storedproc_mysql::config::{MySqlStoredProcReactionConfig, QueryConfig, TemplateSpec};
 use drasi_reaction_storedproc_mysql::executor::MySqlExecutor;
 use drasi_reaction_storedproc_mysql::parser::ParameterParser;
 use drasi_reaction_storedproc_mysql::MySqlStoredProcReaction;
@@ -160,9 +160,8 @@ fn test_config_default_values() {
     assert_eq!(config.password, "");
     assert_eq!(config.database, "");
     assert!(!config.ssl);
-    assert_eq!(config.added_command, None);
-    assert_eq!(config.updated_command, None);
-    assert_eq!(config.deleted_command, None);
+    assert!(config.routes.is_empty());
+    assert_eq!(config.default_template, None);
     assert_eq!(config.command_timeout_ms, 30000);
     assert_eq!(config.retry_attempts, 3);
 }
@@ -198,7 +197,10 @@ fn test_config_validation_empty_user() {
     let config = MySqlStoredProcReactionConfig {
         user: "".to_string(),
         database: "testdb".to_string(),
-        added_command: Some("CALL test()".to_string()),
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL test()")),
+            ..Default::default()
+        }),
         ..Default::default()
     };
 
@@ -212,7 +214,10 @@ fn test_config_validation_empty_database() {
     let config = MySqlStoredProcReactionConfig {
         user: "testuser".to_string(),
         database: "".to_string(),
-        added_command: Some("CALL test()".to_string()),
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL test()")),
+            ..Default::default()
+        }),
         ..Default::default()
     };
 
@@ -225,11 +230,14 @@ fn test_config_validation_empty_database() {
 }
 
 #[test]
-fn test_config_validation_valid_with_added_command() {
+fn test_config_validation_valid_with_default_template() {
     let config = MySqlStoredProcReactionConfig {
         user: "testuser".to_string(),
         database: "testdb".to_string(),
-        added_command: Some("CALL add_item(@id)".to_string()),
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL add_item(@after.id)")),
+            ..Default::default()
+        }),
         ..Default::default()
     };
 
@@ -237,11 +245,19 @@ fn test_config_validation_valid_with_added_command() {
 }
 
 #[test]
-fn test_config_validation_valid_with_updated_command() {
+fn test_config_validation_valid_with_routes() {
+    use std::collections::HashMap;
+
+    let mut routes = HashMap::new();
+    routes.insert("test-query".to_string(), QueryConfig {
+        updated: Some(TemplateSpec::new("CALL update_item(@after.id)")),
+        ..Default::default()
+    });
+
     let config = MySqlStoredProcReactionConfig {
         user: "testuser".to_string(),
         database: "testdb".to_string(),
-        updated_command: Some("CALL update_item(@id)".to_string()),
+        routes,
         ..Default::default()
     };
 
@@ -249,25 +265,15 @@ fn test_config_validation_valid_with_updated_command() {
 }
 
 #[test]
-fn test_config_validation_valid_with_deleted_command() {
+fn test_config_validation_valid_with_all_operations() {
     let config = MySqlStoredProcReactionConfig {
         user: "testuser".to_string(),
         database: "testdb".to_string(),
-        deleted_command: Some("CALL delete_item(@id)".to_string()),
-        ..Default::default()
-    };
-
-    assert!(config.validate().is_ok());
-}
-
-#[test]
-fn test_config_validation_valid_with_all_commands() {
-    let config = MySqlStoredProcReactionConfig {
-        user: "testuser".to_string(),
-        database: "testdb".to_string(),
-        added_command: Some("CALL add_item(@id)".to_string()),
-        updated_command: Some("CALL update_item(@id)".to_string()),
-        deleted_command: Some("CALL delete_item(@id)".to_string()),
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL add_item(@after.id)")),
+            updated: Some(TemplateSpec::new("CALL update_item(@after.id)")),
+            deleted: Some(TemplateSpec::new("CALL delete_item(@before.id)")),
+        }),
         ..Default::default()
     };
 
@@ -283,11 +289,14 @@ fn test_config_serialization() {
         password: "secret".to_string(),
         database: "mydb".to_string(),
         ssl: true,
-        added_command: Some("CALL add_user(@id, @name)".to_string()),
-        updated_command: Some("CALL update_user(@id, @name)".to_string()),
-        deleted_command: Some("CALL delete_user(@id)".to_string()),
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL add_user(@after.id, @after.name)")),
+            updated: Some(TemplateSpec::new("CALL update_user(@after.id, @after.name)")),
+            deleted: Some(TemplateSpec::new("CALL delete_user(@before.id)")),
+        }),
         command_timeout_ms: 10000,
         retry_attempts: 5,
+        ..Default::default()
     };
 
     let json = serde_json::to_string(&config).unwrap();
@@ -309,7 +318,11 @@ fn test_config_deserialization_with_defaults() {
         "user": "testuser",
         "password": "testpass",
         "database": "testdb",
-        "added_command": "CALL test()"
+        "default_template": {
+            "added": {
+                "template": "CALL test()"
+            }
+        }
     }"#;
 
     let config: MySqlStoredProcReactionConfig = serde_json::from_str(json).unwrap();
@@ -432,11 +445,13 @@ async fn test_mysql_config_validation() {
         password: "password".to_string(),
         database: "testdb".to_string(),
         ssl: false,
-        added_command: Some("CALL add_user(@id)".to_string()),
-        updated_command: None,
-        deleted_command: None,
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL add_user(@after.id)")),
+            ..Default::default()
+        }),
         command_timeout_ms: 30000,
         retry_attempts: 3,
+        ..Default::default()
     };
 
     assert!(config.validate().is_ok());
@@ -453,7 +468,7 @@ async fn test_mysql_config_validation() {
 
     // Invalid: no commands
     let mut invalid = config.clone();
-    invalid.added_command = None;
+    invalid.default_template = None;
     assert!(invalid.validate().is_err());
 }
 
@@ -475,11 +490,13 @@ async fn test_mysql_executor_connection() {
         password: mysql_config.password.clone(),
         database: mysql_config.database.clone(),
         ssl: false,
-        added_command: Some("CALL test()".to_string()),
-        updated_command: None,
-        deleted_command: None,
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL test()")),
+            ..Default::default()
+        }),
         command_timeout_ms: 5000,
         retry_attempts: 3,
+        ..Default::default()
     };
 
     let executor = MySqlExecutor::new(&config).await;
@@ -512,11 +529,13 @@ async fn test_mysql_executor_procedure_execution() {
         password: mysql_config.password.clone(),
         database: mysql_config.database.clone(),
         ssl: false,
-        added_command: Some("CALL log_sensor_added(@sensor_id, @temperature)".to_string()),
-        updated_command: None,
-        deleted_command: None,
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
+            ..Default::default()
+        }),
         command_timeout_ms: 5000,
         retry_attempts: 3,
+        ..Default::default()
     };
 
     let executor = MySqlExecutor::new(&config).await.unwrap();
@@ -565,11 +584,14 @@ async fn test_mysql_executor_multiple_operations() {
         password: mysql_config.password.clone(),
         database: mysql_config.database.clone(),
         ssl: false,
-        added_command: Some("CALL log_sensor_added(@sensor_id, @temperature)".to_string()),
-        updated_command: Some("CALL log_sensor_updated(@sensor_id, @temperature)".to_string()),
-        deleted_command: Some("CALL log_sensor_deleted(@sensor_id)".to_string()),
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
+            updated: Some(TemplateSpec::new("CALL log_sensor_updated(@after.sensor_id, @after.temperature)")),
+            deleted: Some(TemplateSpec::new("CALL log_sensor_deleted(@before.sensor_id)")),
+        }),
         command_timeout_ms: 5000,
         retry_attempts: 3,
+        ..Default::default()
     };
 
     let executor = MySqlExecutor::new(&config).await.unwrap();
@@ -625,24 +647,28 @@ async fn test_mysql_parser_with_executor() {
         password: mysql_config.password.clone(),
         database: mysql_config.database.clone(),
         ssl: false,
-        added_command: Some("CALL log_sensor_added(@sensor_id, @temperature)".to_string()),
-        updated_command: None,
-        deleted_command: None,
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
+            ..Default::default()
+        }),
         command_timeout_ms: 5000,
         retry_attempts: 3,
+        ..Default::default()
     };
 
     let executor = MySqlExecutor::new(&config).await.unwrap();
     let parser = ParameterParser::new();
 
-    // Parse command with data
+    // Parse command with data in the new @after context format
     let data = json!({
-        "sensor_id": "sensor-002",
-        "temperature": 27.3
+        "after": {
+            "sensor_id": "sensor-002",
+            "temperature": 27.3
+        }
     });
 
     let (proc_name, params) = parser
-        .parse_command("CALL log_sensor_added(@sensor_id, @temperature)", &data)
+        .parse_command("CALL log_sensor_added(@after.sensor_id, @after.temperature)", &data)
         .expect("Parser should succeed");
 
     assert_eq!(proc_name, "log_sensor_added");
@@ -680,11 +706,13 @@ async fn test_mysql_reaction_creation() {
         password: mysql_config.password.clone(),
         database: mysql_config.database.clone(),
         ssl: false,
-        added_command: Some("CALL log_sensor_added(@sensor_id, @temperature)".to_string()),
-        updated_command: None,
-        deleted_command: None,
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
+            ..Default::default()
+        }),
         command_timeout_ms: 5000,
         retry_attempts: 3,
+        ..Default::default()
     };
 
     let reaction =
@@ -719,7 +747,10 @@ async fn test_mysql_reaction_builder() {
         .with_user(&mysql_config.user)
         .with_password(&mysql_config.password)
         .with_ssl(false)
-        .with_added_command("CALL log_sensor_added(@sensor_id, @temperature)")
+        .with_default_template(QueryConfig {
+            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
+            ..Default::default()
+        })
         .with_query("test-query")
         .with_command_timeout_ms(5000)
         .with_retry_attempts(3)
@@ -755,11 +786,13 @@ async fn test_mysql_executor_with_special_characters() {
         password: mysql_config.password.clone(),
         database: mysql_config.database.clone(),
         ssl: false,
-        added_command: Some("CALL log_sensor_added(@sensor_id, @temperature)".to_string()),
-        updated_command: None,
-        deleted_command: None,
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
+            ..Default::default()
+        }),
         command_timeout_ms: 5000,
         retry_attempts: 3,
+        ..Default::default()
     };
 
     let executor = MySqlExecutor::new(&config).await.unwrap();
@@ -804,9 +837,11 @@ async fn test_mysql_reaction_lifecycle() {
         .with_user(&mysql_config.user)
         .with_password(&mysql_config.password)
         .with_ssl(false)
-        .with_added_command("CALL log_sensor_added(@sensor_id, @temperature)")
-        .with_updated_command("CALL log_sensor_updated(@sensor_id, @temperature)")
-        .with_deleted_command("CALL log_sensor_deleted(@sensor_id)")
+        .with_default_template(QueryConfig {
+            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
+            updated: Some(TemplateSpec::new("CALL log_sensor_updated(@after.sensor_id, @after.temperature)")),
+            deleted: Some(TemplateSpec::new("CALL log_sensor_deleted(@before.sensor_id)")),
+        })
         .with_query("sensor-query")
         .with_auto_start(false) // Don't auto-start for this test
         .build()
@@ -871,11 +906,13 @@ async fn test_mysql_executor_retry_on_failure() {
         password: mysql_config.password.clone(),
         database: mysql_config.database.clone(),
         ssl: false,
-        added_command: Some("CALL non_existent()".to_string()),
-        updated_command: None,
-        deleted_command: None,
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL non_existent()")),
+            ..Default::default()
+        }),
         command_timeout_ms: 1000,
         retry_attempts: 2,
+        ..Default::default()
     };
 
     let executor = MySqlExecutor::new(&config).await.unwrap();

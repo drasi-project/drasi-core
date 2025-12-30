@@ -21,14 +21,20 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use drasi_reaction_storedproc_mysql::MySqlStoredProcReaction;
+//! use drasi_reaction_storedproc_mysql::{MySqlStoredProcReaction, QueryConfig, TemplateSpec};
 //!
 //! let reaction = MySqlStoredProcReaction::builder("user-sync")
-//!     .with_connection("localhost", 3306, "mydb", "root", "password")
+//!     .with_hostname("localhost")
+//!     .with_port(3306)
+//!     .with_database("mydb")
+//!     .with_user("root")
+//!     .with_password("password")
 //!     .with_query("user-changes")
-//!     .with_added_command("CALL add_user(@id, @name, @email)")
-//!     .with_updated_command("CALL update_user(@id, @name, @email)")
-//!     .with_deleted_command("CALL delete_user(@id)")
+//!     .with_default_template(QueryConfig {
+//!         added: Some(TemplateSpec::new("CALL add_user(@after.id, @after.name, @after.email)")),
+//!         updated: Some(TemplateSpec::new("CALL update_user(@after.id, @after.name, @after.email)")),
+//!         deleted: Some(TemplateSpec::new("CALL delete_user(@before.id)")),
+//!     })
 //!     .build()?;
 //! ```
 
@@ -37,5 +43,5 @@ pub mod executor;
 pub mod parser;
 pub mod reaction;
 
-pub use config::MySqlStoredProcReactionConfig;
+pub use config::{MySqlStoredProcReactionConfig, QueryConfig, TemplateSpec};
 pub use reaction::MySqlStoredProcReaction;
