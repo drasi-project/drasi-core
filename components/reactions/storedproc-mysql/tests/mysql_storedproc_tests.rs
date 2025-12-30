@@ -20,7 +20,9 @@
 mod mysql_helpers;
 
 use drasi_lib::Reaction;
-use drasi_reaction_storedproc_mysql::config::{MySqlStoredProcReactionConfig, QueryConfig, TemplateSpec};
+use drasi_reaction_storedproc_mysql::config::{
+    MySqlStoredProcReactionConfig, QueryConfig, TemplateSpec,
+};
 use drasi_reaction_storedproc_mysql::executor::MySqlExecutor;
 use drasi_reaction_storedproc_mysql::parser::ParameterParser;
 use drasi_reaction_storedproc_mysql::MySqlStoredProcReaction;
@@ -249,10 +251,13 @@ fn test_config_validation_valid_with_routes() {
     use std::collections::HashMap;
 
     let mut routes = HashMap::new();
-    routes.insert("test-query".to_string(), QueryConfig {
-        updated: Some(TemplateSpec::new("CALL update_item(@after.id)")),
-        ..Default::default()
-    });
+    routes.insert(
+        "test-query".to_string(),
+        QueryConfig {
+            updated: Some(TemplateSpec::new("CALL update_item(@after.id)")),
+            ..Default::default()
+        },
+    );
 
     let config = MySqlStoredProcReactionConfig {
         user: "testuser".to_string(),
@@ -291,7 +296,9 @@ fn test_config_serialization() {
         ssl: true,
         default_template: Some(QueryConfig {
             added: Some(TemplateSpec::new("CALL add_user(@after.id, @after.name)")),
-            updated: Some(TemplateSpec::new("CALL update_user(@after.id, @after.name)")),
+            updated: Some(TemplateSpec::new(
+                "CALL update_user(@after.id, @after.name)",
+            )),
             deleted: Some(TemplateSpec::new("CALL delete_user(@before.id)")),
         }),
         command_timeout_ms: 10000,
@@ -530,7 +537,9 @@ async fn test_mysql_executor_procedure_execution() {
         database: mysql_config.database.clone(),
         ssl: false,
         default_template: Some(QueryConfig {
-            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
+            added: Some(TemplateSpec::new(
+                "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
+            )),
             ..Default::default()
         }),
         command_timeout_ms: 5000,
@@ -585,9 +594,15 @@ async fn test_mysql_executor_multiple_operations() {
         database: mysql_config.database.clone(),
         ssl: false,
         default_template: Some(QueryConfig {
-            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
-            updated: Some(TemplateSpec::new("CALL log_sensor_updated(@after.sensor_id, @after.temperature)")),
-            deleted: Some(TemplateSpec::new("CALL log_sensor_deleted(@before.sensor_id)")),
+            added: Some(TemplateSpec::new(
+                "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
+            )),
+            updated: Some(TemplateSpec::new(
+                "CALL log_sensor_updated(@after.sensor_id, @after.temperature)",
+            )),
+            deleted: Some(TemplateSpec::new(
+                "CALL log_sensor_deleted(@before.sensor_id)",
+            )),
         }),
         command_timeout_ms: 5000,
         retry_attempts: 3,
@@ -648,7 +663,9 @@ async fn test_mysql_parser_with_executor() {
         database: mysql_config.database.clone(),
         ssl: false,
         default_template: Some(QueryConfig {
-            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
+            added: Some(TemplateSpec::new(
+                "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
+            )),
             ..Default::default()
         }),
         command_timeout_ms: 5000,
@@ -668,7 +685,10 @@ async fn test_mysql_parser_with_executor() {
     });
 
     let (proc_name, params) = parser
-        .parse_command("CALL log_sensor_added(@after.sensor_id, @after.temperature)", &data)
+        .parse_command(
+            "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
+            &data,
+        )
         .expect("Parser should succeed");
 
     assert_eq!(proc_name, "log_sensor_added");
@@ -707,7 +727,9 @@ async fn test_mysql_reaction_creation() {
         database: mysql_config.database.clone(),
         ssl: false,
         default_template: Some(QueryConfig {
-            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
+            added: Some(TemplateSpec::new(
+                "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
+            )),
             ..Default::default()
         }),
         command_timeout_ms: 5000,
@@ -748,7 +770,9 @@ async fn test_mysql_reaction_builder() {
         .with_password(&mysql_config.password)
         .with_ssl(false)
         .with_default_template(QueryConfig {
-            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
+            added: Some(TemplateSpec::new(
+                "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
+            )),
             ..Default::default()
         })
         .with_query("test-query")
@@ -787,7 +811,9 @@ async fn test_mysql_executor_with_special_characters() {
         database: mysql_config.database.clone(),
         ssl: false,
         default_template: Some(QueryConfig {
-            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
+            added: Some(TemplateSpec::new(
+                "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
+            )),
             ..Default::default()
         }),
         command_timeout_ms: 5000,
@@ -838,9 +864,15 @@ async fn test_mysql_reaction_lifecycle() {
         .with_password(&mysql_config.password)
         .with_ssl(false)
         .with_default_template(QueryConfig {
-            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
-            updated: Some(TemplateSpec::new("CALL log_sensor_updated(@after.sensor_id, @after.temperature)")),
-            deleted: Some(TemplateSpec::new("CALL log_sensor_deleted(@before.sensor_id)")),
+            added: Some(TemplateSpec::new(
+                "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
+            )),
+            updated: Some(TemplateSpec::new(
+                "CALL log_sensor_updated(@after.sensor_id, @after.temperature)",
+            )),
+            deleted: Some(TemplateSpec::new(
+                "CALL log_sensor_deleted(@before.sensor_id)",
+            )),
         })
         .with_query("sensor-query")
         .with_auto_start(false) // Don't auto-start for this test

@@ -17,7 +17,9 @@
 mod mysql_helpers;
 
 use drasi_lib::Reaction;
-use drasi_reaction_storedproc_mysql::config::{MySqlStoredProcReactionConfig, QueryConfig, TemplateSpec};
+use drasi_reaction_storedproc_mysql::config::{
+    MySqlStoredProcReactionConfig, QueryConfig, TemplateSpec,
+};
 use drasi_reaction_storedproc_mysql::executor::MySqlExecutor;
 use drasi_reaction_storedproc_mysql::parser::ParameterParser;
 use drasi_reaction_storedproc_mysql::MySqlStoredProcReaction;
@@ -172,7 +174,9 @@ async fn test_default_template_applies_to_all_queries() {
         ssl: false,
         routes: HashMap::new(), // No routes specified
         default_template: Some(QueryConfig {
-            added: Some(TemplateSpec::new("CALL log_query_event(@query_name, @after.sensor_id)")),
+            added: Some(TemplateSpec::new(
+                "CALL log_query_event(@query_name, @after.sensor_id)",
+            )),
             ..Default::default()
         }),
         command_timeout_ms: 5000,
@@ -308,7 +312,10 @@ async fn test_route_overrides_default_template() {
     });
 
     let (proc_name, params) = parser
-        .parse_command("CALL log_special_event(@after.sensor_id, @after.temperature)", &data)
+        .parse_command(
+            "CALL log_special_event(@after.sensor_id, @after.temperature)",
+            &data,
+        )
         .expect("Should parse");
 
     executor
@@ -373,7 +380,10 @@ async fn test_route_with_none_falls_back_to_default() {
     };
 
     // Get the UPDATE template for "partial-query"
-    let template = config.get_command_template("partial-query", drasi_lib::reactions::common::OperationType::Update);
+    let template = config.get_command_template(
+        "partial-query",
+        drasi_lib::reactions::common::OperationType::Update,
+    );
 
     // Should fall back to default template
     assert!(template.is_some());
@@ -468,7 +478,10 @@ async fn test_multiple_queries_with_different_routes() {
     });
 
     let (proc_name, params) = parser
-        .parse_command("CALL log_sensor_added(@after.sensor_id, @after.temperature)", &data)
+        .parse_command(
+            "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
+            &data,
+        )
         .expect("Should parse");
 
     executor
@@ -485,7 +498,10 @@ async fn test_multiple_queries_with_different_routes() {
     });
 
     let (proc_name, params) = parser
-        .parse_command("CALL log_critical_sensor(@after.sensor_id, @after.temperature)", &data)
+        .parse_command(
+            "CALL log_critical_sensor(@after.sensor_id, @after.temperature)",
+            &data,
+        )
         .expect("Should parse");
 
     executor
@@ -527,13 +543,20 @@ async fn test_builder_with_routes() {
         .with_password(&mysql_config.password)
         .with_ssl(false)
         .with_default_template(QueryConfig {
-            added: Some(TemplateSpec::new("CALL log_sensor_added(@after.sensor_id, @after.temperature)")),
+            added: Some(TemplateSpec::new(
+                "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
+            )),
             ..Default::default()
         })
-        .with_route("special-query", QueryConfig {
-            added: Some(TemplateSpec::new("CALL log_sensor_updated(@after.sensor_id, @after.temperature)")),
-            ..Default::default()
-        })
+        .with_route(
+            "special-query",
+            QueryConfig {
+                added: Some(TemplateSpec::new(
+                    "CALL log_sensor_updated(@after.sensor_id, @after.temperature)",
+                )),
+                ..Default::default()
+            },
+        )
         .with_query("normal-query")
         .with_query("special-query")
         .with_command_timeout_ms(5000)
@@ -541,7 +564,10 @@ async fn test_builder_with_routes() {
         .build()
         .await;
 
-    assert!(reaction.is_ok(), "Builder should create reaction with routes");
+    assert!(
+        reaction.is_ok(),
+        "Builder should create reaction with routes"
+    );
 
     let reaction = reaction.unwrap();
     assert_eq!(reaction.id(), "test-routes");
@@ -936,8 +962,8 @@ async fn test_parser_and_executor_with_nested_parameters() {
     assert_eq!(proc_name, "test_nested_update");
     assert_eq!(params.len(), 4);
     assert_eq!(params[0], json!("sensor-123"));
-    assert_eq!(params[1], json!(25.5));  // old temperature
-    assert_eq!(params[2], json!(27.8));  // new temperature
+    assert_eq!(params[1], json!(25.5)); // old temperature
+    assert_eq!(params[2], json!(27.8)); // new temperature
     assert_eq!(params[3], json!("Room A - Updated"));
 
     executor
