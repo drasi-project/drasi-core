@@ -185,8 +185,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use drasi_lib::channels::{DispatchMode, *};
-use drasi_lib::plugin_core::Source;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
+use drasi_lib::Source;
 
 /// PostgreSQL replication source that captures changes via logical replication.
 ///
@@ -347,7 +347,7 @@ impl Source for PostgresReplicationSource {
         let config = self.config.clone();
         let source_id = self.base.id.clone();
         let dispatchers = self.base.dispatchers.clone();
-        let event_tx = self.base.event_tx();
+        let status_tx = self.base.status_tx();
         let status_clone = self.base.status.clone();
 
         let task = tokio::spawn(async move {
@@ -355,14 +355,14 @@ impl Source for PostgresReplicationSource {
                 source_id.clone(),
                 config,
                 dispatchers,
-                event_tx.clone(),
+                status_tx.clone(),
                 status_clone.clone(),
             )
             .await
             {
                 error!("Replication task failed for {source_id}: {e}");
                 *status_clone.write().await = ComponentStatus::Error;
-                if let Some(ref tx) = *event_tx.read().await {
+                if let Some(ref tx) = *status_tx.read().await {
                     let _ = tx
                         .send(ComponentEvent {
                             component_id: source_id,
@@ -431,8 +431,8 @@ impl Source for PostgresReplicationSource {
         self
     }
 
-    async fn inject_event_tx(&self, tx: ComponentEventSender) {
-        self.base.inject_event_tx(tx).await;
+    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.initialize(context).await;
     }
 
     async fn set_bootstrap_provider(
@@ -451,13 +451,13 @@ async fn run_replication(
             Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
         >,
     >,
-    event_tx: Arc<RwLock<Option<ComponentEventSender>>>,
+    status_tx: Arc<RwLock<Option<ComponentEventSender>>>,
     status: Arc<RwLock<ComponentStatus>>,
 ) -> Result<()> {
     info!("Starting replication for source {source_id}");
 
     let mut stream =
-        stream::ReplicationStream::new(config, source_id, dispatchers, event_tx, status);
+        stream::ReplicationStream::new(config, source_id, dispatchers, status_tx, status);
 
     stream.run().await
 }

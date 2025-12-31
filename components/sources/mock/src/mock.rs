@@ -25,8 +25,8 @@ use std::sync::Arc;
 
 use drasi_lib::channels::*;
 use drasi_lib::managers::{log_component_start, log_component_stop};
-use drasi_lib::plugin_core::Source;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
+use drasi_lib::Source;
 
 /// Mock source that generates synthetic data for testing and development.
 ///
@@ -403,8 +403,8 @@ impl Source for MockSource {
         self
     }
 
-    async fn inject_event_tx(&self, tx: ComponentEventSender) {
-        self.base.inject_event_tx(tx).await;
+    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.initialize(context).await;
     }
 
     async fn set_bootstrap_provider(

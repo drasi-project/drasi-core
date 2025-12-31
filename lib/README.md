@@ -527,6 +527,79 @@ For detailed information on building plugins:
 - **[Source Developer Guide](../components/sources/README.md)** - Creating custom data sources
 - **[Reaction Developer Guide](../components/reactions/README.md)** - Creating custom reactions
 - **[Bootstrap Provider Guide](../components/bootstrappers/README.md)** - Creating bootstrap providers
+- **[State Store Provider Guide](../components/state_stores/README.md)** - Creating state store providers
+
+---
+
+## State Store Providers
+
+State store providers allow plugins (Sources, BootstrapProviders, and Reactions) to persist runtime state that survives restarts of DrasiLib.
+
+### Default (Memory) Provider
+
+By default, DrasiLib uses an in-memory state store that does not persist across restarts:
+
+```rust
+let core = DrasiLib::builder()
+    .with_id("my-app")
+    .build()  // Uses MemoryStateStoreProvider by default
+    .await?;
+```
+
+### Redb Provider
+
+For ACID-compliant persistent storage, use the redb state store provider:
+
+```rust
+use drasi_state_store_redb::RedbStateStoreProvider;
+use std::sync::Arc;
+
+let state_store = RedbStateStoreProvider::new("/data/state.redb")?;
+let core = DrasiLib::builder()
+    .with_id("my-app")
+    .with_state_store_provider(Arc::new(state_store))
+    .build()
+    .await?;
+```
+
+### Using State Store in Plugins
+
+When a Source or Reaction is added to DrasiLib, a runtime context is provided via the `initialize()` method. The context contains all DrasiLib-provided services, including the state store (if configured):
+
+```rust
+use drasi_lib::{Source, SourceRuntimeContext};
+
+#[async_trait]
+impl Source for MySource {
+    async fn initialize(&self, context: SourceRuntimeContext) {
+        // Store the context for later use
+        self.base.initialize(context).await;
+
+        // Access state store from context (may be None if not configured)
+        if let Some(state_store) = self.base.state_store().await {
+            // Use state_store for persistent state
+        }
+    }
+}
+```
+
+For reactions, use `ReactionRuntimeContext` which also provides access to `QueryProvider`:
+
+```rust
+use drasi_lib::{Reaction, ReactionRuntimeContext};
+
+#[async_trait]
+impl Reaction for MyReaction {
+    async fn initialize(&self, context: ReactionRuntimeContext) {
+        self.base.initialize(context).await;
+
+        // Access query provider for subscribing to query results
+        let query_provider = self.base.query_provider().await;
+    }
+}
+```
+
+See the **[State Store Provider Guide](../components/state_stores/README.md)** for full documentation.
 
 ---
 

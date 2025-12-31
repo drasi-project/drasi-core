@@ -27,7 +27,7 @@
 
 mod construction {
     use crate::{MockSource, MockSourceBuilder, MockSourceConfig};
-    use drasi_lib::plugin_core::Source;
+    use drasi_lib::Source;
 
     #[test]
     fn test_builder_with_valid_config() {
@@ -70,7 +70,7 @@ mod construction {
 
 mod properties {
     use crate::MockSourceBuilder;
-    use drasi_lib::plugin_core::Source;
+    use drasi_lib::Source;
 
     #[test]
     fn test_id_returns_correct_value() {
@@ -120,7 +120,7 @@ mod properties {
 mod lifecycle {
     use crate::{MockSource, MockSourceConfig};
     use drasi_lib::channels::ComponentStatus;
-    use drasi_lib::plugin_core::Source;
+    use drasi_lib::Source;
 
     #[tokio::test]
     async fn test_initial_status_is_stopped() {
@@ -162,7 +162,7 @@ mod lifecycle {
 
 mod builder {
     use crate::MockSourceBuilder;
-    use drasi_lib::plugin_core::Source;
+    use drasi_lib::Source;
 
     #[test]
     fn test_builder_defaults() {
@@ -230,7 +230,7 @@ mod builder {
 
 mod event_generation {
     use crate::{MockSource, MockSourceConfig};
-    use drasi_lib::plugin_core::Source;
+    use drasi_lib::Source;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_counter_data_generation() {

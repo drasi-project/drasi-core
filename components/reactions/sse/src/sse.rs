@@ -29,8 +29,8 @@ use tower_http::cors::{Any, CorsLayer};
 
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
 use drasi_lib::managers::log_component_start;
-use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
+use drasi_lib::{QueryProvider, Reaction};
 
 pub use super::config::SseReactionConfig;
 use super::SseReactionBuilder;
@@ -43,7 +43,7 @@ fn pre_create_broadcaster_for_template_spec(
     template_spec: &super::config::TemplateSpec,
     base_sse_path: &str,
 ) {
-    if let Some(custom_path) = &template_spec.path {
+    if let Some(custom_path) = &template_spec.extension.path {
         // Only pre-create broadcasters for static paths (no template variables)
         if !custom_path.contains("{{") {
             let resolved_path = if custom_path.starts_with('/') {
@@ -252,8 +252,8 @@ impl Reaction for SseReaction {
         self.base.get_auto_start()
     }
 
-    async fn inject_query_subscriber(&self, query_subscriber: Arc<dyn QuerySubscriber>) {
-        self.base.inject_query_subscriber(query_subscriber).await;
+    async fn initialize(&self, context: drasi_lib::context::ReactionRuntimeContext) {
+        self.base.initialize(context).await;
     }
 
     async fn start(&self) -> anyhow::Result<()> {
@@ -268,7 +268,7 @@ impl Reaction for SseReaction {
             .await?;
 
         // Subscribe to all configured queries using ReactionBase
-        // QuerySubscriber was injected via inject_query_subscriber() when reaction was added
+        // QueryProvider is available from initialize() context
         self.base.subscribe_to_queries().await?;
 
         // Transition to Running
@@ -406,7 +406,7 @@ impl Reaction for SseReaction {
 
                                 // Determine the SSE path for this event
                                 let sse_path = SseReaction::resolve_sse_path(
-                                    spec.path.as_ref(),
+                                    spec.extension.path.as_ref(),
                                     &base_sse_path,
                                     &handlebars,
                                     &context,
@@ -626,9 +626,5 @@ impl Reaction for SseReaction {
 
     async fn status(&self) -> ComponentStatus {
         self.base.get_status().await
-    }
-
-    async fn inject_event_tx(&self, tx: ComponentEventSender) {
-        self.base.inject_event_tx(tx).await;
     }
 }

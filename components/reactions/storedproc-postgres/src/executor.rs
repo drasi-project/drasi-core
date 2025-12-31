@@ -15,18 +15,90 @@
 //! PostgreSQL executor for stored procedure invocation.
 
 use anyhow::{anyhow, Result};
+use bytes::BytesMut;
 use log::{debug, info};
 use serde_json::Value;
+use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::timeout;
-use tokio_postgres::types::ToSql;
+use tokio_postgres::types::{to_sql_checked, IsNull, ToSql, Type};
 use tokio_postgres::{Client, NoTls};
-use postgres_native_tls::MakeTlsConnector;
-use native_tls::TlsConnector;
 
 use crate::config::PostgresStoredProcReactionConfig;
+
+/// Wrapper enum for SQL parameters that implements ToSql
+#[derive(Debug, Clone)]
+enum SqlParam {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Text(String),
+    Json(Value),
+}
+
+impl ToSql for SqlParam {
+    fn to_sql(
+        &self,
+        ty: &Type,
+        out: &mut BytesMut,
+    ) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
+        match self {
+            SqlParam::Null => None::<String>.to_sql(ty, out),
+            SqlParam::Bool(b) => b.to_sql(ty, out),
+            SqlParam::Int(i) => {
+                // Try to match the target type
+                match *ty {
+                    Type::INT2 => (*i as i16).to_sql(ty, out),
+                    Type::INT4 => (*i as i32).to_sql(ty, out),
+                    Type::INT8 => i.to_sql(ty, out),
+                    Type::FLOAT4 => (*i as f32).to_sql(ty, out),
+                    Type::FLOAT8 => (*i as f64).to_sql(ty, out),
+                    Type::NUMERIC => i.to_sql(ty, out),
+                    Type::TEXT | Type::VARCHAR => i.to_string().to_sql(ty, out),
+                    _ => i.to_sql(ty, out),
+                }
+            }
+            SqlParam::Float(f) => {
+                // Try to match the target type
+                match *ty {
+                    Type::FLOAT4 => (*f as f32).to_sql(ty, out),
+                    Type::FLOAT8 => f.to_sql(ty, out),
+                    Type::NUMERIC => f.to_sql(ty, out),
+                    Type::TEXT | Type::VARCHAR => f.to_string().to_sql(ty, out),
+                    _ => f.to_sql(ty, out),
+                }
+            }
+            SqlParam::Text(s) => s.to_sql(ty, out),
+            SqlParam::Json(v) => v.to_sql(ty, out),
+        }
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        // Accept most common PostgreSQL types
+        matches!(
+            *ty,
+            Type::BOOL
+                | Type::INT2
+                | Type::INT4
+                | Type::INT8
+                | Type::FLOAT4
+                | Type::FLOAT8
+                | Type::NUMERIC
+                | Type::TEXT
+                | Type::VARCHAR
+                | Type::JSON
+                | Type::JSONB
+        ) || <String as ToSql>::accepts(ty)
+            || <i64 as ToSql>::accepts(ty)
+            || <f64 as ToSql>::accepts(ty)
+            || <bool as ToSql>::accepts(ty)
+    }
+
+    to_sql_checked!();
+}
 
 /// PostgreSQL stored procedure executor
 pub struct PostgresExecutor {
@@ -40,53 +112,29 @@ impl PostgresExecutor {
     pub async fn new(config: &PostgresStoredProcReactionConfig) -> Result<Self> {
         let port = config.get_port();
 
-        // Build connection string (without sslmode, we handle TLS via connector)
+        // Build connection string
+        let ssl_mode = if config.ssl { "require" } else { "disable" };
         let connection_string = format!(
-            "host={} port={} user={} password={} dbname={}",
-            config.hostname, port, config.user, config.password, config.database
+            "host={} port={} user={} password={} dbname={} sslmode={}",
+            config.hostname, port, config.user, config.password, config.database, ssl_mode
         );
 
         info!(
-            "Connecting to PostgreSQL: {}:{}/{} (SSL: {})",
-            config.hostname, port, config.database, config.ssl
+            "Connecting to PostgreSQL: {}:{}/{}",
+            config.hostname, port, config.database
         );
 
-        // Connect to database with appropriate TLS configuration
-        let client = if config.ssl {
-            // Use TLS connector for SSL connections (required for Azure PostgreSQL)
-            let tls_connector = TlsConnector::builder()
-                .danger_accept_invalid_certs(false)
-                .build()
-                .map_err(|e| anyhow!("Failed to create TLS connector: {e}"))?;
-            let tls = MakeTlsConnector::new(tls_connector);
+        // Connect to database
+        let (client, connection) = tokio_postgres::connect(&connection_string, NoTls)
+            .await
+            .map_err(|e| anyhow!("Failed to connect to database: {e}"))?;
 
-            let (client, connection) = tokio_postgres::connect(&connection_string, tls)
-                .await
-                .map_err(|e| anyhow!("Failed to connect to database: {e}"))?;
-
-            // Spawn connection handler
-            tokio::spawn(async move {
-                if let Err(e) = connection.await {
-                    log::error!("PostgreSQL connection error: {e}");
-                }
-            });
-
-            client
-        } else {
-            // Use NoTls for non-SSL connections
-            let (client, connection) = tokio_postgres::connect(&connection_string, NoTls)
-                .await
-                .map_err(|e| anyhow!("Failed to connect to database: {e}"))?;
-
-            // Spawn connection handler
-            tokio::spawn(async move {
-                if let Err(e) = connection.await {
-                    log::error!("PostgreSQL connection error: {e}");
-                }
-            });
-
-            client
-        };
+        // Spawn connection handler
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                log::error!("PostgreSQL connection error: {e}");
+            }
+        });
 
         info!(
             "Connected to PostgreSQL: {}:{}/{}",
@@ -140,25 +188,36 @@ impl PostgresExecutor {
 
             debug!("Executing: {} with {} parameters", query, params.len());
 
-            // Convert JSON values to ToSql trait objects
-            let sql_params: Vec<Box<dyn ToSql + Sync + Send>> = params
+            // Convert JSON values to SqlParam enum
+            // For numbers, try to preserve the numeric type for stored procedures with numeric parameters
+            // For strings that look like numbers, try to parse them as f64 for DOUBLE PRECISION compatibility
+            let sql_params: Vec<SqlParam> = params
                 .iter()
                 .map(|v| match v {
-                    Value::Null => Box::new(None::<String>) as Box<dyn ToSql + Sync + Send>,
-                    Value::Bool(b) => Box::new(*b) as Box<dyn ToSql + Sync + Send>,
+                    Value::Null => SqlParam::Null,
+                    Value::Bool(b) => SqlParam::Bool(*b),
                     Value::Number(n) => {
+                        // Keep numbers as their native type
                         if let Some(i) = n.as_i64() {
-                            Box::new(i) as Box<dyn ToSql + Sync + Send>
+                            SqlParam::Int(i)
                         } else if let Some(f) = n.as_f64() {
-                            Box::new(f) as Box<dyn ToSql + Sync + Send>
+                            SqlParam::Float(f)
                         } else {
-                            Box::new(n.to_string()) as Box<dyn ToSql + Sync + Send>
+                            SqlParam::Text(n.to_string())
                         }
                     }
-                    Value::String(s) => Box::new(s.clone()) as Box<dyn ToSql + Sync + Send>,
+                    Value::String(s) => {
+                        // Try to parse strings as numbers for compatibility with numeric columns
+                        // If it's a valid number, pass it as f64, otherwise keep as string
+                        if let Ok(f) = s.parse::<f64>() {
+                            SqlParam::Float(f)
+                        } else {
+                            SqlParam::Text(s.clone())
+                        }
+                    }
                     Value::Array(_) | Value::Object(_) => {
                         // For complex types, pass as JSON
-                        Box::new(v.clone()) as Box<dyn ToSql + Sync + Send>
+                        SqlParam::Json(v.clone())
                     }
                 })
                 .collect();
@@ -166,7 +225,7 @@ impl PostgresExecutor {
             // Create references for the execute call
             let param_refs: Vec<&(dyn ToSql + Sync)> = sql_params
                 .iter()
-                .map(|p| p.as_ref() as &(dyn ToSql + Sync))
+                .map(|p| p as &(dyn ToSql + Sync))
                 .collect();
 
             // Execute the stored procedure

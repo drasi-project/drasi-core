@@ -40,9 +40,9 @@ use crate::config::{QueryConfig, QueryLanguage, QueryRuntime};
 use crate::managers::{
     is_operation_valid, log_component_error, log_component_start, log_component_stop, Operation,
 };
-use crate::plugin_core::Source;
 use crate::queries::PriorityQueue;
 use crate::queries::QueryBase;
+use crate::sources::Source;
 use crate::sources::{FutureQueueSource, SourceManager, FUTURE_QUEUE_SOURCE_ID};
 
 /// Default query configuration

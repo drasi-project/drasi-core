@@ -38,6 +38,7 @@ native-tls = "0.2"
 
 # Authentication (optional)
 drasi-auth-azure = { path = "../../auth/azure", optional = true }
+bytes = "1.0"
 
 # Utilities
 serde = { version = "1.0", features = ["derive"] }

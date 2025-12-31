@@ -14,9 +14,69 @@
 
 //! Configuration for the PostgreSQL Stored Procedure reaction.
 
+use drasi_lib::reactions::common::{self, TemplateRouting};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+// Re-export common template types for public API
+pub use common::{QueryConfig, TemplateSpec};
 
 /// Configuration for the PostgreSQL Stored Procedure reaction
+///
+/// Supports Handlebars templates for stored procedure commands.
+/// Commands use @after.fieldName and @before.fieldName syntax to reference query result fields.
+///
+/// Commands can be configured at two levels:
+/// 1. **Default templates**: Applied to all queries unless overridden (using `default_template`)
+/// 2. **Per-query templates**: Override default for specific queries (using `routes`)
+///
+/// ## Template Variables
+///
+/// Templates have access to the following variables:
+/// - `after` - The data after the change (available for ADD and UPDATE)
+/// - `before` - The data before the change (available for UPDATE and DELETE)
+/// - `data` - The raw data field (available for UPDATE)
+/// - `query_name` - The name of the query that produced the result
+/// - `operation` - The operation type ("ADD", "UPDATE", or "DELETE")
+///
+/// ## Example with Default Template
+///
+/// ```rust,ignore
+/// let config = PostgresStoredProcReactionConfig {
+///     hostname: "localhost".to_string(),
+///     database: "mydb".to_string(),
+///     user: "postgres".to_string(),
+///     password: "password".to_string(),
+///     default_template: Some(QueryConfig {
+///         added: Some(TemplateSpec::new("CALL add_user(@after.id, @after.name, @after.email)")),
+///         updated: Some(TemplateSpec::new("CALL update_user(@after.id, @after.name, @after.email)")),
+///         deleted: Some(TemplateSpec::new("CALL delete_user(@before.id)")),
+///     }),
+///     ..Default::default()
+/// };
+/// ```
+///
+/// ## Example with Per-Query Templates
+///
+/// ```rust,ignore
+/// use std::collections::HashMap;
+///
+/// let mut routes = HashMap::new();
+/// routes.insert("user-query".to_string(), QueryConfig {
+///     added: Some(TemplateSpec::new("CALL add_user(@after.id, @after.name, @after.email)")),
+///     updated: Some(TemplateSpec::new("CALL update_user(@after.id, @after.name, @after.email)")),
+///     deleted: Some(TemplateSpec::new("CALL delete_user(@before.id)")),
+/// });
+///
+/// let config = PostgresStoredProcReactionConfig {
+///     hostname: "localhost".to_string(),
+///     database: "mydb".to_string(),
+///     user: "postgres".to_string(),
+///     password: "password".to_string(),
+///     routes,
+///     ..Default::default()
+/// };
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PostgresStoredProcReactionConfig {
     /// Database hostname or IP address
@@ -30,9 +90,7 @@ pub struct PostgresStoredProcReactionConfig {
     /// Database user
     pub user: String,
 
-    /// Database password or access token
-    /// For Azure Identity authentication, obtain a token using the drasi-auth-azure crate
-    /// and pass it here as the password
+    /// Database password
     pub password: String,
 
     /// Database name
@@ -42,23 +100,13 @@ pub struct PostgresStoredProcReactionConfig {
     #[serde(default)]
     pub ssl: bool,
 
-    /// Stored procedure command for added results
-    /// Use @fieldName to reference query result fields
-    /// Example: "CALL add_user(@id, @name, @email)"
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub added_command: Option<String>,
+    /// Query-specific template configurations for stored procedure commands
+    #[serde(default)]
+    pub routes: HashMap<String, QueryConfig>,
 
-    /// Stored procedure command for updated results
-    /// Use @fieldName to reference query result fields
-    /// Example: "CALL update_user(@id, @name, @email)"
+    /// Default template configuration used when no query-specific route is defined.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub updated_command: Option<String>,
-
-    /// Stored procedure command for deleted results
-    /// Use @fieldName to reference query result fields
-    /// Example: "CALL delete_user(@id)"
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deleted_command: Option<String>,
+    pub default_template: Option<QueryConfig>,
 
     /// Command timeout in milliseconds
     #[serde(default = "default_timeout_ms")]
@@ -78,12 +126,21 @@ impl Default for PostgresStoredProcReactionConfig {
             password: String::new(),
             database: String::new(),
             ssl: false,
-            added_command: None,
-            updated_command: None,
-            deleted_command: None,
+            routes: HashMap::new(),
+            default_template: None,
             command_timeout_ms: default_timeout_ms(),
             retry_attempts: default_retry_attempts(),
         }
+    }
+}
+
+impl TemplateRouting for PostgresStoredProcReactionConfig {
+    fn routes(&self) -> &HashMap<String, QueryConfig> {
+        &self.routes
+    }
+
+    fn default_template(&self) -> Option<&QueryConfig> {
+        self.default_template.as_ref()
     }
 }
 
@@ -106,23 +163,43 @@ impl PostgresStoredProcReactionConfig {
         self.port.unwrap_or(5432)
     }
 
+    /// Get the command template for a specific query and operation type
+    ///
+    /// Priority order:
+    /// 1. Query-specific route template
+    /// 2. Default template
+    pub fn get_command_template(
+        &self,
+        query_id: &str,
+        operation: common::OperationType,
+    ) -> Option<String> {
+        // Try to get from routes or default_template first
+        let spec = self.get_template_spec(query_id, operation);
+        if let Some(spec) = spec {
+            return Some(spec.template.clone());
+        }
+        None
+    }
+
     /// Validate the configuration
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.user.is_empty() {
             anyhow::bail!("Database user is required");
         }
-        if self.password.is_empty() {
-            anyhow::bail!("Password is required");
-        }
         if self.database.is_empty() {
             anyhow::bail!("Database name is required");
         }
-        if self.added_command.is_none()
-            && self.updated_command.is_none()
-            && self.deleted_command.is_none()
-        {
-            anyhow::bail!("At least one command (added, updated, or deleted) must be specified");
+
+        // Check if at least one command is configured
+        let has_routes = !self.routes.is_empty();
+        let has_default_template = self.default_template.is_some();
+
+        if !has_routes && !has_default_template {
+            anyhow::bail!(
+                "At least one command must be specified (via routes or default_template)"
+            );
         }
+
         Ok(())
     }
 }

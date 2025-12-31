@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Plugin core module for source abstractions
+//! Source trait module
 //!
 //! This module provides the core trait that all source plugins must implement.
 //! It separates the plugin contract from the source manager and implementation details.
@@ -27,16 +27,20 @@
 //!
 //! drasi-lib has no knowledge of which plugins exist - it only knows about this trait.
 //!
-//! # Event Channel Injection
+//! # Runtime Context Initialization
 //!
-//! Sources do not need to receive an event channel during construction.
-//! DrasiLib automatically injects the event channel when the source is added
-//! via `add_source()`. This simplifies the plugin constructor API.
+//! Sources receive all drasi-lib services through a single `initialize()` call
+//! when added to DrasiLib. The `SourceRuntimeContext` provides:
+//! - `event_tx`: Channel for component lifecycle events
+//! - `state_store`: Optional persistent state storage
+//!
+//! This replaces the previous `inject_*` methods with a cleaner single-call pattern.
 
 use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::channels::*;
+use crate::context::SourceRuntimeContext;
 
 /// Trait defining the interface for all source implementations.
 ///
@@ -47,8 +51,9 @@ use crate::channels::*;
 /// # Example Implementation
 ///
 /// ```ignore
-/// use drasi_lib::plugin_core::Source;
-/// use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
+/// use drasi_lib::Source;
+/// use drasi_lib::sources::{SourceBase, SourceBaseParams};
+/// use drasi_lib::context::SourceRuntimeContext;
 ///
 /// pub struct MySource {
 ///     base: SourceBase,
@@ -56,7 +61,6 @@ use crate::channels::*;
 /// }
 ///
 /// impl MySource {
-///     // No event_tx needed - it's injected automatically by DrasiLib
 ///     pub fn new(config: MySourceConfig) -> Result<Self> {
 ///         let params = SourceBaseParams::new(&config.id)
 ///             .with_dispatch_mode(config.dispatch_mode)
@@ -82,8 +86,8 @@ use crate::channels::*;
 ///         // Return plugin-specific properties
 ///     }
 ///
-///     async fn inject_event_tx(&self, tx: ComponentEventSender) {
-///         self.base.inject_event_tx(tx).await;
+///     async fn initialize(&self, context: SourceRuntimeContext) {
+///         self.base.initialize(context).await;
 ///     }
 ///
 ///     // ... implement other methods
@@ -153,13 +157,18 @@ pub trait Source: Send + Sync {
     /// Downcast helper for testing - allows access to concrete types
     fn as_any(&self) -> &dyn std::any::Any;
 
-    /// Inject the event channel for component lifecycle events
+    /// Initialize the source with runtime context.
     ///
     /// This method is called automatically by DrasiLib when the source is added
     /// via `add_source()`. Plugin developers do not need to call this directly.
     ///
-    /// Implementation should delegate to `self.base.inject_event_tx(tx).await`.
-    async fn inject_event_tx(&self, tx: ComponentEventSender);
+    /// The context provides access to:
+    /// - `source_id`: The source's unique identifier
+    /// - `event_tx`: Channel for reporting component lifecycle events
+    /// - `state_store`: Optional persistent state storage
+    ///
+    /// Implementation should delegate to `self.base.initialize(context).await`.
+    async fn initialize(&self, context: SourceRuntimeContext);
 
     /// Set the bootstrap provider for this source
     ///
@@ -225,8 +234,8 @@ impl Source for Box<dyn Source + 'static> {
         (**self).as_any()
     }
 
-    async fn inject_event_tx(&self, tx: ComponentEventSender) {
-        (**self).inject_event_tx(tx).await
+    async fn initialize(&self, context: SourceRuntimeContext) {
+        (**self).initialize(context).await
     }
 
     async fn set_bootstrap_provider(
