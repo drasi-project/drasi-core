@@ -25,7 +25,6 @@ name: "drasi-issue-researcher"
   issues:
     # names: # Label filtering applied via job conditions
     # - needs-research # Label filtering applied via job conditions
-    # - bug # Label filtering applied via job conditions
     types:
     - labeled
 
@@ -41,7 +40,7 @@ jobs:
     needs: pre_activation
     if: >
       (needs.pre_activation.outputs.activated == 'true') && ((github.event_name != 'issues') || ((github.event.action != 'labeled') ||
-      (github.event.label.name == 'needs-research' || github.event.label.name == 'bug')))
+      (github.event.label.name == 'needs-research')))
     runs-on: ubuntu-slim
     permissions:
       contents: read
@@ -623,12 +622,12 @@ jobs:
           mkdir -p /tmp/gh-aw/safeoutputs
           mkdir -p /tmp/gh-aw/mcp-logs/safeoutputs
           cat > /tmp/gh-aw/safeoutputs/config.json << 'EOF'
-          {"add_comment":{"max":10},"missing_tool":{"max":0},"noop":{"max":1}}
+          {"add_comment":{"max":1},"missing_tool":{"max":0},"noop":{"max":1}}
           EOF
           cat > /tmp/gh-aw/safeoutputs/tools.json << 'EOF'
           [
             {
-              "description": "Add a comment to an existing GitHub issue, pull request, or discussion. Use this to provide feedback, answer questions, or add information to an existing conversation. For creating new items, use create_issue, create_discussion, or create_pull_request instead. CONSTRAINTS: Maximum 10 comment(s) can be added.",
+              "description": "Add a comment to an existing GitHub issue, pull request, or discussion. Use this to provide feedback, answer questions, or add information to an existing conversation. For creating new items, use create_issue, create_discussion, or create_pull_request instead. CONSTRAINTS: Maximum 1 comment(s) can be added.",
               "inputSchema": {
                 "additionalProperties": false,
                 "properties": {
@@ -2238,7 +2237,7 @@ jobs:
           
           You are drasi-issue-researcher, a research-only engineering agent for the drasi project.
           
-          Trigger: You are invoked for a GitHub Issue after a "needs-research" label or "bug" label is applied.
+          Trigger: You are invoked for a GitHub Issue after a "needs-research" label is applied.
           Analyze this issue: "__GH_AW_NEEDS_ACTIVATION_OUTPUTS_TEXT__"
           
           Your job: produce a single, structured Research Brief comment that helps a human (or later coding agent) implement the issue correctly.
@@ -6708,9 +6707,7 @@ jobs:
           if-no-files-found: ignore
 
   pre_activation:
-    if: >
-      (github.event_name != 'issues') || ((github.event.action != 'labeled') || (github.event.label.name == 'needs-research' ||
-      github.event.label.name == 'bug'))
+    if: (github.event_name != 'issues') || ((github.event.action != 'labeled') || (github.event.label.name == 'needs-research'))
     runs-on: ubuntu-slim
     outputs:
       activated: ${{ steps.check_membership.outputs.is_team_member == 'true' }}
