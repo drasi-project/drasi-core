@@ -14,75 +14,12 @@
 
 //! Configuration for the MS SQL Server Stored Procedure reaction.
 
+use drasi_lib::reactions::common::{self, TemplateRouting};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Template specification for a single operation type
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TemplateSpec {
-    pub template: String,
-}
-
-/// Query-specific configuration with templates for each operation type
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct QueryConfig {
-    pub added: Option<TemplateSpec>,
-    pub updated: Option<TemplateSpec>,
-    pub deleted: Option<TemplateSpec>,
-}
-
-/// Operation types for change events
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OperationType {
-    Add,
-    Update,
-    Delete,
-}
-
-impl std::str::FromStr for OperationType {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "insert" => Ok(OperationType::Add),
-            "update" => Ok(OperationType::Update),
-            "delete" => Ok(OperationType::Delete),
-            _ => anyhow::bail!("Invalid operation type: {}", s),
-        }
-    }
-}
-
-impl std::fmt::Display for OperationType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            OperationType::Add => write!(f, "insert"),
-            OperationType::Update => write!(f, "update"),
-            OperationType::Delete => write!(f, "delete"),
-        }
-    }
-}
-
-/// Trait for reaction configurations that support template routing
-pub trait TemplateRouting {
-    fn routes(&self) -> &HashMap<String, QueryConfig>;
-    fn default_template(&self) -> Option<&QueryConfig>;
-
-    /// Get the template spec for a specific query and operation
-    fn get_template_spec(&self, query_id: &str, operation: OperationType) -> Option<&TemplateSpec> {
-        // First check if there's a route for this query
-        let config = self
-            .routes()
-            .get(query_id)
-            .or_else(|| self.default_template())?;
-
-        // Get the appropriate template based on operation type
-        match operation {
-            OperationType::Add => config.added.as_ref(),
-            OperationType::Update => config.updated.as_ref(),
-            OperationType::Delete => config.deleted.as_ref(),
-        }
-    }
-}
+// Re-export common template types for public API
+pub use common::{OperationType, QueryConfig, TemplateSpec};
 
 /// Configuration for the MS SQL Server Stored Procedure reaction
 ///

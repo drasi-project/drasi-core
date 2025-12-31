@@ -22,12 +22,13 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
+use drasi_lib::channels::ComponentStatus;
+use drasi_lib::context::ReactionRuntimeContext;
 use drasi_lib::managers::log_component_start;
-use drasi_lib::plugin_core::{QuerySubscriber, Reaction};
-use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
+use drasi_lib::reactions::common::OperationType;
+use drasi_lib::reactions::{QueryProvider, Reaction, ReactionBase, ReactionBaseParams};
 
-use crate::config::{MsSqlStoredProcReactionConfig, OperationType, QueryConfig};
+use crate::config::{MsSqlStoredProcReactionConfig, QueryConfig};
 use crate::executor::MsSqlExecutor;
 use crate::parser::ParameterParser;
 
@@ -294,12 +295,8 @@ impl Reaction for MsSqlStoredProcReaction {
         self.base.get_auto_start()
     }
 
-    async fn inject_query_subscriber(&self, query_subscriber: Arc<dyn QuerySubscriber>) {
-        self.base.inject_query_subscriber(query_subscriber).await;
-    }
-
-    async fn inject_event_tx(&self, event_tx: ComponentEventSender) {
-        self.base.inject_event_tx(event_tx).await;
+    async fn initialize(&self, context: ReactionRuntimeContext) {
+        self.base.initialize(context).await;
     }
 
     async fn start(&self) -> Result<()> {
