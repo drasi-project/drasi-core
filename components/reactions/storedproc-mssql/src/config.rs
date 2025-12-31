@@ -15,8 +15,131 @@
 //! Configuration for the MS SQL Server Stored Procedure reaction.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// Template specification for a single operation type
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemplateSpec {
+    pub template: String,
+}
+
+/// Query-specific configuration with templates for each operation type
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct QueryConfig {
+    pub added: Option<TemplateSpec>,
+    pub updated: Option<TemplateSpec>,
+    pub deleted: Option<TemplateSpec>,
+}
+
+/// Operation types for change events
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationType {
+    Add,
+    Update,
+    Delete,
+}
+
+impl std::str::FromStr for OperationType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "insert" => Ok(OperationType::Add),
+            "update" => Ok(OperationType::Update),
+            "delete" => Ok(OperationType::Delete),
+            _ => anyhow::bail!("Invalid operation type: {}", s),
+        }
+    }
+}
+
+impl std::fmt::Display for OperationType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OperationType::Add => write!(f, "insert"),
+            OperationType::Update => write!(f, "update"),
+            OperationType::Delete => write!(f, "delete"),
+        }
+    }
+}
+
+/// Trait for reaction configurations that support template routing
+pub trait TemplateRouting {
+    fn routes(&self) -> &HashMap<String, QueryConfig>;
+    fn default_template(&self) -> Option<&QueryConfig>;
+
+    /// Get the template spec for a specific query and operation
+    fn get_template_spec(&self, query_id: &str, operation: OperationType) -> Option<&TemplateSpec> {
+        // First check if there's a route for this query
+        let config = self
+            .routes()
+            .get(query_id)
+            .or_else(|| self.default_template())?;
+
+        // Get the appropriate template based on operation type
+        match operation {
+            OperationType::Add => config.added.as_ref(),
+            OperationType::Update => config.updated.as_ref(),
+            OperationType::Delete => config.deleted.as_ref(),
+        }
+    }
+}
 
 /// Configuration for the MS SQL Server Stored Procedure reaction
+///
+/// Supports Handlebars templates for stored procedure commands.
+/// Commands use @after.fieldName and @before.fieldName syntax to reference query result fields.
+///
+/// Commands can be configured at two levels:
+/// 1. **Default templates**: Applied to all queries unless overridden (using `default_template`)
+/// 2. **Per-query templates**: Override default for specific queries (using `routes`)
+///
+/// ## Template Variables
+///
+/// Templates have access to the following variables:
+/// - `after` - The data after the change (available for ADD and UPDATE)
+/// - `before` - The data before the change (available for UPDATE and DELETE)
+/// - `data` - The raw data field (available for UPDATE)
+/// - `query_name` - The name of the query that produced the result
+/// - `operation` - The operation type ("ADD", "UPDATE", or "DELETE")
+///
+/// ## Example with Default Template
+///
+/// ```rust,ignore
+/// let config = MsSqlStoredProcReactionConfig {
+///     hostname: "localhost".to_string(),
+///     database: "mydb".to_string(),
+///     user: "sa".to_string(),
+///     password: "password".to_string(),
+///     default_template: Some(QueryConfig {
+///         added: Some(TemplateSpec::new("EXEC add_user @after.id, @after.name, @after.email")),
+///         updated: Some(TemplateSpec::new("EXEC update_user @after.id, @after.name, @after.email")),
+///         deleted: Some(TemplateSpec::new("EXEC delete_user @before.id")),
+///     }),
+///     ..Default::default()
+/// };
+/// ```
+///
+/// ## Example with Per-Query Templates
+///
+/// ```rust,ignore
+/// use std::collections::HashMap;
+///
+/// let mut routes = HashMap::new();
+/// routes.insert("user-query".to_string(), QueryConfig {
+///     added: Some(TemplateSpec::new("EXEC add_user @after.id, @after.name, @after.email")),
+///     updated: Some(TemplateSpec::new("EXEC update_user @after.id, @after.name, @after.email")),
+///     deleted: Some(TemplateSpec::new("EXEC delete_user @before.id")),
+/// });
+///
+/// let config = MsSqlStoredProcReactionConfig {
+///     hostname: "localhost".to_string(),
+///     database: "mydb".to_string(),
+///     user: "sa".to_string(),
+///     password: "password".to_string(),
+///     routes,
+///     ..Default::default()
+/// };
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MsSqlStoredProcReactionConfig {
     /// Database hostname or IP address
@@ -40,23 +163,13 @@ pub struct MsSqlStoredProcReactionConfig {
     #[serde(default)]
     pub ssl: bool,
 
-    /// Stored procedure command for added results
-    /// Use @fieldName to reference query result fields
-    /// Example: "EXEC add_user @id, @name, @email"
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub added_command: Option<String>,
+    /// Query-specific template configurations for stored procedure commands
+    #[serde(default)]
+    pub routes: HashMap<String, QueryConfig>,
 
-    /// Stored procedure command for updated results
-    /// Use @fieldName to reference query result fields
-    /// Example: "EXEC update_user @id, @name, @email"
+    /// Default template configuration used when no query-specific route is defined.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub updated_command: Option<String>,
-
-    /// Stored procedure command for deleted results
-    /// Use @fieldName to reference query result fields
-    /// Example: "EXEC delete_user @id"
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deleted_command: Option<String>,
+    pub default_template: Option<QueryConfig>,
 
     /// Command timeout in milliseconds
     #[serde(default = "default_timeout_ms")]
@@ -76,12 +189,21 @@ impl Default for MsSqlStoredProcReactionConfig {
             password: String::new(),
             database: String::new(),
             ssl: false,
-            added_command: None,
-            updated_command: None,
-            deleted_command: None,
+            routes: HashMap::new(),
+            default_template: None,
             command_timeout_ms: default_timeout_ms(),
             retry_attempts: default_retry_attempts(),
         }
+    }
+}
+
+impl TemplateRouting for MsSqlStoredProcReactionConfig {
+    fn routes(&self) -> &HashMap<String, QueryConfig> {
+        &self.routes
+    }
+
+    fn default_template(&self) -> Option<&QueryConfig> {
+        self.default_template.as_ref()
     }
 }
 
@@ -104,6 +226,20 @@ impl MsSqlStoredProcReactionConfig {
         self.port.unwrap_or(1433)
     }
 
+    /// Get the command template for a specific query and operation type
+    ///
+    /// Priority order:
+    /// 1. Query-specific route template
+    /// 2. Default template
+    pub fn get_command_template(&self, query_id: &str, operation: OperationType) -> Option<String> {
+        // Try to get from routes or default_template first
+        let spec = self.get_template_spec(query_id, operation);
+        if let Some(spec) = spec {
+            return Some(spec.template.clone());
+        }
+        None
+    }
+
     /// Validate the configuration
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.user.is_empty() {
@@ -112,12 +248,17 @@ impl MsSqlStoredProcReactionConfig {
         if self.database.is_empty() {
             anyhow::bail!("Database name is required");
         }
-        if self.added_command.is_none()
-            && self.updated_command.is_none()
-            && self.deleted_command.is_none()
-        {
-            anyhow::bail!("At least one command (added, updated, or deleted) must be specified");
+
+        // Check if at least one command is configured
+        let has_routes = !self.routes.is_empty();
+        let has_default_template = self.default_template.is_some();
+
+        if !has_routes && !has_default_template {
+            anyhow::bail!(
+                "At least one command must be specified (via routes or default_template)"
+            );
         }
+
         Ok(())
     }
 }

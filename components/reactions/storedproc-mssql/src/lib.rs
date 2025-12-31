@@ -21,14 +21,24 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use drasi_reaction_storedproc_mssql::MsSqlStoredProcReaction;
+//! use drasi_reaction_storedproc_mssql::{MsSqlStoredProcReaction, QueryConfig, TemplateSpec};
+//!
+//! let default_template = QueryConfig {
+//!     added: Some(TemplateSpec {
+//!         template: "EXEC add_user @after.id, @after.name, @after.email".to_string(),
+//!     }),
+//!     updated: Some(TemplateSpec {
+//!         template: "EXEC update_user @after.id, @after.name, @after.email".to_string(),
+//!     }),
+//!     deleted: Some(TemplateSpec {
+//!         template: "EXEC delete_user @before.id".to_string(),
+//!     }),
+//! };
 //!
 //! let reaction = MsSqlStoredProcReaction::builder("user-sync")
 //!     .with_connection("localhost", 1433, "mydb", "sa", "password")
 //!     .with_query("user-changes")
-//!     .with_added_command("EXEC add_user @id, @name, @email")
-//!     .with_updated_command("EXEC update_user @id, @name, @email")
-//!     .with_deleted_command("EXEC delete_user @id")
+//!     .with_default_template(default_template)
 //!     .build()?;
 //! ```
 
@@ -37,5 +47,5 @@ pub mod executor;
 pub mod parser;
 pub mod reaction;
 
-pub use config::MsSqlStoredProcReactionConfig;
+pub use config::{MsSqlStoredProcReactionConfig, QueryConfig, TemplateSpec};
 pub use reaction::MsSqlStoredProcReaction;

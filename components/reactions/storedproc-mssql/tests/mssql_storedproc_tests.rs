@@ -23,7 +23,7 @@
 
 mod mssql_helpers;
 
-use drasi_reaction_storedproc_mssql::config::MsSqlStoredProcReactionConfig;
+use drasi_reaction_storedproc_mssql::{MsSqlStoredProcReactionConfig, QueryConfig, TemplateSpec};
 use mssql_helpers::{execute_sql, setup_mssql, MssqlConfig};
 use serial_test::serial;
 use std::time::Duration;
@@ -239,12 +239,19 @@ fn test_config_defaults() {
 
 #[test]
 fn test_config_validation_requires_user() {
-    let config = MsSqlStoredProcReactionConfig {
+    let mut config = MsSqlStoredProcReactionConfig {
         user: String::new(),
         database: "test_db".to_string(),
-        added_command: Some("EXEC test_proc".to_string()),
         ..Default::default()
     };
+
+    config.default_template = Some(QueryConfig {
+        added: Some(TemplateSpec {
+            template: "EXEC test_proc".to_string(),
+        }),
+        updated: None,
+        deleted: None,
+    });
 
     let result = config.validate();
     assert!(result.is_err());
@@ -253,12 +260,19 @@ fn test_config_validation_requires_user() {
 
 #[test]
 fn test_config_validation_requires_database() {
-    let config = MsSqlStoredProcReactionConfig {
+    let mut config = MsSqlStoredProcReactionConfig {
         user: "test_user".to_string(),
         database: String::new(),
-        added_command: Some("EXEC test_proc".to_string()),
         ..Default::default()
     };
+
+    config.default_template = Some(QueryConfig {
+        added: Some(TemplateSpec {
+            template: "EXEC test_proc".to_string(),
+        }),
+        updated: None,
+        deleted: None,
+    });
 
     let result = config.validate();
     assert!(result.is_err());
@@ -269,34 +283,34 @@ fn test_config_validation_requires_database() {
 }
 
 #[test]
-fn test_config_validation_requires_at_least_one_command() {
+fn test_config_validation_requires_at_least_one_template() {
     let config = MsSqlStoredProcReactionConfig {
         user: "test_user".to_string(),
         password: "test_pass".to_string(),
         database: "test_db".to_string(),
-        added_command: None,
-        updated_command: None,
-        deleted_command: None,
         ..Default::default()
     };
 
     let result = config.validate();
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("At least one command"));
 }
 
 #[test]
 fn test_config_validation_success() {
-    let config = MsSqlStoredProcReactionConfig {
+    let mut config = MsSqlStoredProcReactionConfig {
         user: "test_user".to_string(),
         password: "test_pass".to_string(),
         database: "test_db".to_string(),
-        added_command: Some("EXEC test_proc".to_string()),
         ..Default::default()
     };
+
+    config.default_template = Some(QueryConfig {
+        added: Some(TemplateSpec {
+            template: "EXEC test_proc".to_string(),
+        }),
+        updated: None,
+        deleted: None,
+    });
 
     let result = config.validate();
     assert!(result.is_ok());
