@@ -246,9 +246,7 @@ fn test_config_validation_requires_user() {
     };
 
     config.default_template = Some(QueryConfig {
-        added: Some(TemplateSpec {
-            template: "EXEC test_proc".to_string(),
-        }),
+        added: Some(TemplateSpec::new("EXEC test_proc")),
         updated: None,
         deleted: None,
     });
@@ -267,9 +265,7 @@ fn test_config_validation_requires_database() {
     };
 
     config.default_template = Some(QueryConfig {
-        added: Some(TemplateSpec {
-            template: "EXEC test_proc".to_string(),
-        }),
+        added: Some(TemplateSpec::new("EXEC test_proc")),
         updated: None,
         deleted: None,
     });
@@ -305,9 +301,7 @@ fn test_config_validation_success() {
     };
 
     config.default_template = Some(QueryConfig {
-        added: Some(TemplateSpec {
-            template: "EXEC test_proc".to_string(),
-        }),
+        added: Some(TemplateSpec::new("EXEC test_proc")),
         updated: None,
         deleted: None,
     });
