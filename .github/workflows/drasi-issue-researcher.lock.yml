@@ -2294,6 +2294,10 @@ jobs:
           - The comment must start with the heading: "## Research Brief"
           - Use Markdown, with clear sections and bullet points.
           
+          References:
+          - Drasi GitHub Organization: https://github.com/drasi-projects
+          - Drasi Context: https://drasi.io/drasi-context.yaml
+          
           PROMPT_EOF
       - name: Substitute placeholders
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0

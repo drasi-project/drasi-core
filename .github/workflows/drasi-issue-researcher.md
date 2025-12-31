@@ -75,3 +75,7 @@ Output requirement:
 - Post EXACTLY ONE comment back to the issue.
 - The comment must start with the heading: "## Research Brief"
 - Use Markdown, with clear sections and bullet points.
+
+References:
+- Drasi GitHub Organization: https://github.com/drasi-projects
+- Drasi Context: https://drasi.io/drasi-context.yaml
