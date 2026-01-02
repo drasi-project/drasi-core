@@ -51,10 +51,17 @@ members = [
   "examples/query",
   ]
 
+# Exclude internal crates from workspace packaging
+exclude = [
+  "shared-tests",
+  "query-perf",
+  "examples/query",
+]
+
 resolver = "2"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.1.0"
 
 [workspace.lints.rust]
 warnings = "deny"
