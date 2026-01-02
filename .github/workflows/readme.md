@@ -45,8 +45,8 @@ To modify or create agentic workflows, you'll need to:
 ### Available Agentic Workflows
 
 #### [drasi-issue-researcher.md](drasi-issue-researcher.md)
-- **Purpose**: Automatically researches GitHub issues labeled with "needs-research" or "bug" and posts a comprehensive Research Brief
-- **Trigger**: When a "needs-research" or "bug" label is applied to an issue
+- **Purpose**: Automatically researches GitHub issues labeled with "needs-research" and posts a comprehensive Research Brief
+- **Trigger**: When a "needs-research" label is applied to an issue
 - **Output**: Posts a detailed comment with problem analysis, relevant code locations, proposed approaches, and acceptance criteria
 
 ## Standard Workflows
