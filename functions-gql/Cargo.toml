@@ -7,7 +7,7 @@ edition = "2021"
 workspace = true
 
 [dependencies]
-drasi-core = { path = "../core" }
+drasi-core = { version = "0.1.0", path = "../core" }
 
 [dev-dependencies]
 tokio = { version = "1.29.1", features = ["full"] }

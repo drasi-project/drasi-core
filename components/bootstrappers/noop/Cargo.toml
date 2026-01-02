@@ -1,6 +1,6 @@
 [package]
 name = "drasi-bootstrap-noop"
-version = "0.2.0"
+version = "0.1.0"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "No-op bootstrap provider plugin for Drasi"
@@ -13,7 +13,7 @@ categories = ["development-tools"]
 workspace = true
 
 [dependencies]
-drasi-lib = { path = "../../../lib" }
+drasi-lib = { version = "0.1.0", path = "../../../lib" }
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
