@@ -77,10 +77,11 @@ jobs:
           key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-build-
-      - name: Install Rust and Cargo tarpaulin
-        run: |
-          rustup update 1.88.0 && rustup default 1.88.0
-          cargo install cargo-tarpaulin
+      - name: Show Rust toolchain
+        run: rustup show
+
+      - name: Install Cargo tarpaulin
+        run: cargo install cargo-tarpaulin
       
       - name: Clean build artifacts
         run: cargo clean
