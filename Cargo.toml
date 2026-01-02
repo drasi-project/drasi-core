@@ -36,6 +36,7 @@ members = [
   "components/reactions/application",
   "components/reactions/log",
   "components/reactions/storedproc-mssql",
+  "components/reactions/storedproc-mysql",
   "components/reactions/storedproc-postgres",
 
   # Index Plugins
