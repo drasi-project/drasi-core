@@ -187,8 +187,8 @@ async fn get_log_entries(config: &MssqlConfig) -> Vec<(String, String)> {
     let mut entries = Vec::new();
     if let Some(rows) = rows.first() {
         for row in rows {
-            let operation: &str = row.get(0).unwrap();
-            let sensor_id: &str = row.get(1).unwrap();
+            let operation: &str = row.get(0).expect("Failed to get operation from row");
+            let sensor_id: &str = row.get(1).expect("Failed to get sensor_id from row");
             entries.push((operation.to_string(), sensor_id.to_string()));
         }
     }
@@ -340,18 +340,18 @@ async fn test_mssql_connection() {
         let mssql = setup_mssql().await;
 
         // Verify we can connect
-        let mut client = mssql.get_client().await.unwrap();
+        let mut client = mssql.get_client().await.expect("Failed to get MSSQL client");
         let rows = client
             .query("SELECT 1 AS value", &[])
             .await
-            .unwrap()
+            .expect("Failed to execute query")
             .into_results()
             .await
-            .unwrap();
+            .expect("Failed to get results");
 
         if let Some(rows) = rows.first() {
             if let Some(row) = rows.first() {
-                let value: i32 = row.get(0).unwrap();
+                let value: i32 = row.get(0).expect("Failed to get value from row");
                 assert_eq!(value, 1);
             }
         }
@@ -383,7 +383,7 @@ async fn test_mssql_stored_procedures() {
         setup_stored_procedures(mssql_config).await;
 
         // Execute the stored procedure using parameterized query
-        let mut client = mssql.get_client().await.unwrap();
+        let mut client = mssql.get_client().await.expect("Failed to get MSSQL client");
 
         client
             .execute(
@@ -430,7 +430,7 @@ async fn test_mssql_multiple_operations() {
         let mssql_config = mssql.config();
         setup_stored_procedures(mssql_config).await;
 
-        let mut client = mssql.get_client().await.unwrap();
+        let mut client = mssql.get_client().await.expect("Failed to get MSSQL client");
 
         // Execute ADD
         client
@@ -495,7 +495,7 @@ async fn test_mssql_with_special_characters() {
         let mssql_config = mssql.config();
         setup_stored_procedures(mssql_config).await;
 
-        let mut client = mssql.get_client().await.unwrap();
+        let mut client = mssql.get_client().await.expect("Failed to get MSSQL client");
 
         // Test with special characters (potential SQL injection)
         client
