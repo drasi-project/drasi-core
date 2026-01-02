@@ -34,7 +34,7 @@ permissions:
 jobs:
   core_code_coverage:
     name: Generate Code Coverage for drasi-core
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-4-cores
     permissions:
       contents: read
     services:
@@ -82,9 +82,13 @@ jobs:
           rustup update 1.88.0 && rustup default 1.88.0
           cargo install cargo-tarpaulin
       
+      - name: Clean build artifacts
+        run: cargo clean
+      
       - name: Generate Code Coverage
         env:
           REDIS_URL: redis://localhost:6379
+          CARGO_INCREMENTAL: 0
         run: |
           cargo tarpaulin --release --out Xml
           mv cobertura.xml drasi-core-tarpaulin-report.xml

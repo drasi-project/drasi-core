@@ -175,9 +175,9 @@ use drasi_lib::channels::{
     ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, ControlOperation,
     DispatchMode, SourceControl, SourceEvent, SourceEventWrapper, SubscriptionResponse,
 };
-use drasi_lib::plugin_core::Source;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::manager::convert_json_to_element_properties;
+use drasi_lib::Source;
 
 #[cfg(test)]
 mod tests;
@@ -1140,7 +1140,7 @@ impl Source for PlatformSource {
             self.base.id.clone(),
             platform_config,
             self.base.dispatchers.clone(),
-            self.base.event_tx(),
+            self.base.status_tx(),
             self.base.status.clone(),
         )
         .await;
@@ -1181,8 +1181,8 @@ impl Source for PlatformSource {
         self
     }
 
-    async fn inject_event_tx(&self, tx: ComponentEventSender) {
-        self.base.inject_event_tx(tx).await;
+    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.initialize(context).await;
     }
 
     async fn set_bootstrap_provider(

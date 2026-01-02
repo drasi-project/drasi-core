@@ -14,9 +14,13 @@
 
 pub mod common;
 pub mod manager;
+mod traits;
 
 #[cfg(test)]
 mod tests;
+
+// Re-export the Reaction and QueryProvider traits
+pub use traits::{QueryProvider, Reaction};
 
 pub use common::base::{ReactionBase, ReactionBaseParams};
 pub use manager::ReactionManager;

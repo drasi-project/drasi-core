@@ -71,14 +71,14 @@ DrasiLib has no knowledge of which plugins exist - it only knows about the `Sour
 
 ## The Source Trait
 
-All sources must implement the `Source` trait from `drasi_lib::plugin_core`:
+All sources must implement the `Source` trait from `drasi_lib`:
 
 ```rust
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_lib::channels::*;
 use drasi_lib::config::SourceSubscriptionSettings;
-use drasi_lib::plugin_core::Source;
+use drasi_lib::Source;
 use std::collections::HashMap;
 
 #[async_trait]
@@ -131,9 +131,10 @@ pub trait Source: Send + Sync {
     /// Downcast helper for testing - allows access to concrete types
     fn as_any(&self) -> &dyn std::any::Any;
 
-    /// Inject the event channel for component lifecycle events.
+    /// Initialize the source with runtime context.
     /// Called automatically by DrasiLib when the source is added.
-    async fn inject_event_tx(&self, tx: ComponentEventSender);
+    /// The context provides access to DrasiLib services like status_tx and state_store.
+    async fn initialize(&self, context: SourceRuntimeContext);
 
     /// Set the bootstrap provider for this source.
     /// This method allows setting a bootstrap provider after source construction.
@@ -149,7 +150,7 @@ pub trait Source: Send + Sync {
 
 ### Key Design Points
 
-- **No event_tx in constructor**: Sources don't need the event channel during construction. DrasiLib automatically injects it when the source is added via `add_source()`.
+- **Context-based initialization**: Sources receive a `SourceRuntimeContext` via `initialize()` when added to DrasiLib. The context provides access to the status channel, state store, and other DrasiLib services.
 - **Async lifecycle**: All lifecycle methods (`start`, `stop`, `subscribe`) are async.
 - **Generic properties**: The `properties()` method returns a HashMap for API inspection, while the actual typed configuration is owned by the plugin.
 - **Query context in subscribe**: The `subscribe()` method receives `SourceSubscriptionSettings` which includes the specific node and relation labels the query needs, enabling sources and bootstrap providers to filter data at the source level.
@@ -276,9 +277,10 @@ impl SourceBase {
     pub async fn set_shutdown_tx(&self, tx: tokio::sync::oneshot::Sender<()>);
     pub async fn stop_common(&self) -> Result<()>;
 
-    // Event channel (injected by DrasiLib)
-    pub async fn inject_event_tx(&self, tx: ComponentEventSender);
-    pub fn event_tx(&self) -> Arc<RwLock<Option<ComponentEventSender>>>;
+    // Context initialization (called automatically by DrasiLib)
+    pub async fn initialize(&self, context: SourceRuntimeContext);
+    pub fn status_tx(&self) -> Arc<RwLock<Option<ComponentEventSender>>>;
+    pub async fn state_store(&self) -> Option<Arc<dyn StateStoreProvider>>;
 
     // Auto-start configuration
     pub fn get_auto_start(&self) -> bool;
@@ -645,7 +647,7 @@ use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
 use drasi_lib::channels::*;
-use drasi_lib::plugin_core::Source;
+use drasi_lib::Source;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use log::{debug, error, info};
 use std::collections::HashMap;
@@ -836,8 +838,8 @@ impl Source for MySource {
         self
     }
 
-    async fn inject_event_tx(&self, tx: ComponentEventSender) {
-        self.base.inject_event_tx(tx).await;
+    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.initialize(context).await;
     }
 
     async fn set_bootstrap_provider(
@@ -918,7 +920,7 @@ let core = DrasiLib::builder()
 
 ```rust
 use drasi_lib::DrasiLib;
-use drasi_lib::plugin_core::Source;  // Required for set_bootstrap_provider
+use drasi_lib::Source;  // Required for set_bootstrap_provider
 use my_source_plugin::{MySource, MySourceConfig};
 use drasi_bootstrap_scriptfile::ScriptFileBootstrapProvider;
 
@@ -1074,7 +1076,7 @@ async fn test_source_with_drasi() {
 
 | File | Description |
 |------|-------------|
-| `lib/src/plugin_core/source.rs` | `Source` trait definition |
+| `lib/src/sources/traits.rs` | `Source` trait definition |
 | `lib/src/sources/base.rs` | `SourceBase` implementation |
 | `lib/src/config/schema.rs` | `SourceSubscriptionSettings` and configuration types |
 | `lib/src/channels/events.rs` | Event types (`SourceChange`, `SourceEvent`, etc.) |
@@ -1098,7 +1100,7 @@ When creating a new source plugin:
   - [ ] `status()` - return current status
   - [ ] `subscribe(settings)` - handle query subscriptions with SourceSubscriptionSettings
   - [ ] `as_any()` - return self for downcasting
-  - [ ] `inject_event_tx()` - delegate to SourceBase
+  - [ ] `initialize(context)` - delegate to SourceBase
   - [ ] `set_bootstrap_provider()` - delegate to SourceBase (optional)
 - [ ] Use `SourceBase` for common functionality
 - [ ] Handle status transitions properly

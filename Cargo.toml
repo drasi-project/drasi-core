@@ -35,12 +35,16 @@ members = [
   "components/reactions/profiler",
   "components/reactions/application",
   "components/reactions/log",
+  "components/reactions/storedproc-postgres",
 
   # Index Plugins
   "components/indexes/rocksdb",
   "components/indexes/garnet",
 
-  # Internal (dev/test only - not published)
+  # State Store Plugins
+  "components/state_stores/redb",
+
+  # Internal
   "shared-tests",
   "query-perf",
   "examples/query",

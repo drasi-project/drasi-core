@@ -15,6 +15,7 @@
 pub mod base;
 pub mod future_queue_source;
 pub mod manager;
+mod traits;
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -31,6 +32,9 @@ pub trait Publisher: Send + Sync {
         change: SourceChange,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }
+
+// Re-export the Source trait
+pub use traits::Source;
 
 pub use base::{SourceBase, SourceBaseParams};
 pub use future_queue_source::{FutureQueueSource, FUTURE_QUEUE_SOURCE_ID};

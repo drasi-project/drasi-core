@@ -643,6 +643,6 @@ The internal batch channel capacity is automatically calculated as `max_batch_si
 ## See Also
 
 - [Drasi Core Documentation](../../README.md)
-- [Source Plugin API](../../../lib/src/plugin_core/source.rs)
+- [Source Plugin API](../../../lib/src/sources/traits.rs)
 - [Bootstrap Providers](../../../lib/src/bootstrap/)
 - [Continuous Queries](../../../query-cypher/)

@@ -214,7 +214,7 @@ Properties:
 
 ```rust
 use drasi_source_mock::MockSource;
-use drasi_lib::plugin_core::Source;
+use drasi_lib::Source;
 use std::sync::Arc;
 
 #[tokio::main]
@@ -284,7 +284,7 @@ async fn main() -> anyhow::Result<()> {
 ```rust
 use drasi_source_mock::{MockSource, MockSourceConfig};
 use drasi_lib::channels::SourceEvent;
-use drasi_lib::plugin_core::Source;
+use drasi_lib::Source;
 
 #[tokio::test]
 async fn test_sensor_data_generation() {

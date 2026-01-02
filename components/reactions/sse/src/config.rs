@@ -33,12 +33,11 @@ fn default_sse_host() -> String {
     "0.0.0.0".to_string()
 }
 
-/// Specification for SSE output template and path.
+/// SSE-specific extension for template specifications.
 ///
-/// This type is used to configure SSE templates for different operation types (added, updated, deleted).
-/// All template fields support Handlebars template syntax for dynamic content generation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct TemplateSpec {
+/// This extension adds path routing capabilities specific to SSE reactions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct SseExtension {
     /// Optional custom path for this specific template.
     /// If provided, events will be sent to this path. Absolute paths (starting with '/')
     /// are used as-is, while relative paths are appended to the base SSE path.
@@ -47,35 +46,23 @@ pub struct TemplateSpec {
     /// Supports Handlebars templates for dynamic paths.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-
-    /// Event data template as a Handlebars template.
-    /// Template context provides: `after`, `before`, `query_name`, `operation`, `timestamp`.
-    /// If this string is empty, each event uses the per-result default JSON format
-    /// with fields `queryId`, `result` (singular), and `timestamp`. This differs from
-    /// the global default (when no custom template is configured), which uses a
-    /// `results` array with multiple items.
-    #[serde(default)]
-    pub template: String,
 }
 
-/// Configuration for query-specific SSE output.
+/// Type alias for SSE template specification using the common generic type.
+///
+/// This includes both the template string and SSE-specific path field.
+/// Template context provides: `after`, `before`, `query_name`, `operation`, `timestamp`.
+/// If template string is empty, each event uses the per-result default JSON format
+/// with fields `queryId`, `result` (singular), and `timestamp`. This differs from
+/// the global default (when no custom template is configured), which uses a
+/// `results` array with multiple items.
+pub type TemplateSpec = drasi_lib::reactions::common::TemplateSpec<SseExtension>;
+
+/// Type alias for SSE query configuration using the common generic type.
 ///
 /// Defines different template specifications for each operation type (added, updated, deleted).
 /// Each operation type can have its own template and optionally its own endpoint.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct QueryConfig {
-    /// Template specification for ADD operations (new rows in query results).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub added: Option<TemplateSpec>,
-
-    /// Template specification for UPDATE operations (modified rows in query results).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub updated: Option<TemplateSpec>,
-
-    /// Template specification for DELETE operations (removed rows from query results).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deleted: Option<TemplateSpec>,
-}
+pub type QueryConfig = drasi_lib::reactions::common::QueryConfig<SseExtension>;
 
 /// SSE (Server-Sent Events) reaction configuration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -16,7 +16,7 @@
 
 use anyhow::Result;
 use drasi_lib::{DrasiLib, Query};
-use drasi_reaction_sse::{QueryConfig, SseReaction, TemplateSpec};
+use drasi_reaction_sse::{QueryConfig, SseExtension, SseReaction, TemplateSpec};
 use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
 use futures_util::StreamExt;
 use std::collections::HashMap;
@@ -156,16 +156,14 @@ async fn test_sse_custom_templates_integration() -> Result<()> {
 
     // Create SSE reaction with custom template
     let custom_config = QueryConfig {
-        added: Some(TemplateSpec {
-            path: None,
-            template: r#"{"event":"person_added","name":"{{after.name}}","age":{{after.age}}}"#
-                .to_string(),
-        }),
-        updated: Some(TemplateSpec {
-            path: None,
-            template: r#"{"event":"person_updated","name":"{{after.name}}","old_age":{{before.age}},"new_age":{{after.age}}}"#
-                .to_string(),
-        }),
+        added: Some(TemplateSpec::with_extension(
+            r#"{"event":"person_added","name":"{{after.name}}","age":{{after.age}}}"#,
+            SseExtension { path: None },
+        )),
+        updated: Some(TemplateSpec::with_extension(
+            r#"{"event":"person_updated","name":"{{after.name}}","old_age":{{before.age}},"new_age":{{after.age}}}"#,
+            SseExtension { path: None },
+        )),
         deleted: None,
     };
 
@@ -269,19 +267,23 @@ async fn test_sse_multi_path_integration() -> Result<()> {
 
     // Create SSE reaction with different paths for each query
     let person_config = QueryConfig {
-        added: Some(TemplateSpec {
-            path: Some("/persons".to_string()),
-            template: r#"{"type":"person","name":"{{after.name}}"}"#.to_string(),
-        }),
+        added: Some(TemplateSpec::with_extension(
+            r#"{"type":"person","name":"{{after.name}}"}"#,
+            SseExtension {
+                path: Some("/persons".to_string()),
+            },
+        )),
         updated: None,
         deleted: None,
     };
 
     let company_config = QueryConfig {
-        added: Some(TemplateSpec {
-            path: Some("/companies".to_string()),
-            template: r#"{"type":"company","name":"{{after.name}}"}"#.to_string(),
-        }),
+        added: Some(TemplateSpec::with_extension(
+            r#"{"type":"company","name":"{{after.name}}"}"#,
+            SseExtension {
+                path: Some("/companies".to_string()),
+            },
+        )),
         updated: None,
         deleted: None,
     };
