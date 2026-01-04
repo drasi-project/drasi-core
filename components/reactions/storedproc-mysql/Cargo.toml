@@ -13,32 +13,39 @@
 # limitations under the License.
 
 [package]
-name = "drasi-bootstrap-scriptfile"
+name = "drasi-reaction-storedproc-mysql"
 version = "0.1.0"
 edition = "2021"
 authors = ["Drasi Project"]
-description = "ScriptFile bootstrap plugin for Drasi"
+description = "MySQL Stored Procedure reaction plugin for Drasi"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
-keywords = ["drasi", "plugin", "bootstrap", "script"]
-categories = ["filesystem"]
+keywords = ["drasi", "plugin", "reaction", "mysql", "storedproc"]
+categories = ["database"]
+
+[dependencies]
+drasi-lib = { path = "../../../lib" }
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+async-trait = "0.1"
+
+# MySQL
+mysql_async = { version = "0.34", default-features = false, features = ["default"] }
+
+# Utilities
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+regex = "1.10"
+log = "0.4"
+anyhow = "1.0"
+
+[dev-dependencies]
+tokio-test = "0.4"
+env_logger = "0.10.0"
+serial_test = "3.0"
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["mysql"] }
 
 [lints]
 workspace = true
-
-[dependencies]
-drasi-lib = { version = "0.1.0", path = "../../../lib" }
-drasi-core = { version = "0.1.0", path = "../../../core" }
-anyhow = "1.0"
-async-trait = "0.1"
-log = "0.4"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-chrono = "0.4"
-uuid = { version = "1.0", features = ["v4"] }
-tokio-stream = "0.1"
-prost-types = "0.12"
-ordered-float = "3.0"
-tokio-postgres = "0.7"
-postgres-types = "0.2"
-redis = { version = "0.25", features = ["tokio-comp"] }
