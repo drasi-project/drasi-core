@@ -26,6 +26,9 @@ use tokio::time::timeout;
 use tokio_postgres::types::{to_sql_checked, IsNull, ToSql, Type};
 use tokio_postgres::{Client, NoTls};
 
+use native_tls::TlsConnector;
+use postgres_native_tls::MakeTlsConnector;
+
 use crate::config::PostgresStoredProcReactionConfig;
 
 /// Wrapper enum for SQL parameters that implements ToSql
@@ -124,28 +127,59 @@ impl PostgresExecutor {
             config.hostname, port, config.database
         );
 
-        // Connect to database
-        let (client, connection) = tokio_postgres::connect(&connection_string, NoTls)
-            .await
-            .map_err(|e| anyhow!("Failed to connect to database: {e}"))?;
+        // Connect to database with appropriate TLS configuration
+        if config.ssl {
+            // Use native TLS for secure connections
+            let tls_connector = TlsConnector::builder()
+                .build()
+                .map_err(|e| anyhow!("Failed to build TLS connector: {e}"))?;
+            let tls = MakeTlsConnector::new(tls_connector);
 
-        // Spawn connection handler
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                log::error!("PostgreSQL connection error: {e}");
-            }
-        });
+            let (client, connection) = tokio_postgres::connect(&connection_string, tls)
+                .await
+                .map_err(|e| anyhow!("Failed to connect to database: {e}"))?;
 
-        info!(
-            "Connected to PostgreSQL: {}:{}/{}",
-            config.hostname, port, config.database
-        );
+            // Spawn connection handler
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    log::error!("PostgreSQL connection error: {e}");
+                }
+            });
 
-        Ok(Self {
-            client: Arc::new(RwLock::new(client)),
-            command_timeout: Duration::from_millis(config.command_timeout_ms),
-            retry_attempts: config.retry_attempts,
-        })
+            info!(
+                "Connected to PostgreSQL: {}:{}/{} (SSL enabled)",
+                config.hostname, port, config.database
+            );
+
+            Ok(Self {
+                client: Arc::new(RwLock::new(client)),
+                command_timeout: Duration::from_millis(config.command_timeout_ms),
+                retry_attempts: config.retry_attempts,
+            })
+        } else {
+            // Use NoTls for non-secure connections
+            let (client, connection) = tokio_postgres::connect(&connection_string, NoTls)
+                .await
+                .map_err(|e| anyhow!("Failed to connect to database: {e}"))?;
+
+            // Spawn connection handler
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    log::error!("PostgreSQL connection error: {e}");
+                }
+            });
+
+            info!(
+                "Connected to PostgreSQL: {}:{}/{} (SSL disabled)",
+                config.hostname, port, config.database
+            );
+
+            Ok(Self {
+                client: Arc::new(RwLock::new(client)),
+                command_timeout: Duration::from_millis(config.command_timeout_ms),
+                retry_attempts: config.retry_attempts,
+            })
+        }
     }
 
     /// Test the database connection
