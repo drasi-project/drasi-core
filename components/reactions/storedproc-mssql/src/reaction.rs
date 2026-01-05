@@ -381,7 +381,7 @@ impl MsSqlStoredProcReactionBuilder {
         self.config.port = Some(port);
         self.config.database = database.into();
         self.config.user = user.into();
-        self.config.password = password.into();
+        self.config.password = Some(password.into());
         self
     }
 
@@ -409,9 +409,15 @@ impl MsSqlStoredProcReactionBuilder {
         self
     }
 
-    /// Set the database password
+    /// Set the database password (for SQL Server authentication)
     pub fn with_password(mut self, password: impl Into<String>) -> Self {
-        self.config.password = password.into();
+        self.config.password = Some(password.into());
+        self
+    }
+
+    /// Set the Azure AD token (for Azure AD authentication)
+    pub fn with_aad_token(mut self, token: impl Into<String>) -> Self {
+        self.config.aad_token = Some(token.into());
         self
     }
 
