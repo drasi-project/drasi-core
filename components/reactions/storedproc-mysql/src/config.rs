@@ -100,6 +100,10 @@ pub struct MySqlStoredProcReactionConfig {
     #[serde(default)]
     pub ssl: bool,
 
+    /// Enable cleartext password plugin (required for Azure AD authentication)
+    #[serde(default)]
+    pub enable_cleartext_plugin: bool,
+
     /// Query-specific template configurations for stored procedure commands
     #[serde(default)]
     pub routes: HashMap<String, QueryConfig>,
@@ -126,6 +130,7 @@ impl Default for MySqlStoredProcReactionConfig {
             password: String::new(),
             database: String::new(),
             ssl: false,
+            enable_cleartext_plugin: false,
             routes: HashMap::new(),
             default_template: None,
             command_timeout_ms: default_timeout_ms(),

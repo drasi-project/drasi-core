@@ -414,6 +414,12 @@ impl MySqlStoredProcReactionBuilder {
         self
     }
 
+    /// Enable or disable cleartext password plugin (required for Azure AD authentication)
+    pub fn with_cleartext_plugin(mut self, enable: bool) -> Self {
+        self.config.enable_cleartext_plugin = enable;
+        self
+    }
+
     /// Set the default template configuration
     pub fn with_default_template(mut self, template: QueryConfig) -> Self {
         self.config.default_template = Some(template);

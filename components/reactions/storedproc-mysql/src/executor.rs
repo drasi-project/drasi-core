@@ -54,6 +54,11 @@ impl MySqlExecutor {
             opts_builder = opts_builder.ssl_opts(Some(SslOpts::default()));
         }
 
+        // Enable cleartext plugin if configured (required for Azure AD authentication)
+        if config.enable_cleartext_plugin {
+            opts_builder = opts_builder.enable_cleartext_plugin(true);
+        }
+
         // Create connection pool
         let pool = Pool::new(opts_builder);
 
