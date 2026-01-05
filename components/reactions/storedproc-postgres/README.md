@@ -18,6 +18,9 @@ Add the dependency to your `Cargo.toml`:
 ```toml
 [dependencies]
 drasi-reaction-storedproc-postgres = { path = "path/to/drasi-core/components/reactions/storedproc-postgres" }
+
+# For Azure AD authentication support:
+drasi-auth-azure = { path = "path/to/drasi-core/components/auth/azure" }
 ```
 
 ## Quick Start
@@ -42,11 +45,7 @@ $$;
 ### 2. Create the Reaction
 
 ```rust
-<<<<<<< HEAD
-use drasi_reaction_storedproc_postgres::PostgresStoredProcReaction;
-=======
 use drasi_reaction_storedproc_postgres::{PostgresStoredProcReaction, QueryConfig, TemplateSpec};
->>>>>>> feature-lib
 use drasi_lib::DrasiLib;
 
 #[tokio::main]
@@ -60,17 +59,11 @@ async fn main() -> anyhow::Result<()> {
             "password"
         )
         .with_query("user-changes")
-<<<<<<< HEAD
-        .with_added_command("CALL add_user(@id, @name, @email)")
-        .with_updated_command("CALL update_user(@id, @name, @email)")
-        .with_deleted_command("CALL delete_user(@id)")
-=======
         .with_default_template(QueryConfig {
             added: Some(TemplateSpec::new("CALL add_user(@after.id, @after.name, @after.email)")),
             updated: Some(TemplateSpec::new("CALL update_user(@after.id, @after.name, @after.email)")),
             deleted: Some(TemplateSpec::new("CALL delete_user(@before.id)")),
         })
->>>>>>> feature-lib
         .build()
         .await?;
 
@@ -100,17 +93,11 @@ let reaction = PostgresStoredProcReaction::builder("my-reaction")
     .with_password("secret")
     .with_ssl(true)  // Enable SSL/TLS
     .with_query("query1")
-<<<<<<< HEAD
-    .with_added_command("CALL add_record(@id, @name)")
-    .with_updated_command("CALL update_record(@id, @name)")
-    .with_deleted_command("CALL delete_record(@id)")
-=======
     .with_default_template(QueryConfig {
         added: Some(TemplateSpec::new("CALL add_record(@after.id, @after.name)")),
         updated: Some(TemplateSpec::new("CALL update_record(@after.id, @after.name)")),
         deleted: Some(TemplateSpec::new("CALL delete_record(@before.id)")),
     })
->>>>>>> feature-lib
     .with_command_timeout_ms(30000)
     .with_retry_attempts(3)
     .build()
@@ -127,28 +114,153 @@ let reaction = PostgresStoredProcReaction::builder("my-reaction")
 | `password` | Database password | `String` | Required |
 | `database` | Database name | `String` | Required |
 | `ssl` | Enable SSL/TLS | `bool` | `false` |
-<<<<<<< HEAD
-| `added_command` | Procedure for ADD operations | `Option<String>` | `None` |
-| `updated_command` | Procedure for UPDATE operations | `Option<String>` | `None` |
-| `deleted_command` | Procedure for DELETE operations | `Option<String>` | `None` |
-=======
 | `default_template` | Default templates for all queries | `Option<QueryConfig>` | `None` |
 | `routes` | Query-specific template overrides | `HashMap<String, QueryConfig>` | Empty |
->>>>>>> feature-lib
 | `command_timeout_ms` | Command timeout | `u64` | `30000` |
 | `retry_attempts` | Number of retries | `u32` | `3` |
 
-## Parameter Mapping
+## Authentication
 
-<<<<<<< HEAD
-Use the `@fieldName` syntax to reference fields from query results:
+The PostgreSQL Stored Procedure reaction supports two authentication methods:
+
+### Password Authentication (Traditional)
+
+Use username and password credentials:
 
 ```rust
-.with_added_command("CALL add_user(@id, @name, @email)")
+let reaction = PostgresStoredProcReaction::builder("my-reaction")
+    .with_hostname("localhost")
+    .with_port(5432)
+    .with_database("mydb")
+    .with_user("postgres")
+    .with_password("secret")
+    .build()
+    .await?;
 ```
 
-Query result:
-=======
+### Azure AD Authentication with Default Credentials
+
+For Azure Database for PostgreSQL, you can use Azure AD authentication with `DefaultAzureCredential`. This method automatically tries multiple authentication mechanisms in order:
+
+1. **Managed Identity** - for production in Azure
+2. **Azure CLI** (`az login`) - for local development
+3. **Azure PowerShell**
+4. **Interactive browser**
+
+#### Azure Portal Setup
+
+1. **Configure Azure AD Admin:**
+   - Navigate to: Azure Portal → PostgreSQL Server → Settings → Authentication
+   - Set authentication method to "Azure AD authentication only" or "PostgreSQL and Azure AD authentication"
+   - Add your Azure AD account as admin
+
+2. **Configure Firewall Rules:**
+   - Navigate to: Azure Portal → PostgreSQL Server → Settings → Networking
+   - Add your client IP address to the firewall rules
+   - For local development, add your current IP address
+   - For production, add your Azure resource's IP range or enable "Allow Azure services and resources to access this server"
+
+3. **No additional SQL setup needed** - Azure AD admins automatically have full access
+
+#### Code Configuration
+
+```rust
+use drasi_auth_azure::get_postgres_token_with_default_credential;
+use drasi_reaction_storedproc_postgres::PostgresStoredProcReaction;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Get Azure AD token
+    let token = get_postgres_token_with_default_credential().await?;
+
+    let reaction = PostgresStoredProcReaction::builder("my-reaction")
+        .with_hostname("server.postgres.database.azure.com")
+        .with_port(5432)
+        .with_database("drasi_test")
+        // Username format depends on authentication method:
+        // - Local dev (az login): use your email (e.g., "user@<domain>.com")
+        // - Managed Identity: use the identity name (e.g., "my-app-identity")
+        .with_user("user@<domain>.com")
+        .with_aad_token(&token)             // Use token instead of password
+        .with_ssl(true)                     // Required for Azure PostgreSQL
+        .with_query("my-query")
+        .with_default_template(QueryConfig {
+            added: Some(TemplateSpec::new("CALL add_record(@after.id)")),
+            updated: None,
+            deleted: None,
+        })
+        .build()
+        .await?;
+
+    // ... rest of your application
+    Ok(())
+}
+```
+
+**Key Requirements:**
+- Use `.with_aad_token(&token)` instead of `.with_password()`
+- Username format depends on your authentication method (see below)
+- SSL must be enabled with `.with_ssl(true)`
+- Token scope: `https://ossrdbms-aad.database.windows.net/.default`
+
+#### Local Development with Azure CLI
+
+The easiest way for local development is using Azure CLI:
+
+```bash
+# Login to Azure CLI with your Azure AD account
+az login
+
+# Verify you're logged in
+az account show
+```
+
+**Important:** When using `az login` for local development:
+- Use your **full email address** as the username (e.g., `user@<domain>.com`)
+- `DefaultAzureCredential` will automatically use your Azure CLI credentials
+- Ensure your Azure AD account is added as an admin in the PostgreSQL server
+
+#### Production Deployment with Managed Identity
+
+When running in Azure (App Service, AKS, VM, Container Apps, etc.):
+
+1. Enable Managed Identity on your Azure resource
+2. Grant the Managed Identity access to your PostgreSQL server as an Azure AD admin
+3. Use the **Managed Identity name** as the username (e.g., `my-app-identity`)
+4. `DefaultAzureCredential` automatically uses Managed Identity - no code changes needed
+5. No secrets to manage or rotate
+
+**Important:** When using Managed Identity:
+- Use the **identity name** as the username, not an email address
+- System-assigned identities typically use the resource name
+- User-assigned identities use the identity resource name
+- Example: `.with_user("my-app-identity")`
+
+#### Troubleshooting
+
+**"Access denied" Error**
+- Verify you're added as Azure AD admin in Azure Portal
+- Wait 1-2 minutes for changes to propagate
+- Ensure using correct username format (full email)
+
+**"Failed to get token"**
+```bash
+# Login to Azure CLI
+az login
+
+# Verify subscription
+az account show
+
+# If needed, set the correct subscription
+az account set --subscription "subscription-name"
+```
+
+**SSL Connection Errors**
+- Ensure `.with_ssl(true)` is set
+- Azure PostgreSQL requires SSL/TLS connections
+
+## Parameter Mapping
+
 Templates use the `@` syntax to reference fields from query results. The reaction provides different data contexts based on the operation type:
 
 - **ADD operations**: Use `@after.field` to access the new data
@@ -166,7 +278,6 @@ Templates use the `@` syntax to reference fields from query results. The reactio
 ```
 
 Query result for ADD operation:
->>>>>>> feature-lib
 ```json
 {
   "id": 1,
@@ -182,73 +293,6 @@ CALL add_user(1, 'Alice', 'alice@example.com')
 
 ### Nested Field Access
 
-<<<<<<< HEAD
-```rust
-.with_added_command("CALL add_address(@user.id, @address.city)")
-```
-
-## Azure Identity Authentication
-
-For Azure Database for PostgreSQL, you can use Azure Identity (Managed Identity, Service Principal, etc.) instead of password authentication.
-
-### Prerequisites
-
-Add the optional `azure` feature and the auth crate:
-
-```toml
-[dependencies]
-drasi-reaction-storedproc-postgres = { path = "...", features = ["azure"] }
-drasi-auth-azure = { path = "..." }
-```
-
-### Using Managed Identity
-
-```rust
-use drasi_reaction_storedproc_postgres::PostgresStoredProcReaction;
-use drasi_auth_azure::AzureIdentityAuth;
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Get an access token using Azure Managed Identity
-    let azure_auth = AzureIdentityAuth::managed_identity();
-    let token = azure_auth.get_postgres_token().await?;
-
-    // Use the token as the password
-    let reaction = PostgresStoredProcReaction::builder("user-sync")
-        .with_hostname("myserver.postgres.database.azure.com")
-        .with_port(5432)
-        .with_database("mydb")
-        .with_user("myuser@myserver")  // Format: identity-name@server-name
-        .with_password(token)  // Pass the token as password
-        .with_ssl(true)  // SSL required for Azure
-        .with_query("user-changes")
-        .with_added_command("CALL add_user(@id, @name, @email)")
-        .build()
-        .await?;
-
-    // ... rest of setup
-    Ok(())
-}
-```
-
-### Using Service Principal
-
-```rust
-use drasi_auth_azure::AzureIdentityAuth;
-
-// Get token using Service Principal
-let azure_auth = AzureIdentityAuth::service_principal(
-    "tenant-id",
-    "client-id",
-    "client-secret"
-);
-let token = azure_auth.get_postgres_token().await?;
-
-// Use token as password in reaction builder
-let reaction = PostgresStoredProcReaction::builder("user-sync")
-    .with_password(token)
-    // ... rest of configuration
-=======
 Access nested fields using dot notation:
 
 ```rust
@@ -279,35 +323,10 @@ let reaction = PostgresStoredProcReaction::builder("my-reaction")
         added: Some(TemplateSpec::new("CALL user_added(@after.id, @after.name)")),
         ..Default::default()  // updated and deleted will use default template
     })
->>>>>>> feature-lib
     .build()
     .await?;
 ```
 
-<<<<<<< HEAD
-### Convenience Helper Functions
-
-The `drasi-auth-azure` crate provides convenient helper functions:
-
-```rust
-use drasi_auth_azure::get_postgres_token_with_managed_identity;
-
-// Quick way to get a token with managed identity
-let token = get_postgres_token_with_managed_identity(None).await?;
-
-// Or with a specific client ID for user-assigned managed identity
-let token = get_postgres_token_with_managed_identity(
-    Some("my-client-id".to_string())
-).await?;
-```
-
-### Important Notes
-
-- When using Azure Identity, SSL must be enabled (`.with_ssl(true)`)
-- The username format should be: `identity-name@server-name`
-- For Managed Identity: the identity name is typically the VM/App Service name
-- Tokens expire and need to be refreshed periodically (consider implementing token refresh logic for long-running applications)
-=======
 ## Advanced Example: Partial Route Overrides
 
 This example shows how to override only specific operations for a query while falling back to defaults for others:
@@ -421,7 +440,6 @@ let reaction = PostgresStoredProcReaction::builder("multi-query-sync")
    - Delete: `CALL log_entity_deleted(@before.id, @before.type)`
 
 **Note:** If a route specifies `None` for an operation (like `deleted: None` for product-changes), the reaction will check the default template. If the default template also has `None` for that operation, no procedure will be called.
->>>>>>> feature-lib
 
 ## Error Handling
 

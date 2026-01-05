@@ -15,19 +15,16 @@
 //! Azure Identity authentication for Drasi components
 //!
 //! This crate provides authentication using Azure Identity credentials,
-//! supporting various credential types like Managed Identity, Service Principal,
-//! and DefaultAzureCredential.
+//! supporting DefaultAzureCredential (which includes Managed Identity, Azure CLI, etc.)
+//! and Service Principal authentication.
 //!
 //! # Example
 //!
 //! ```rust,ignore
 //! use drasi_auth_azure::AzureIdentityAuth;
 //!
-//! // Use DefaultAzureCredential
+//! // Use DefaultAzureCredential (automatically tries Managed Identity, Azure CLI, etc.)
 //! let auth = AzureIdentityAuth::default();
-//!
-//! // Use Managed Identity
-//! let auth = AzureIdentityAuth::managed_identity();
 //!
 //! // Get an access token
 //! let token = auth.get_token(&["https://database.windows.net/.default"]).await?;
@@ -46,13 +43,9 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AzureIdentityAuth {
-    /// Use DefaultAzureCredential (tries multiple credential types in order)
+    /// Use DefaultAzureCredential (tries multiple credential types in order:
+    /// Environment variables, Managed Identity, Azure CLI, Azure PowerShell, etc.)
     Default,
-    /// Use Managed Identity with optional client ID
-    ManagedIdentity {
-        /// Optional client ID for user-assigned managed identity
-        client_id: Option<String>,
-    },
     /// Use Service Principal (client credentials)
     ServicePrincipal {
         /// Azure AD tenant ID
@@ -71,18 +64,6 @@ impl Default for AzureIdentityAuth {
 }
 
 impl AzureIdentityAuth {
-    /// Create a managed identity configuration
-    pub fn managed_identity() -> Self {
-        Self::ManagedIdentity { client_id: None }
-    }
-
-    /// Create a managed identity configuration with a specific client ID
-    pub fn managed_identity_with_client(client_id: impl Into<String>) -> Self {
-        Self::ManagedIdentity {
-            client_id: Some(client_id.into()),
-        }
-    }
-
     /// Create a service principal configuration
     pub fn service_principal(
         tenant_id: impl Into<String>,
@@ -103,18 +84,6 @@ impl AzureIdentityAuth {
         match self {
             Self::Default => {
                 debug!("Building DefaultAzureCredential");
-                let credential = DefaultAzureCredential::create(TokenCredentialOptions::default())?;
-                Ok(Arc::new(credential))
-            }
-            Self::ManagedIdentity { client_id } => {
-                debug!("Building ManagedIdentityCredential");
-
-                // If a client ID is provided, set it via environment variable
-                if let Some(id) = client_id {
-                    debug!("Using managed identity with client ID: {}", id);
-                    std::env::set_var("AZURE_CLIENT_ID", id);
-                }
-
                 let credential = DefaultAzureCredential::create(TokenCredentialOptions::default())?;
                 Ok(Arc::new(credential))
             }
@@ -177,27 +146,6 @@ impl AzureIdentityAuth {
     }
 }
 
-/// Helper function to get a PostgreSQL token using managed identity
-///
-/// This is a convenience function for the common case of using managed identity
-/// with Azure Database for PostgreSQL.
-///
-/// # Example
-/// ```rust,ignore
-/// let token = get_postgres_token_with_managed_identity(None).await?;
-/// // Use token as password in connection string
-/// ```
-pub async fn get_postgres_token_with_managed_identity(
-    client_id: Option<String>,
-) -> Result<String> {
-    let auth = if let Some(id) = client_id {
-        AzureIdentityAuth::managed_identity_with_client(id)
-    } else {
-        AzureIdentityAuth::managed_identity()
-    };
-    auth.get_postgres_token().await
-}
-
 /// Helper function to get a PostgreSQL token using default Azure credential
 ///
 /// This tries multiple credential types in order (environment, managed identity, etc.)
@@ -232,27 +180,6 @@ pub async fn get_postgres_token_with_service_principal(
     auth.get_postgres_token().await
 }
 
-/// Helper function to get a MySQL token using managed identity
-///
-/// This is a convenience function for the common case of using managed identity
-/// with Azure Database for MySQL.
-///
-/// # Example
-/// ```rust,ignore
-/// let token = get_mysql_token_with_managed_identity(None).await?;
-/// // Use token as password in connection string
-/// ```
-pub async fn get_mysql_token_with_managed_identity(
-    client_id: Option<String>,
-) -> Result<String> {
-    let auth = if let Some(id) = client_id {
-        AzureIdentityAuth::managed_identity_with_client(id)
-    } else {
-        AzureIdentityAuth::managed_identity()
-    };
-    auth.get_mysql_token().await
-}
-
 /// Helper function to get a MySQL token using default Azure credential
 ///
 /// This tries multiple credential types in order (environment, managed identity, Azure CLI, etc.)
@@ -285,27 +212,6 @@ pub async fn get_mysql_token_with_service_principal(
 ) -> Result<String> {
     let auth = AzureIdentityAuth::service_principal(tenant_id, client_id, client_secret);
     auth.get_mysql_token().await
-}
-
-/// Helper function to get an Azure SQL token using managed identity
-///
-/// This is a convenience function for the common case of using managed identity
-/// with Azure SQL Database.
-///
-/// # Example
-/// ```rust,ignore
-/// let token = get_sql_token_with_managed_identity(None).await?;
-/// // Use token as password in connection string
-/// ```
-pub async fn get_sql_token_with_managed_identity(
-    client_id: Option<String>,
-) -> Result<String> {
-    let auth = if let Some(id) = client_id {
-        AzureIdentityAuth::managed_identity_with_client(id)
-    } else {
-        AzureIdentityAuth::managed_identity()
-    };
-    auth.get_sql_token().await
 }
 
 /// Helper function to get an Azure SQL token using default Azure credential
@@ -350,20 +256,6 @@ mod tests {
     fn test_azure_identity_auth_constructors() {
         let default = AzureIdentityAuth::default();
         assert!(matches!(default, AzureIdentityAuth::Default));
-
-        let managed = AzureIdentityAuth::managed_identity();
-        assert!(matches!(
-            managed,
-            AzureIdentityAuth::ManagedIdentity { client_id: None }
-        ));
-
-        let managed_with_id = AzureIdentityAuth::managed_identity_with_client("test-client-id");
-        match managed_with_id {
-            AzureIdentityAuth::ManagedIdentity { client_id } => {
-                assert_eq!(client_id, Some("test-client-id".to_string()));
-            }
-            _ => panic!("Expected ManagedIdentity"),
-        }
 
         let sp = AzureIdentityAuth::service_principal("tenant", "client", "secret");
         match sp {

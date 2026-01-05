@@ -18,6 +18,9 @@ Add the dependency to your `Cargo.toml`:
 ```toml
 [dependencies]
 drasi-reaction-storedproc-mssql = { path = "path/to/drasi-core/components/reactions/storedproc-mssql" }
+
+# For Azure AD authentication support:
+drasi-auth-azure = { path = "path/to/drasi-core/components/auth/azure" }
 ```
 
 ## Quick Start
@@ -130,6 +133,161 @@ let reaction = MsSqlStoredProcReaction::builder("my-reaction")
 | `deleted_command` | Procedure for DELETE operations | `Option<String>` | `None` |
 | `command_timeout_ms` | Command timeout | `u64` | `30000` |
 | `retry_attempts` | Number of retries | `u32` | `3` |
+
+## Authentication
+
+The MS SQL Server Stored Procedure reaction supports two authentication methods:
+
+### Password Authentication (Traditional)
+
+Use username and password credentials:
+
+```rust
+let reaction = MsSqlStoredProcReaction::builder("my-reaction")
+    .with_hostname("localhost")
+    .with_port(1433)
+    .with_database("mydb")
+    .with_user("sa")
+    .with_password("YourPassword123!")
+    .build()
+    .await?;
+```
+
+### Azure AD Authentication with Default Credentials
+
+For Azure SQL Database, you can use Azure AD authentication with `DefaultAzureCredential`. This method automatically tries multiple authentication mechanisms in order:
+
+1. **Environment variables** (Service Principal) - for CI/CD
+2. **Managed Identity** - for production in Azure
+3. **Azure CLI** (`az login`) - for local development
+4. **Azure PowerShell**
+5. **Interactive browser**
+
+#### Azure Portal Setup
+
+1. **Configure Azure AD Admin:**
+   - Navigate to: Azure Portal → SQL Server → Settings → Azure Active Directory admin
+   - Click "Set admin"
+   - Add your Azure AD account
+   - Wait 1-2 minutes for propagation
+
+2. **Configure Firewall Rules:**
+   - Navigate to: Azure Portal → SQL Server → Security → Networking
+   - Add your client IP address to the firewall rules
+   - For local development, add your current IP address
+   - For production, add your Azure resource's IP range or enable "Allow Azure services and resources to access this server"
+
+3. **No additional SQL setup needed** - Azure AD admins automatically have full access
+
+#### Code Configuration
+
+```rust
+use drasi_auth_azure::get_sql_token_with_default_credential;
+use drasi_reaction_storedproc_mssql::MsSqlStoredProcReaction;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Get Azure AD token
+    let token = get_sql_token_with_default_credential().await?;
+
+    let reaction = MsSqlStoredProcReaction::builder("my-reaction")
+        .with_hostname("server.database.windows.net")
+        .with_port(1433)
+        .with_database("drasi_test")
+        // Username format depends on authentication method:
+        // - Local dev (az login): use your email (e.g., "user@<domain>.com")
+        // - Managed Identity: use the identity name (e.g., "my-app-identity")
+        .with_user("user@<domain>.com")
+        .with_aad_token(&token)           // Use token instead of password
+        .with_ssl(true)                   // Required for Azure SQL
+        .with_query("my-query")
+        .with_added_command("EXEC add_record @id")
+        .with_updated_command("EXEC update_record @id")
+        .with_deleted_command("EXEC delete_record @id")
+        .build()
+        .await?;
+
+    // ... rest of your application
+    Ok(())
+}
+```
+
+**Key Requirements:**
+- Use `.with_aad_token(&token)` instead of `.with_password()`
+- Username format depends on your authentication method (see below)
+- SSL is automatically enabled for Azure SQL
+- Token scope: `https://database.windows.net/.default`
+- Requires `tiberius` with `rustls` feature
+
+#### Local Development with Azure CLI
+
+The easiest way for local development is using Azure CLI:
+
+```bash
+# Login to Azure CLI with your Azure AD account
+az login
+
+# Verify you're logged in
+az account show
+```
+
+**Important:** When using `az login` for local development:
+- Use your **full email address** as the username (e.g., `user@<domain>.com`)
+- `DefaultAzureCredential` will automatically use your Azure CLI credentials
+- Ensure your Azure AD account is added as an admin in the SQL Server
+
+#### Production Deployment with Managed Identity
+
+When running in Azure (App Service, AKS, VM, Container Apps, etc.):
+
+1. Enable Managed Identity on your Azure resource
+2. Grant the Managed Identity access to your SQL Server as an Azure AD admin
+3. Use the **Managed Identity name** as the username (e.g., `my-app-identity`)
+4. `DefaultAzureCredential` automatically uses Managed Identity - no code changes needed
+5. No secrets to manage or rotate
+
+**Important:** When using Managed Identity:
+- Use the **identity name** as the username, not an email address
+- System-assigned identities typically use the resource name
+- User-assigned identities use the identity resource name
+- Example: `.with_user("my-app-identity")`
+
+#### CI/CD with Service Principal
+
+For automated deployments, use environment variables:
+
+```bash
+export AZURE_TENANT_ID="your-tenant-id"
+export AZURE_CLIENT_ID="your-client-id"
+export AZURE_CLIENT_SECRET="your-client-secret"
+```
+
+#### Troubleshooting
+
+**"Access denied" Error**
+- Verify you're added as Azure AD admin in Azure Portal
+- Wait 1-2 minutes for changes to propagate
+- Ensure using correct username format (email for local dev, identity name for managed identity)
+
+**"Failed to get token"**
+```bash
+# Login to Azure CLI
+az login
+
+# Verify subscription
+az account show
+
+# If needed, set the correct subscription
+az account set --subscription "subscription-name"
+```
+
+**"TLS encryption is not enabled"**
+- Ensure you have the `rustls` feature enabled for `tiberius` dependency
+- Update `Cargo.toml`: `tiberius = { version = "0.12", features = ["rustls"] }`
+
+**Firewall Errors**
+- Verify your IP address is added to the SQL Server firewall rules
+- For Azure services, enable "Allow Azure services and resources to access this server"
 
 ## Parameter Mapping
 
