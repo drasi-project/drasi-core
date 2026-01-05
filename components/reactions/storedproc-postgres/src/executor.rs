@@ -115,11 +115,22 @@ impl PostgresExecutor {
     pub async fn new(config: &PostgresStoredProcReactionConfig) -> Result<Self> {
         let port = config.get_port();
 
+        // Determine password - use aad_token if available, otherwise use password
+        let password = if let Some(ref token) = config.aad_token {
+            debug!("Using Azure AD token authentication");
+            token
+        } else if let Some(ref pwd) = config.password {
+            debug!("Using password authentication");
+            pwd
+        } else {
+            return Err(anyhow!("Either password or aad_token must be provided"));
+        };
+
         // Build connection string
         let ssl_mode = if config.ssl { "require" } else { "disable" };
         let connection_string = format!(
             "host={} port={} user={} password={} dbname={} sslmode={}",
-            config.hostname, port, config.user, config.password, config.database, ssl_mode
+            config.hostname, port, config.user, password, config.database, ssl_mode
         );
 
         info!(
