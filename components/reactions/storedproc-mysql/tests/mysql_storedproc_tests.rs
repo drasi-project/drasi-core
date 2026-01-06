@@ -159,9 +159,11 @@ fn test_config_default_values() {
     assert_eq!(config.port, None);
     assert_eq!(config.get_port(), 3306); // Default MySQL port
     assert_eq!(config.user, "");
-    assert_eq!(config.password, "");
+    assert_eq!(config.password, None);
+    assert_eq!(config.aad_token, None);
     assert_eq!(config.database, "");
     assert!(!config.ssl);
+    assert!(!config.enable_cleartext_plugin);
     assert!(config.routes.is_empty());
     assert_eq!(config.default_template, None);
     assert_eq!(config.command_timeout_ms, 30000);
@@ -291,9 +293,11 @@ fn test_config_serialization() {
         hostname: "db.example.com".to_string(),
         port: Some(3307),
         user: "admin".to_string(),
-        password: "secret".to_string(),
+        password: Some("secret".to_string()),
+        aad_token: None,
         database: "mydb".to_string(),
         ssl: true,
+        enable_cleartext_plugin: false,
         default_template: Some(QueryConfig {
             added: Some(TemplateSpec::new("CALL add_user(@after.id, @after.name)")),
             updated: Some(TemplateSpec::new(
@@ -312,7 +316,7 @@ fn test_config_serialization() {
     assert_eq!(deserialized.hostname, "db.example.com");
     assert_eq!(deserialized.port, Some(3307));
     assert_eq!(deserialized.user, "admin");
-    assert_eq!(deserialized.password, "secret");
+    assert_eq!(deserialized.password, Some("secret".to_string()));
     assert_eq!(deserialized.database, "mydb");
     assert!(deserialized.ssl);
     assert_eq!(deserialized.command_timeout_ms, 10000);
@@ -449,9 +453,11 @@ async fn test_mysql_config_validation() {
         hostname: "localhost".to_string(),
         port: Some(3306),
         user: "testuser".to_string(),
-        password: "password".to_string(),
+        password: Some("password".to_string()),
+        aad_token: None,
         database: "testdb".to_string(),
         ssl: false,
+        enable_cleartext_plugin: false,
         default_template: Some(QueryConfig {
             added: Some(TemplateSpec::new("CALL add_user(@after.id)")),
             ..Default::default()
@@ -494,9 +500,11 @@ async fn test_mysql_executor_connection() {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
         user: mysql_config.user.clone(),
-        password: mysql_config.password.clone(),
+        password: Some(mysql_config.password.clone()),
+        aad_token: None,
         database: mysql_config.database.clone(),
         ssl: false,
+        enable_cleartext_plugin: false,
         default_template: Some(QueryConfig {
             added: Some(TemplateSpec::new("CALL test()")),
             ..Default::default()
@@ -533,9 +541,11 @@ async fn test_mysql_executor_procedure_execution() {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
         user: mysql_config.user.clone(),
-        password: mysql_config.password.clone(),
+        password: Some(mysql_config.password.clone()),
+        aad_token: None,
         database: mysql_config.database.clone(),
         ssl: false,
+        enable_cleartext_plugin: false,
         default_template: Some(QueryConfig {
             added: Some(TemplateSpec::new(
                 "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
@@ -590,9 +600,11 @@ async fn test_mysql_executor_multiple_operations() {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
         user: mysql_config.user.clone(),
-        password: mysql_config.password.clone(),
+        password: Some(mysql_config.password.clone()),
+        aad_token: None,
         database: mysql_config.database.clone(),
         ssl: false,
+        enable_cleartext_plugin: false,
         default_template: Some(QueryConfig {
             added: Some(TemplateSpec::new(
                 "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
@@ -659,9 +671,11 @@ async fn test_mysql_parser_with_executor() {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
         user: mysql_config.user.clone(),
-        password: mysql_config.password.clone(),
+        password: Some(mysql_config.password.clone()),
+        aad_token: None,
         database: mysql_config.database.clone(),
         ssl: false,
+        enable_cleartext_plugin: false,
         default_template: Some(QueryConfig {
             added: Some(TemplateSpec::new(
                 "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
@@ -723,9 +737,11 @@ async fn test_mysql_reaction_creation() {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
         user: mysql_config.user.clone(),
-        password: mysql_config.password.clone(),
+        password: Some(mysql_config.password.clone()),
+        aad_token: None,
         database: mysql_config.database.clone(),
         ssl: false,
+        enable_cleartext_plugin: false,
         default_template: Some(QueryConfig {
             added: Some(TemplateSpec::new(
                 "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
@@ -807,9 +823,11 @@ async fn test_mysql_executor_with_special_characters() {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
         user: mysql_config.user.clone(),
-        password: mysql_config.password.clone(),
+        password: Some(mysql_config.password.clone()),
+        aad_token: None,
         database: mysql_config.database.clone(),
         ssl: false,
+        enable_cleartext_plugin: false,
         default_template: Some(QueryConfig {
             added: Some(TemplateSpec::new(
                 "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
@@ -935,9 +953,11 @@ async fn test_mysql_executor_retry_on_failure() {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
         user: mysql_config.user.clone(),
-        password: mysql_config.password.clone(),
+        password: Some(mysql_config.password.clone()),
+        aad_token: None,
         database: mysql_config.database.clone(),
         ssl: false,
+        enable_cleartext_plugin: false,
         default_template: Some(QueryConfig {
             added: Some(TemplateSpec::new("CALL non_existent()")),
             ..Default::default()
