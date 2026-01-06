@@ -219,13 +219,13 @@ For Azure Database for MySQL Flexible Server, you can use Azure AD authenticatio
 #### Code Configuration
 
 ```rust
-use drasi_auth_azure::get_mysql_token_with_default_credential;
+use drasi_reaction_storedproc_mysql::azure_auth::get_mysql_aad_token;
 use drasi_reaction_storedproc_mysql::MySqlStoredProcReaction;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Get Azure AD token
-    let token = get_mysql_token_with_default_credential().await?;
+    // Get Azure AD token using the component helper
+    let token = get_mysql_aad_token().await?;
 
     let reaction = MySqlStoredProcReaction::builder("my-reaction")
         .with_hostname("server.mysql.database.azure.com")
@@ -256,7 +256,23 @@ async fn main() -> anyhow::Result<()> {
 - Use `.with_aad_token(&token)` instead of `.with_password()`
 - Username format depends on your authentication method (see below)
 - **Both** `.with_ssl(true)` and `.with_cleartext_plugin(true)` are required
-- Token scope: `https://ossrdbms-aad.database.windows.net/.default`
+- The helper automatically uses the correct OAuth scope: `https://ossrdbms-aad.database.windows.net/.default`
+
+#### Alternative: Service Principal Authentication
+
+For CI/CD scenarios or when you need explicit service principal credentials:
+
+```rust
+use drasi_reaction_storedproc_mysql::azure_auth::get_mysql_aad_token_with_service_principal;
+
+let token = get_mysql_aad_token_with_service_principal(
+    "tenant-id",
+    "client-id",
+    "client-secret"
+).await?;
+
+// Use the token with the builder as shown above
+```
 
 #### Local Development with Azure CLI
 

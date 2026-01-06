@@ -107,145 +107,77 @@ impl AzureIdentityAuth {
 
     /// Get an access token for the specified scopes
     ///
-    /// This is a convenience method for getting tokens directly.
+    /// This is the primary method for getting access tokens. Provide the appropriate
+    /// OAuth scope(s) for the Azure service you want to authenticate with.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let auth = AzureIdentityAuth::default();
+    /// // For Azure Database for PostgreSQL/MySQL
+    /// let token = auth.get_token(&["https://ossrdbms-aad.database.windows.net/.default"]).await?;
+    /// ```
     pub async fn get_token(&self, scopes: &[&str]) -> Result<String> {
         let credential = self.build_credential().await?;
         let token = credential.get_token(scopes).await?;
         Ok(token.token.secret().to_string())
     }
-
-    /// Get an access token for Azure Database for PostgreSQL
-    ///
-    /// This is a convenience method specifically for PostgreSQL authentication.
-    /// The token can be used as the password field in PostgreSQL connection strings.
-    pub async fn get_postgres_token(&self) -> Result<String> {
-        debug!("Requesting PostgreSQL access token");
-        self.get_token(&["https://ossrdbms-aad.database.windows.net/.default"])
-            .await
-    }
-
-    /// Get an access token for Azure Database for MySQL
-    ///
-    /// This is a convenience method specifically for MySQL authentication.
-    /// The token can be used as the password field in MySQL connection strings.
-    /// Note: Azure Database for MySQL uses the same OAuth scope as PostgreSQL.
-    pub async fn get_mysql_token(&self) -> Result<String> {
-        debug!("Requesting MySQL access token");
-        self.get_token(&["https://ossrdbms-aad.database.windows.net/.default"])
-            .await
-    }
-
-    /// Get an access token for Azure SQL Database
-    ///
-    /// This is a convenience method specifically for Azure SQL authentication.
-    /// The token can be used as the password field in SQL connection strings.
-    pub async fn get_sql_token(&self) -> Result<String> {
-        debug!("Requesting SQL Database access token");
-        self.get_token(&["https://database.windows.net/.default"])
-            .await
-    }
 }
 
-/// Helper function to get a PostgreSQL token using default Azure credential
+/// Helper function to get an access token using DefaultAzureCredential
 ///
-/// This tries multiple credential types in order (environment, managed identity, etc.)
+/// This is a convenience function that creates a DefaultAzureCredential
+/// and fetches a token for the provided scope. DefaultAzureCredential tries
+/// multiple credential types in order: environment variables, managed identity,
+/// Azure CLI, Azure PowerShell, etc.
+///
+/// # Arguments
+/// * `scope` - The OAuth scope to request (e.g., "https://ossrdbms-aad.database.windows.net/.default")
 ///
 /// # Example
 /// ```rust,ignore
-/// let token = get_postgres_token_with_default_credential().await?;
+/// use drasi_auth_azure::get_token_with_default_credential;
+///
+/// const POSTGRES_SCOPE: &str = "https://ossrdbms-aad.database.windows.net/.default";
+/// let token = get_token_with_default_credential(POSTGRES_SCOPE).await?;
 /// // Use token as password in connection string
 /// ```
-pub async fn get_postgres_token_with_default_credential() -> Result<String> {
+pub async fn get_token_with_default_credential(scope: &str) -> Result<String> {
     let auth = AzureIdentityAuth::default();
-    auth.get_postgres_token().await
+    auth.get_token(&[scope]).await
 }
 
-/// Helper function to get a PostgreSQL token using service principal
+/// Helper function to get an access token using Service Principal credentials
+///
+/// This is a convenience function that creates a Service Principal credential
+/// and fetches a token for the provided scope.
+///
+/// # Arguments
+/// * `scope` - The OAuth scope to request (e.g., "https://ossrdbms-aad.database.windows.net/.default")
+/// * `tenant_id` - Azure AD tenant ID
+/// * `client_id` - Application (client) ID
+/// * `client_secret` - Client secret
 ///
 /// # Example
 /// ```rust,ignore
-/// let token = get_postgres_token_with_service_principal(
+/// use drasi_auth_azure::get_token_with_service_principal;
+///
+/// const POSTGRES_SCOPE: &str = "https://ossrdbms-aad.database.windows.net/.default";
+/// let token = get_token_with_service_principal(
+///     POSTGRES_SCOPE,
 ///     "tenant-id",
 ///     "client-id",
 ///     "client-secret"
 /// ).await?;
 /// // Use token as password in connection string
 /// ```
-pub async fn get_postgres_token_with_service_principal(
+pub async fn get_token_with_service_principal(
+    scope: &str,
     tenant_id: impl Into<String>,
     client_id: impl Into<String>,
     client_secret: impl Into<String>,
 ) -> Result<String> {
     let auth = AzureIdentityAuth::service_principal(tenant_id, client_id, client_secret);
-    auth.get_postgres_token().await
-}
-
-/// Helper function to get a MySQL token using default Azure credential
-///
-/// This tries multiple credential types in order (environment, managed identity, Azure CLI, etc.)
-///
-/// # Example
-/// ```rust,ignore
-/// let token = get_mysql_token_with_default_credential().await?;
-/// // Use token as password in connection string
-/// ```
-pub async fn get_mysql_token_with_default_credential() -> Result<String> {
-    let auth = AzureIdentityAuth::default();
-    auth.get_mysql_token().await
-}
-
-/// Helper function to get a MySQL token using service principal
-///
-/// # Example
-/// ```rust,ignore
-/// let token = get_mysql_token_with_service_principal(
-///     "tenant-id",
-///     "client-id",
-///     "client-secret"
-/// ).await?;
-/// // Use token as password in connection string
-/// ```
-pub async fn get_mysql_token_with_service_principal(
-    tenant_id: impl Into<String>,
-    client_id: impl Into<String>,
-    client_secret: impl Into<String>,
-) -> Result<String> {
-    let auth = AzureIdentityAuth::service_principal(tenant_id, client_id, client_secret);
-    auth.get_mysql_token().await
-}
-
-/// Helper function to get an Azure SQL token using default Azure credential
-///
-/// This tries multiple credential types in order (environment, managed identity, Azure CLI, etc.)
-///
-/// # Example
-/// ```rust,ignore
-/// let token = get_sql_token_with_default_credential().await?;
-/// // Use token as password in connection string
-/// ```
-pub async fn get_sql_token_with_default_credential() -> Result<String> {
-    let auth = AzureIdentityAuth::default();
-    auth.get_sql_token().await
-}
-
-/// Helper function to get an Azure SQL token using service principal
-///
-/// # Example
-/// ```rust,ignore
-/// let token = get_sql_token_with_service_principal(
-///     "tenant-id",
-///     "client-id",
-///     "client-secret"
-/// ).await?;
-/// // Use token as password in connection string
-/// ```
-pub async fn get_sql_token_with_service_principal(
-    tenant_id: impl Into<String>,
-    client_id: impl Into<String>,
-    client_secret: impl Into<String>,
-) -> Result<String> {
-    let auth = AzureIdentityAuth::service_principal(tenant_id, client_id, client_secret);
-    auth.get_sql_token().await
+    auth.get_token(&[scope]).await
 }
 
 #[cfg(test)]

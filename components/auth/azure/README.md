@@ -22,33 +22,24 @@ drasi-auth-azure = { path = "path/to/components/auth/azure" }
 
 ## Usage Examples
 
-### PostgreSQL with DefaultAzureCredential (Recommended)
+### Generic Token Retrieval with DefaultAzureCredential (Recommended)
 
 The simplest approach - automatically handles managed identity, Azure CLI, and more:
 
 ```rust
-use drasi_auth_azure::get_postgres_token_with_default_credential;
+use drasi_auth_azure::get_token_with_default_credential;
 
-let token = get_postgres_token_with_default_credential().await?;
-// Use token as password in PostgreSQL connection
-```
+// For PostgreSQL or MySQL
+const POSTGRES_SCOPE: &str = "https://ossrdbms-aad.database.windows.net/.default";
+let token = get_token_with_default_credential(POSTGRES_SCOPE).await?;
 
-### MySQL with DefaultAzureCredential (Recommended)
+// For Azure SQL
+const SQL_SCOPE: &str = "https://database.windows.net/.default";
+let token = get_token_with_default_credential(SQL_SCOPE).await?;
 
-```rust
-use drasi_auth_azure::get_mysql_token_with_default_credential;
-
-let token = get_mysql_token_with_default_credential().await?;
-// Use token as password in MySQL connection
-```
-
-### Azure SQL with DefaultAzureCredential (Recommended)
-
-```rust
-use drasi_auth_azure::get_sql_token_with_default_credential;
-
-let token = get_sql_token_with_default_credential().await?;
-// Use token as password in SQL connection
+// For other Azure services
+const STORAGE_SCOPE: &str = "https://storage.azure.com/.default";
+let token = get_token_with_default_credential(STORAGE_SCOPE).await?;
 ```
 
 ### Service Principal Authentication
@@ -56,19 +47,34 @@ let token = get_sql_token_with_default_credential().await?;
 For scenarios requiring explicit service principal credentials:
 
 ```rust
-use drasi_auth_azure::get_postgres_token_with_service_principal;
+use drasi_auth_azure::get_token_with_service_principal;
 
-let token = get_postgres_token_with_service_principal(
+const POSTGRES_SCOPE: &str = "https://ossrdbms-aad.database.windows.net/.default";
+let token = get_token_with_service_principal(
+    POSTGRES_SCOPE,
     "tenant-id",
     "client-id",
     "client-secret"
 ).await?;
-// Use token as password in connection
 ```
 
-Similar functions exist for MySQL and SQL:
-- `get_mysql_token_with_service_principal()`
-- `get_sql_token_with_service_principal()`
+### Database-Specific Helpers (Convenience)
+
+For database-specific use cases, each database component provides convenient helper functions:
+
+```rust
+// PostgreSQL - see storedproc-postgres component
+use drasi_reaction_storedproc_postgres::azure_auth::get_postgres_aad_token;
+let token = get_postgres_aad_token().await?;
+
+// MySQL - see storedproc-mysql component
+use drasi_reaction_storedproc_mysql::azure_auth::get_mysql_aad_token;
+let token = get_mysql_aad_token().await?;
+
+// Azure SQL - see storedproc-mssql component
+use drasi_reaction_storedproc_mssql::azure_auth::get_mssql_aad_token;
+let token = get_mssql_aad_token().await?;
+```
 
 ### Using the AzureIdentityAuth Enum Directly
 
@@ -90,33 +96,40 @@ let auth = AzureIdentityAuth::service_principal(
 let token = auth.get_token(&["https://database.windows.net/.default"]).await?;
 ```
 
-## Token Scopes for Azure Databases
+## OAuth Scopes for Azure Services
 
-### Azure SQL Database
-```rust
-let token = auth.get_sql_token().await?;
-// Scope: https://database.windows.net/.default
+This library provides generic token retrieval for any Azure service. Here are common OAuth scopes:
+
+### Azure Databases
+
+**PostgreSQL / MySQL** (Azure Database for OSS RDBMS):
+```
+https://ossrdbms-aad.database.windows.net/.default
 ```
 
-### Azure Database for PostgreSQL / MySQL
-```rust
-let token = auth.get_postgres_token().await?;
-// or
-let token = auth.get_mysql_token().await?;
-// Scope: https://ossrdbms-aad.database.windows.net/.default
+**Azure SQL Database**:
+```
+https://database.windows.net/.default
 ```
 
-### Other Azure Resources
+### Other Azure Services
 
-For other resources, use `get_token()` with custom scopes:
-
-```rust
-// Azure Storage
-let token = auth.get_token(&["https://storage.azure.com/.default"]).await?;
-
-// Azure Key Vault
-let token = auth.get_token(&["https://vault.azure.net/.default"]).await?;
+**Azure Storage**:
 ```
+https://storage.azure.com/.default
+```
+
+**Azure Key Vault**:
+```
+https://vault.azure.net/.default
+```
+
+**Azure Resource Manager**:
+```
+https://management.azure.com/.default
+```
+
+For database-specific authentication, we recommend using the helper functions provided by each database component (see [Database-Specific Helpers](#database-specific-helpers-convenience) above), which handle the correct OAuth scope automatically.
 
 ## Authentication Flow
 
@@ -154,11 +167,11 @@ Then use the default credential functions - they'll automatically use the specif
 ### PostgreSQL Stored Procedure Reaction
 
 ```rust
-use drasi_auth_azure::get_postgres_token_with_default_credential;
+use drasi_reaction_storedproc_postgres::azure_auth::get_postgres_aad_token;
 use drasi_reaction_storedproc_postgres::PostgresStoredProcReaction;
 
-// Get Azure AD token
-let token = get_postgres_token_with_default_credential().await?;
+// Get Azure AD token using the PostgreSQL component helper
+let token = get_postgres_aad_token().await?;
 
 let reaction = PostgresStoredProcReaction::builder("my-reaction")
     .with_hostname("server.postgres.database.azure.com")
@@ -175,11 +188,11 @@ let reaction = PostgresStoredProcReaction::builder("my-reaction")
 ### MySQL Stored Procedure Reaction
 
 ```rust
-use drasi_auth_azure::get_mysql_token_with_default_credential;
+use drasi_reaction_storedproc_mysql::azure_auth::get_mysql_aad_token;
 use drasi_reaction_storedproc_mysql::MySqlStoredProcReaction;
 
-// Get Azure AD token
-let token = get_mysql_token_with_default_credential().await?;
+// Get Azure AD token using the MySQL component helper
+let token = get_mysql_aad_token().await?;
 
 let reaction = MySqlStoredProcReaction::builder("my-reaction")
     .with_hostname("server.mysql.database.azure.com")
@@ -195,11 +208,11 @@ let reaction = MySqlStoredProcReaction::builder("my-reaction")
 ### Azure SQL Stored Procedure Reaction
 
 ```rust
-use drasi_auth_azure::get_sql_token_with_default_credential;
+use drasi_reaction_storedproc_mssql::azure_auth::get_mssql_aad_token;
 use drasi_reaction_storedproc_mssql::MsSqlStoredProcReaction;
 
-// Get Azure AD token
-let token = get_sql_token_with_default_credential().await?;
+// Get Azure AD token using the MS SQL component helper
+let token = get_mssql_aad_token().await?;
 
 let reaction = MsSqlStoredProcReaction::builder("my-reaction")
     .with_hostname("server.database.windows.net")
@@ -217,8 +230,9 @@ let reaction = MsSqlStoredProcReaction::builder("my-reaction")
 - **Type-safe**: Uses Rust enums for different credential types
 - **Async-first**: All operations are async
 - **Flexible**: Supports DefaultAzureCredential and Service Principal flows
-- **Database-optimized**: Specialized functions for PostgreSQL, MySQL, and Azure SQL
+- **Generic**: Works with any Azure service OAuth scope
 - **Serializable**: Can be configured via JSON/YAML
+- **Separation of concerns**: Database-specific helpers live in their respective components
 
 ## Best Practices
 

@@ -182,13 +182,13 @@ For Azure SQL Database, you can use Azure AD authentication with `DefaultAzureCr
 #### Code Configuration
 
 ```rust
-use drasi_auth_azure::get_sql_token_with_default_credential;
+use drasi_reaction_storedproc_mssql::azure_auth::get_mssql_aad_token;
 use drasi_reaction_storedproc_mssql::MsSqlStoredProcReaction;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Get Azure AD token
-    let token = get_sql_token_with_default_credential().await?;
+    // Get Azure AD token using the component helper
+    let token = get_mssql_aad_token().await?;
 
     let reaction = MsSqlStoredProcReaction::builder("my-reaction")
         .with_hostname("server.database.windows.net")
@@ -216,8 +216,24 @@ async fn main() -> anyhow::Result<()> {
 - Use `.with_aad_token(&token)` instead of `.with_password()`
 - Username format depends on your authentication method (see below)
 - SSL is automatically enabled for Azure SQL
-- Token scope: `https://database.windows.net/.default`
+- The helper automatically uses the correct OAuth scope: `https://database.windows.net/.default`
 - Requires `tiberius` with `rustls` feature
+
+#### Alternative: Service Principal Authentication
+
+For CI/CD scenarios or when you need explicit service principal credentials:
+
+```rust
+use drasi_reaction_storedproc_mssql::azure_auth::get_mssql_aad_token_with_service_principal;
+
+let token = get_mssql_aad_token_with_service_principal(
+    "tenant-id",
+    "client-id",
+    "client-secret"
+).await?;
+
+// Use the token with the builder as shown above
+```
 
 #### Local Development with Azure CLI
 

@@ -34,6 +34,7 @@
 //!     .build()?;
 //! ```
 
+pub mod azure_auth;
 pub mod config;
 pub mod executor;
 pub mod parser;
