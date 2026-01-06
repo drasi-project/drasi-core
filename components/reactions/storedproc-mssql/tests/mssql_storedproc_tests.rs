@@ -282,7 +282,7 @@ fn test_config_validation_requires_database() {
 fn test_config_validation_requires_at_least_one_template() {
     let config = MsSqlStoredProcReactionConfig {
         user: "test_user".to_string(),
-        password: "test_pass".to_string(),
+        password: Some("test_pass".to_string()),
         database: "test_db".to_string(),
         ..Default::default()
     };
@@ -295,7 +295,7 @@ fn test_config_validation_requires_at_least_one_template() {
 fn test_config_validation_success() {
     let mut config = MsSqlStoredProcReactionConfig {
         user: "test_user".to_string(),
-        password: "test_pass".to_string(),
+        password: Some("test_pass".to_string()),
         database: "test_db".to_string(),
         ..Default::default()
     };

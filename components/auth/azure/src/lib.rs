@@ -92,9 +92,7 @@ impl AzureIdentityAuth {
                 client_id,
                 client_secret,
             } => {
-                debug!(
-                    "Building ServicePrincipalCredential for tenant: {tenant_id}",
-                );
+                debug!("Building ServicePrincipalCredential for tenant: {tenant_id}",);
 
                 // Set environment variables for ClientSecretCredential
                 std::env::set_var("AZURE_TENANT_ID", tenant_id);
