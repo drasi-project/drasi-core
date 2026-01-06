@@ -178,7 +178,7 @@ fn test_config_default_values() {
     assert_eq!(config.port, None);
     assert_eq!(config.get_port(), 5432); // Default port
     assert_eq!(config.user, "");
-    assert_eq!(config.password, "");
+    assert_eq!(config.password, None);
     assert_eq!(config.database, "");
     assert!(!config.ssl);
     assert!(config.routes.is_empty());
@@ -322,7 +322,8 @@ fn test_config_serialization() {
         hostname: "db.example.com".to_string(),
         port: Some(5433),
         user: "admin".to_string(),
-        password: "secret".to_string(),
+        password: Some("secret".to_string()),
+        aad_token: None,
         database: "mydb".to_string(),
         ssl: true,
         routes: std::collections::HashMap::new(),
@@ -343,7 +344,7 @@ fn test_config_serialization() {
     assert_eq!(deserialized.hostname, "db.example.com");
     assert_eq!(deserialized.port, Some(5433));
     assert_eq!(deserialized.user, "admin");
-    assert_eq!(deserialized.password, "secret");
+    assert_eq!(deserialized.password, Some("secret".to_string()));
     assert_eq!(deserialized.database, "mydb");
     assert!(deserialized.ssl);
     assert_eq!(deserialized.command_timeout_ms, 10000);
@@ -490,7 +491,8 @@ async fn test_postgres_config_validation() {
         hostname: "localhost".to_string(), // DevSkim: ignore DS137138
         port: Some(5432),
         user: "testuser".to_string(),
-        password: "password".to_string(),
+        password: Some("password".to_string()),
+        aad_token: None,
         database: "testdb".to_string(),
         ssl: false,
         default_template: Some(QueryConfig {
@@ -534,7 +536,8 @@ async fn test_postgres_executor_connection() {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
         user: pg_config.user.clone(),
-        password: pg_config.password.clone(),
+        password: Some(pg_config.password.clone()),
+        aad_token: None,
         database: pg_config.database.clone(),
         ssl: false,
         default_template: Some(QueryConfig {
@@ -574,7 +577,8 @@ async fn test_postgres_executor_procedure_execution() {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
         user: pg_config.user.clone(),
-        password: pg_config.password.clone(),
+        password: Some(pg_config.password.clone()),
+        aad_token: None,
         database: pg_config.database.clone(),
         ssl: false,
         default_template: Some(QueryConfig {
@@ -632,7 +636,8 @@ async fn test_postgres_executor_multiple_operations() {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
         user: pg_config.user.clone(),
-        password: pg_config.password.clone(),
+        password: Some(pg_config.password.clone()),
+        aad_token: None,
         database: pg_config.database.clone(),
         ssl: false,
         default_template: Some(QueryConfig {
@@ -701,7 +706,8 @@ async fn test_postgres_parser_with_executor() {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
         user: pg_config.user.clone(),
-        password: pg_config.password.clone(),
+        password: Some(pg_config.password.clone()),
+        aad_token: None,
         database: pg_config.database.clone(),
         ssl: false,
         routes: HashMap::new(),
@@ -761,7 +767,8 @@ async fn test_postgres_reaction_creation() {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
         user: pg_config.user.clone(),
-        password: pg_config.password.clone(),
+        password: Some(pg_config.password.clone()),
+        aad_token: None,
         database: pg_config.database.clone(),
         ssl: false,
         routes: HashMap::new(),
@@ -848,7 +855,8 @@ async fn test_postgres_executor_with_special_characters() {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
         user: pg_config.user.clone(),
-        password: pg_config.password.clone(),
+        password: Some(pg_config.password.clone()),
+        aad_token: None,
         database: pg_config.database.clone(),
         ssl: false,
         routes: HashMap::new(),
@@ -977,7 +985,8 @@ async fn test_postgres_executor_retry_on_failure() {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
         user: pg_config.user.clone(),
-        password: pg_config.password.clone(),
+        password: Some(pg_config.password.clone()),
+        aad_token: None,
         database: pg_config.database.clone(),
         ssl: false,
         routes: HashMap::new(),
@@ -1061,7 +1070,8 @@ async fn test_default_template_applies_to_all_queries() {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
         user: pg_config.user.clone(),
-        password: pg_config.password.clone(),
+        password: Some(pg_config.password.clone()),
+        aad_token: None,
         database: pg_config.database.clone(),
         ssl: false,
         routes: HashMap::new(), // No routes specified
@@ -1184,7 +1194,8 @@ async fn test_route_overrides_default_template() {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
         user: pg_config.user.clone(),
-        password: pg_config.password.clone(),
+        password: Some(pg_config.password.clone()),
+        aad_token: None,
         database: pg_config.database.clone(),
         ssl: false,
         routes,
@@ -1257,7 +1268,8 @@ async fn test_route_with_none_falls_back_to_default() {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
         user: pg_config.user.clone(),
-        password: pg_config.password.clone(),
+        password: Some(pg_config.password.clone()),
+        aad_token: None,
         database: pg_config.database.clone(),
         ssl: false,
         routes,
@@ -1356,7 +1368,8 @@ async fn test_executor_with_various_data_types() {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
         user: pg_config.user.clone(),
-        password: pg_config.password.clone(),
+        password: Some(pg_config.password.clone()),
+        aad_token: None,
         database: pg_config.database.clone(),
         ssl: false,
         routes: HashMap::new(),
@@ -1472,7 +1485,8 @@ async fn test_executor_with_string_numbers() {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
         user: pg_config.user.clone(),
-        password: pg_config.password.clone(),
+        password: Some(pg_config.password.clone()),
+        aad_token: None,
         database: pg_config.database.clone(),
         ssl: false,
         routes: HashMap::new(),
