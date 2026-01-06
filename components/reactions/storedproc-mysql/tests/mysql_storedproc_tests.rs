@@ -184,6 +184,7 @@ fn test_config_custom_port() {
 fn test_config_validation_no_commands() {
     let config = MySqlStoredProcReactionConfig {
         user: "testuser".to_string(),
+        password: Some("password".to_string()),
         database: "testdb".to_string(),
         ..Default::default()
     };
@@ -237,6 +238,7 @@ fn test_config_validation_empty_database() {
 fn test_config_validation_valid_with_default_template() {
     let config = MySqlStoredProcReactionConfig {
         user: "testuser".to_string(),
+        password: Some("password".to_string()),
         database: "testdb".to_string(),
         default_template: Some(QueryConfig {
             added: Some(TemplateSpec::new("CALL add_item(@after.id)")),
@@ -263,6 +265,7 @@ fn test_config_validation_valid_with_routes() {
 
     let config = MySqlStoredProcReactionConfig {
         user: "testuser".to_string(),
+        password: Some("password".to_string()),
         database: "testdb".to_string(),
         routes,
         ..Default::default()
@@ -275,6 +278,7 @@ fn test_config_validation_valid_with_routes() {
 fn test_config_validation_valid_with_all_operations() {
     let config = MySqlStoredProcReactionConfig {
         user: "testuser".to_string(),
+        password: Some("password".to_string()),
         database: "testdb".to_string(),
         default_template: Some(QueryConfig {
             added: Some(TemplateSpec::new("CALL add_item(@after.id)")),
