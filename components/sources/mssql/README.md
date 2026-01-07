@@ -131,12 +131,6 @@ cargo test -p drasi-source-mssql -- --ignored
 - `chrono` - DateTime handling
 - `uuid` - UUID generation
 
-## Documentation
-
-- `README.md` - This file
-- `IMPLEMENTATION_COMPLETE.md` - Comprehensive implementation summary
-- `mssql-implementation-plan.md` - Original detailed plan with CDC research
-
 ## License
 
 Apache License 2.0
