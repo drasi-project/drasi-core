@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn test_value_to_string_float() {
-        let val = ElementValue::Float(ordered_float::OrderedFloat(3.14));
-        assert_eq!(value_to_string(&val), "3.14");
+        let val = ElementValue::Float(ordered_float::OrderedFloat(2.14));
+        assert_eq!(value_to_string(&val), "2.14");
     }
 }
