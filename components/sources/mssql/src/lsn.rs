@@ -92,10 +92,7 @@ impl Lsn {
     /// Returns error if bytes length is not exactly 10
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() != 10 {
-            return Err(anyhow!(
-                "LSN must be exactly 10 bytes, got {}",
-                bytes.len()
-            ));
+            return Err(anyhow!("LSN must be exactly 10 bytes, got {}", bytes.len()));
         }
 
         let mut arr = [0u8; 10];

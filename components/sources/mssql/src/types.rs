@@ -56,7 +56,7 @@ pub fn extract_column_value(row: &Row, col_idx: usize) -> Result<ElementValue> {
             None => ElementValue::Null,
         });
     }
-    
+
     // Try integer types
     if let Ok(val) = row.try_get::<i32, _>(col_idx) {
         return Ok(match val {
@@ -64,28 +64,28 @@ pub fn extract_column_value(row: &Row, col_idx: usize) -> Result<ElementValue> {
             None => ElementValue::Null,
         });
     }
-    
+
     if let Ok(val) = row.try_get::<i64, _>(col_idx) {
         return Ok(match val {
             Some(i) => ElementValue::Integer(i),
             None => ElementValue::Null,
         });
     }
-    
+
     if let Ok(val) = row.try_get::<i16, _>(col_idx) {
         return Ok(match val {
             Some(i) => ElementValue::Integer(i as i64),
             None => ElementValue::Null,
         });
     }
-    
+
     if let Ok(val) = row.try_get::<u8, _>(col_idx) {
         return Ok(match val {
             Some(i) => ElementValue::Integer(i as i64),
             None => ElementValue::Null,
         });
     }
-    
+
     // Try boolean
     if let Ok(val) = row.try_get::<bool, _>(col_idx) {
         return Ok(match val {
@@ -93,7 +93,7 @@ pub fn extract_column_value(row: &Row, col_idx: usize) -> Result<ElementValue> {
             None => ElementValue::Null,
         });
     }
-    
+
     // Try float types
     if let Ok(val) = row.try_get::<f64, _>(col_idx) {
         return Ok(match val {
@@ -101,14 +101,14 @@ pub fn extract_column_value(row: &Row, col_idx: usize) -> Result<ElementValue> {
             None => ElementValue::Null,
         });
     }
-    
+
     if let Ok(val) = row.try_get::<f32, _>(col_idx) {
         return Ok(match val {
             Some(f) => ElementValue::Float(ordered_float::OrderedFloat(f as f64)),
             None => ElementValue::Null,
         });
     }
-    
+
     // Try decimal/numeric
     if let Ok(val) = row.try_get::<rust_decimal::Decimal, _>(col_idx) {
         return Ok(match val {
@@ -119,7 +119,7 @@ pub fn extract_column_value(row: &Row, col_idx: usize) -> Result<ElementValue> {
             None => ElementValue::Null,
         });
     }
-    
+
     // Try UUID
     if let Ok(val) = row.try_get::<uuid::Uuid, _>(col_idx) {
         return Ok(match val {
@@ -127,17 +127,17 @@ pub fn extract_column_value(row: &Row, col_idx: usize) -> Result<ElementValue> {
             None => ElementValue::Null,
         });
     }
-    
+
     // Try datetime types - convert to string
     if let Ok(val) = row.try_get::<chrono::NaiveDateTime, _>(col_idx) {
         return Ok(match val {
-            Some(dt) => ElementValue::String(Arc::from(
-                dt.format("%Y-%m-%dT%H:%M:%S%.3f").to_string(),
-            )),
+            Some(dt) => {
+                ElementValue::String(Arc::from(dt.format("%Y-%m-%dT%H:%M:%S%.3f").to_string()))
+            }
             None => ElementValue::Null,
         });
     }
-    
+
     // Try binary data
     if let Ok(val) = row.try_get::<&[u8], _>(col_idx) {
         return Ok(match val {
@@ -145,7 +145,7 @@ pub fn extract_column_value(row: &Row, col_idx: usize) -> Result<ElementValue> {
             None => ElementValue::Null,
         });
     }
-    
+
     // If nothing matched, return Null
     Ok(ElementValue::Null)
 }
@@ -183,4 +183,3 @@ mod tests {
         assert_eq!(value_to_string(&val), "3.14");
     }
 }
-

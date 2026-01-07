@@ -207,7 +207,7 @@ impl Source for MsSqlSource {
 
     async fn start(&self) -> Result<()> {
         use drasi_lib::channels::ComponentStatus;
-        
+
         if self.base.get_status().await == ComponentStatus::Running {
             return Ok(());
         }
@@ -222,13 +222,8 @@ impl Source for MsSqlSource {
 
         // Spawn CDC polling task
         let task_handle = tokio::spawn(async move {
-            if let Err(e) = stream::run_cdc_stream(
-                source_id.clone(),
-                config,
-                dispatchers,
-                state_store,
-            )
-            .await
+            if let Err(e) =
+                stream::run_cdc_stream(source_id.clone(), config, dispatchers, state_store).await
             {
                 log::error!("CDC stream task failed for {}: {}", source_id, e);
             }
@@ -245,17 +240,17 @@ impl Source for MsSqlSource {
 
     async fn stop(&self) -> Result<()> {
         use drasi_lib::channels::ComponentStatus;
-        
+
         log::info!("MS SQL source '{}' stopping", self.base.id);
-        
+
         // Stop CDC polling task
         if let Some(handle) = self.task_handle.write().await.take() {
             handle.abort();
             log::debug!("CDC polling task stopped");
         }
-        
+
         self.base.set_status(ComponentStatus::Stopped).await;
-        
+
         Ok(())
     }
 
@@ -274,7 +269,7 @@ impl Source for MsSqlSource {
 
     async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
         self.base.initialize(context.clone()).await;
-        
+
         // Store state store if provided
         if let Some(state_store) = context.state_store {
             *self.state_store.write().await = Some(state_store);
@@ -413,10 +408,10 @@ impl MsSqlSourceBuilder {
         }
 
         let source_id = self.id.clone();
-        
+
         // Create base source parameters
         let mut params = SourceBaseParams::new(&source_id);
-        
+
         // Add bootstrap provider if configured
         if let Some(provider) = self.bootstrap_provider {
             params = params.with_bootstrap_provider(provider);

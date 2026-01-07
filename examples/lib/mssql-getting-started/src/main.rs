@@ -47,17 +47,15 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use drasi_lib::{DrasiLib, Query};
-use drasi_source_mssql::MsSqlSource;
 use drasi_bootstrap_mssql::MsSqlBootstrapProvider;
+use drasi_lib::{DrasiLib, Query};
 use drasi_reaction_log::LogReaction;
+use drasi_source_mssql::MsSqlSource;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info")
-    ).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     println!("╔════════════════════════════════════════════╗");
     println!("║   DrasiLib MS SQL Getting Started         ║");
@@ -99,13 +97,15 @@ async fn main() -> Result<()> {
 
     // Query 1: All Orders - Returns all orders with their details
     let all_orders_query = Query::cypher("all-orders")
-        .query(r#"
+        .query(
+            r#"
             MATCH (o:Orders)
             RETURN o.OrderId AS order_id,
                    o.CustomerName AS customer_name,
                    o.Status AS status,
                    o.TotalAmount AS total_amount
-        "#)
+        "#,
+        )
         .from_source("orders-source")
         .auto_start(true)
         .enable_bootstrap(true)
@@ -113,13 +113,15 @@ async fn main() -> Result<()> {
 
     // Query 2: Pending Orders - Orders that are pending
     let pending_orders_query = Query::cypher("pending-orders")
-        .query(r#"
+        .query(
+            r#"
             MATCH (o:Orders)
             WHERE o.Status = 'Pending'
             RETURN o.OrderId AS order_id,
                    o.CustomerName AS customer_name,
                    o.TotalAmount AS total_amount
-        "#)
+        "#,
+        )
         .from_source("orders-source")
         .auto_start(true)
         .enable_bootstrap(true)
@@ -127,14 +129,16 @@ async fn main() -> Result<()> {
 
     // Query 3: Large Orders - Orders over $1000
     let large_orders_query = Query::cypher("large-orders")
-        .query(r#"
+        .query(
+            r#"
             MATCH (o:Orders)
             WHERE o.TotalAmount > 1000
             RETURN o.OrderId AS order_id,
                    o.CustomerName AS customer_name,
                    o.Status AS status,
                    o.TotalAmount AS total_amount
-        "#)
+        "#,
+        )
         .from_source("orders-source")
         .auto_start(true)
         .enable_bootstrap(true)
@@ -146,7 +150,7 @@ async fn main() -> Result<()> {
     // Step 4: Create Log Reaction
     // =========================================================================
     use drasi_reaction_log::{QueryConfig, TemplateSpec};
-    
+
     let log_reaction = LogReaction::builder("console-logger")
         .from_query("all-orders")
         .from_query("pending-orders")
@@ -181,7 +185,7 @@ async fn main() -> Result<()> {
             .with_query(large_orders_query)
             .with_reaction(log_reaction)
             .build()
-            .await?
+            .await?,
     );
 
     println!("✓ DrasiLib built");

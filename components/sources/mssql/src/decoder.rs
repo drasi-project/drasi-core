@@ -75,16 +75,16 @@ impl std::fmt::Display for CdcOperation {
 pub mod cdc_columns {
     /// LSN of the change
     pub const START_LSN: &str = "__$start_lsn";
-    
+
     /// End LSN (always NULL for captured changes)
     pub const END_LSN: &str = "__$end_lsn";
-    
+
     /// Sequence value within transaction
     pub const SEQVAL: &str = "__$seqval";
-    
+
     /// Operation type (1=delete, 2=insert, 3=update before, 4=update after)
     pub const OPERATION: &str = "__$operation";
-    
+
     /// Bit mask showing which columns were updated
     pub const UPDATE_MASK: &str = "__$update_mask";
 

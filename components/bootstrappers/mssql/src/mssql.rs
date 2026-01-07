@@ -16,7 +16,9 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use drasi_core::models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange};
+use drasi_core::models::{
+    Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
+};
 use drasi_lib::bootstrap::BootstrapProvider;
 use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest};
 use drasi_lib::channels::{BootstrapEvent, SourceChangeEvent};
@@ -77,7 +79,10 @@ impl BootstrapProvider for MsSqlBootstrapProvider {
         // Execute bootstrap
         let count = handler.execute(request, context, event_tx).await?;
 
-        info!("Completed MS SQL bootstrap for query {}: sent {} records", query_id, count);
+        info!(
+            "Completed MS SQL bootstrap for query {}: sent {} records",
+            query_id, count
+        );
 
         Ok(count)
     }
@@ -197,7 +202,7 @@ impl MsSqlBootstrapHandler {
 
         // Map labels to tables (label -> table_name)
         let tables = self.map_labels_to_tables(&request)?;
-        
+
         if tables.is_empty() {
             warn!("No tables to bootstrap");
             return Ok(0);
@@ -210,7 +215,7 @@ impl MsSqlBootstrapHandler {
             .await?
             .into_results()
             .await?;
-        
+
         client
             .simple_query("BEGIN TRANSACTION")
             .await?
@@ -221,12 +226,15 @@ impl MsSqlBootstrapHandler {
 
         // Bootstrap each node label
         for (label, table_name) in &tables {
-            info!("Bootstrapping table '{}' with label '{}'", table_name, label);
-            
+            info!(
+                "Bootstrapping table '{}' with label '{}'",
+                table_name, label
+            );
+
             let count = self
                 .bootstrap_table(client, label, table_name, context, &event_tx)
                 .await?;
-            
+
             total_count += count;
             info!("Bootstrapped {} records from table '{}'", count, table_name);
         }
@@ -255,9 +263,9 @@ impl MsSqlBootstrapHandler {
             // 2. Match with schema prefix (dbo.Label)
             // 3. Match ignoring schema (Label matches dbo.Label)
             // 4. Case-insensitive match
-            
+
             let mut matched = false;
-            
+
             // Try exact match first
             if self.config.tables.contains(label) {
                 tables.push((label.clone(), label.clone()));
@@ -279,9 +287,12 @@ impl MsSqlBootstrapHandler {
                     }
                 }
             }
-            
+
             if !matched {
-                warn!("Table for label '{}' not found in configured tables {:?}, skipping", label, self.config.tables);
+                warn!(
+                    "Table for label '{}' not found in configured tables {:?}, skipping",
+                    label, self.config.tables
+                );
             }
         }
 
@@ -297,7 +308,10 @@ impl MsSqlBootstrapHandler {
         context: &BootstrapContext,
         event_tx: &tokio::sync::mpsc::Sender<BootstrapEvent>,
     ) -> Result<usize> {
-        debug!("Starting bootstrap of table '{}' with label '{}'", table_name, label);
+        debug!(
+            "Starting bootstrap of table '{}' with label '{}'",
+            table_name, label
+        );
 
         // Query all rows from the table
         let query = format!("SELECT * FROM {}", table_name);
@@ -346,7 +360,7 @@ impl MsSqlBootstrapHandler {
         // Process each column
         for (idx, column) in row.columns().iter().enumerate() {
             let column_name = column.name();
-            
+
             // Convert the value
             let element_value = self.convert_column_value(row, idx, column)?;
 
@@ -387,7 +401,10 @@ impl MsSqlBootstrapHandler {
                     Ok(ElementValue::Null)
                 }
             }
-            ColumnType::Int1 | ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8 
+            ColumnType::Int1
+            | ColumnType::Int2
+            | ColumnType::Int4
+            | ColumnType::Int8
             | ColumnType::Intn => {
                 // Try different integer sizes - order matters for SQL Server types
                 // INT (Int4) -> i32, BIGINT (Int8) -> i64, SMALLINT (Int2) -> i16, TINYINT (Int1) -> u8
@@ -403,8 +420,11 @@ impl MsSqlBootstrapHandler {
                     Ok(ElementValue::Null)
                 }
             }
-            ColumnType::Float4 | ColumnType::Float8 | ColumnType::Floatn 
-            | ColumnType::Numericn | ColumnType::Decimaln => {
+            ColumnType::Float4
+            | ColumnType::Float8
+            | ColumnType::Floatn
+            | ColumnType::Numericn
+            | ColumnType::Decimaln => {
                 // Try f32 first (Float4), then f64 (Float8)
                 // For Decimal/Numeric, tiberius can return them as f64
                 if let Ok(Some(val)) = row.try_get::<f32, _>(idx) {
@@ -415,16 +435,23 @@ impl MsSqlBootstrapHandler {
                     Ok(ElementValue::Null)
                 }
             }
-            ColumnType::BigVarChar | ColumnType::BigChar | ColumnType::NVarchar 
-            | ColumnType::NChar | ColumnType::BigVarBin | ColumnType::BigBinary
-            | ColumnType::Text | ColumnType::NText => {
+            ColumnType::BigVarChar
+            | ColumnType::BigChar
+            | ColumnType::NVarchar
+            | ColumnType::NChar
+            | ColumnType::BigVarBin
+            | ColumnType::BigBinary
+            | ColumnType::Text
+            | ColumnType::NText => {
                 if let Ok(Some(val)) = row.try_get::<&str, _>(idx) {
                     Ok(ElementValue::String(Arc::from(val)))
                 } else {
                     Ok(ElementValue::Null)
                 }
             }
-            ColumnType::Datetime | ColumnType::Datetime2 | ColumnType::Datetime4 
+            ColumnType::Datetime
+            | ColumnType::Datetime2
+            | ColumnType::Datetime4
             | ColumnType::Datetimen => {
                 if let Ok(Some(val)) = row.try_get::<chrono::NaiveDateTime, _>(idx) {
                     Ok(ElementValue::String(Arc::from(val.to_string().as_str())))

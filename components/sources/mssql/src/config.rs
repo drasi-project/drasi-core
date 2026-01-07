@@ -252,7 +252,7 @@ mod tests {
     fn test_start_position_serialization() {
         let json = serde_json::to_string(&StartPosition::Beginning).unwrap();
         assert_eq!(json, "\"beginning\"");
-        
+
         let json = serde_json::to_string(&StartPosition::Current).unwrap();
         assert_eq!(json, "\"current\"");
     }

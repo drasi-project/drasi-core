@@ -50,10 +50,8 @@ impl MsSqlConnection {
         match config.auth_mode {
             AuthMode::SqlServer => {
                 debug!("Using SQL Server authentication");
-                tiberius_config.authentication(AuthMethod::sql_server(
-                    &config.user,
-                    &config.password,
-                ));
+                tiberius_config
+                    .authentication(AuthMethod::sql_server(&config.user, &config.password));
             }
             AuthMode::Windows => {
                 // TODO: Implement Windows authentication
@@ -81,7 +79,14 @@ impl MsSqlConnection {
         // Connect via TCP
         let tcp = TcpStream::connect((config.host.as_str(), config.port))
             .await
-            .map_err(|e| anyhow!("Failed to connect to {}:{}: {}", config.host, config.port, e))?;
+            .map_err(|e| {
+                anyhow!(
+                    "Failed to connect to {}:{}: {}",
+                    config.host,
+                    config.port,
+                    e
+                )
+            })?;
 
         tcp.set_nodelay(true)?;
 
@@ -115,7 +120,10 @@ impl MsSqlConnection {
 
         if let Some(row) = rows.first() {
             let version: &str = row.get(0).ok_or_else(|| anyhow!("No version returned"))?;
-            info!("MS SQL Server version: {}", version.lines().next().unwrap_or(version));
+            info!(
+                "MS SQL Server version: {}",
+                version.lines().next().unwrap_or(version)
+            );
         }
 
         Ok(())

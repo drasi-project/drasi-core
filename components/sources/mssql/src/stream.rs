@@ -47,10 +47,7 @@ pub async fn run_cdc_stream(
     // Discover primary keys
     let mut pk_cache = PrimaryKeyCache::new();
     pk_cache.discover_keys(client, &config).await?;
-    info!(
-        "Discovered primary keys for {} tables",
-        config.tables.len()
-    );
+    info!("Discovered primary keys for {} tables", config.tables.len());
 
     // Load last LSN checkpoint from StateStore
     let mut current_lsn = load_checkpoint(&source_id, &state_store).await?;
@@ -67,7 +64,7 @@ pub async fn run_cdc_stream(
 
     loop {
         let lsn_before = current_lsn.clone();
-        
+
         match poll_cdc_changes(
             &source_id,
             &config,
@@ -129,7 +126,10 @@ async fn poll_cdc_changes(
         Some(lsn) => {
             // Validate LSN is still valid
             if !is_valid_lsn(client, lsn, &config.tables[0]).await? {
-                warn!("Stored LSN {} is no longer valid, falling back to start_position", lsn.to_hex());
+                warn!(
+                    "Stored LSN {} is no longer valid, falling back to start_position",
+                    lsn.to_hex()
+                );
                 match config.start_position {
                     StartPosition::Beginning => {
                         let min_lsn = get_min_lsn(client, &config.tables[0]).await?;
@@ -146,19 +146,23 @@ async fn poll_cdc_changes(
                 lsn.clone()
             }
         }
-        None => {
-            match config.start_position {
-                StartPosition::Beginning => {
-                    let min_lsn = get_min_lsn(client, &config.tables[0]).await?;
-                    info!("No checkpoint LSN, starting from beginning (minimum LSN: {})", min_lsn.to_hex());
-                    min_lsn
-                }
-                StartPosition::Current => {
-                    info!("No checkpoint LSN, starting from current (LSN: {})", max_lsn.to_hex());
-                    max_lsn.clone()
-                }
+        None => match config.start_position {
+            StartPosition::Beginning => {
+                let min_lsn = get_min_lsn(client, &config.tables[0]).await?;
+                info!(
+                    "No checkpoint LSN, starting from beginning (minimum LSN: {})",
+                    min_lsn.to_hex()
+                );
+                min_lsn
             }
-        }
+            StartPosition::Current => {
+                info!(
+                    "No checkpoint LSN, starting from current (LSN: {})",
+                    max_lsn.to_hex()
+                );
+                max_lsn.clone()
+            }
+        },
     };
 
     // Update current_lsn if it was newly initialized
@@ -168,11 +172,19 @@ async fn poll_cdc_changes(
 
     // If from_lsn >= max_lsn, no new changes
     if from_lsn >= max_lsn {
-        debug!("No new changes: from_lsn {} >= max_lsn {}", from_lsn.to_hex(), max_lsn.to_hex());
+        debug!(
+            "No new changes: from_lsn {} >= max_lsn {}",
+            from_lsn.to_hex(),
+            max_lsn.to_hex()
+        );
         return Ok(0);
     }
-    
-    debug!("Querying changes from LSN {} to {}", from_lsn.to_hex(), max_lsn.to_hex());
+
+    debug!(
+        "Querying changes from LSN {} to {}",
+        from_lsn.to_hex(),
+        max_lsn.to_hex()
+    );
 
     let mut change_count = 0;
     let mut batch = Vec::new();
@@ -198,10 +210,7 @@ async fn poll_cdc_changes(
             let element_id = pk_cache.generate_element_id(table, &row)?;
 
             // Extract label from table name (remove schema prefix if present)
-            let label = table
-                .split('.')
-                .last()
-                .unwrap_or(table);
+            let label = table.split('.').last().unwrap_or(table);
 
             // Convert to SourceChange
             let change = match operation {
@@ -248,7 +257,7 @@ async fn poll_cdc_changes(
             change_count += 1;
         }
     }
-    
+
     // After processing all changes, update checkpoint to max_lsn
     // This ensures we don't reprocess the same changes
     if change_count > 0 {
@@ -257,7 +266,11 @@ async fn poll_cdc_changes(
 
     // Dispatch all changes in batch
     if !batch.is_empty() {
-        debug!("Dispatching {} changes to {} dispatchers", batch.len(), dispatchers.read().await.len());
+        debug!(
+            "Dispatching {} changes to {} dispatchers",
+            batch.len(),
+            dispatchers.read().await.len()
+        );
         let dispatchers = dispatchers.read().await;
         for dispatcher in dispatchers.iter() {
             for change in &batch {
@@ -294,25 +307,27 @@ async fn query_table_changes(
         "SELECT * FROM cdc.fn_cdc_get_all_changes_{}(@P1, @P2, 'all') ORDER BY __$start_lsn, __$seqval",
         capture_instance
     );
-    
+
     debug!("CDC query: {}", query);
-    debug!("From LSN: {}, To LSN: {}", from_lsn.to_hex(), to_lsn.to_hex());
+    debug!(
+        "From LSN: {}, To LSN: {}",
+        from_lsn.to_hex(),
+        to_lsn.to_hex()
+    );
 
     let from_bytes = from_lsn.to_bytes();
     let to_bytes = to_lsn.to_bytes();
 
     let stream = client
-        .query(
-            &query,
-            &[
-                &from_bytes.as_slice(),
-                &to_bytes.as_slice(),
-            ],
-        )
+        .query(&query, &[&from_bytes.as_slice(), &to_bytes.as_slice()])
         .await?;
 
     let rows = stream.into_first_result().await?;
-    debug!("Retrieved {} rows from CDC function for table '{}'", rows.len(), table);
+    debug!(
+        "Retrieved {} rows from CDC function for table '{}'",
+        rows.len(),
+        table
+    );
     Ok(rows)
 }
 
@@ -331,9 +346,7 @@ async fn get_max_lsn(
     }
 
     let row = &rows[0];
-    let lsn_bytes: &[u8] = row
-        .try_get(0)?
-        .ok_or_else(|| anyhow!("max_lsn is NULL"))?;
+    let lsn_bytes: &[u8] = row.try_get(0)?.ok_or_else(|| anyhow!("max_lsn is NULL"))?;
 
     Lsn::from_bytes(lsn_bytes)
 }
@@ -344,13 +357,14 @@ async fn get_min_lsn(
     table: &str,
 ) -> Result<Lsn> {
     let capture_instance = table.replace('.', "_");
-    
+
     // Use string formatting instead of parameters since sys.fn_cdc_get_min_lsn expects a string literal
-    let query = format!("SELECT sys.fn_cdc_get_min_lsn('{}') AS min_lsn", capture_instance);
-    
-    let stream = client
-        .query(&query, &[])
-        .await?;
+    let query = format!(
+        "SELECT sys.fn_cdc_get_min_lsn('{}') AS min_lsn",
+        capture_instance
+    );
+
+    let stream = client.query(&query, &[]).await?;
 
     let rows = stream.into_first_result().await?;
 
@@ -359,9 +373,7 @@ async fn get_min_lsn(
     }
 
     let row = &rows[0];
-    let lsn_bytes: &[u8] = row
-        .try_get(0)?
-        .ok_or_else(|| anyhow!("min_lsn is NULL"))?;
+    let lsn_bytes: &[u8] = row.try_get(0)?.ok_or_else(|| anyhow!("min_lsn is NULL"))?;
 
     Lsn::from_bytes(lsn_bytes)
 }
@@ -373,11 +385,12 @@ async fn is_valid_lsn(
     table: &str,
 ) -> Result<bool> {
     let capture_instance = table.replace('.', "_");
-    let query = format!("SELECT sys.fn_cdc_get_min_lsn('{}') AS min_lsn", capture_instance);
-    
-    let stream = client
-        .query(&query, &[])
-        .await?;
+    let query = format!(
+        "SELECT sys.fn_cdc_get_min_lsn('{}') AS min_lsn",
+        capture_instance
+    );
+
+    let stream = client.query(&query, &[]).await?;
 
     let rows = stream.into_first_result().await?;
 

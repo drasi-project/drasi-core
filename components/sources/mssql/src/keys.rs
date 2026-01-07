@@ -77,14 +77,10 @@ impl PrimaryKeyCache {
 
         // Merge with configured table_keys (which take precedence)
         for tk in &config.table_keys {
-            self.keys
-                .insert(tk.table.clone(), tk.key_columns.clone());
+            self.keys.insert(tk.table.clone(), tk.key_columns.clone());
         }
 
-        log::info!(
-            "Discovered primary keys for {} tables",
-            self.keys.len()
-        );
+        log::info!("Discovered primary keys for {} tables", self.keys.len());
         for (table, keys) in &self.keys {
             log::debug!("Table '{}' primary key: {:?}", table, keys);
         }
@@ -99,14 +95,14 @@ impl PrimaryKeyCache {
         if let Some(keys) = self.keys.get(table) {
             return Some(keys);
         }
-        
+
         // Try without schema prefix (e.g., "dbo.Orders" -> "Orders")
         if let Some(table_only) = table.split('.').nth(1) {
             if let Some(keys) = self.keys.get(table_only) {
                 return Some(keys);
             }
         }
-        
+
         None
     }
 
