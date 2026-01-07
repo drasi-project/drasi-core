@@ -358,9 +358,7 @@ async fn get_min_lsn(
     let capture_instance = table.replace('.', "_");
 
     // Use string formatting instead of parameters since sys.fn_cdc_get_min_lsn expects a string literal
-    let query = format!(
-        "SELECT sys.fn_cdc_get_min_lsn('{capture_instance}') AS min_lsn"
-    );
+    let query = format!("SELECT sys.fn_cdc_get_min_lsn('{capture_instance}') AS min_lsn");
 
     let stream = client.query(&query, &[]).await?;
 
@@ -383,9 +381,7 @@ async fn is_valid_lsn(
     table: &str,
 ) -> Result<bool> {
     let capture_instance = table.replace('.', "_");
-    let query = format!(
-        "SELECT sys.fn_cdc_get_min_lsn('{capture_instance}') AS min_lsn"
-    );
+    let query = format!("SELECT sys.fn_cdc_get_min_lsn('{capture_instance}') AS min_lsn");
 
     let stream = client.query(&query, &[]).await?;
 

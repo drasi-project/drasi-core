@@ -130,9 +130,7 @@ impl PrimaryKeyCache {
                     if !matches!(value, ElementValue::Null) {
                         key_values.push(value_to_string(&value));
                     } else {
-                        warn!(
-                            "NULL value in primary key column '{pk_col}' for table '{table}'"
-                        );
+                        warn!("NULL value in primary key column '{pk_col}' for table '{table}'");
                     }
                 }
             }

@@ -226,9 +226,7 @@ impl MsSqlBootstrapHandler {
 
         // Bootstrap each node label
         for (label, table_name) in &tables {
-            info!(
-                "Bootstrapping table '{table_name}' with label '{label}'"
-            );
+            info!("Bootstrapping table '{table_name}' with label '{label}'");
 
             let count = self
                 .bootstrap_table(client, label, table_name, context, &event_tx)
@@ -307,9 +305,7 @@ impl MsSqlBootstrapHandler {
         context: &BootstrapContext,
         event_tx: &tokio::sync::mpsc::Sender<BootstrapEvent>,
     ) -> Result<usize> {
-        debug!(
-            "Starting bootstrap of table '{table_name}' with label '{label}'"
-        );
+        debug!("Starting bootstrap of table '{table_name}' with label '{label}'");
 
         // Query all rows from the table
         let query = format!("SELECT * FROM {table_name}");
