@@ -1,0 +1,14 @@
+### Get All Orders Results
+GET http://localhost:8080/queries/all-orders/results
+
+###
+
+### Get Pending Orders Results
+GET http://localhost:8080/queries/pending-orders/results
+
+###
+
+### Get Large Orders Results
+GET http://localhost:8080/queries/large-orders/results
+
+###
