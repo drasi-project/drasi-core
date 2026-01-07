@@ -93,7 +93,7 @@ impl MsSqlConnection {
         // Create Tiberius client
         let client = Client::connect(tiberius_config, tcp.compat_write())
             .await
-            .map_err(|e| anyhow!("Failed to authenticate with MS SQL Server: {}", e))?;
+            .map_err(|e| anyhow!("Failed to authenticate with MS SQL Server: {e}"))?;
 
         info!("Successfully connected to MS SQL Server");
 

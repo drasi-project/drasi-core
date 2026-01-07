@@ -40,7 +40,7 @@ impl CdcOperation {
             2 => Ok(Self::Insert),
             3 => Ok(Self::UpdateBefore),
             4 => Ok(Self::UpdateAfter),
-            _ => Err(anyhow!("Invalid CDC operation value: {}", value)),
+            _ => Err(anyhow!("Invalid CDC operation value: {value}")),
         }
     }
 

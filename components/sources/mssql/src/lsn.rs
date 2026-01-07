@@ -61,9 +61,9 @@ impl Lsn {
         let mut bytes = [0u8; 10];
         for (i, chunk) in hex_clean.as_bytes().chunks(2).enumerate() {
             let hex_byte = std::str::from_utf8(chunk)
-                .map_err(|e| anyhow!("Invalid UTF-8 in hex string: {}", e))?;
+                .map_err(|e| anyhow!("Invalid UTF-8 in hex string: {e}"))?;
             bytes[i] = u8::from_str_radix(hex_byte, 16)
-                .map_err(|e| anyhow!("Invalid hex character: {}", e))?;
+                .map_err(|e| anyhow!("Invalid hex character: {e}"))?;
         }
 
         Ok(Lsn(bytes))
