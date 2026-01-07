@@ -14,7 +14,7 @@
 
 //! CDC polling stream implementation
 
-use crate::config::MsSqlSourceConfig;
+use crate::config::{MsSqlSourceConfig, StartPosition};
 use crate::connection::MsSqlConnection;
 use crate::decoder::{cdc_columns, CdcOperation};
 use crate::keys::PrimaryKeyCache;
@@ -66,6 +66,8 @@ pub async fn run_cdc_stream(
     let poll_interval = Duration::from_millis(config.poll_interval_ms);
 
     loop {
+        let lsn_before = current_lsn.clone();
+        
         match poll_cdc_changes(
             &source_id,
             &config,
@@ -77,10 +79,16 @@ pub async fn run_cdc_stream(
         .await
         {
             Ok(change_count) => {
-                if change_count > 0 {
-                    debug!("Processed {} CDC changes", change_count);
+                // Save checkpoint if LSN was initialized or if we processed changes
+                let lsn_changed = current_lsn != lsn_before;
+                if change_count > 0 || lsn_changed {
+                    if change_count > 0 {
+                        debug!("Processed {} CDC changes", change_count);
+                    }
+                    if lsn_changed && change_count == 0 {
+                        debug!("Initialized LSN checkpoint");
+                    }
 
-                    // Save checkpoint after successful processing
                     if let Some(ref lsn) = current_lsn {
                         save_checkpoint(&source_id, lsn, &state_store).await?;
                     }
@@ -116,24 +124,47 @@ async fn poll_cdc_changes(
     let max_lsn = get_max_lsn(client).await?;
     debug!("Max LSN from CDC: {}", max_lsn.to_hex());
 
-    // If no current LSN, start from minimum available LSN to get all retained changes
+    // If no current LSN, use configured start position
     let from_lsn = match current_lsn {
         Some(lsn) => {
             // Validate LSN is still valid
             if !is_valid_lsn(client, lsn, &config.tables[0]).await? {
-                warn!("Stored LSN {} is no longer valid, using minimum available LSN", lsn.to_hex());
-                get_min_lsn(client, &config.tables[0]).await?
+                warn!("Stored LSN {} is no longer valid, falling back to start_position", lsn.to_hex());
+                match config.start_position {
+                    StartPosition::Beginning => {
+                        let min_lsn = get_min_lsn(client, &config.tables[0]).await?;
+                        info!("Using minimum available LSN: {}", min_lsn.to_hex());
+                        min_lsn
+                    }
+                    StartPosition::Current => {
+                        info!("Using current LSN (no historical changes)");
+                        max_lsn.clone()
+                    }
+                }
             } else {
                 debug!("Using stored LSN: {}", lsn.to_hex());
                 lsn.clone()
             }
         }
         None => {
-            let min_lsn = get_min_lsn(client, &config.tables[0]).await?;
-            info!("No checkpoint LSN, starting from minimum available LSN: {}", min_lsn.to_hex());
-            min_lsn
+            match config.start_position {
+                StartPosition::Beginning => {
+                    let min_lsn = get_min_lsn(client, &config.tables[0]).await?;
+                    info!("No checkpoint LSN, starting from beginning (minimum LSN: {})", min_lsn.to_hex());
+                    min_lsn
+                }
+                StartPosition::Current => {
+                    info!("No checkpoint LSN, starting from current (LSN: {})", max_lsn.to_hex());
+                    max_lsn.clone()
+                }
+            }
         }
     };
+
+    // Update current_lsn if it was newly initialized
+    if current_lsn.is_none() {
+        *current_lsn = Some(from_lsn.clone());
+    }
 
     // If from_lsn >= max_lsn, no new changes
     if from_lsn >= max_lsn {

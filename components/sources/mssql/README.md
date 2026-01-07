@@ -5,7 +5,7 @@ A Microsoft SQL Server Change Data Capture (CDC) source plugin for the Drasi pla
 ## Quick Start
 
 ```rust
-use drasi_source_mssql::MsSqlSource;
+use drasi_source_mssql::{MsSqlSource, StartPosition};
 
 let source = MsSqlSource::builder("mssql-source")
     .with_host("localhost")
@@ -14,7 +14,7 @@ let source = MsSqlSource::builder("mssql-source")
     .with_user("drasi_user")
     .with_password("password")
     .with_tables(vec!["orders".to_string(), "customers".to_string()])
-    .with_poll_interval_ms(1000)
+    .with_start_position(StartPosition::Current)  // or StartPosition::Beginning
     .build()?;
 
 source.start().await?;
@@ -31,13 +31,23 @@ password: secret         # Password
 tables:                  # Tables to monitor
   - orders
   - customers
-poll_interval_ms: 1000   # CDC polling interval (default: 1000ms)
+start_position: current  # Starting position when no LSN in state store
+                        # Options: 'beginning' or 'current' (default: current)
 table_keys:              # Optional: Override primary keys
   - table: order_items
     key_columns:
       - order_id
       - product_id
 ```
+
+### Start Position Options
+
+The `start_position` configuration determines what happens when no LSN checkpoint is found in the state store:
+
+- **`current`** (default): Start from the current LSN, ignoring historical changes. Use this when you only want new changes from now onwards.
+- **`beginning`**: Start from the earliest available LSN in CDC retention. Use this to capture all retained historical changes.
+
+**Note**: Once an LSN is persisted to the state store, it will always be used regardless of the `start_position` setting. The `start_position` only applies when no checkpoint exists.
 
 ## Prerequisites
 
@@ -135,6 +145,3 @@ Apache License 2.0
 
 Drasi Contributors
 
----
-
-**Status**: Production-quality foundation with ~82% completion

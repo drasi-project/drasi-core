@@ -49,7 +49,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use drasi_source_mssql::MsSqlSource;
+//! use drasi_source_mssql::{MsSqlSource, StartPosition};
 //! use drasi_lib::Source;
 //!
 //! # async fn example() -> anyhow::Result<()> {
@@ -59,6 +59,7 @@
 //!     .with_user("drasi_user")
 //!     .with_password("secure_password")
 //!     .with_tables(vec!["orders".to_string(), "customers".to_string()])
+//!     .with_start_position(StartPosition::Beginning)  // Capture all retained changes
 //!     .build()?;
 //!
 //! source.start().await?;
@@ -75,7 +76,7 @@ pub mod stream;
 pub mod types;
 
 // Re-export main types
-pub use config::{AuthMode, EncryptionMode, MsSqlSourceConfig, TableKeyConfig};
+pub use config::{AuthMode, EncryptionMode, MsSqlSourceConfig, StartPosition, TableKeyConfig};
 pub use connection::MsSqlConnection;
 pub use decoder::CdcOperation;
 pub use keys::PrimaryKeyCache;
@@ -383,9 +384,9 @@ impl MsSqlSourceBuilder {
         self
     }
 
-    /// Set the starting LSN
-    pub fn with_start_lsn(mut self, lsn: impl Into<String>) -> Self {
-        self.config.start_lsn = Some(lsn.into());
+    /// Set the starting position when no LSN is found in state store
+    pub fn with_start_position(mut self, position: StartPosition) -> Self {
+        self.config.start_position = position;
         self
     }
 

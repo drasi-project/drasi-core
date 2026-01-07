@@ -87,7 +87,6 @@ async fn main() -> Result<()> {
         .with_user("sa")
         .with_password("YourStrong!Passw0rd")
         .with_table("dbo.Orders")
-        .with_poll_interval_ms(2000)
         .with_trust_server_certificate(true)
         .with_bootstrap_provider(bootstrap_provider)
         .build()?;

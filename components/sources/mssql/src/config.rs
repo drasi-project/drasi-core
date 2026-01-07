@@ -62,6 +62,22 @@ impl Default for EncryptionMode {
     }
 }
 
+/// Starting position when no LSN is found in the state store
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StartPosition {
+    /// Start from the beginning (earliest available LSN)
+    Beginning,
+    /// Start from the current LSN (now)
+    Current,
+}
+
+impl Default for StartPosition {
+    fn default() -> Self {
+        Self::Current
+    }
+}
+
 impl std::fmt::Display for EncryptionMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -126,10 +142,9 @@ pub struct MsSqlSourceConfig {
     #[serde(default)]
     pub table_keys: Vec<TableKeyConfig>,
 
-    /// Starting LSN (optional, for initial run)
-    /// Only used if no LSN is found in the StateStore
+    /// Starting position when no LSN is found in the state store
     #[serde(default)]
-    pub start_lsn: Option<String>,
+    pub start_position: StartPosition,
 }
 
 fn default_host() -> String {
@@ -158,7 +173,7 @@ impl Default for MsSqlSourceConfig {
             encryption: EncryptionMode::default(),
             trust_server_certificate: false,
             table_keys: Vec::new(),
-            start_lsn: None,
+            start_position: StartPosition::default(),
         }
     }
 }
@@ -195,7 +210,7 @@ mod tests {
                 table: "orders".to_string(),
                 key_columns: vec!["order_id".to_string()],
             }],
-            start_lsn: Some("0x00000027000000680004".to_string()),
+            start_position: StartPosition::Beginning,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -226,5 +241,19 @@ mod tests {
 
         assert_eq!(tk.table, "orders");
         assert_eq!(tk.key_columns.len(), 2);
+    }
+
+    #[test]
+    fn test_start_position_default() {
+        assert_eq!(StartPosition::default(), StartPosition::Current);
+    }
+
+    #[test]
+    fn test_start_position_serialization() {
+        let json = serde_json::to_string(&StartPosition::Beginning).unwrap();
+        assert_eq!(json, "\"beginning\"");
+        
+        let json = serde_json::to_string(&StartPosition::Current).unwrap();
+        assert_eq!(json, "\"current\"");
     }
 }
