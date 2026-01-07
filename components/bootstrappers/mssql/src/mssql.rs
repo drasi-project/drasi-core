@@ -79,10 +79,7 @@ impl BootstrapProvider for MsSqlBootstrapProvider {
         // Execute bootstrap
         let count = handler.execute(request, context, event_tx).await?;
 
-        info!(
-            "Completed MS SQL bootstrap for query {}: sent {} records",
-            query_id, count
-        );
+        info!("Completed MS SQL bootstrap for query {query_id}: sent {count} records");
 
         Ok(count)
     }
@@ -492,7 +489,7 @@ impl MsSqlBootstrapHandler {
             event_tx
                 .send(bootstrap_event)
                 .await
-                .map_err(|e| anyhow!("Failed to send bootstrap event: {}", e))?;
+                .map_err(|e| anyhow!("Failed to send bootstrap event: {e}"))?;
         }
 
         Ok(())
