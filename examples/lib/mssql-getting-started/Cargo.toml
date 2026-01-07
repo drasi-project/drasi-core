@@ -1,0 +1,18 @@
+[package]
+name = "mssql-getting-started"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+drasi-lib = { path = "../../../lib" }
+drasi-source-mssql = { path = "../../../components/sources/mssql" }
+drasi-bootstrap-mssql = { path = "../../../components/bootstrappers/mssql" }
+drasi-reaction-log = { path = "../../../components/reactions/log" }
+
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+env_logger = "0.11"
+axum = "0.8"
+serde_json = "1"
