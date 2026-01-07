@@ -225,7 +225,7 @@ impl Source for MsSqlSource {
             if let Err(e) =
                 stream::run_cdc_stream(source_id.clone(), config, dispatchers, state_store).await
             {
-                log::error!("CDC stream task failed for {}: {}", source_id, e);
+                log::error!("CDC stream task failed for {source_id}: {e}");
             }
         });
 

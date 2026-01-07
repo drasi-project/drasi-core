@@ -80,7 +80,7 @@ impl Lsn {
     /// assert_eq!(lsn.to_hex(), "0x00000000000000000000");
     /// ```
     pub fn to_hex(&self) -> String {
-        format!("0x{}", hex::encode(&self.0))
+        format!("0x{}", hex::encode(self.0))
     }
 
     /// Create LSN from raw bytes (from StateStore or SQL query result)
@@ -221,6 +221,6 @@ mod tests {
     #[test]
     fn test_lsn_display() {
         let lsn = Lsn::from_hex("0x00000027000000680004").unwrap();
-        assert_eq!(format!("{}", lsn), "0x00000027000000680004");
+        assert_eq!(format!("{lsn}"), "0x00000027000000680004");
     }
 }

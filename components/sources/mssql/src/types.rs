@@ -158,7 +158,7 @@ pub fn value_to_string(value: &ElementValue) -> String {
         ElementValue::String(s) => s.to_string(),
         ElementValue::Bool(b) => b.to_string(),
         ElementValue::Null => "null".to_string(),
-        _ => format!("{:?}", value),
+        _ => format!("{value:?}"),
     }
 }
 

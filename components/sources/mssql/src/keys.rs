@@ -71,7 +71,7 @@ impl PrimaryKeyCache {
 
             self.keys
                 .entry(table_name.to_string())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(column_name.to_string());
         }
 
@@ -82,7 +82,7 @@ impl PrimaryKeyCache {
 
         log::info!("Discovered primary keys for {} tables", self.keys.len());
         for (table, keys) in &self.keys {
-            log::debug!("Table '{}' primary key: {:?}", table, keys);
+            log::debug!("Table '{table}' primary key: {keys:?}");
         }
 
         Ok(())
@@ -131,8 +131,7 @@ impl PrimaryKeyCache {
                         key_values.push(value_to_string(&value));
                     } else {
                         warn!(
-                            "NULL value in primary key column '{}' for table '{}'",
-                            pk_col, table
+                            "NULL value in primary key column '{pk_col}' for table '{table}'"
                         );
                     }
                 }
@@ -145,8 +144,7 @@ impl PrimaryKeyCache {
         } else {
             // No primary key or all NULL - use UUID fallback
             warn!(
-                "No primary key value for table '{}'. Using UUID fallback. Consider adding 'table_keys' configuration.",
-                table
+                "No primary key value for table '{table}'. Using UUID fallback. Consider adding 'table_keys' configuration."
             );
             Ok(format!("{}:{}", table, uuid::Uuid::new_v4()))
         }

@@ -227,8 +227,7 @@ impl MsSqlBootstrapHandler {
         // Bootstrap each node label
         for (label, table_name) in &tables {
             info!(
-                "Bootstrapping table '{}' with label '{}'",
-                table_name, label
+                "Bootstrapping table '{table_name}' with label '{label}'"
             );
 
             let count = self
@@ -236,7 +235,7 @@ impl MsSqlBootstrapHandler {
                 .await?;
 
             total_count += count;
-            info!("Bootstrapped {} records from table '{}'", count, table_name);
+            info!("Bootstrapped {count} records from table '{table_name}'");
         }
 
         // Commit transaction
@@ -272,14 +271,14 @@ impl MsSqlBootstrapHandler {
                 matched = true;
             } else {
                 // Try with dbo schema prefix
-                let with_schema = format!("dbo.{}", label);
+                let with_schema = format!("dbo.{label}");
                 if self.config.tables.contains(&with_schema) {
                     tables.push((label.clone(), with_schema));
                     matched = true;
                 } else {
                     // Try matching any configured table that ends with .{label}
                     for table in &self.config.tables {
-                        if table == label || table.ends_with(&format!(".{}", label)) {
+                        if table == label || table.ends_with(&format!(".{label}")) {
                             tables.push((label.clone(), table.clone()));
                             matched = true;
                             break;
@@ -309,12 +308,11 @@ impl MsSqlBootstrapHandler {
         event_tx: &tokio::sync::mpsc::Sender<BootstrapEvent>,
     ) -> Result<usize> {
         debug!(
-            "Starting bootstrap of table '{}' with label '{}'",
-            table_name, label
+            "Starting bootstrap of table '{table_name}' with label '{label}'"
         );
 
         // Query all rows from the table
-        let query = format!("SELECT * FROM {}", table_name);
+        let query = format!("SELECT * FROM {table_name}");
         let stream = client.query(&query, &[]).await?;
         let rows = stream.into_results().await?;
 

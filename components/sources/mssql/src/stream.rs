@@ -38,7 +38,7 @@ pub async fn run_cdc_stream(
     dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     state_store: Option<Arc<dyn drasi_lib::state_store::StateStoreProvider>>,
 ) -> Result<()> {
-    info!("Starting CDC stream for source '{}'", source_id);
+    info!("Starting CDC stream for source '{source_id}'");
 
     // Connect to MS SQL
     let mut connection = MsSqlConnection::connect(&config).await?;
@@ -63,7 +63,7 @@ pub async fn run_cdc_stream(
     let poll_interval = Duration::from_millis(config.poll_interval_ms);
 
     loop {
-        let lsn_before = current_lsn.clone();
+        let lsn_before = current_lsn;
 
         match poll_cdc_changes(
             &source_id,
@@ -80,7 +80,7 @@ pub async fn run_cdc_stream(
                 let lsn_changed = current_lsn != lsn_before;
                 if change_count > 0 || lsn_changed {
                     if change_count > 0 {
-                        debug!("Processed {} CDC changes", change_count);
+                        debug!("Processed {change_count} CDC changes");
                     }
                     if lsn_changed && change_count == 0 {
                         debug!("Initialized LSN checkpoint");
@@ -92,7 +92,7 @@ pub async fn run_cdc_stream(
                 }
             }
             Err(e) => {
-                error!("Error polling CDC changes: {}", e);
+                error!("Error polling CDC changes: {e}");
 
                 // Check if LSN is invalid and needs reset
                 if e.to_string().contains("invalid LSN") || e.to_string().contains("out of range") {
@@ -138,12 +138,12 @@ async fn poll_cdc_changes(
                     }
                     StartPosition::Current => {
                         info!("Using current LSN (no historical changes)");
-                        max_lsn.clone()
+                        max_lsn
                     }
                 }
             } else {
                 debug!("Using stored LSN: {}", lsn.to_hex());
-                lsn.clone()
+                *lsn
             }
         }
         None => match config.start_position {
@@ -160,14 +160,14 @@ async fn poll_cdc_changes(
                     "No checkpoint LSN, starting from current (LSN: {})",
                     max_lsn.to_hex()
                 );
-                max_lsn.clone()
+                max_lsn
             }
         },
     };
 
     // Update current_lsn if it was newly initialized
     if current_lsn.is_none() {
-        *current_lsn = Some(from_lsn.clone());
+        *current_lsn = Some(from_lsn);
     }
 
     // If from_lsn >= max_lsn, no new changes
@@ -191,11 +191,11 @@ async fn poll_cdc_changes(
 
     // Query each configured table's CDC changes
     for table in &config.tables {
-        debug!("Querying table '{}' for changes", table);
+        debug!("Querying table '{table}' for changes");
         let changes = match query_table_changes(client, table, &from_lsn, &max_lsn).await {
             Ok(changes) => changes,
             Err(e) => {
-                error!("Failed to query CDC changes for table '{}': {}", table, e);
+                error!("Failed to query CDC changes for table '{table}': {e}");
                 return Err(e);
             }
         };
@@ -210,7 +210,7 @@ async fn poll_cdc_changes(
             let element_id = pk_cache.generate_element_id(table, &row)?;
 
             // Extract label from table name (remove schema prefix if present)
-            let label = table.split('.').last().unwrap_or(table);
+            let label = table.split('.').next_back().unwrap_or(table);
 
             // Convert to SourceChange
             let change = match operation {
@@ -261,7 +261,7 @@ async fn poll_cdc_changes(
     // After processing all changes, update checkpoint to max_lsn
     // This ensures we don't reprocess the same changes
     if change_count > 0 {
-        *current_lsn = Some(max_lsn.clone());
+        *current_lsn = Some(max_lsn);
     }
 
     // Dispatch all changes in batch
@@ -304,11 +304,10 @@ async fn query_table_changes(
 
     // Tiberius uses @P1, @P2, etc. for positional parameters
     let query = format!(
-        "SELECT * FROM cdc.fn_cdc_get_all_changes_{}(@P1, @P2, 'all') ORDER BY __$start_lsn, __$seqval",
-        capture_instance
+        "SELECT * FROM cdc.fn_cdc_get_all_changes_{capture_instance}(@P1, @P2, 'all') ORDER BY __$start_lsn, __$seqval"
     );
 
-    debug!("CDC query: {}", query);
+    debug!("CDC query: {query}");
     debug!(
         "From LSN: {}, To LSN: {}",
         from_lsn.to_hex(),
@@ -360,8 +359,7 @@ async fn get_min_lsn(
 
     // Use string formatting instead of parameters since sys.fn_cdc_get_min_lsn expects a string literal
     let query = format!(
-        "SELECT sys.fn_cdc_get_min_lsn('{}') AS min_lsn",
-        capture_instance
+        "SELECT sys.fn_cdc_get_min_lsn('{capture_instance}') AS min_lsn"
     );
 
     let stream = client.query(&query, &[]).await?;
@@ -386,8 +384,7 @@ async fn is_valid_lsn(
 ) -> Result<bool> {
     let capture_instance = table.replace('.', "_");
     let query = format!(
-        "SELECT sys.fn_cdc_get_min_lsn('{}') AS min_lsn",
-        capture_instance
+        "SELECT sys.fn_cdc_get_min_lsn('{capture_instance}') AS min_lsn"
     );
 
     let stream = client.query(&query, &[]).await?;
@@ -451,7 +448,7 @@ async fn load_checkpoint(
                     return Ok(Some(lsn));
                 }
                 Err(e) => {
-                    warn!("Failed to parse stored LSN: {}, starting fresh", e);
+                    warn!("Failed to parse stored LSN: {e}, starting fresh");
                 }
             }
         }
@@ -494,7 +491,7 @@ mod tests {
     #[test]
     fn test_capture_instance_format() {
         let table = "orders";
-        let capture_instance = format!("dbo_{}", table);
+        let capture_instance = format!("dbo_{table}");
         assert_eq!(capture_instance, "dbo_orders");
     }
 
