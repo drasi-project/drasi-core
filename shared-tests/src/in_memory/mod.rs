@@ -524,3 +524,20 @@ mod future_aggregations {
         future_aggregations::truelater_max(&test_config).await;
     }
 }
+
+mod windows {
+    use super::InMemoryQueryConfig;
+    use crate::use_cases::*;
+
+    #[tokio::test]
+    async fn sliding_window_max() {
+        let test_config = InMemoryQueryConfig::new();
+        windows::sliding_window_max(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn sliding_window_avg_grouped() {
+        let test_config = InMemoryQueryConfig::new();
+        windows::sliding_window_avg_grouped(&test_config).await;
+    }
+}
