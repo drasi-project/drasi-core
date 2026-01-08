@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod avg;
+mod collect;
 mod count;
 mod last;
 pub mod lazy_sorted_set;
@@ -22,6 +23,7 @@ mod min;
 mod sum;
 
 pub use avg::Avg;
+pub use collect::Collect;
 pub use count::Count;
 pub use last::AggregatingLast;
 pub use linear_gradient::LinearGradient;
@@ -29,9 +31,36 @@ pub use max::Max;
 pub use min::Min;
 pub use sum::Sum;
 
+use std::sync::Arc;
+
 use crate::models::{ElementPropertyMap, ElementValue};
 
 use self::lazy_sorted_set::LazySortedSet;
+
+use super::{Function, FunctionRegistry};
+
+pub trait RegisterAggregationFunctions {
+    fn register_aggregation_functions(&self);
+}
+
+impl RegisterAggregationFunctions for FunctionRegistry {
+    fn register_aggregation_functions(&self) {
+        self.register_function("sum", Function::Aggregating(Arc::new(Sum {})));
+        self.register_function("avg", Function::Aggregating(Arc::new(Avg {})));
+        self.register_function("count", Function::Aggregating(Arc::new(Count {})));
+        self.register_function("min", Function::Aggregating(Arc::new(Min {})));
+        self.register_function("max", Function::Aggregating(Arc::new(Max {})));
+        self.register_function("collect", Function::Aggregating(Arc::new(Collect {})));
+        self.register_function(
+            "drasi.linearGradient",
+            Function::Aggregating(Arc::new(LinearGradient {})),
+        );
+        self.register_function(
+            "drasi.last",
+            Function::Aggregating(Arc::new(AggregatingLast {})),
+        );
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum ValueAccumulator {
