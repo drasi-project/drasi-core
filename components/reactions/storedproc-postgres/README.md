@@ -18,6 +18,9 @@ Add the dependency to your `Cargo.toml`:
 ```toml
 [dependencies]
 drasi-reaction-storedproc-postgres = { path = "path/to/drasi-core/components/reactions/storedproc-postgres" }
+
+# For Azure AD authentication support:
+drasi-auth-azure = { path = "path/to/drasi-core/components/auth/azure" }
 ```
 
 ## Quick Start
@@ -115,6 +118,162 @@ let reaction = PostgresStoredProcReaction::builder("my-reaction")
 | `routes` | Query-specific template overrides | `HashMap<String, QueryConfig>` | Empty |
 | `command_timeout_ms` | Command timeout | `u64` | `30000` |
 | `retry_attempts` | Number of retries | `u32` | `3` |
+
+## Authentication
+
+The PostgreSQL Stored Procedure reaction supports two authentication methods:
+
+### Password Authentication (Traditional)
+
+Use username and password credentials:
+
+```rust
+let reaction = PostgresStoredProcReaction::builder("my-reaction")
+    .with_hostname("localhost")
+    .with_port(5432)
+    .with_database("mydb")
+    .with_user("postgres")
+    .with_password("secret")
+    .build()
+    .await?;
+```
+
+### Azure AD Authentication with Default Credentials
+
+For Azure Database for PostgreSQL, you can use Azure AD authentication with `DefaultAzureCredential`. This method automatically tries multiple authentication mechanisms in order:
+
+1. **Managed Identity** - for production in Azure
+2. **Azure CLI** (`az login`) - for local development
+3. **Azure PowerShell**
+4. **Interactive browser**
+
+#### Azure Portal Setup
+
+1. **Configure Azure AD Admin:**
+   - Navigate to: Azure Portal → PostgreSQL Server → Settings → Authentication
+   - Set authentication method to "Azure AD authentication only" or "PostgreSQL and Azure AD authentication"
+   - Add your Azure AD account as admin
+
+2. **Configure Firewall Rules:**
+   - Navigate to: Azure Portal → PostgreSQL Server → Settings → Networking
+   - Add your client IP address to the firewall rules
+   - For local development, add your current IP address
+   - For production, add your Azure resource's IP range or enable "Allow Azure services and resources to access this server"
+
+3. **No additional SQL setup needed** - Azure AD admins automatically have full access
+
+#### Code Configuration
+
+```rust
+use drasi_reaction_storedproc_postgres::azure_auth::get_postgres_aad_token;
+use drasi_reaction_storedproc_postgres::PostgresStoredProcReaction;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Get Azure AD token using the component helper
+    let token = get_postgres_aad_token().await?;
+
+    let reaction = PostgresStoredProcReaction::builder("my-reaction")
+        .with_hostname("server.postgres.database.azure.com")
+        .with_port(5432)
+        .with_database("drasi_test")
+        // Username format depends on authentication method:
+        // - Local dev (az login): use your email (e.g., "user@<domain>.com")
+        // - Managed Identity: use the identity name (e.g., "my-app-identity")
+        .with_user("user@<domain>.com")
+        .with_aad_token(&token)             // Use token instead of password
+        .with_ssl(true)                     // Required for Azure PostgreSQL
+        .with_query("my-query")
+        .with_default_template(QueryConfig {
+            added: Some(TemplateSpec::new("CALL add_record(@after.id)")),
+            updated: None,
+            deleted: None,
+        })
+        .build()
+        .await?;
+
+    // ... rest of your application
+    Ok(())
+}
+```
+
+**Key Requirements:**
+- Use `.with_aad_token(&token)` instead of `.with_password()`
+- Username format depends on your authentication method (see below)
+- SSL must be enabled with `.with_ssl(true)`
+- The helper automatically uses the correct OAuth scope: `https://ossrdbms-aad.database.windows.net/.default`
+
+#### Alternative: Service Principal Authentication
+
+For CI/CD scenarios or when you need explicit service principal credentials:
+
+```rust
+use drasi_reaction_storedproc_postgres::azure_auth::get_postgres_aad_token_with_service_principal;
+
+let token = get_postgres_aad_token_with_service_principal(
+    "tenant-id",
+    "client-id",
+    "client-secret"
+).await?;
+
+// Use the token with the builder as shown above
+```
+
+#### Local Development with Azure CLI
+
+The easiest way for local development is using Azure CLI:
+
+```bash
+# Login to Azure CLI with your Azure AD account
+az login
+
+# Verify you're logged in
+az account show
+```
+
+**Important:** When using `az login` for local development:
+- Use your **full email address** as the username (e.g., `user@<domain>.com`)
+- `DefaultAzureCredential` will automatically use your Azure CLI credentials
+- Ensure your Azure AD account is added as an admin in the PostgreSQL server
+
+#### Production Deployment with Managed Identity
+
+When running in Azure (App Service, AKS, VM, Container Apps, etc.):
+
+1. Enable Managed Identity on your Azure resource
+2. Grant the Managed Identity access to your PostgreSQL server as an Azure AD admin
+3. Use the **Managed Identity name** as the username (e.g., `my-app-identity`)
+4. `DefaultAzureCredential` automatically uses Managed Identity - no code changes needed
+5. No secrets to manage or rotate
+
+**Important:** When using Managed Identity:
+- Use the **identity name** as the username, not an email address
+- System-assigned identities typically use the resource name
+- User-assigned identities use the identity resource name
+- Example: `.with_user("my-app-identity")`
+
+#### Troubleshooting
+
+**"Access denied" Error**
+- Verify you're added as Azure AD admin in Azure Portal
+- Wait 1-2 minutes for changes to propagate
+- Ensure using correct username format (full email)
+
+**"Failed to get token"**
+```bash
+# Login to Azure CLI
+az login
+
+# Verify subscription
+az account show
+
+# If needed, set the correct subscription
+az account set --subscription "subscription-name"
+```
+
+**SSL Connection Errors**
+- Ensure `.with_ssl(true)` is set
+- Azure PostgreSQL requires SSL/TLS connections
 
 ## Parameter Mapping
 

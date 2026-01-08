@@ -50,7 +50,18 @@ impl MsSqlExecutor {
         let mut tiberius_config = TiberiusConfig::new();
         tiberius_config.host(&config.hostname);
         tiberius_config.port(port);
-        tiberius_config.authentication(AuthMethod::sql_server(&config.user, &config.password));
+
+        // Configure authentication method
+        if let Some(ref token) = config.aad_token {
+            debug!("Using Azure AD token authentication");
+            tiberius_config.authentication(AuthMethod::AADToken(token.clone()));
+        } else if let Some(ref password) = config.password {
+            debug!("Using SQL Server authentication");
+            tiberius_config.authentication(AuthMethod::sql_server(&config.user, password));
+        } else {
+            return Err(anyhow!("Either password or aad_token must be provided"));
+        }
+
         tiberius_config.database(&config.database);
         tiberius_config.trust_cert(); // For self-signed certificates
 

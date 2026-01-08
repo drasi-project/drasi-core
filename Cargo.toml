@@ -43,6 +43,8 @@ members = [
   "components/indexes/rocksdb",
   "components/indexes/garnet",
 
+  # Auth Plugins
+  "components/auth/azure",
   # State Store Plugins
   "components/state_stores/redb",
 

@@ -90,8 +90,13 @@ pub struct MySqlStoredProcReactionConfig {
     /// Database user
     pub user: String,
 
-    /// Database password
-    pub password: String,
+    /// Database password (for standard authentication)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+
+    /// Azure AD token (for Azure AD authentication)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aad_token: Option<String>,
 
     /// Database name
     pub database: String,
@@ -99,6 +104,10 @@ pub struct MySqlStoredProcReactionConfig {
     /// Enable SSL/TLS
     #[serde(default)]
     pub ssl: bool,
+
+    /// Enable cleartext password plugin (required for Azure AD authentication)
+    #[serde(default)]
+    pub enable_cleartext_plugin: bool,
 
     /// Query-specific template configurations for stored procedure commands
     #[serde(default)]
@@ -123,9 +132,11 @@ impl Default for MySqlStoredProcReactionConfig {
             hostname: default_hostname(),
             port: None,
             user: String::new(),
-            password: String::new(),
+            password: None,
+            aad_token: None,
             database: String::new(),
             ssl: false,
+            enable_cleartext_plugin: false,
             routes: HashMap::new(),
             default_template: None,
             command_timeout_ms: default_timeout_ms(),
@@ -188,6 +199,14 @@ impl MySqlStoredProcReactionConfig {
         }
         if self.database.is_empty() {
             anyhow::bail!("Database name is required");
+        }
+
+        // Check that either password or aad_token is provided
+        if self.password.is_none() && self.aad_token.is_none() {
+            anyhow::bail!("Either password or aad_token must be provided");
+        }
+        if self.password.is_some() && self.aad_token.is_some() {
+            anyhow::bail!("Cannot specify both password and aad_token");
         }
 
         // Check if at least one command is configured

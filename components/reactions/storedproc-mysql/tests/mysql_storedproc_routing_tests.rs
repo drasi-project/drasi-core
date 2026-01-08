@@ -169,9 +169,11 @@ async fn test_default_template_applies_to_all_queries() {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
         user: mysql_config.user.clone(),
-        password: mysql_config.password.clone(),
+        password: Some(mysql_config.password.clone()),
+        aad_token: None,
         database: mysql_config.database.clone(),
         ssl: false,
+        enable_cleartext_plugin: false,
         routes: HashMap::new(), // No routes specified
         default_template: Some(QueryConfig {
             added: Some(TemplateSpec::new(
@@ -285,9 +287,11 @@ async fn test_route_overrides_default_template() {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
         user: mysql_config.user.clone(),
-        password: mysql_config.password.clone(),
+        password: Some(mysql_config.password.clone()),
+        aad_token: None,
         database: mysql_config.database.clone(),
         ssl: false,
+        enable_cleartext_plugin: false,
         routes,
         default_template: Some(QueryConfig {
             added: Some(TemplateSpec::new(
@@ -363,9 +367,11 @@ async fn test_route_with_none_falls_back_to_default() {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
         user: mysql_config.user.clone(),
-        password: mysql_config.password.clone(),
+        password: Some(mysql_config.password.clone()),
+        aad_token: None,
         database: mysql_config.database.clone(),
         ssl: false,
+        enable_cleartext_plugin: false,
         routes,
         default_template: Some(QueryConfig {
             added: None,
@@ -450,9 +456,11 @@ async fn test_multiple_queries_with_different_routes() {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
         user: mysql_config.user.clone(),
-        password: mysql_config.password.clone(),
+        password: Some(mysql_config.password.clone()),
+        aad_token: None,
         database: mysql_config.database.clone(),
         ssl: false,
+        enable_cleartext_plugin: false,
         routes,
         default_template: Some(QueryConfig {
             added: Some(TemplateSpec::new(
@@ -634,9 +642,11 @@ async fn test_executor_with_various_data_types() {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
         user: mysql_config.user.clone(),
-        password: mysql_config.password.clone(),
+        password: Some(mysql_config.password.clone()),
+        aad_token: None,
         database: mysql_config.database.clone(),
         ssl: false,
+        enable_cleartext_plugin: false,
         default_template: Some(QueryConfig {
             added: Some(TemplateSpec::new("CALL test_data_types(@after.text_val, @after.int_val, @after.float_val, @after.bool_val)")),
             ..Default::default()
@@ -746,9 +756,11 @@ async fn test_executor_with_string_numbers() {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
         user: mysql_config.user.clone(),
-        password: mysql_config.password.clone(),
+        password: Some(mysql_config.password.clone()),
+        aad_token: None,
         database: mysql_config.database.clone(),
         ssl: false,
+        enable_cleartext_plugin: false,
         default_template: Some(QueryConfig {
             added: Some(TemplateSpec::new("CALL test_string_number(@after.value)")),
             ..Default::default()
@@ -888,9 +900,11 @@ async fn test_parser_and_executor_with_nested_parameters() {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
         user: mysql_config.user.clone(),
-        password: mysql_config.password.clone(),
+        password: Some(mysql_config.password.clone()),
+        aad_token: None,
         database: mysql_config.database.clone(),
         ssl: false,
+        enable_cleartext_plugin: false,
         default_template: Some(QueryConfig {
             added: Some(TemplateSpec::new(
                 "CALL test_nested_add(@after.sensor_id, @after.temperature, @after.metadata)",
@@ -1123,9 +1137,11 @@ async fn test_parser_with_deeply_nested_fields() {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
         user: mysql_config.user.clone(),
-        password: mysql_config.password.clone(),
+        password: Some(mysql_config.password.clone()),
+        aad_token: None,
         database: mysql_config.database.clone(),
         ssl: false,
+        enable_cleartext_plugin: false,
         default_template: Some(QueryConfig {
             added: Some(TemplateSpec::new("CALL test_deep_nested(@after.device.name, @after.location.building, @after.location.floor, @after.reading.value)")),
             ..Default::default()

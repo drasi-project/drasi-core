@@ -33,6 +33,9 @@ async-trait = "0.1"
 # MySQL
 mysql_async = { version = "0.34", default-features = false, features = ["default"] }
 
+# Authentication
+drasi-auth-azure = { path = "../../auth/azure" }
+
 # Utilities
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

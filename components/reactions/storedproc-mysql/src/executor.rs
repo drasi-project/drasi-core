@@ -41,17 +41,33 @@ impl MySqlExecutor {
             config.hostname, port, config.database
         );
 
+        // Determine password - use aad_token if available, otherwise use password
+        let password = if let Some(ref token) = config.aad_token {
+            debug!("Using Azure AD token authentication");
+            token
+        } else if let Some(ref pwd) = config.password {
+            debug!("Using password authentication");
+            pwd
+        } else {
+            return Err(anyhow!("Either password or aad_token must be provided"));
+        };
+
         // Build MySQL connection options
         let mut opts_builder = OptsBuilder::default()
             .ip_or_hostname(&config.hostname)
             .tcp_port(port)
             .user(Some(&config.user))
-            .pass(Some(&config.password))
+            .pass(Some(password))
             .db_name(Some(&config.database));
 
         // Configure SSL if enabled
         if config.ssl {
             opts_builder = opts_builder.ssl_opts(Some(SslOpts::default()));
+        }
+
+        // Enable cleartext plugin if configured (required for Azure AD authentication)
+        if config.enable_cleartext_plugin {
+            opts_builder = opts_builder.enable_cleartext_plugin(true);
         }
 
         // Create connection pool
