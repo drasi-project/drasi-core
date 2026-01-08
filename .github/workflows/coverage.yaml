@@ -34,7 +34,7 @@ permissions:
 jobs:
   core_code_coverage:
     name: Generate Code Coverage for drasi-core
-    runs-on: ubuntu-latest-8-cores
+    runs-on: ubuntu-latest-4-cores
     permissions:
       contents: read
     services:
