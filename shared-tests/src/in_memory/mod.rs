@@ -582,3 +582,50 @@ mod collect_aggregation {
         collect_aggregation::multiple_collects_test(&test_config).await;
     }
 }
+
+mod source_update_upsert {
+    use super::InMemoryQueryConfig;
+    use crate::use_cases::*;
+
+    #[tokio::test]
+    async fn test_upsert_semantics() {
+        let test_config = InMemoryQueryConfig::new();
+        source_update_upsert::test_upsert_semantics(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn test_partial_updates() {
+        let test_config = InMemoryQueryConfig::new();
+        source_update_upsert::test_partial_updates(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn test_stateless_processing() {
+        let test_config = InMemoryQueryConfig::new();
+        source_update_upsert::test_stateless_processing(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn test_query_matching() {
+        let test_config = InMemoryQueryConfig::new();
+        source_update_upsert::test_query_matching(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn test_multiple_entities() {
+        let test_config = InMemoryQueryConfig::new();
+        source_update_upsert::test_multiple_entities(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn test_relationship_upsert() {
+        let test_config = InMemoryQueryConfig::new();
+        source_update_upsert::test_relationship_upsert(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn test_aggregation_with_upserts() {
+        let test_config = InMemoryQueryConfig::new();
+        source_update_upsert::test_aggregation_with_upserts(&test_config).await;
+    }
+}
