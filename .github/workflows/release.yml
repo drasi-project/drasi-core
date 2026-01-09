@@ -1,0 +1,133 @@
+name: Release Crates
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_target:
+        description: 'What to release?'
+        required: true
+        type: choice
+        options:
+          - core-and-lib
+          - component
+
+      component_name:
+        description: 'Component name (if releasing component, e.g., drasi-source-postgres)'
+        required: false
+        type: string
+
+      version_bump:
+        description: 'Version bump type'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+
+      dry_run:
+        description: 'Dry run only (preview changes without publishing)'
+        required: true
+        type: boolean
+        default: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write  # Needed for creating tags and releases
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for git tags
+
+
+      - name: Install cargo-release
+        run: cargo install cargo-release
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Validate component name
+        if: inputs.release_target == 'component' && inputs.component_name == ''
+        run: |
+          echo "Error: component_name is required when release_target is 'component'"
+          exit 1
+
+      # Release core-and-lib (core libraries + drasi-lib)
+      - name: Release core-and-lib
+        if: inputs.release_target == 'core-and-lib'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "Running dry-run for core-and-lib release..."
+            cargo release ${{ inputs.version_bump }} \
+              -p drasi-core \
+              -p drasi-query-ast \
+              -p drasi-query-cypher \
+              -p drasi-query-gql \
+              -p drasi-functions-cypher \
+              -p drasi-functions-gql \
+              -p drasi-middleware \
+              -p drasi-lib \
+              --no-push --no-tag --no-publish
+          else
+            echo "Releasing core-and-lib..."
+            cargo release ${{ inputs.version_bump }} \
+              -p drasi-core \
+              -p drasi-query-ast \
+              -p drasi-query-cypher \
+              -p drasi-query-gql \
+              -p drasi-functions-cypher \
+              -p drasi-functions-gql \
+              -p drasi-middleware \
+              -p drasi-lib \
+              --execute
+          fi
+
+      # Release component
+      - name: Release component
+        if: inputs.release_target == 'component'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "Running dry-run for ${{ inputs.component_name }} release..."
+            cargo release ${{ inputs.version_bump }} \
+              -p ${{ inputs.component_name }} \
+              --no-push --no-tag --no-publish
+          else
+            echo "Releasing ${{ inputs.component_name }}..."
+            cargo release ${{ inputs.version_bump }} \
+              -p ${{ inputs.component_name }} \
+              --execute
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Target**: ${{ inputs.release_target }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ inputs.release_target }}" = "component" ]; then
+            echo "- **Component**: ${{ inputs.component_name }}" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "- **Version Bump**: ${{ inputs.version_bump }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Dry Run**: ${{ inputs.dry_run }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "✅ Dry run completed successfully. No changes were published." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "To publish for real, re-run this workflow with dry_run=false" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ Release completed and published to crates.io" >> $GITHUB_STEP_SUMMARY
+          fi
