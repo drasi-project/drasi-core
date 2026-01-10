@@ -24,7 +24,13 @@ on:
           - patch
           - minor
           - major
+          - custom
         default: patch
+
+      custom_version:
+        description: 'Custom version (only if version_bump=custom, e.g., 0.2.5)'
+        required: false
+        type: string
 
       dry_run:
         description: 'Dry run only (preview changes without publishing)'
@@ -63,6 +69,21 @@ jobs:
           echo "Error: component_name is required when release_target is 'component'"
           exit 1
 
+      - name: Validate custom version
+        if: inputs.version_bump == 'custom' && inputs.custom_version == ''
+        run: |
+          echo "Error: custom_version is required when version_bump is 'custom'"
+          exit 1
+
+      - name: Set version argument
+        id: version
+        run: |
+          if [ "${{ inputs.version_bump }}" = "custom" ]; then
+            echo "arg=${{ inputs.custom_version }}" >> $GITHUB_OUTPUT
+          else
+            echo "arg=${{ inputs.version_bump }}" >> $GITHUB_OUTPUT
+          fi
+
       # Release core-and-lib (core libraries + drasi-lib)
       - name: Release core-and-lib
         if: inputs.release_target == 'core-and-lib'
@@ -71,7 +92,7 @@ jobs:
         run: |
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             echo "Running dry-run for core-and-lib release..."
-            cargo release ${{ inputs.version_bump }} \
+            cargo release ${{ steps.version.outputs.arg }} \
               -p drasi-core \
               -p drasi-query-ast \
               -p drasi-query-cypher \
@@ -80,10 +101,10 @@ jobs:
               -p drasi-functions-gql \
               -p drasi-middleware \
               -p drasi-lib \
-              --no-push --no-tag --no-publish
+              --no-push --no-tag --no-publish --no-confirm
           else
             echo "Releasing core-and-lib..."
-            cargo release ${{ inputs.version_bump }} \
+            cargo release ${{ steps.version.outputs.arg }} \
               -p drasi-core \
               -p drasi-query-ast \
               -p drasi-query-cypher \
@@ -92,6 +113,7 @@ jobs:
               -p drasi-functions-gql \
               -p drasi-middleware \
               -p drasi-lib \
+              --no-confirm \
               --execute
           fi
 
@@ -103,13 +125,14 @@ jobs:
         run: |
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             echo "Running dry-run for ${{ inputs.component_name }} release..."
-            cargo release ${{ inputs.version_bump }} \
+            cargo release ${{ steps.version.outputs.arg }} \
               -p ${{ inputs.component_name }} \
-              --no-push --no-tag --no-publish
+              --no-push --no-tag --no-publish --no-confirm
           else
             echo "Releasing ${{ inputs.component_name }}..."
-            cargo release ${{ inputs.version_bump }} \
+            cargo release ${{ steps.version.outputs.arg }} \
               -p ${{ inputs.component_name }} \
+              --no-confirm \
               --execute
           fi
 
@@ -121,7 +144,11 @@ jobs:
           if [ "${{ inputs.release_target }}" = "component" ]; then
             echo "- **Component**: ${{ inputs.component_name }}" >> $GITHUB_STEP_SUMMARY
           fi
-          echo "- **Version Bump**: ${{ inputs.version_bump }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ inputs.version_bump }}" = "custom" ]; then
+            echo "- **Version**: ${{ inputs.custom_version }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Version Bump**: ${{ inputs.version_bump }}" >> $GITHUB_STEP_SUMMARY
+          fi
           echo "- **Dry Run**: ${{ inputs.dry_run }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           if [ "${{ inputs.dry_run }}" = "true" ]; then
