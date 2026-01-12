@@ -12,9 +12,37 @@ on:
           - component
 
       component_name:
-        description: 'Component name (if releasing component, e.g., drasi-source-postgres)'
+        description: 'Component to release (only if release_target is component)'
         required: false
-        type: string
+        type: choice
+        options:
+          - ''
+          - drasi-source-postgres
+          - drasi-source-http
+          - drasi-source-grpc
+          - drasi-source-platform
+          - drasi-source-application
+          - drasi-source-mock
+          - drasi-bootstrap-postgres
+          - drasi-bootstrap-platform
+          - drasi-bootstrap-scriptfile
+          - drasi-bootstrap-application
+          - drasi-bootstrap-noop
+          - drasi-reaction-http
+          - drasi-reaction-http-adaptive
+          - drasi-reaction-grpc
+          - drasi-reaction-grpc-adaptive
+          - drasi-reaction-sse
+          - drasi-reaction-platform
+          - drasi-reaction-profiler
+          - drasi-reaction-application
+          - drasi-reaction-log
+          - drasi-reaction-storedproc-mssql
+          - drasi-reaction-storedproc-mysql
+          - drasi-reaction-storedproc-postgres
+          - drasi-index-rocksdb
+          - drasi-index-garnet
+          - drasi-state-store-redb
 
       version_bump:
         description: 'Version bump type'
