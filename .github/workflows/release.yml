@@ -47,6 +47,7 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    environment: drasi-core-release
 
     steps:
       - name: Checkout code
