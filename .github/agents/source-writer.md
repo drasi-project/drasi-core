@@ -33,6 +33,44 @@ If the data source involves an external system (e.g., a database, API, file form
 
 **CRITICAL**: Verify that libraries for real-time change detection actually exist and are functional.
 
+#### 3.5 Verify Library Capabilities with Proof-of-Concept
+
+This mandatory step requires the agent to:
+
+  - Examine actual library source code (not just docs)
+    - Look at struct field visibility
+    - Check examples in the crate's examples/ directory
+    - Verify the API actually exposes the needed data
+  - Write a minimal working POC demonstrating:  // Must actually compile and run
+    for row in &event.rows {
+        for cell in &row.cells {
+            println!("{:?}", cell); // Proves data is accessible
+        }
+    }
+  - Document findings in the implementation plan with evidence
+    - Show which file contains the struct definition
+    - Prove the field is public
+    - Include example code from the library
+  - Quality gate: Plan cannot be approved without POC verification
+
+🚩 Red Flags Checklist
+
+Add early warning system to catch placeholder implementations:
+
+  - #[allow(dead_code)] on business logic → STOP
+  - Returning Ok(Vec::new()) for core functionality → STOP
+  - "Placeholder" comments in primary paths → STOP
+
+✅ Validation Checkpoints
+
+Test each component immediately after writing it:
+
+  - Types → Unit test conversions
+  - Decoder → Test with actual library events
+  - Stream → Test actual event processing
+
+If any checkpoint fails, stop and re-verify library support.
+
 ### 4. Determine How Real-Time Changes Can Be Detected
 Decide on the best approach (e.g., webhooks, polling, change data capture) based on the target system's capabilities.
 
