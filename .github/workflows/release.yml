@@ -57,7 +57,7 @@ jobs:
 
 
       - name: Install cargo-release
-        run: cargo install cargo-release
+        run: cargo install cargo-release --version 0.25.20 --locked
 
       - name: Configure Git
         run: |
