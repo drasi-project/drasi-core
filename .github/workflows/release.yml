@@ -71,11 +71,19 @@ jobs:
           exit 1
 
       - name: Validate custom version
-        if: inputs.version_bump == 'custom' && inputs.custom_version == ''
+        if: inputs.version_bump == 'custom'
         run: |
-          echo "Error: custom_version is required when version_bump is 'custom'"
-          exit 1
+          if [ -z "${{ inputs.custom_version }}" ]; then
+            echo "Error: custom_version is required when version_bump is 'custom'"
+            exit 1
+          fi
 
+          # Validate semantic version format: MAJOR.MINOR.PATCH with optional pre-release and build metadata
+          SEMVER_REGEX='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z\.-]+)?(\+[0-9A-Za-z\.-]+)?$'
+          if ! echo "${{ inputs.custom_version }}" | grep -Eq "$SEMVER_REGEX"; then
+            echo "Error: custom_version '${{ inputs.custom_version }}' is not a valid semantic version (e.g., 1.2.3, 1.2.3-beta.1, 1.2.3+build.1)."
+            exit 1
+          fi
       - name: Set version argument
         id: version
         run: |
