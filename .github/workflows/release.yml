@@ -123,6 +123,7 @@ jobs:
 
       # Release core-and-lib (core libraries + drasi-lib)
       - name: Release core-and-lib
+        id: release-core
         if: inputs.release_target == 'core-and-lib'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -156,6 +157,7 @@ jobs:
 
       # Release component
       - name: Release component
+        id: release-component
         if: inputs.release_target == 'component'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -188,10 +190,21 @@ jobs:
           fi
           echo "- **Dry Run**: ${{ inputs.dry_run }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
-            echo "✅ Dry run completed successfully. No changes were published." >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "To publish for real, re-run this workflow with dry_run=false" >> $GITHUB_STEP_SUMMARY
+
+          # Check outcome of release steps
+          CORE_OUTCOME="${{ steps.release-core.outcome }}"
+          COMPONENT_OUTCOME="${{ steps.release-component.outcome }}"
+
+          if [ "$CORE_OUTCOME" = "failure" ] || [ "$COMPONENT_OUTCOME" = "failure" ]; then
+            echo "❌ **Release failed!** Check the logs above for details." >> $GITHUB_STEP_SUMMARY
+          elif [ "$CORE_OUTCOME" = "success" ] || [ "$COMPONENT_OUTCOME" = "success" ]; then
+            if [ "${{ inputs.dry_run }}" = "true" ]; then
+              echo "✅ Dry run completed successfully. No changes were published." >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "To publish for real, re-run this workflow with dry_run=false" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "✅ Release completed and published to crates.io" >> $GITHUB_STEP_SUMMARY
+            fi
           else
-            echo "✅ Release completed and published to crates.io" >> $GITHUB_STEP_SUMMARY
+            echo "⏭️ Release step was skipped." >> $GITHUB_STEP_SUMMARY
           fi
