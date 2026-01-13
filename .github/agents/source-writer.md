@@ -39,8 +39,10 @@ This mandatory step requires the agent to:
 
   - Examine actual library source code (not just docs)
     - Look at struct field visibility
+    - Identify differences in documentation vs. actual API
     - Check examples in the crate's examples/ directory
     - Verify the API actually exposes the needed data
+    - Create the PoC in a sub-directory named `/temp/[source-name]-poc-verification/` and add it to gitignore
   - Write a minimal working POC demonstrating:  // Must actually compile and run
     for row in &event.rows {
         for cell in &row.cells {
@@ -95,6 +97,8 @@ The plan **MUST** include:
 3. **Data Extraction and Change Detection Mechanisms**
    - Specific library or API that will be used
    - How changes will be detected in real-time
+   - Inject the POC verification code and findings here
+   - **CRITICAL**: Prove that the library supports accessing change event data
    - **No placeholders or "TODO" items allowed**
 4. **Data Mapping Strategies** and transformations
 5. **Key Classes and Functions** to be implemented
