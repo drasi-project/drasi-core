@@ -128,29 +128,25 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
+          PACKAGES="\
+            -p drasi-core \
+            -p drasi-query-ast \
+            -p drasi-query-cypher \
+            -p drasi-query-gql \
+            -p drasi-functions-cypher \
+            -p drasi-functions-gql \
+            -p drasi-middleware \
+            -p drasi-lib"
+
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             echo "Running dry-run for core-and-lib release..."
             cargo release ${{ steps.version.outputs.arg }} \
-              -p drasi-core \
-              -p drasi-query-ast \
-              -p drasi-query-cypher \
-              -p drasi-query-gql \
-              -p drasi-functions-cypher \
-              -p drasi-functions-gql \
-              -p drasi-middleware \
-              -p drasi-lib \
+              $PACKAGES \
               --no-push --no-tag --no-publish --no-confirm
           else
             echo "Releasing core-and-lib..."
             cargo release ${{ steps.version.outputs.arg }} \
-              -p drasi-core \
-              -p drasi-query-ast \
-              -p drasi-query-cypher \
-              -p drasi-query-gql \
-              -p drasi-functions-cypher \
-              -p drasi-functions-gql \
-              -p drasi-middleware \
-              -p drasi-lib \
+              $PACKAGES \
               --no-confirm \
               --execute
           fi
