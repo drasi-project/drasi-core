@@ -37,7 +37,7 @@ drasi-functions-cypher = { version = "0.1.0", path = "../functions-cypher" }
 drasi-functions-gql = { version = "0.1.0", path = "../functions-gql" }
 drasi-query-ast = { version = "0.1.2", path = "../query-ast" }
 drasi-query-cypher = { version = "0.1.2", path = "../query-cypher" }
-drasi-query-gql = { version = "0.1.0", path = "../query-gql" }
+drasi-query-gql = { version = "0.1.2", path = "../query-gql" }
 drasi-middleware = { version = "0.1.0", path = "../middleware" }
 
 # Note: Index backends (RocksDB, Garnet) are now plugins and NOT direct dependencies.
