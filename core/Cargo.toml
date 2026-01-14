@@ -53,4 +53,4 @@ time-macros = { version = "0.2.6", features = ["serde"] }
 
 [dev-dependencies]
 mockall = "0.13.1"
-drasi-query-cypher = { version = "0.1.0", path = "../query-cypher" }
+drasi-query-cypher = { version = "0.1.2", path = "../query-cypher" }
