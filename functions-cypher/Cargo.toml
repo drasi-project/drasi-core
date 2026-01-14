@@ -2,6 +2,9 @@
 name = "drasi-functions-cypher"
 version.workspace = true
 edition = "2021"
+license = "Apache-2.0"
+description = "Cypher function implementations for Drasi"
+repository = "https://github.com/drasi-project/drasi-core"
 
 [lints]
 workspace = true
