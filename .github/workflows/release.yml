@@ -83,6 +83,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq libjq-dev
+
+      - name: Set JQ_LIB_DIR
+        run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+
       - name: Install cargo-release
         run: cargo install cargo-release --version 0.25.20 --locked
 
