@@ -58,7 +58,8 @@ Write implementation plan including:
 4. Testing strategy:
    - Unit tests for components
    - **Integration test** ⭐ **REQUIRED**
-     - Which docker image will be used (must exist on Docker Hub)
+     - **Exact Docker image** (verify it exists on Docker Hub)
+     - How to programmatically start/configure it in tests
      - How source system will be set up programmatically
      - Exact test scenario (INSERT → verify, UPDATE → verify, DELETE → verify)
      - How test will verify changes are detected
@@ -67,6 +68,12 @@ Write implementation plan including:
 5. **Definition of Done** (what's complete, what's not, limitations)
 6. Assumptions & open questions
 7. Make sure any code examples in the plan reflect actual library APIs
+
+**MANDATORY Docker Container Requirement:**
+- Integration test MUST use testcontainers with a real Docker image
+- Manual example MUST provision a Docker container
+- NO exceptions for "external" dependencies like K8s clusters
+
 
 ### 6. User Confirmation
 **Do not start coding until plan is approved.**
