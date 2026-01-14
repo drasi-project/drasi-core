@@ -129,11 +129,11 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          # if [ "${{ inputs.dry_run }}" = "true" ]; then
-          #   cargo release ${{ needs.setup.outputs.version_arg }} -p drasi-query-ast --no-push --no-tag --no-publish --no-confirm
-          # else
-          #   cargo release ${{ needs.setup.outputs.version_arg }} -p drasi-query-ast --no-confirm --execute
-          # fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            cargo release ${{ needs.setup.outputs.version_arg }} -p drasi-query-ast --no-push --no-tag --no-publish --no-confirm
+          else
+            cargo release ${{ needs.setup.outputs.version_arg }} -p drasi-query-ast --no-verify --no-confirm --execute
+          fi
 
   # Release drasi-query-cypher (depends on query-ast)
   release-query-cypher:
