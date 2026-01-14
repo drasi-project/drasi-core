@@ -1,5 +1,5 @@
 ---
-name: source-writer
+name: source-writer-old
 description: A source implementation specialist for writing new data source and bootstrap components in Drasi.
 ---
 
