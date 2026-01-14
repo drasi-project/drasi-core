@@ -10,7 +10,7 @@ repository = "https://github.com/drasi-project/drasi-core"
 workspace = true
 
 [dependencies]
-drasi-core = { version = "0.1.0", path = "../core" }
+drasi-core = { version = "0.1.2", path = "../core" }
 
 [dev-dependencies]
 tokio = { version = "1.29.1", features = ["full"] }
