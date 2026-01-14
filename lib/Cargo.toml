@@ -33,8 +33,8 @@ path = "src/lib.rs"
 
 [dependencies]
 drasi-core = { version = "0.1.3", path = "../core" }
-drasi-functions-cypher = { version = "0.1.2", path = "../functions-cypher" }
-drasi-functions-gql = { version = "0.1.2", path = "../functions-gql" }
+drasi-functions-cypher = { version = "0.1.3", path = "../functions-cypher" }
+drasi-functions-gql = { version = "0.1.3", path = "../functions-gql" }
 drasi-query-ast = { version = "0.1.3", path = "../query-ast" }
 drasi-query-cypher = { version = "0.1.3", path = "../query-cypher" }
 drasi-query-gql = { version = "0.1.3", path = "../query-gql" }
