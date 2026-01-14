@@ -146,35 +146,35 @@ jobs:
 
             # Release packages one at a time with delays to ensure crates.io has updated
             echo "📦 Releasing drasi-query-ast..."
-            cargo release $VERSION_ARG -p drasi-query-ast --no-confirm --execute || true
+            cargo release $VERSION_ARG -p drasi-query-ast --no-confirm --execute
             sleep 30
 
             echo "📦 Releasing drasi-query-cypher..."
-            cargo release $VERSION_ARG -p drasi-query-cypher --no-confirm --execute || true
+            cargo release $VERSION_ARG -p drasi-query-cypher --no-confirm --execute
             sleep 30
 
             echo "📦 Releasing drasi-query-gql..."
-            cargo release $VERSION_ARG -p drasi-query-gql --no-confirm --execute || true
+            cargo release $VERSION_ARG -p drasi-query-gql --no-confirm --execute
             sleep 30
 
             echo "📦 Releasing drasi-core..."
-            cargo release $VERSION_ARG -p drasi-core --no-confirm --execute || true
+            cargo release $VERSION_ARG -p drasi-core --no-confirm --execute
             sleep 30
 
             echo "📦 Releasing drasi-functions-cypher..."
-            cargo release $VERSION_ARG -p drasi-functions-cypher --no-confirm --execute || true
+            cargo release $VERSION_ARG -p drasi-functions-cypher --no-confirm --execute
             sleep 30
 
             echo "📦 Releasing drasi-functions-gql..."
-            cargo release $VERSION_ARG -p drasi-functions-gql --no-confirm --execute || true
+            cargo release $VERSION_ARG -p drasi-functions-gql --no-confirm --execute
             sleep 30
 
             echo "📦 Releasing drasi-middleware..."
-            cargo release $VERSION_ARG -p drasi-middleware --no-confirm --execute || true
+            cargo release $VERSION_ARG -p drasi-middleware --no-confirm --execute
             sleep 30
 
             echo "📦 Releasing drasi-lib..."
-            cargo release $VERSION_ARG -p drasi-lib --no-confirm --execute || true
+            cargo release $VERSION_ARG -p drasi-lib --no-confirm --execute
 
             echo "✅ All packages released!"
           fi
