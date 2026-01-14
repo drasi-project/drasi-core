@@ -28,7 +28,7 @@ workspace = true
 
 [dependencies]
 drasi-core = { version = "0.1.0", path = "../../../core" }
-drasi-query-ast = { version = "0.1.1", path = "../../../query-ast" }
+drasi-query-ast = { version = "0.1.2", path = "../../../query-ast" }
 rocksdb = { version = "0.21.0", features = ["default", "multi-threaded-cf"] }
 async-trait = "0.1.68"
 hashers = "1.0.1"
