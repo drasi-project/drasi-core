@@ -15,7 +15,7 @@ workspace = true
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-drasi-query-ast = { version = "0.1.0", path = "../query-ast" }
+drasi-query-ast = { version = "0.1.1", path = "../query-ast" }
 peg = "0.8.1"
 serde = "1.0.164"
 serde_json = "1.0.96"
