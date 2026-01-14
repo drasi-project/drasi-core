@@ -129,10 +129,10 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           PACKAGES="\
-            -p drasi-core \
             -p drasi-query-ast \
             -p drasi-query-cypher \
             -p drasi-query-gql \
+            -p drasi-core \
             -p drasi-functions-cypher \
             -p drasi-functions-gql \
             -p drasi-middleware \
