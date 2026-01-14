@@ -29,7 +29,7 @@ Implementation is **ONLY complete** when:
 
 ### 2. Research Target System
 - Research target system documentation to understand how to interact with it effectively. Take note of any libraries or SDKs that may facilitate integration. Search the web for best practices and common pitfalls when integrating with this system.
-- Determine how real time changes can be detected: Decide on the best approach (e.g., webhooks, polling, change data capture) based on the target system's capabilities.
+- Determine how real time changes can be detected: Decide on the best approach (e.g., webhooks, polling, change data capture) based on the target system's capabilities. Prefer CDC, log-based, or event-driven mechanisms over polling whenever possible.
 
 ### 3. Verify Library Capabilities with POC
 
