@@ -73,25 +73,13 @@ permissions:
   contents: write  # Needed for creating tags and releases
 
 jobs:
-  release:
-    runs-on: ubuntu-latest-8-cores
+  # Setup job to determine version and validate inputs
+  setup:
+    runs-on: ubuntu-latest
     environment: drasi-core-release
-
+    outputs:
+      version_arg: ${{ steps.version.outputs.arg }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Fetch all history for git tags
-
-
-      - name: Install cargo-release
-        run: cargo install cargo-release --version 0.25.20 --locked
-
-      - name: Configure Git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
       - name: Validate component name
         if: inputs.release_target == 'component' && inputs.component_name == ''
         run: |
@@ -112,6 +100,7 @@ jobs:
             echo "Error: custom_version '${{ inputs.custom_version }}' is not a valid semantic version (e.g., 1.2.3, 1.2.3-beta.1, 1.2.3+build.1)."
             exit 1
           fi
+
       - name: Set version argument
         id: version
         run: |
@@ -121,57 +110,238 @@ jobs:
             echo "arg=${{ inputs.version_bump }}" >> $GITHUB_OUTPUT
           fi
 
-      # Release core-and-lib (core libraries + drasi-lib)
-      - name: Release core-and-lib
-        id: release-core
-        if: inputs.release_target == 'core-and-lib'
+  # Release drasi-query-ast (no dependencies)
+  release-query-ast:
+    needs: setup
+    if: inputs.release_target == 'core-and-lib'
+    runs-on: ubuntu-latest-8-cores
+    environment: drasi-core-release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: cargo install cargo-release --version 0.25.20 --locked
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Release drasi-query-ast
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          PACKAGES="\
-            -p drasi-query-cypher \
-            -p drasi-query-gql \
-            -p drasi-core \
-            -p drasi-functions-cypher \
-            -p drasi-functions-gql \
-            -p drasi-middleware \
-            -p drasi-lib"
+          # if [ "${{ inputs.dry_run }}" = "true" ]; then
+          #   cargo release ${{ needs.setup.outputs.version_arg }} -p drasi-query-ast --no-push --no-tag --no-publish --no-confirm
+          # else
+          #   cargo release ${{ needs.setup.outputs.version_arg }} -p drasi-query-ast --no-confirm --execute
+          # fi
 
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
-            echo "Running dry-run for core-and-lib release..."
-            cargo release ${{ steps.version.outputs.arg }} \
-              $PACKAGES \
-              --no-push --no-tag --no-publish --no-confirm
-          else
-            echo "Releasing core-and-lib..."
-            cargo release ${{ steps.version.outputs.arg }} \
-              $PACKAGES \
-              --no-confirm \
-              --execute
-          fi
-
-      # Release component
-      - name: Release component
-        id: release-component
-        if: inputs.release_target == 'component'
+  # Release drasi-query-cypher (depends on query-ast)
+  release-query-cypher:
+    needs: [setup, release-query-ast]
+    if: inputs.release_target == 'core-and-lib'
+    runs-on: ubuntu-latest-8-cores
+    environment: drasi-core-release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: cargo install cargo-release --version 0.25.20 --locked
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Release drasi-query-cypher
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           if [ "${{ inputs.dry_run }}" = "true" ]; then
-            echo "Running dry-run for ${{ inputs.component_name }} release..."
-            cargo release ${{ steps.version.outputs.arg }} \
-              -p ${{ inputs.component_name }} \
-              --no-push --no-tag --no-publish --no-confirm
+            cargo release ${{ needs.setup.outputs.version_arg }} -p drasi-query-cypher --no-push --no-tag --no-publish --no-confirm
           else
-            echo "Releasing ${{ inputs.component_name }}..."
-            cargo release ${{ steps.version.outputs.arg }} \
-              -p ${{ inputs.component_name }} \
-              --no-confirm \
-              --execute
+            cargo release ${{ needs.setup.outputs.version_arg }} -p drasi-query-cypher --no-confirm --execute
           fi
 
-      - name: Summary
-        if: always()
+  # Release drasi-query-gql (depends on query-ast)
+  release-query-gql:
+    needs: [setup, release-query-ast]
+    if: inputs.release_target == 'core-and-lib'
+    runs-on: ubuntu-latest-8-cores
+    environment: drasi-core-release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: cargo install cargo-release --version 0.25.20 --locked
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Release drasi-query-gql
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            cargo release ${{ needs.setup.outputs.version_arg }} -p drasi-query-gql --no-push --no-tag --no-publish --no-confirm
+          else
+            cargo release ${{ needs.setup.outputs.version_arg }} -p drasi-query-gql --no-confirm --execute
+          fi
+
+  # Release drasi-core (depends on query-ast)
+  release-core:
+    needs: [setup, release-query-ast]
+    if: inputs.release_target == 'core-and-lib'
+    runs-on: ubuntu-latest-8-cores
+    environment: drasi-core-release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: cargo install cargo-release --version 0.25.20 --locked
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Release drasi-core
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            cargo release ${{ needs.setup.outputs.version_arg }} -p drasi-core --no-push --no-tag --no-publish --no-confirm
+          else
+            cargo release ${{ needs.setup.outputs.version_arg }} -p drasi-core --no-confirm --execute
+          fi
+
+  # Release drasi-functions-cypher (depends on core)
+  release-functions-cypher:
+    needs: [setup, release-core]
+    if: inputs.release_target == 'core-and-lib'
+    runs-on: ubuntu-latest-8-cores
+    environment: drasi-core-release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: cargo install cargo-release --version 0.25.20 --locked
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Release drasi-functions-cypher
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            cargo release ${{ needs.setup.outputs.version_arg }} -p drasi-functions-cypher --no-push --no-tag --no-publish --no-confirm
+          else
+            cargo release ${{ needs.setup.outputs.version_arg }} -p drasi-functions-cypher --no-confirm --execute
+          fi
+
+  # Release drasi-functions-gql (depends on core)
+  release-functions-gql:
+    needs: [setup, release-core]
+    if: inputs.release_target == 'core-and-lib'
+    runs-on: ubuntu-latest-8-cores
+    environment: drasi-core-release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: cargo install cargo-release --version 0.25.20 --locked
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Release drasi-functions-gql
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            cargo release ${{ needs.setup.outputs.version_arg }} -p drasi-functions-gql --no-push --no-tag --no-publish --no-confirm
+          else
+            cargo release ${{ needs.setup.outputs.version_arg }} -p drasi-functions-gql --no-confirm --execute
+          fi
+
+  # Release drasi-middleware (depends on core)
+  release-middleware:
+    needs: [setup, release-core]
+    if: inputs.release_target == 'core-and-lib'
+    runs-on: ubuntu-latest-8-cores
+    environment: drasi-core-release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: cargo install cargo-release --version 0.25.20 --locked
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Release drasi-middleware
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            cargo release ${{ needs.setup.outputs.version_arg }} -p drasi-middleware --no-push --no-tag --no-publish --no-confirm
+          else
+            cargo release ${{ needs.setup.outputs.version_arg }} -p drasi-middleware --no-confirm --execute
+          fi
+
+  # Release drasi-lib (depends on all previous packages)
+  release-lib:
+    needs: [setup, release-core, release-query-cypher, release-query-gql, release-functions-cypher, release-functions-gql, release-middleware]
+    if: inputs.release_target == 'core-and-lib'
+    runs-on: ubuntu-latest-8-cores
+    environment: drasi-core-release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: cargo install cargo-release --version 0.25.20 --locked
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Release drasi-lib
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            cargo release ${{ needs.setup.outputs.version_arg }} -p drasi-lib --no-push --no-tag --no-publish --no-confirm
+          else
+            cargo release ${{ needs.setup.outputs.version_arg }} -p drasi-lib --no-confirm --execute
+          fi
+
+  # Release component (single component release)
+  release-component:
+    needs: setup
+    if: inputs.release_target == 'component'
+    runs-on: ubuntu-latest-8-cores
+    environment: drasi-core-release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: cargo install cargo-release --version 0.25.20 --locked
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Release ${{ inputs.component_name }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            cargo release ${{ needs.setup.outputs.version_arg }} -p ${{ inputs.component_name }} --no-push --no-tag --no-publish --no-confirm
+          else
+            cargo release ${{ needs.setup.outputs.version_arg }} -p ${{ inputs.component_name }} --no-confirm --execute
+          fi
+
+  # Summary job
+  summary:
+    needs: [setup, release-query-ast, release-query-cypher, release-query-gql, release-core, release-functions-cypher, release-functions-gql, release-middleware, release-lib, release-component]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate Summary
         run: |
           echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
           echo "- **Target**: ${{ inputs.release_target }}" >> $GITHUB_STEP_SUMMARY
@@ -186,13 +356,10 @@ jobs:
           echo "- **Dry Run**: ${{ inputs.dry_run }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          # Check outcome of release steps
-          CORE_OUTCOME="${{ steps.release-core.outcome }}"
-          COMPONENT_OUTCOME="${{ steps.release-component.outcome }}"
-
-          if [ "$CORE_OUTCOME" = "failure" ] || [ "$COMPONENT_OUTCOME" = "failure" ]; then
+          # Check if any job failed
+          if [ "${{ contains(needs.*.result, 'failure') }}" = "true" ]; then
             echo "❌ **Release failed!** Check the logs above for details." >> $GITHUB_STEP_SUMMARY
-          elif [ "$CORE_OUTCOME" = "success" ] || [ "$COMPONENT_OUTCOME" = "success" ]; then
+          elif [ "${{ contains(needs.*.result, 'success') }}" = "true" ]; then
             if [ "${{ inputs.dry_run }}" = "true" ]; then
               echo "✅ Dry run completed successfully. No changes were published." >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY
@@ -201,5 +368,5 @@ jobs:
               echo "✅ Release completed and published to crates.io" >> $GITHUB_STEP_SUMMARY
             fi
           else
-            echo "⏭️ Release step was skipped." >> $GITHUB_STEP_SUMMARY
+            echo "⏭️ Release steps were skipped." >> $GITHUB_STEP_SUMMARY
           fi
