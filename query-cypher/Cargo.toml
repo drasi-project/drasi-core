@@ -1,6 +1,6 @@
 [package]
 name = "drasi-query-cypher"
-version = "0.1.3"
+version = "0.2.1"
 edition = "2021"
 license = "Apache-2.0"
 description = "Drasi Core Cypher Parser"
