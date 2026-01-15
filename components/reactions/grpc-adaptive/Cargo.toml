@@ -42,7 +42,7 @@ chrono = "0.4"
 uuid = { version = "1.0", features = ["v4"] }
 prost-types = "0.12"
 ordered-float = "3.0"
-drasi-reaction-grpc = { version = "0.1.0", path = "../grpc" }
+drasi-reaction-grpc = { version = "0.1.1", path = "../grpc" }
 
 [build-dependencies]
 tonic-build = "0.11"
