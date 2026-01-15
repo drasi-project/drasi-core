@@ -6,7 +6,7 @@
 "ghcr.io/devcontainers/features/git:1": {}
 },
 
-"postCreateCommand": "sudo apt-get update && sudo apt-get install -y libjq-dev libonig-dev && mkdir -p ~/.cargo && printf '[build]\\nJQ_LIB_DIR = \"/usr/lib/x86_64-linux-gnu\"\\n' > ~/.cargo/config.toml",
+"postCreateCommand": "bash -c 'sudo apt-get update && sudo apt-get install -y libjq-dev libonig-dev && mkdir -p ~/.cargo && cat > ~/.cargo/config.toml <<EOF\n[build]\nJQ_LIB_DIR = \"/usr/lib/x86_64-linux-gnu\"\nEOF\n'",
 
 "customizations": {
 "vscode": {
