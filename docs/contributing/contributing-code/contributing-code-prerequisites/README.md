@@ -53,6 +53,8 @@ JQ_LIB_DIR = "/usr/lib/x86_64-linux-gnu"
 EOF
 ```
 
+> **Note for non-x86_64 architectures:** The path above is for x86_64. For ARM64 or other architectures, adjust the path accordingly (e.g., `/usr/lib/aarch64-linux-gnu`). Alternatively, use the Dev Container setup which automatically detects the correct path for your architecture.
+
 **macOS with Homebrew:**
 ```bash
 mkdir -p ~/.cargo

@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 echo "Installing libjq and dependencies..."
 sudo apt-get update
