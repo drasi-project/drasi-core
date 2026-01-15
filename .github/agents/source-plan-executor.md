@@ -391,6 +391,7 @@ echo "✓ Setup complete!"
 - Bootstrap README: overview, configuration, usage
 - Example README: quick start, verification, helper scripts, troubleshooting
 - Integration test documentation
+- Any system packages or libraries required
 
 ### 6. Quality Checks
 
