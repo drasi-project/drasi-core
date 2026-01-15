@@ -1,0 +1,25 @@
+{
+"name": "Drasi Core Rust Development",
+"image": "mcr.microsoft.com/devcontainers/rust:1-1-bookworm",
+
+"features": {
+"ghcr.io/devcontainers/features/git:1": {}
+},
+
+"postCreateCommand": "sudo apt-get update && sudo apt-get install -y libjq-dev libonig-dev && mkdir -p ~/.cargo && printf '[build]\\nJQ_LIB_DIR = \"/usr/lib/x86_64-linux-gnu\"\\n' > ~/.cargo/config.toml",
+
+"customizations": {
+"vscode": {
+"extensions": [
+"rust-lang.rust-analyzer",
+"tamasfe.even-better-toml",
+"serayuzgur.crates"
+],
+"settings": {
+"git.alwaysSignOff": true
+}
+}
+},
+
+"remoteUser": "vscode"
+}
