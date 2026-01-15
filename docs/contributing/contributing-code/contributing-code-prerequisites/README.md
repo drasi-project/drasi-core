@@ -45,15 +45,19 @@ After installing libjq, you need to configure the Rust build system to find the 
 **Linux:**
 ```bash
 mkdir -p ~/.cargo
-echo '[build]' >> ~/.cargo/config.toml
-echo 'JQ_LIB_DIR = "/usr/lib/x86_64-linux-gnu"' >> ~/.cargo/config.toml
+cat > ~/.cargo/config.toml << 'EOF'
+[build]
+JQ_LIB_DIR = "/usr/lib/x86_64-linux-gnu"
+EOF
 ```
 
 **macOS:**
 ```bash
 mkdir -p ~/.cargo
-echo '[build]' >> ~/.cargo/config.toml
-echo 'JQ_LIB_DIR = "/opt/homebrew/lib"' >> ~/.cargo/config.toml
+cat > ~/.cargo/config.toml << 'EOF'
+[build]
+JQ_LIB_DIR = "/opt/homebrew/lib"
+EOF
 ```
 
 Adjust the path as needed based on where your package manager installed libjq.
