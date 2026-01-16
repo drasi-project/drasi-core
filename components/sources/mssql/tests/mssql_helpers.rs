@@ -117,18 +117,24 @@ pub async fn setup_mssql() -> Result<MssqlGuard> {
 
 async fn setup_mssql_raw() -> Result<(ContainerAsync<GenericImage>, MssqlConfig)> {
     let password = "YourStrong@Passw0rd";
-    let (image_name, image_tag, accept_eula, init_delay, privileged) = if cfg!(target_arch = "aarch64")
-    {
-        (
-            "mcr.microsoft.com/azure-sql-edge",
-            "latest",
-            "1",
-            20000,
-            true,
-        )
-    } else {
-        ("mcr.microsoft.com/mssql/server", "2022-latest", "Y", 15000, false)
-    };
+    let (image_name, image_tag, accept_eula, init_delay, privileged) =
+        if cfg!(target_arch = "aarch64") {
+            (
+                "mcr.microsoft.com/azure-sql-edge",
+                "latest",
+                "1",
+                20000,
+                true,
+            )
+        } else {
+            (
+                "mcr.microsoft.com/mssql/server",
+                "2022-latest",
+                "Y",
+                15000,
+                false,
+            )
+        };
 
     let mut image = GenericImage::new(image_name, image_tag)
         .with_exposed_port(1433.tcp())

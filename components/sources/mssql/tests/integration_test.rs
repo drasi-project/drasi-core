@@ -151,7 +151,9 @@ async fn test_mssql_change_detection_end_to_end() -> Result<()> {
         .try_init();
 
     let result = tokio::time::timeout(Duration::from_secs(300), async {
-        let mssql = setup_mssql().await.context("Failed to start MSSQL container")?;
+        let mssql = setup_mssql()
+            .await
+            .context("Failed to start MSSQL container")?;
         let db_config = prepare_database(mssql.config())
             .await
             .context("Failed to prepare MSSQL database")?;
@@ -209,7 +211,9 @@ async fn test_mssql_change_detection_end_to_end() -> Result<()> {
         core.start().await.context("Failed to start DrasiLib")?;
 
         let mut subscription = handle
-            .subscribe_with_options(SubscriptionOptions::default().with_timeout(Duration::from_secs(5)))
+            .subscribe_with_options(
+                SubscriptionOptions::default().with_timeout(Duration::from_secs(5)),
+            )
             .await
             .context("Failed to create subscription")?;
 
@@ -247,11 +251,7 @@ async fn test_mssql_change_detection_end_to_end() -> Result<()> {
         execute_sql(&mut client, "DELETE FROM dbo.Products WHERE ProductId = 1;").await?;
 
         wait_for_change(&mut subscription, 6, |entry| {
-            matches_change(
-                entry,
-                "DELETE",
-                &[("id", "1"), ("name", "Widget Updated")],
-            )
+            matches_change(entry, "DELETE", &[("id", "1"), ("name", "Widget Updated")])
         })
         .await
         .context("Did not observe DELETE change")?;
