@@ -27,7 +27,6 @@ readme = "README.md"
 [lints]
 workspace = true
 
-
 [lib]
 name = "drasi_lib"
 path = "src/lib.rs"
