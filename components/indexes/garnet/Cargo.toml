@@ -28,7 +28,7 @@ workspace = true
 
 [dependencies]
 drasi-core = { version = "0.2.2", path = "../../../core" }
-drasi-query-ast = { version = "0.2.2", path = "../../../query-ast" }
+drasi-query-ast = { version = "0.2.3", path = "../../../query-ast" }
 redis = { version = "0.25", features = ["tokio-comp"] }
 async-trait = "0.1.68"
 hashers = "1.0.1"
