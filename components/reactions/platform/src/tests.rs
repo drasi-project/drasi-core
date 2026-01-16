@@ -20,7 +20,7 @@
 #[cfg(test)]
 use super::*;
 #[cfg(test)]
-use drasi_lib::channels::QueryResult;
+use drasi_lib::channels::{QueryResult, ResultDiff};
 #[cfg(test)]
 use serde_json::json;
 #[cfg(test)]
@@ -51,7 +51,7 @@ fn create_test_config() -> ReactionConfig {
 
 /// Helper function to create a QueryResult with test data
 #[cfg(test)]
-fn create_test_query_result(query_id: &str, results: Vec<serde_json::Value>) -> QueryResult {
+fn create_test_query_result(query_id: &str, results: Vec<ResultDiff>) -> QueryResult {
     QueryResult {
         query_id: query_id.to_string(),
         timestamp: chrono::Utc::now(),
@@ -69,10 +69,9 @@ mod transformer_integration_tests {
     fn test_transformer_produces_valid_cloudevent_structure() {
         let query_result = create_test_query_result(
             "test-query",
-            vec![json!({
-                "type": "add",
-                "data": {"id": "1", "value": "test"}
-            })],
+            vec![ResultDiff::Add {
+                data: json!({"id": "1", "value": "test"}),
+            }],
         );
 
         let result_event = transformer::transform_query_result(query_result.clone(), 1, 1).unwrap();
@@ -101,13 +100,18 @@ mod transformer_integration_tests {
         let query_result = create_test_query_result(
             "mixed-ops-query",
             vec![
-                json!({"type": "add", "data": {"id": "1"}}),
-                json!({
-                    "type": "update",
-                    "before": {"id": "2", "value": 10},
-                    "after": {"id": "2", "value": 20}
-                }),
-                json!({"type": "delete", "data": {"id": "3"}}),
+                ResultDiff::Add {
+                    data: json!({"id": "1"}),
+                },
+                ResultDiff::Update {
+                    data: json!({"id": "2", "value": 20}),
+                    before: json!({"id": "2", "value": 10}),
+                    after: json!({"id": "2", "value": 20}),
+                    grouping_keys: None,
+                },
+                ResultDiff::Delete {
+                    data: json!({"id": "3"}),
+                },
             ],
         );
 
@@ -131,7 +135,9 @@ mod transformer_integration_tests {
         let query_result = QueryResult {
             query_id: "metadata-query".to_string(),
             timestamp: chrono::Utc::now(),
-            results: vec![json!({"type": "add", "data": {"id": "1"}})],
+            results: vec![ResultDiff::Add {
+                data: json!({"id": "1"}),
+            }],
             metadata,
             profiling: None,
         };
@@ -483,7 +489,9 @@ mod profiling_metadata_tests {
         let query_result = QueryResult {
             query_id: "profiling-test".to_string(),
             timestamp: chrono::Utc::now(),
-            results: vec![json!({"type": "add", "data": {"id": "1"}})],
+            results: vec![ResultDiff::Add {
+                data: json!({"id": "1"}),
+            }],
             metadata: HashMap::new(),
             profiling: Some(profiling),
         };
@@ -521,7 +529,9 @@ mod profiling_metadata_tests {
         let query_result = QueryResult {
             query_id: "no-profiling-test".to_string(),
             timestamp: chrono::Utc::now(),
-            results: vec![json!({"type": "add", "data": {"id": "1"}})],
+            results: vec![ResultDiff::Add {
+                data: json!({"id": "1"}),
+            }],
             metadata: HashMap::new(),
             profiling: None, // No profiling data
         };
