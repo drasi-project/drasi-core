@@ -21,7 +21,7 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
+use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::{QueryProvider, Reaction};
@@ -440,143 +440,107 @@ impl Reaction for LogReaction {
                 }
 
                 for result in &query_result.results {
-                    if let Some(result_type) = result.get("type").and_then(|v| v.as_str()) {
-                        // Normalize result_type to lowercase for matching
-                        let result_type_lower = result_type.to_lowercase();
+                    // Build context for template rendering
+                    let mut context = Map::new();
+                    context.insert(
+                        "query_name".to_string(),
+                        Value::String(query_result.query_id.clone()),
+                    );
 
-                        // Build context for template rendering
-                        let mut context = Map::new();
-                        context.insert(
-                            "query_name".to_string(),
-                            Value::String(query_result.query_id.clone()),
-                        );
-                        context.insert(
-                            "operation".to_string(),
-                            Value::String(result_type.to_uppercase()),
-                        );
+                    // Get query-specific config if available, otherwise use default
+                    let query_config = config
+                        .routes
+                        .get(&query_result.query_id)
+                        .or(config.default_template.as_ref());
 
-                        // Get query-specific config if available, otherwise use default
-                        let query_config = config
-                            .routes
-                            .get(&query_result.query_id)
-                            .or(config.default_template.as_ref());
+                    match result {
+                        ResultDiff::Add { data } => {
+                            context.insert("operation".to_string(), Value::String("ADD".into()));
+                            context.insert("after".to_string(), data.clone());
 
-                        match result_type_lower.as_str() {
-                            "add" => {
-                                if let Some(data) = result.get("data") {
-                                    context.insert("after".to_string(), data.clone());
+                            let template = query_config
+                                .and_then(|qc| qc.added.as_ref())
+                                .map(|ts| ts.template.as_str());
 
-                                    // Check for template in config
-                                    let template = query_config
-                                        .and_then(|qc| qc.added.as_ref())
-                                        .map(|ts| ts.template.as_str());
-
-                                    if let Some(template_str) = template {
-                                        // Use template
-                                        match handlebars.render_template(template_str, &context) {
-                                            Ok(rendered) => {
-                                                #[allow(clippy::print_stdout)]
-                                                {
-                                                    println!("[{reaction_name}]   {rendered}");
-                                                }
-                                            }
-                                            Err(e) => {
-                                                debug!(
-                                                    "[{reaction_name}] Template render error: {e}"
-                                                );
-                                                // Fall back to JSON output
-                                                #[allow(clippy::print_stdout)]
-                                                {
-                                                    println!("[{reaction_name}]   [ADD] {data}");
-                                                }
-                                            }
+                            if let Some(template_str) = template {
+                                match handlebars.render_template(template_str, &context) {
+                                    Ok(rendered) => {
+                                        #[allow(clippy::print_stdout)]
+                                        {
+                                            println!("[{reaction_name}]   {rendered}");
                                         }
-                                    } else {
-                                        // Default: show full JSON
+                                    }
+                                    Err(e) => {
+                                        debug!("[{reaction_name}] Template render error: {e}");
                                         #[allow(clippy::print_stdout)]
                                         {
                                             println!("[{reaction_name}]   [ADD] {data}");
                                         }
                                     }
                                 }
+                            } else {
+                                #[allow(clippy::print_stdout)]
+                                {
+                                    println!("[{reaction_name}]   [ADD] {data}");
+                                }
                             }
-                            "remove" | "delete" => {
-                                if let Some(data) = result.get("data") {
-                                    context.insert("before".to_string(), data.clone());
+                        }
+                        ResultDiff::Delete { data } => {
+                            context.insert("operation".to_string(), Value::String("DELETE".into()));
+                            context.insert("before".to_string(), data.clone());
 
-                                    // Check for template in config
-                                    let template = query_config
-                                        .and_then(|qc| qc.deleted.as_ref())
-                                        .map(|ts| ts.template.as_str());
+                            let template = query_config
+                                .and_then(|qc| qc.deleted.as_ref())
+                                .map(|ts| ts.template.as_str());
 
-                                    if let Some(template_str) = template {
-                                        // Use template
-                                        match handlebars.render_template(template_str, &context) {
-                                            Ok(rendered) => {
-                                                #[allow(clippy::print_stdout)]
-                                                {
-                                                    println!("[{reaction_name}]   {rendered}");
-                                                }
-                                            }
-                                            Err(e) => {
-                                                debug!(
-                                                    "[{reaction_name}] Template render error: {e}"
-                                                );
-                                                // Fall back to JSON output
-                                                #[allow(clippy::print_stdout)]
-                                                {
-                                                    println!("[{reaction_name}]   [DELETE] {data}");
-                                                }
-                                            }
+                            if let Some(template_str) = template {
+                                match handlebars.render_template(template_str, &context) {
+                                    Ok(rendered) => {
+                                        #[allow(clippy::print_stdout)]
+                                        {
+                                            println!("[{reaction_name}]   {rendered}");
                                         }
-                                    } else {
-                                        // Default: show full JSON
+                                    }
+                                    Err(e) => {
+                                        debug!("[{reaction_name}] Template render error: {e}");
                                         #[allow(clippy::print_stdout)]
                                         {
                                             println!("[{reaction_name}]   [DELETE] {data}");
                                         }
                                     }
                                 }
-                            }
-                            "update" => {
-                                if let (Some(before), Some(after)) =
-                                    (result.get("before"), result.get("after"))
+                            } else {
+                                #[allow(clippy::print_stdout)]
                                 {
-                                    context.insert("before".to_string(), before.clone());
-                                    context.insert("after".to_string(), after.clone());
-                                    if let Some(data) = result.get("data") {
-                                        context.insert("data".to_string(), data.clone());
-                                    }
+                                    println!("[{reaction_name}]   [DELETE] {data}");
+                                }
+                            }
+                        }
+                        ResultDiff::Update {
+                            before,
+                            after,
+                            data,
+                            ..
+                        } => {
+                            context.insert("operation".to_string(), Value::String("UPDATE".into()));
+                            context.insert("before".to_string(), before.clone());
+                            context.insert("after".to_string(), after.clone());
+                            context.insert("data".to_string(), data.clone());
 
-                                    // Check for template in config
-                                    let template = query_config
-                                        .and_then(|qc| qc.updated.as_ref())
-                                        .map(|ts| ts.template.as_str());
+                            let template = query_config
+                                .and_then(|qc| qc.updated.as_ref())
+                                .map(|ts| ts.template.as_str());
 
-                                    if let Some(template_str) = template {
-                                        // Use template
-                                        match handlebars.render_template(template_str, &context) {
-                                            Ok(rendered) => {
-                                                #[allow(clippy::print_stdout)]
-                                                {
-                                                    println!("[{reaction_name}]   {rendered}");
-                                                }
-                                            }
-                                            Err(e) => {
-                                                debug!(
-                                                    "[{reaction_name}] Template render error: {e}"
-                                                );
-                                                // Fall back to JSON output
-                                                #[allow(clippy::print_stdout)]
-                                                {
-                                                    println!(
-                                                        "[{reaction_name}]   [UPDATE] {before} -> {after}"
-                                                    );
-                                                }
-                                            }
+                            if let Some(template_str) = template {
+                                match handlebars.render_template(template_str, &context) {
+                                    Ok(rendered) => {
+                                        #[allow(clippy::print_stdout)]
+                                        {
+                                            println!("[{reaction_name}]   {rendered}");
                                         }
-                                    } else {
-                                        // Default: show full JSON
+                                    }
+                                    Err(e) => {
+                                        debug!("[{reaction_name}] Template render error: {e}");
                                         #[allow(clippy::print_stdout)]
                                         {
                                             println!(
@@ -585,17 +549,24 @@ impl Reaction for LogReaction {
                                         }
                                     }
                                 }
-                            }
-                            _ => {
+                            } else {
                                 #[allow(clippy::print_stdout)]
                                 {
-                                    println!(
-                                        "[{}]   [{}] {}",
-                                        reaction_name,
-                                        result_type.to_uppercase(),
-                                        result
-                                    );
+                                    println!("[{reaction_name}]   [UPDATE] {before} -> {after}");
                                 }
+                            }
+                        }
+                        ResultDiff::Aggregation { .. } | ResultDiff::Noop => {
+                            let result_json = serde_json::to_string(result)
+                                .expect("ResultDiff serialization should succeed");
+                            let operation = match result {
+                                ResultDiff::Aggregation { .. } => "AGGREGATION",
+                                ResultDiff::Noop => "NOOP",
+                                _ => "UNKNOWN",
+                            };
+                            #[allow(clippy::print_stdout)]
+                            {
+                                println!("[{reaction_name}]   [{operation}] {result_json}");
                             }
                         }
                     }

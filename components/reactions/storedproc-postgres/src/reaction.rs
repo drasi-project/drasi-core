@@ -22,7 +22,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
+use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::{QueryProvider, Reaction};
@@ -188,18 +188,13 @@ impl PostgresStoredProcReaction {
 
                 // Process each result item in the batch
                 for result_item in &query_result.results {
-                    // Get the operation type from the result
-                    let result_type = result_item
-                        .get("type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
-
-                    // Parse operation type
-                    let operation = match result_type.parse::<OperationType>() {
-                        Ok(op) => op,
-                        Err(_) => {
+                    let (operation, data_value, result_type) = match result_item {
+                        ResultDiff::Add { data } => (OperationType::Add, data, "ADD"),
+                        ResultDiff::Update { data, .. } => (OperationType::Update, data, "UPDATE"),
+                        ResultDiff::Delete { data } => (OperationType::Delete, data, "DELETE"),
+                        ResultDiff::Aggregation { .. } | ResultDiff::Noop => {
                             debug!(
-                                "[{reaction_id}] Unknown operation type: {result_type}, skipping"
+                                "[{reaction_id}] Unknown operation type: aggregation/noop, skipping"
                             );
                             continue;
                         }
@@ -210,45 +205,39 @@ impl PostgresStoredProcReaction {
 
                     // Execute the stored procedure if a command is configured
                     if let Some(cmd) = command {
-                        let data = result_item.get("data");
+                        // Prepare context with after/before fields based on operation type
+                        let context = Self::prepare_context(operation, data_value);
+                        debug!(
+                            "[{reaction_id}] Context data: {}",
+                            serde_json::to_string_pretty(&context)
+                                .unwrap_or_else(|_| "<<invalid>>".to_string())
+                        );
 
-                        if let Some(data_value) = data {
-                            // Prepare context with after/before fields based on operation type
-                            let context = Self::prepare_context(operation, data_value);
-                            debug!(
-                                "[{reaction_id}] Context data: {}",
-                                serde_json::to_string_pretty(&context)
-                                    .unwrap_or_else(|_| "<<invalid>>".to_string())
-                            );
+                        // Parse command and extract parameters
+                        match parser.parse_command(&cmd, &context) {
+                            Ok((proc_name, params)) => {
+                                debug!(
+                                    "[{reaction_id}] Executing procedure: {proc_name} with {params_len} parameters for {result_type} operation",
+                                    params_len = params.len()
+                                );
 
-                            // Parse command and extract parameters
-                            match parser.parse_command(&cmd, &context) {
-                                Ok((proc_name, params)) => {
-                                    debug!(
-                                        "[{reaction_id}] Executing procedure: {proc_name} with {params_len} parameters for {result_type} operation",
-                                        params_len = params.len()
-                                    );
-
-                                    // Execute stored procedure
-                                    match executor.execute_procedure(&proc_name, params).await {
-                                        Ok(()) => {
-                                            debug!(
-                                                "[{reaction_id}] Successfully executed {proc_name} for {result_type} operation"
-                                            );
-                                        }
-                                        Err(e) => {
-                                            error!(
-                                                "[{reaction_id}] Failed to execute {proc_name}: {e}"
-                                            );
-                                        }
+                                // Execute stored procedure
+                                match executor.execute_procedure(&proc_name, params).await {
+                                    Ok(()) => {
+                                        debug!(
+                                            "[{reaction_id}] Successfully executed {proc_name} for {result_type} operation"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        error!(
+                                            "[{reaction_id}] Failed to execute {proc_name}: {e}"
+                                        );
                                     }
                                 }
-                                Err(e) => {
-                                    error!("[{reaction_id}] Failed to parse command: {e}");
-                                }
                             }
-                        } else {
-                            error!("[{reaction_id}] No data available for {result_type} operation");
+                            Err(e) => {
+                                error!("[{reaction_id}] Failed to parse command: {e}");
+                            }
                         }
                     } else {
                         debug!(

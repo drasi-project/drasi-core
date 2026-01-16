@@ -820,47 +820,42 @@ impl Query for DrasiQuery {
                             );
 
                             // Convert Drasi results to our QueryResult format
-                            let converted_results: Vec<serde_json::Value> = results
+                            let converted_results: Vec<ResultDiff> = results
                                 .iter()
                                 .map(|ctx| match ctx {
                                     QueryPartEvaluationContext::Adding { after } => {
                                         debug!("Query '{query_id}' got Adding context");
-                                        serde_json::json!({
-                                            "type": "ADD",
-                                            "data": convert_query_variables_to_json(after)
-                                        })
+                                        ResultDiff::Add {
+                                            data: convert_query_variables_to_json(after),
+                                        }
                                     }
                                     QueryPartEvaluationContext::Removing { before } => {
                                         warn!(
                                             "Query '{query_id}' got Removing context for UPDATE source event"
                                         );
-                                        serde_json::json!({
-                                            "type": "DELETE",
-                                            "data": convert_query_variables_to_json(before)
-                                        })
+                                        ResultDiff::Delete {
+                                            data: convert_query_variables_to_json(before),
+                                        }
                                     }
                                     QueryPartEvaluationContext::Updating { before, after } => {
                                         debug!("Query '{query_id}' got Updating context");
-                                        serde_json::json!({
-                                            "type": "UPDATE",
-                                            "data": convert_query_variables_to_json(after),
-                                            "before": convert_query_variables_to_json(before),
-                                            "after": convert_query_variables_to_json(after)
-                                        })
+                                        ResultDiff::Update {
+                                            data: convert_query_variables_to_json(after),
+                                            before: convert_query_variables_to_json(before),
+                                            after: convert_query_variables_to_json(after),
+                                            grouping_keys: None,
+                                        }
                                     }
                                     QueryPartEvaluationContext::Aggregation {
                                         before, after, ..
                                     } => {
-                                        serde_json::json!({
-                                            "type": "aggregation",
-                                            "before": before.as_ref().map(convert_query_variables_to_json),
-                                            "after": convert_query_variables_to_json(after)
-                                        })
+                                        ResultDiff::Aggregation {
+                                            before: before.as_ref().map(convert_query_variables_to_json),
+                                            after: convert_query_variables_to_json(after),
+                                        }
                                     }
                                     QueryPartEvaluationContext::Noop => {
-                                        serde_json::json!({
-                                            "type": "noop"
-                                        })
+                                        ResultDiff::Noop
                                     }
                                 })
                                 .collect();
@@ -868,43 +863,25 @@ impl Query for DrasiQuery {
                             // Update the current result set based on the changes
                             let mut result_set = current_results.write().await;
                             for result in &converted_results {
-                                if let Some(change_type) =
-                                    result.get("type").and_then(|t| t.as_str())
-                                {
-                                    match change_type {
-                                        "ADD" => {
-                                            if let Some(data) = result.get("data") {
-                                                result_set.push(data.clone());
-                                            }
-                                        }
-                                        "DELETE" => {
-                                            if let Some(data) = result.get("data") {
-                                                result_set.retain(|item| item != data);
-                                            }
-                                        }
-                                        "UPDATE" => {
-                                            if let (Some(before), Some(after)) =
-                                                (result.get("before"), result.get("after"))
-                                            {
-                                                if let Some(pos) = result_set
-                                                    .iter()
-                                                    .position(|item| item == before)
-                                                {
-                                                    result_set[pos] = after.clone();
-                                                } else {
-                                                    warn!("UPDATE: Could not find exact match for before state, treating as remove+add");
-                                                    result_set.retain(|item| item != before);
-                                                    result_set.push(after.clone());
-                                                }
-                                            } else if let Some(data) = result.get("data") {
-                                                warn!(
-                                                    "UPDATE without before/after, adding new data"
-                                                );
-                                                result_set.push(data.clone());
-                                            }
-                                        }
-                                        _ => {}
+                                match result {
+                                    ResultDiff::Add { data } => {
+                                        result_set.push(data.clone());
                                     }
+                                    ResultDiff::Delete { data } => {
+                                        result_set.retain(|item| item != data);
+                                    }
+                                    ResultDiff::Update { before, after, .. } => {
+                                        if let Some(pos) =
+                                            result_set.iter().position(|item| item == before)
+                                        {
+                                            result_set[pos] = after.clone();
+                                        } else {
+                                            warn!("UPDATE: Could not find exact match for before state, treating as remove+add");
+                                            result_set.retain(|item| item != before);
+                                            result_set.push(after.clone());
+                                        }
+                                    }
+                                    ResultDiff::Aggregation { .. } | ResultDiff::Noop => {}
                                 }
                             }
                             drop(result_set);

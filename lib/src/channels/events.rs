@@ -330,11 +330,36 @@ pub struct QuerySubscriptionResponse {
     pub receiver: Box<dyn super::ChangeReceiver<QueryResult>>,
 }
 
+/// Typed result diff emitted by continuous queries.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type")]
+pub enum ResultDiff {
+    #[serde(rename = "ADD")]
+    Add { data: serde_json::Value },
+    #[serde(rename = "DELETE")]
+    Delete { data: serde_json::Value },
+    #[serde(rename = "UPDATE")]
+    Update {
+        data: serde_json::Value,
+        before: serde_json::Value,
+        after: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        grouping_keys: Option<Vec<String>>,
+    },
+    #[serde(rename = "aggregation")]
+    Aggregation {
+        before: Option<serde_json::Value>,
+        after: serde_json::Value,
+    },
+    #[serde(rename = "noop")]
+    Noop,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResult {
     pub query_id: String,
     pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub results: Vec<serde_json::Value>,
+    pub results: Vec<ResultDiff>,
     pub metadata: HashMap<String, serde_json::Value>,
     /// Optional profiling metadata for performance tracking
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -346,7 +371,7 @@ impl QueryResult {
     pub fn new(
         query_id: String,
         timestamp: chrono::DateTime<chrono::Utc>,
-        results: Vec<serde_json::Value>,
+        results: Vec<ResultDiff>,
         metadata: HashMap<String, serde_json::Value>,
     ) -> Self {
         Self {
@@ -362,7 +387,7 @@ impl QueryResult {
     pub fn with_profiling(
         query_id: String,
         timestamp: chrono::DateTime<chrono::Utc>,
-        results: Vec<serde_json::Value>,
+        results: Vec<ResultDiff>,
         metadata: HashMap<String, serde_json::Value>,
         profiling: ProfilingMetadata,
     ) -> Self {
