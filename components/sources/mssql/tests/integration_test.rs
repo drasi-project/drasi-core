@@ -18,6 +18,7 @@ mod mssql_helpers;
 
 use anyhow::{Context, Result};
 use drasi_bootstrap_mssql::MsSqlBootstrapProvider;
+use drasi_lib::channels::ResultDiff;
 use drasi_lib::{DrasiLib, Query};
 use drasi_reaction_application::subscription::SubscriptionOptions;
 use drasi_reaction_application::ApplicationReaction;
@@ -54,49 +55,41 @@ fn matches_fields(data: &Value, fields: &[(&str, &str)]) -> bool {
         .all(|(field, expected)| field_matches(data, field, expected))
 }
 
-fn matches_change(entry: &Value, change_type: &str, fields: &[(&str, &str)]) -> bool {
-    entry
-        .get("type")
-        .and_then(|value| value.as_str())
-        .is_some_and(|value| value == change_type)
-        && entry
-            .get("data")
-            .map(|data| matches_fields(data, fields))
-            .unwrap_or(false)
+fn matches_change(entry: &ResultDiff, change_type: &str, fields: &[(&str, &str)]) -> bool {
+    match (change_type, entry) {
+        ("ADD", ResultDiff::Add { data })
+        | ("DELETE", ResultDiff::Delete { data })
+        | ("UPDATE", ResultDiff::Update { data, .. }) => matches_fields(data, fields),
+        _ => false,
+    }
 }
 
 fn matches_update(
-    entry: &Value,
+    entry: &ResultDiff,
     before_fields: &[(&str, &str)],
     after_fields: &[(&str, &str)],
 ) -> bool {
-    entry
-        .get("type")
-        .and_then(|value| value.as_str())
-        .is_some_and(|value| value == "UPDATE")
-        && entry
-            .get("before")
-            .map(|data| matches_fields(data, before_fields))
-            .unwrap_or(false)
-        && entry
-            .get("after")
-            .map(|data| matches_fields(data, after_fields))
-            .unwrap_or(false)
+    match entry {
+        ResultDiff::Update { before, after, .. } => {
+            matches_fields(before, before_fields) && matches_fields(after, after_fields)
+        }
+        _ => false,
+    }
 }
 
 async fn wait_for_change<F>(
     subscription: &mut drasi_reaction_application::subscription::Subscription,
     attempts: usize,
     mut matcher: F,
-) -> Result<Value>
+) -> Result<ResultDiff>
 where
-    F: FnMut(&Value) -> bool,
+    F: FnMut(&ResultDiff) -> bool,
 {
     for _ in 0..attempts {
         if let Some(result) = subscription.recv().await {
-            for entry in result.results {
-                if matcher(&entry) {
-                    return Ok(entry);
+            for entry in &result.results {
+                if matcher(entry) {
+                    return Ok(entry.clone());
                 }
             }
         }
