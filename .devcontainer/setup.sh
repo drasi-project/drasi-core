@@ -3,7 +3,7 @@ set -euo pipefail
 
 echo "Installing build dependencies..."
 sudo apt-get update
-sudo apt-get install -y libjq-dev libonig-dev protobuf-compiler
+sudo apt-get install -y build-essential libjq-dev libonig-dev protobuf-compiler
 
 echo "Configuring Rust build environment..."
 
