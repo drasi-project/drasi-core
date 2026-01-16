@@ -12,16 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod distinct;
-mod index_of;
-mod insert;
-mod range;
-mod reduce;
-mod tail;
+mod cos;
+mod degrees;
+mod pi;
+mod radians;
+mod sin;
+mod tan;
 
-pub use distinct::Distinct;
-pub use index_of::IndexOf;
-pub use insert::Insert;
-pub use range::Range;
-pub use reduce::Reduce;
-pub use tail::Tail;
+#[cfg(test)]
+mod tests;
+
+pub use cos::Cos;
+pub use degrees::Degrees;
+pub use pi::Pi;
+pub use radians::Radians;
+pub use sin::Sin;
+pub use tan::Tan;
