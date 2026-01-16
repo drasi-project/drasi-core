@@ -62,7 +62,7 @@ exclude = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.3"
 
 [workspace.lints.rust]
 warnings = "deny"
