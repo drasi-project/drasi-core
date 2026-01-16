@@ -1,0 +1,233 @@
+name: Release Crates
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_target:
+        description: 'What to release?'
+        required: true
+        type: choice
+        options:
+          - core-and-lib
+          - component
+
+      component_name:
+        description: 'Component to release (only if release_target is component)'
+        required: false
+        type: choice
+        options:
+          - ''
+          - drasi-source-postgres
+          - drasi-source-http
+          - drasi-source-grpc
+          - drasi-source-platform
+          - drasi-source-application
+          - drasi-source-mock
+          - drasi-bootstrap-postgres
+          - drasi-bootstrap-platform
+          - drasi-bootstrap-scriptfile
+          - drasi-bootstrap-application
+          - drasi-bootstrap-noop
+          - drasi-reaction-http
+          - drasi-reaction-http-adaptive
+          - drasi-reaction-grpc
+          - drasi-reaction-grpc-adaptive
+          - drasi-reaction-sse
+          - drasi-reaction-platform
+          - drasi-reaction-profiler
+          - drasi-reaction-application
+          - drasi-reaction-log
+          - drasi-reaction-storedproc-mssql
+          - drasi-reaction-storedproc-mysql
+          - drasi-reaction-storedproc-postgres
+          - drasi-index-rocksdb
+          - drasi-index-garnet
+          - drasi-state-store-redb
+
+      version_bump:
+        description: 'Version bump type'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+          - custom
+        default: patch
+
+      custom_version:
+        description: 'Custom version (only if version_bump=custom, e.g., 0.2.5)'
+        required: false
+        type: string
+
+      dry_run:
+        description: 'Dry run only (preview changes without publishing)'
+        required: true
+        type: boolean
+        default: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write  # Needed for creating tags and releases
+
+jobs:
+  release:
+    runs-on: ubuntu-latest-8-cores
+    environment: drasi-core-release
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq libjq-dev protobuf-compiler
+
+      - name: Set JQ_LIB_DIR
+        run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+
+      - name: Install cargo-release
+        run: cargo install cargo-release --version 0.25.20 --locked
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Validate component name
+        if: inputs.release_target == 'component' && inputs.component_name == ''
+        run: |
+          echo "Error: component_name is required when release_target is 'component'"
+          exit 1
+
+      - name: Validate custom version
+        if: inputs.version_bump == 'custom'
+        run: |
+          if [ -z "${{ inputs.custom_version }}" ]; then
+            echo "Error: custom_version is required when version_bump is 'custom'"
+            exit 1
+          fi
+
+          # Validate semantic version format
+          SEMVER_REGEX='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z\.-]+)?(\+[0-9A-Za-z\.-]+)?$'
+          if ! echo "${{ inputs.custom_version }}" | grep -Eq "$SEMVER_REGEX"; then
+            echo "Error: custom_version '${{ inputs.custom_version }}' is not a valid semantic version"
+            exit 1
+          fi
+
+      - name: Set version argument
+        id: version
+        run: |
+          if [ "${{ inputs.version_bump }}" = "custom" ]; then
+            echo "arg=${{ inputs.custom_version }}" >> $GITHUB_OUTPUT
+          else
+            echo "arg=${{ inputs.version_bump }}" >> $GITHUB_OUTPUT
+          fi
+
+      # Release core-and-lib (sequentially to avoid conflicts)
+      - name: Release core-and-lib
+        if: inputs.release_target == 'core-and-lib'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          VERSION_ARG="${{ steps.version.outputs.arg }}"
+
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "Running dry-run for core-and-lib release..."
+            cargo release $VERSION_ARG \
+              -p drasi-query-ast \
+              -p drasi-query-cypher \
+              -p drasi-query-gql \
+              -p drasi-core \
+              -p drasi-functions-cypher \
+              -p drasi-functions-gql \
+              -p drasi-middleware \
+              -p drasi-lib \
+              --no-push --no-tag --no-publish --no-confirm
+          else
+            echo "Releasing packages sequentially..."
+
+            # Release packages one at a time with delays to ensure crates.io has updated
+            echo "📦 Releasing drasi-query-ast..."
+            cargo release $VERSION_ARG -p drasi-query-ast --no-confirm --execute
+            sleep 30
+
+            echo "📦 Releasing drasi-query-cypher..."
+            cargo release $VERSION_ARG -p drasi-query-cypher --no-confirm --execute
+            sleep 30
+
+            echo "📦 Releasing drasi-query-gql..."
+            cargo release $VERSION_ARG -p drasi-query-gql --no-confirm --execute
+            sleep 30
+
+            echo "📦 Releasing drasi-core..."
+            cargo release $VERSION_ARG -p drasi-core --no-confirm --execute
+            sleep 30
+
+            echo "📦 Releasing drasi-functions-cypher..."
+            cargo release $VERSION_ARG -p drasi-functions-cypher --no-confirm --execute
+            sleep 30
+
+            echo "📦 Releasing drasi-functions-gql..."
+            cargo release $VERSION_ARG -p drasi-functions-gql --no-confirm --execute
+            sleep 30
+
+            echo "📦 Releasing drasi-middleware..."
+            cargo release $VERSION_ARG -p drasi-middleware --no-confirm --execute
+            sleep 30
+
+            echo "📦 Releasing drasi-lib..."
+            cargo release $VERSION_ARG -p drasi-lib --no-confirm --execute
+
+            echo "✅ All packages released!"
+          fi
+
+      # Release component
+      - name: Release component
+        if: inputs.release_target == 'component'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "Running dry-run for ${{ inputs.component_name }} release..."
+            cargo release ${{ steps.version.outputs.arg }} \
+              -p ${{ inputs.component_name }} \
+              --no-push --no-tag --no-publish --no-confirm
+          else
+            echo "Releasing ${{ inputs.component_name }}..."
+            cargo release ${{ steps.version.outputs.arg }} \
+              -p ${{ inputs.component_name }} \
+              --no-confirm \
+              --execute
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Target**: ${{ inputs.release_target }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ inputs.release_target }}" = "component" ]; then
+            echo "- **Component**: ${{ inputs.component_name }}" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ "${{ inputs.version_bump }}" = "custom" ]; then
+            echo "- **Version**: ${{ inputs.custom_version }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Version Bump**: ${{ inputs.version_bump }}" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "- **Dry Run**: ${{ inputs.dry_run }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "✅ Dry run completed successfully. No changes were published." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "To publish for real, re-run this workflow with dry_run=false" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ Release process completed. Check logs above for any warnings." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Note: Some packages may have been skipped if already published at this version." >> $GITHUB_STEP_SUMMARY
+          fi

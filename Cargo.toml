@@ -21,7 +21,6 @@ members = [
 
   # Bootstrap Plugins
   "components/bootstrappers/postgres",
-  "components/bootstrappers/mssql",
   "components/bootstrappers/platform",
   "components/bootstrappers/scriptfile",
   "components/bootstrappers/application",
@@ -64,7 +63,7 @@ exclude = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.3"
 
 [workspace.lints.rust]
 warnings = "deny"

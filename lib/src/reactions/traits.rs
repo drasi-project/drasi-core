@@ -186,7 +186,7 @@ pub trait Reaction: Send + Sync {
     async fn status(&self) -> ComponentStatus;
 }
 
-/// Blanket implementation of Reaction for Box<dyn Reaction>
+/// Blanket implementation of Reaction for `Box<dyn Reaction>`
 ///
 /// This allows boxed trait objects to be used with methods expecting `impl Reaction`.
 #[async_trait]

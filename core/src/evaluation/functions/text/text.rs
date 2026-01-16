@@ -654,3 +654,24 @@ impl ScalarFunction for ToStringOrNull {
         }
     }
 }
+
+#[derive(Debug)]
+pub struct RandomUUID {}
+
+#[async_trait]
+impl ScalarFunction for RandomUUID {
+    async fn call(
+        &self,
+        _context: &ExpressionEvaluationContext,
+        expression: &ast::FunctionExpression,
+        args: Vec<VariableValue>,
+    ) -> Result<VariableValue, FunctionError> {
+        if !args.is_empty() {
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
+        }
+        Ok(VariableValue::String(uuid::Uuid::new_v4().to_string()))
+    }
+}

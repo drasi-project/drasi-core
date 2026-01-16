@@ -137,7 +137,7 @@ pub trait BootstrapProvider: Send + Sync {
 }
 
 /// Blanket implementation of BootstrapProvider for boxed trait objects.
-/// This allows Box<dyn BootstrapProvider> to be used where BootstrapProvider is expected.
+/// This allows `Box<dyn BootstrapProvider>` to be used where BootstrapProvider is expected.
 #[async_trait]
 impl BootstrapProvider for Box<dyn BootstrapProvider> {
     async fn bootstrap(
@@ -222,12 +222,12 @@ pub struct ScriptFileBootstrapConfig {
 /// ```yaml
 /// bootstrap_provider:
 ///   type: platform
-///   query_api_url: "http://remote-drasi:8080"
+///   query_api_url: "http://remote-drasi:8080" # DevSkim: ignore DS137138
 ///   timeout_seconds: 600
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PlatformBootstrapConfig {
-    /// URL of the Query API service (e.g., "http://my-source-query-api:8080")
+    /// URL of the Query API service (e.g., "http://my-source-query-api:8080") // DevSkim: ignore DS137138
     /// If not specified, falls back to `query_api_url` property from source config
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query_api_url: Option<String>,
@@ -334,7 +334,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(config.timeout_seconds, 300);
-        assert_eq!(config.query_api_url, Some("http://test:8080".to_string()));
+        assert_eq!(config.query_api_url, Some("http://test:8080".to_string())); // DevSkim: ignore DS137138
     }
 
     #[test]
@@ -354,19 +354,19 @@ mod tests {
     #[test]
     fn test_platform_bootstrap_config_serialization() {
         let config = BootstrapProviderConfig::Platform(PlatformBootstrapConfig {
-            query_api_url: Some("http://test:8080".to_string()),
+            query_api_url: Some("http://test:8080".to_string()), // DevSkim: ignore DS137138
             timeout_seconds: 600,
         });
 
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains("\"type\":\"platform\""));
-        assert!(json.contains("\"query_api_url\":\"http://test:8080\""));
+        assert!(json.contains("\"query_api_url\":\"http://test:8080\"")); // DevSkim: ignore DS137138
         assert!(json.contains("\"timeout_seconds\":600"));
 
         let deserialized: BootstrapProviderConfig = serde_json::from_str(&json).unwrap();
         match deserialized {
             BootstrapProviderConfig::Platform(cfg) => {
-                assert_eq!(cfg.query_api_url, Some("http://test:8080".to_string()));
+                assert_eq!(cfg.query_api_url, Some("http://test:8080".to_string())); // DevSkim: ignore DS137138
                 assert_eq!(cfg.timeout_seconds, 600);
             }
             _ => panic!("Expected Platform variant"),
@@ -437,14 +437,14 @@ mod tests {
     fn test_yaml_deserialization_platform() {
         let yaml = r#"
 type: platform
-query_api_url: "http://remote:8080"
+query_api_url: "http://remote:8080" # DevSkim: ignore DS137138
 timeout_seconds: 300
 "#;
 
         let config: BootstrapProviderConfig = serde_yaml::from_str(yaml).unwrap();
         match config {
             BootstrapProviderConfig::Platform(cfg) => {
-                assert_eq!(cfg.query_api_url, Some("http://remote:8080".to_string()));
+                assert_eq!(cfg.query_api_url, Some("http://remote:8080".to_string())); // DevSkim: ignore DS137138
                 assert_eq!(cfg.timeout_seconds, 300);
             }
             _ => panic!("Expected Platform variant"),
@@ -474,7 +474,7 @@ file_paths:
     fn test_platform_config_with_defaults() {
         let yaml = r#"
 type: platform
-query_api_url: "http://test:8080"
+query_api_url: "http://test:8080" # DevSkim: ignore DS137138
 "#;
 
         let config: BootstrapProviderConfig = serde_yaml::from_str(yaml).unwrap();
@@ -489,12 +489,12 @@ query_api_url: "http://test:8080"
     #[test]
     fn test_bootstrap_config_equality() {
         let config1 = BootstrapProviderConfig::Platform(PlatformBootstrapConfig {
-            query_api_url: Some("http://test:8080".to_string()),
+            query_api_url: Some("http://test:8080".to_string()), // DevSkim: ignore DS137138
             timeout_seconds: 300,
         });
 
         let config2 = BootstrapProviderConfig::Platform(PlatformBootstrapConfig {
-            query_api_url: Some("http://test:8080".to_string()),
+            query_api_url: Some("http://test:8080".to_string()), // DevSkim: ignore DS137138
             timeout_seconds: 300,
         });
 

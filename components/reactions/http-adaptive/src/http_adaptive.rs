@@ -14,7 +14,7 @@ use std::time::Duration;
 // RecvError no longer needed with trait-based receivers
 use tokio::sync::mpsc;
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
+use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ResultDiff};
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::{QueryProvider, Reaction};
 
@@ -32,7 +32,7 @@ mod tests;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchResult {
     pub query_id: String,
-    pub results: Vec<Value>,
+    pub results: Vec<ResultDiff>,
     pub timestamp: String,
     pub count: usize,
 }
@@ -134,7 +134,7 @@ impl AdaptiveHttpReaction {
 
     async fn send_batch(
         &self,
-        batch: Vec<(String, Vec<Value>)>,
+        batch: Vec<(String, Vec<ResultDiff>)>,
         reaction_name: &str,
     ) -> Result<()> {
         if batch.is_empty() {
@@ -142,7 +142,7 @@ impl AdaptiveHttpReaction {
         }
 
         // Group by query_id for batch sending
-        let mut batches_by_query: HashMap<String, Vec<Value>> = HashMap::new();
+        let mut batches_by_query: HashMap<String, Vec<ResultDiff>> = HashMap::new();
         for (query_id, results) in batch {
             batches_by_query
                 .entry(query_id)
@@ -226,16 +226,14 @@ impl AdaptiveHttpReaction {
     async fn send_single_result(
         &self,
         query_id: &str,
-        data: &Value,
+        result: &ResultDiff,
         reaction_name: &str,
     ) -> Result<()> {
-        // Determine operation type
-        let operation = if data.get("before").is_some() && data.get("after").is_some() {
-            "updated"
-        } else if data.get("after").is_some() {
-            "added"
-        } else {
-            "deleted"
+        let operation = match result {
+            ResultDiff::Add { .. } => "added",
+            ResultDiff::Update { .. } | ResultDiff::Aggregation { .. } => "updated",
+            ResultDiff::Delete { .. } => "deleted",
+            ResultDiff::Noop => return Ok(()),
         };
 
         // Get call spec for this query and operation
@@ -252,6 +250,8 @@ impl AdaptiveHttpReaction {
         if let Some(call_spec) = call_spec {
             // Prepare context for template rendering
             let mut context = Map::new();
+            let data =
+                serde_json::to_value(result).expect("ResultDiff serialization should succeed");
             context.insert("data".to_string(), data.clone());
             context.insert("query_id".to_string(), Value::String(query_id.to_string()));
             context.insert(
@@ -360,7 +360,7 @@ impl AdaptiveHttpReaction {
 
                     let batch_size = batch
                         .iter()
-                        .map(|(_, v): &(String, Vec<Value>)| v.len())
+                        .map(|(_, v): &(String, Vec<ResultDiff>)| v.len())
                         .sum::<usize>();
                     total_results += batch_size as u64;
                     total_batches += 1;
