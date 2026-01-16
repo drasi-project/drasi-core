@@ -42,13 +42,13 @@ This is the list of core dependencies to install for the most common tasks. In g
 
 After installing libjq, you need to configure the Rust build system to find the library.
 
-> **Note:** The following commands will create or overwrite `~/.cargo/config.toml`. If you have existing Cargo configuration, you may want to manually add just the `[build]` section and `JQ_LIB_DIR` setting instead.
+> **Note:** The following commands will create or overwrite `~/.cargo/config.toml`. If you have existing Cargo configuration, you may want to manually add just the `[env]` section and `JQ_LIB_DIR` setting instead.
 
 **Linux:**
 ```bash
 mkdir -p ~/.cargo
 cat > ~/.cargo/config.toml << 'EOF'
-[build]
+[env]
 JQ_LIB_DIR = "/usr/lib/x86_64-linux-gnu"
 EOF
 ```
@@ -61,13 +61,13 @@ mkdir -p ~/.cargo
 
 # For Apple Silicon Macs (M1/M2/M3):
 cat > ~/.cargo/config.toml << 'EOF'
-[build]
+[env]
 JQ_LIB_DIR = "/opt/homebrew/lib"
 EOF
 
 # For Intel Macs:
 # cat > ~/.cargo/config.toml << 'EOF'
-# [build]
+# [env]
 # JQ_LIB_DIR = "/usr/local/lib"
 # EOF
 ```

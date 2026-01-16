@@ -17,7 +17,7 @@ else
 fi
 
 cat > ~/.cargo/config.toml << EOF
-[build]
+[env]
 JQ_LIB_DIR = "$LIB_PATH"
 EOF
 
