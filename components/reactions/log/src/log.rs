@@ -566,7 +566,7 @@ impl Reaction for LogReaction {
                             };
                             #[allow(clippy::print_stdout)]
                             {
-                                println!("[{}]   [{}] {}", reaction_name, operation, result_json);
+                                println!("[{reaction_name}]   [{operation}] {result_json}");
                             }
                         }
                     }
