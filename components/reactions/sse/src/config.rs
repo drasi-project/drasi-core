@@ -1,0 +1,107 @@
+// Copyright 2025 The Drasi Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Configuration types for SSE (Server-Sent Events) reactions.
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+fn default_sse_path() -> String {
+    "/events".to_string()
+}
+
+fn default_heartbeat_interval_ms() -> u64 {
+    30000
+}
+
+fn default_sse_port() -> u16 {
+    8080
+}
+
+fn default_sse_host() -> String {
+    "0.0.0.0".to_string()
+}
+
+/// SSE-specific extension for template specifications.
+///
+/// This extension adds path routing capabilities specific to SSE reactions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct SseExtension {
+    /// Optional custom path for this specific template.
+    /// If provided, events will be sent to this path. Absolute paths (starting with '/')
+    /// are used as-is, while relative paths are appended to the base SSE path.
+    /// For example, if the base sse_path is "/events" and path is "sensors",
+    /// events will be sent to "/events/sensors".
+    /// Supports Handlebars templates for dynamic paths.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// Type alias for SSE template specification using the common generic type.
+///
+/// This includes both the template string and SSE-specific path field.
+/// Template context provides: `after`, `before`, `query_name`, `operation`, `timestamp`.
+/// If template string is empty, each event uses the per-result default JSON format
+/// with fields `queryId`, `result` (singular), and `timestamp`. This differs from
+/// the global default (when no custom template is configured), which uses a
+/// `results` array with multiple items.
+pub type TemplateSpec = drasi_lib::reactions::common::TemplateSpec<SseExtension>;
+
+/// Type alias for SSE query configuration using the common generic type.
+///
+/// Defines different template specifications for each operation type (added, updated, deleted).
+/// Each operation type can have its own template and optionally its own endpoint.
+pub type QueryConfig = drasi_lib::reactions::common::QueryConfig<SseExtension>;
+
+/// SSE (Server-Sent Events) reaction configuration
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SseReactionConfig {
+    /// Host to bind SSE server
+    #[serde(default = "default_sse_host")]
+    pub host: String,
+
+    /// Port to bind SSE server
+    #[serde(default = "default_sse_port")]
+    pub port: u16,
+
+    /// SSE path
+    #[serde(default = "default_sse_path")]
+    pub sse_path: String,
+
+    /// Heartbeat interval in milliseconds
+    #[serde(default = "default_heartbeat_interval_ms")]
+    pub heartbeat_interval_ms: u64,
+
+    /// Query-specific template configurations
+    #[serde(default)]
+    pub routes: HashMap<String, QueryConfig>,
+
+    /// Default template configuration used when no query-specific route is defined.
+    /// If not set, falls back to the built-in default format.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_template: Option<QueryConfig>,
+}
+
+impl Default for SseReactionConfig {
+    fn default() -> Self {
+        Self {
+            host: default_sse_host(),
+            port: default_sse_port(),
+            sse_path: default_sse_path(),
+            heartbeat_interval_ms: default_heartbeat_interval_ms(),
+            routes: HashMap::new(),
+            default_template: None,
+        }
+    }
+}

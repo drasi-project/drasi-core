@@ -22,6 +22,7 @@ on:
     branches:
       - main
       - feature/*
+      - feature-lib
 
 env:
   CARGO_TERM_COLOR: always
@@ -33,7 +34,7 @@ permissions:
 jobs:
   core_code_coverage:
     name: Generate Code Coverage for drasi-core
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-8-cores
     permissions:
       contents: read
     services:
@@ -48,7 +49,7 @@ jobs:
       - name: Install libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq libjq-dev libonig-dev
+          sudo apt-get install -y jq libjq-dev libonig-dev protobuf-compiler
 
       - name: Set JQ_LIB_DIR
         run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
@@ -76,16 +77,21 @@ jobs:
           key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-build-
-      - name: Install Rust and Cargo tarpaulin
-        run: |
-          rustup update stable
-          cargo install cargo-tarpaulin
+      - name: Show Rust toolchain
+        run: rustup show
+
+      - name: Install Cargo tarpaulin
+        run: cargo install cargo-tarpaulin
+      
+      - name: Clean build artifacts
+        run: cargo clean
       
       - name: Generate Code Coverage
         env:
           REDIS_URL: redis://localhost:6379
+          CARGO_INCREMENTAL: 0
         run: |
-          cargo tarpaulin --out Xml
+          cargo tarpaulin --release --out Xml
           mv cobertura.xml drasi-core-tarpaulin-report.xml
           echo "Code coverage report generated"
 

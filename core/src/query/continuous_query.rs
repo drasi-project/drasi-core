@@ -85,7 +85,7 @@ impl ContinuousQuery {
         }
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all, err, level = "debug")]
     pub async fn process_source_change(
         &self,
         change: SourceChange,
@@ -161,7 +161,7 @@ impl ContinuousQuery {
         Ok(result)
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all, err, level = "debug")]
     async fn build_solution_changes(
         &self,
         base_variables: &QueryVariables,
@@ -453,7 +453,7 @@ impl ContinuousQuery {
         Ok(true)
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all, err, level = "debug")]
     async fn project_solution(
         &self,
         part_context: QueryPartEvaluationContext,
@@ -494,7 +494,7 @@ impl ContinuousQuery {
         Ok(result.into_iter().map(|(ctx, _)| ctx).collect())
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all, err, level = "debug")]
     async fn execute_source_middleware(
         &self,
         change: SourceChange,
@@ -553,7 +553,7 @@ impl ContinuousQuery {
                                         continue;
                                     }
                                     Err(e) => {
-                                        log::error!("Future queue consumer error: {:?}", e);
+                                        log::error!("Future queue consumer error: {e:?}");
                                         tokio::time::sleep(error_interval).await;
                                         continue;
                                     }
@@ -564,7 +564,7 @@ impl ContinuousQuery {
                                 continue;
                             }
                             Err(e) => {
-                                log::error!("Future queue consumer error: {:?}", e);
+                                log::error!("Future queue consumer error: {e:?}");
                                 tokio::time::sleep(error_interval).await;
                                 continue;
                             }
@@ -575,7 +575,7 @@ impl ContinuousQuery {
                         match consumer.on_due(&fut_ref).await {
                             Ok(_) => log::info!("Future queue consumer processed {}", &fut_ref.element_ref),
                             Err(e) => {
-                                log::error!("Future queue consumer error: {:?}", e);
+                                log::error!("Future queue consumer error: {e:?}");
                                 consumer.on_error(&fut_ref, e).await;
                             }
                         }

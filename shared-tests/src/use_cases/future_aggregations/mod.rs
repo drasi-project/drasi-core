@@ -123,7 +123,7 @@ pub async fn truefor_sum(config: &(impl QueryTestConfig + Send)) {
 
         let result = cq.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
-        println!("Result: {:?}", result);
+        println!("Result: {result:?}");
         assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
             after: variablemap!("value"=>VariableValue::Float(Float::from(3.0))),
             before: Some(variablemap!("value"=>VariableValue::Float(Float::from(2.0))),),
@@ -218,7 +218,7 @@ pub async fn truefor_grouped_sum(config: &(impl QueryTestConfig + Send)) {
 
         let result = cq.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
-        println!("Result: {:?}", result);
+        println!("Result: {result:?}");
         assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
             after: variablemap!(
                 "value"=>VariableValue::Float(Float::from(3.0)),
@@ -285,7 +285,7 @@ pub async fn truelater_max(config: &(impl QueryTestConfig + Send)) {
         let result = fqc.recv(std::time::Duration::from_secs(5)).await.unwrap();
 
         assert_eq!(result.len(), 1);
-        println!("Result: {:?}", result);
+        println!("Result: {result:?}");
         assert!(result.contains(&QueryPartEvaluationContext::Adding {
             after: variablemap!("id"=>VariableValue::from("i1"))
         }));
@@ -326,7 +326,7 @@ pub async fn truelater_max(config: &(impl QueryTestConfig + Send)) {
 
         let result = cq.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
-        println!("Result: {:?}", result);
+        println!("Result: {result:?}");
         assert!(result.contains(&QueryPartEvaluationContext::Removing {
             before: variablemap!("id"=>VariableValue::from("i1"))
         }));

@@ -85,6 +85,32 @@ To modify or create agentic workflows, you'll need to:
 - **Trigger**: Automatically triggered on pull requests to the `main`, `feature/*`, or `release/*` branches and pushes to the `main` branch.
   - Note: Performance tests are skipped for draft pull requests.
 
+### [release.yml](release.yml)
+- **Purpose**: Publishes crates to crates.io for both core libraries and individual components.
+- **Trigger**: Manual via workflow dispatch
+- **Environment**: Requires `drasi-core-release` environment with `CARGO_REGISTRY_TOKEN` secret
+- **Inputs**:
+  - `release_target`: Choose between `core-and-lib` (releases all core libraries) or `component` (releases a single component)
+  - `component_name`: Select from dropdown of available components (required when `release_target` is `component`)
+  - `version_bump`: Choose `patch`, `minor`, `major`, or `custom` version bump
+  - `custom_version`: Specify exact version (only when `version_bump` is `custom`)
+  - `dry_run`: Set to `true` (default) to preview changes without publishing, or `false` to publish to crates.io
+- **Features**:
+  - Runs on `ubuntu-latest-8-cores` for faster builds
+  - Uses cargo-release 0.25.20 with `--locked` flag for dependency stability
+  - Requires environment approval before execution
+  - Provides detailed summary of release outcome
+
+### [test-release.yml](test-release.yml)
+- **Purpose**: Tests the release process safely without publishing to crates.io.
+- **Trigger**: Manual via workflow dispatch
+- **Inputs**:
+  - `test_branch`: Branch to test on (will be modified with commits and tags)
+  - `release_target`: Choose between `core-and-lib` or `component`
+  - `component_name`: Component to release (if `release_target` is `component`)
+  - `version_bump`: Choose `patch`, `minor`, or `major`
+- **Note**: Always uses `--no-publish` flag to prevent actual publication to crates.io. Creates commits and tags on the test branch for verification.
+
 
 ## Viewing Workflow Status
 

@@ -350,8 +350,6 @@ pub async fn not_reported_with_true_now_or_later(config: &(impl QueryTestConfig 
     let time0 = init_time.and_utc().timestamp_millis() as u64;
     let time1 = time0 + Duration::minutes(30).num_milliseconds() as u64;
     let time2 = time1 + Duration::minutes(30).num_milliseconds() as u64;
-    let time3 = time2 + Duration::minutes(30).num_milliseconds() as u64;
-    let time4 = time3 + Duration::minutes(30).num_milliseconds() as u64;
 
     now_override.store(time0, Ordering::Relaxed);
 

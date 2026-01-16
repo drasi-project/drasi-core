@@ -1,6 +1,6 @@
 [package]
 name = "drasi-middleware"
-version = "0.1.0"
+version = "0.2.3"
 edition = "2021"
 license = "Apache-2.0"
 description = "Drasi Core Middleware"
@@ -9,9 +9,12 @@ keywords = ["drasi"]
 categories = ["database"]
 readme = "../readme.md"
 
+[lints]
+workspace = true
+
 [dependencies]
 async-trait = "0.1.68"
-drasi-core = { path = "../core" }
+drasi-core = { version = "0.2.3", path = "../core" }
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -21,4 +24,4 @@ ordered-float = "3.7.0"
 hex = "0.4.3"
 urlencoding = "2.1.2"
 jq-rs ="0.4.1"
-tokio = { version = "1.29.1", features = ["full"] }
+tokio = { version = "1.29.1", features = ["rt-multi-thread", "sync", "time", "macros"] }

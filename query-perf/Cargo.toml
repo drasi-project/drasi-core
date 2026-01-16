@@ -2,6 +2,10 @@
 name = "query-perf"
 version = "0.1.0"
 edition = "2021"
+publish = false
+
+[lints]
+workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -10,8 +14,8 @@ drasi-query-ast = { path = "../query-ast" }
 drasi-core = { path = "../core" }
 drasi-query-cypher = { path = "../query-cypher" }
 drasi-functions-cypher = { path = "../functions-cypher" }
-drasi-index-garnet = { path = "../index-garnet" }
-drasi-index-rocksdb = { path = "../index-rocksdb" }
+drasi-index-garnet = { path = "../components/indexes/garnet" }
+drasi-index-rocksdb = { path = "../components/indexes/rocksdb" }
 serde = "1.0.163"
 serde_json = "1.0.96"
 rand = "0.8.5"

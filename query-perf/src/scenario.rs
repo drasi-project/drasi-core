@@ -39,7 +39,7 @@ impl SourceChangeStream {
             change_stream_generator,
         }
     }
-    pub fn iter(&mut self) -> SrcChangeStreamIter {
+    pub fn iter(&mut self) -> SrcChangeStreamIter<'_> {
         SrcChangeStreamIter::new(self)
     }
 }

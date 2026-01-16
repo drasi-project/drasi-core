@@ -110,7 +110,7 @@ pub async fn collect_based_aggregation_test(config: &(impl QueryTestConfig + Sen
             }
 
             if let Some(order_count) = after.get("order_count").and_then(|v| v.as_i64()) {
-                println!("Order count via size(): {}", order_count);
+                println!("Order count via size(): {order_count}");
                 assert_eq!(order_count, 4); // 3 original + 1 new
             }
 
@@ -454,10 +454,7 @@ pub async fn multiple_collects_test(config: &(impl QueryTestConfig + Send)) {
                         .and_then(|v| v.as_i64())
                         .unwrap_or(0);
 
-                    println!(
-                        "Product {}: {} ratings, {} review_ids, count={}",
-                        product_id, ratings, review_ids, review_count
-                    );
+                    println!("Product {product_id}: {ratings} ratings, {review_ids} review_ids, count={review_count}");
 
                     // All three should match
                     assert_eq!(

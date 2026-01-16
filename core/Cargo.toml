@@ -1,6 +1,6 @@
 [package]
 name = "drasi-core"
-version = "0.1.0"
+version = "0.2.3"
 edition = "2021"
 license = "Apache-2.0"
 description = "Drasi Core"
@@ -8,6 +8,9 @@ repository = "https://github.com/drasi-project/drasi-core"
 keywords = ["drasi"]
 categories = ["database"]
 readme = "../readme.md"    
+
+[lints]
+workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -17,13 +20,13 @@ parallel_solver = []
 
 [dependencies]
 async-trait = "0.1.68"
-drasi-query-ast = { path = "../query-ast" }
+drasi-query-ast = { version = "0.2.3", path = "../query-ast" }
 hashers = "1.0.1"
 ordered-float = "3.7.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rand = { version = "0.8.5", features = ["small_rng"] }
-tokio = { version =  "1.29.1", features = ["full"] }
+tokio = { version =  "1.29.1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 async-recursion = "1.0.4"
 futures = "0.3.28"
 tokio-stream = "0.1.14"
@@ -51,4 +54,4 @@ time-macros = { version = "0.2.6", features = ["serde"] }
 
 [dev-dependencies]
 mockall = "0.13.1"
-drasi-query-cypher = { path = "../query-cypher" }
+drasi-query-cypher = { version = "0.2.3", path = "../query-cypher" }

@@ -1,6 +1,6 @@
 [package]
 name = "drasi-query-cypher"
-version = "0.1.0"
+version = "0.2.3"
 edition = "2021"
 license = "Apache-2.0"
 description = "Drasi Core Cypher Parser"
@@ -9,10 +9,13 @@ keywords = ["drasi"]
 categories = ["database"]
 readme = "../readme.md"    
 
+[lints]
+workspace = true
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-drasi-query-ast = { path = "../query-ast" }
+drasi-query-ast = { version = "0.2.3", path = "../query-ast" }
 peg = "0.8.1"
 serde = "1.0.164"
 serde_json = "1.0.96"

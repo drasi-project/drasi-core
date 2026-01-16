@@ -12,3 +12,9 @@ Cargo.lock
 
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
+
+.DS_Store
+.plans
+
+# Local cargo config (developers should set JQ_LIB_DIR via environment variable)
+.cargo/config.toml

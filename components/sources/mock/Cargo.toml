@@ -1,0 +1,29 @@
+[package]
+name = "drasi-source-mock"
+version = "0.1.1"
+edition = "2021"
+authors = ["Drasi Project"]
+description = "Mock source plugin for Drasi"
+license = "Apache-2.0"
+repository = "https://github.com/drasi-project/drasi-core"
+keywords = ["drasi", "plugin", "source", "mock", "testing"]
+categories = ["development-tools::testing"]
+
+[lints]
+workspace = true
+
+[dependencies]
+drasi-lib = { version = "0.2.3", path = "../../../lib" }
+anyhow = "1.0"
+async-trait = "0.1"
+log = "0.4"
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+drasi-core = { version = "0.2.3", path = "../../../core" }
+chrono = "0.4"
+uuid = { version = "1.0", features = ["v4"] }
+tokio-stream = "0.1"
+prost-types = "0.12"
+ordered-float = "3.0"
+rand = "0.8"

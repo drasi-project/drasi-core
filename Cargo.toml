@@ -7,18 +7,75 @@ members = [
   "query-gql",
   "functions-cypher",
   "functions-gql",
-  "index-rocksdb",
-  "index-garnet",
   "middleware",
-  
+  "lib",
+
+  # Source Plugins
+  "components/sources/postgres",
+  "components/sources/http",
+  "components/sources/grpc",
+  "components/sources/platform",
+  "components/sources/application",
+  "components/sources/mock",
+
+  # Bootstrap Plugins
+  "components/bootstrappers/postgres",
+  "components/bootstrappers/platform",
+  "components/bootstrappers/scriptfile",
+  "components/bootstrappers/application",
+  "components/bootstrappers/noop",
+
+  # Reaction Plugins
+  "components/reactions/http",
+  "components/reactions/http-adaptive",
+  "components/reactions/grpc",
+  "components/reactions/grpc-adaptive",
+  "components/reactions/sse",
+  "components/reactions/platform",
+  "components/reactions/profiler",
+  "components/reactions/application",
+  "components/reactions/log",
+  "components/reactions/storedproc-mssql",
+  "components/reactions/storedproc-mysql",
+  "components/reactions/storedproc-postgres",
+
+  # Index Plugins
+  "components/indexes/rocksdb",
+  "components/indexes/garnet",
+
+  # State Store Plugins
+  "components/state_stores/redb",
+
   # Internal
   "shared-tests",
   "query-perf",
-  "examples",
+  "examples/query",
   ]
 
+# Exclude internal crates from workspace packaging
+exclude = [
+  "shared-tests",
+  "query-perf",
+  "examples/query",
+]
+
+resolver = "2"
+
 [workspace.package]
-version = "0.2.0"
+version = "0.2.3"
+
+[workspace.lints.rust]
+warnings = "deny"
+unused = "allow"
+
+[workspace.lints.clippy]
+print_stdout = "warn"
+unwrap_used = "warn"
+uninlined_format_args = "warn"
+module_inception = "allow"
+ptr_arg = "allow"
+type_complexity = "allow"
+large_enum_variant = "allow"
 
 [profile.release]
 codegen-units = 1

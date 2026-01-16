@@ -40,7 +40,7 @@ pub struct CachedResultIndex {
 
 impl CachedResultIndex {
     pub fn new(inner: Arc<dyn ResultIndex>, cache_size: usize) -> Result<Self, CacheError> {
-        log::info!("using cached result index with cache size {}", cache_size);
+        log::info!("using cached result index with cache size {cache_size}");
 
         let value_cache = LRUCache::new(cache_size)?;
         let set_count_cache = LRUCache::new(cache_size)?;

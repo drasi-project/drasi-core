@@ -1,6 +1,6 @@
 [package]
 name = "drasi-query-ast"
-version = "0.1.0"
+version = "0.2.3"
 edition = "2021"
 license = "Apache-2.0"
 description = "Drasi Core Abstract Syntax Tree"
@@ -8,6 +8,9 @@ repository = "https://github.com/drasi-project/drasi-core"
 keywords = ["drasi"]
 categories = ["database"]
 readme = "../readme.md"    
+
+[lints]
+workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

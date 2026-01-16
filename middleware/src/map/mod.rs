@@ -150,7 +150,7 @@ impl SourceMiddleware for Map {
                 None => continue,
             };
 
-            log::info!("Processing mappings for label: {}", label);
+            log::info!("Processing mappings for label: {label}");
 
             #[allow(unused_assignments)]
             let mut del_element_binding = Option::<Element>::None;
@@ -188,7 +188,7 @@ impl SourceMiddleware for Map {
                 };
 
                 for s in selected {
-                    log::info!("Processing mapping for selector: {:#?}", s);
+                    log::info!("Processing mapping for selector: {s:#?}");
 
                     if let Some(obj) = source_obj.as_object_mut() {
                         obj.insert("$selected".to_string(), s);

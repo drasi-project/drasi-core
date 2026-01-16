@@ -480,8 +480,8 @@ pub async fn test_multiple_entities(config: &(impl QueryTestConfig + Send)) {
     // Create three entities
     //println!("Creating three entities...");
     for i in 1..=3 {
-        let id = format!("entity{}", i);
-        let name = format!("Entity {}", i);
+        let id = format!("entity{i}");
+        let name = format!("Entity {i}");
 
         let change = SourceChange::Update {
             element: Element::Node {
