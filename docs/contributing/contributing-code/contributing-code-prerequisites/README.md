@@ -64,6 +64,19 @@ source ~/.zshrc
 
 Adjust the path as needed based on where your package manager installed libjq.
 
+### Shared Libraries
+
+#### libjq
+
+Building the `middleware` crate will require `libjq` to be installed in your system. This can be done by [installing JQ](https://jqlang.org/download/) using your system package manager, such as Homebrew on MacOS, vcpkg on Windows or apt on Linux. Depending on your installation, you may also need to manually set the `JQ_LIB_DIR` environment variable if the build cannot automatically find it. Some common places where you might find this are:
+
+| Package Manager | Path |
+|-|-|
+| Homebrew | `/opt/homebrew/lib` |
+| apt | `/usr/lib/x86_64-linux-gnu` |
+| tdnf | `/usr/lib64` |
+| vcpkg | `C:\vcpkg\installed\x64-windows\lib` |
+| Chocolatey | `C:\ProgramData\chocolatey\lib` |
 
 ### Enable Git Hooks
 

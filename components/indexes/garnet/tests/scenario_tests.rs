@@ -365,3 +365,91 @@ mod prev_unique {
         prev_distinct::prev_unique(&test_config).await;
     }
 }
+
+mod collect_aggregation {
+    use super::GarnetQueryConfig;
+    use shared_tests::use_cases::*;
+
+    #[tokio::test]
+    async fn collect_based_aggregation_test() {
+        let test_config = GarnetQueryConfig::new(false);
+        collect_aggregation::collect_based_aggregation_test(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn simple_aggregation_test() {
+        let test_config = GarnetQueryConfig::new(false);
+        collect_aggregation::simple_aggregation_test(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn collect_with_filter() {
+        let test_config = GarnetQueryConfig::new(false);
+        collect_aggregation::collect_with_filter_test(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn collect_objects() {
+        let test_config = GarnetQueryConfig::new(false);
+        collect_aggregation::collect_objects_test(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn collect_mixed_types() {
+        let test_config = GarnetQueryConfig::new(false);
+        collect_aggregation::collect_mixed_types_test(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn multiple_collects() {
+        let test_config = GarnetQueryConfig::new(false);
+        collect_aggregation::multiple_collects_test(&test_config).await;
+    }
+}
+
+mod source_update_upsert {
+    use super::GarnetQueryConfig;
+    use shared_tests::use_cases::*;
+
+    #[tokio::test]
+    async fn test_upsert_semantics() {
+        let test_config = GarnetQueryConfig::new(false);
+        source_update_upsert::test_upsert_semantics(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn test_partial_updates() {
+        let test_config = GarnetQueryConfig::new(false);
+        source_update_upsert::test_partial_updates(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn test_stateless_processing() {
+        let test_config = GarnetQueryConfig::new(false);
+        source_update_upsert::test_stateless_processing(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn test_query_matching() {
+        let test_config = GarnetQueryConfig::new(false);
+        source_update_upsert::test_query_matching(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn test_multiple_entities() {
+        let test_config = GarnetQueryConfig::new(false);
+        source_update_upsert::test_multiple_entities(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn test_relationship_upsert() {
+        let test_config = GarnetQueryConfig::new(false);
+        source_update_upsert::test_relationship_upsert(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn test_aggregation_with_upserts() {
+        let test_config = GarnetQueryConfig::new(false);
+        source_update_upsert::test_aggregation_with_upserts(&test_config).await;
+    }
+}

@@ -12,13 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use drasi_core::query::QueryBuilder;
-use drasi_query_ast::ast::Query;
 
 pub mod building_comfort;
+pub mod collect_aggregation;
 pub mod curbside_pickup;
 pub mod dapr_state_store;
 pub mod decoder;
@@ -32,6 +30,7 @@ pub mod promote;
 pub mod relabel;
 pub mod remap;
 pub mod sensor_heartbeat;
+pub mod source_update_upsert;
 pub mod unwind;
 
 pub mod before;
@@ -47,8 +46,9 @@ pub mod logical_conditions;
 pub mod prev_distinct;
 pub mod rolling_average_decrease_by_ten;
 pub mod steps_happen_in_any_order;
+pub mod windows;
 
 #[async_trait]
 pub trait QueryTestConfig {
-    async fn config_query(&self, builder: QueryBuilder, query: Arc<Query>) -> QueryBuilder;
+    async fn config_query(&self, builder: QueryBuilder) -> QueryBuilder;
 }

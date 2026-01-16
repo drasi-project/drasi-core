@@ -14,7 +14,7 @@
 
 use crate::evaluation::context::QueryVariables;
 use crate::evaluation::functions::FunctionRegistry;
-use crate::evaluation::functions::{Function, Range, Reverse, Tail};
+use crate::evaluation::functions::{Distinct, Function, IndexOf, Insert, Range, Reverse, Tail};
 use crate::evaluation::variable_value::float::Float;
 use crate::evaluation::variable_value::integer::Integer;
 use crate::evaluation::variable_value::VariableValue;
@@ -32,6 +32,9 @@ fn create_list_expression_test_function_registry() -> Arc<FunctionRegistry> {
     registry.register_function("tail", Function::Scalar(Arc::new(Tail {})));
     registry.register_function("reverse", Function::Scalar(Arc::new(Reverse {})));
     registry.register_function("range", Function::Scalar(Arc::new(Range {})));
+    registry.register_function("coll.distinct", Function::Scalar(Arc::new(Distinct {})));
+    registry.register_function("coll.indexOf", Function::Scalar(Arc::new(IndexOf {})));
+    registry.register_function("coll.insert", Function::Scalar(Arc::new(Insert {})));
 
     registry
 }
@@ -283,4 +286,73 @@ async fn test_list_range_invalid_arg_count() {
             error: FunctionEvaluationError::InvalidArgumentCount
         })
     ));
+}
+
+#[tokio::test]
+async fn test_distinct() {
+    let function_registry = create_list_expression_test_function_registry();
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+    let variables = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+
+    let expr = "coll.distinct([1, 2, 2, 3, 1])";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
+    assert_eq!(
+        result,
+        VariableValue::List(vec![
+            VariableValue::Integer(Integer::from(1)),
+            VariableValue::Integer(Integer::from(2)),
+            VariableValue::Integer(Integer::from(3)),
+        ])
+    );
+}
+
+#[tokio::test]
+async fn test_index_of() {
+    let function_registry = create_list_expression_test_function_registry();
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+    let variables = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+
+    let expr = "coll.indexOf(['a', 'b', 'c'], 'b')";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
+    assert_eq!(result, VariableValue::Integer(Integer::from(1)));
+}
+
+#[tokio::test]
+async fn test_insert() {
+    let function_registry = create_list_expression_test_function_registry();
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+    let variables = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+
+    let expr = "coll.insert([1, 2, 3], 1, 99)";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
+    assert_eq!(
+        result,
+        VariableValue::List(vec![
+            VariableValue::Integer(Integer::from(1)),
+            VariableValue::Integer(Integer::from(99)),
+            VariableValue::Integer(Integer::from(2)),
+            VariableValue::Integer(Integer::from(3)),
+        ])
+    );
 }
