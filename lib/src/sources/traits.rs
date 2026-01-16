@@ -186,7 +186,7 @@ pub trait Source: Send + Sync {
     }
 }
 
-/// Blanket implementation of Source for Box<dyn Source>
+/// Blanket implementation of Source for `Box<dyn Source>`
 ///
 /// This allows boxed trait objects to be used with methods expecting `impl Source`.
 #[async_trait]

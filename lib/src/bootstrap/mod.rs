@@ -137,7 +137,7 @@ pub trait BootstrapProvider: Send + Sync {
 }
 
 /// Blanket implementation of BootstrapProvider for boxed trait objects.
-/// This allows Box<dyn BootstrapProvider> to be used where BootstrapProvider is expected.
+/// This allows `Box<dyn BootstrapProvider>` to be used where BootstrapProvider is expected.
 #[async_trait]
 impl BootstrapProvider for Box<dyn BootstrapProvider> {
     async fn bootstrap(
