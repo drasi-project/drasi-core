@@ -40,36 +40,26 @@ This is the list of core dependencies to install for the most common tasks. In g
   - On macOS: `brew install jq`
   - On other systems, consult your package manager
 
-After installing libjq, you need to configure the Rust build system to find the library.
-
-> **Note:** The following commands will create or overwrite `~/.cargo/config.toml`. If you have existing Cargo configuration, you may want to manually add just the `[env]` section and `JQ_LIB_DIR` setting instead.
+After installing libjq, you need to set the `JQ_LIB_DIR` environment variable so the Rust build system can find the library.
 
 **Linux:**
 ```bash
-mkdir -p ~/.cargo
-cat > ~/.cargo/config.toml << 'EOF'
-[env]
-JQ_LIB_DIR = "/usr/lib/x86_64-linux-gnu"
-EOF
+# Add to your shell profile (e.g., ~/.bashrc or ~/.zshrc)
+echo 'export JQ_LIB_DIR="/usr/lib/x86_64-linux-gnu"' >> ~/.bashrc
+source ~/.bashrc
 ```
 
 > **Note for non-x86_64 architectures:** The path above is for x86_64. For ARM64 or other architectures, adjust the path accordingly (e.g., `/usr/lib/aarch64-linux-gnu`). Alternatively, use the Dev Container setup which automatically detects the correct path for your architecture.
 
 **macOS with Homebrew:**
 ```bash
-mkdir -p ~/.cargo
-
 # For Apple Silicon Macs (M1/M2/M3):
-cat > ~/.cargo/config.toml << 'EOF'
-[env]
-JQ_LIB_DIR = "/opt/homebrew/lib"
-EOF
+echo 'export JQ_LIB_DIR="/opt/homebrew/lib"' >> ~/.zshrc
+source ~/.zshrc
 
 # For Intel Macs:
-# cat > ~/.cargo/config.toml << 'EOF'
-# [env]
-# JQ_LIB_DIR = "/usr/local/lib"
-# EOF
+# echo 'export JQ_LIB_DIR="/usr/local/lib"' >> ~/.bash_profile
+# source ~/.bash_profile
 ```
 
 Adjust the path as needed based on where your package manager installed libjq.

@@ -6,7 +6,6 @@ sudo apt-get update
 sudo apt-get install -y libjq-dev libonig-dev
 
 echo "Configuring Rust build environment..."
-mkdir -p ~/.cargo
 
 # Detect the correct library path for the architecture
 if [ -x "$(command -v dpkg-architecture)" ]; then
@@ -16,10 +15,13 @@ else
     LIB_PATH="/usr/lib/x86_64-linux-gnu"
 fi
 
-cat > ~/.cargo/config.toml << EOF
-[env]
-JQ_LIB_DIR = "$LIB_PATH"
-EOF
+# Set JQ_LIB_DIR environment variable persistently
+echo "export JQ_LIB_DIR=\"$LIB_PATH\"" >> ~/.bashrc
+echo "export JQ_LIB_DIR=\"$LIB_PATH\"" >> ~/.zshrc 2>/dev/null || true
+echo "export JQ_LIB_DIR=\"$LIB_PATH\"" >> ~/.profile
+
+# Also set it for the current session
+export JQ_LIB_DIR="$LIB_PATH"
 
 echo "Development environment setup complete!"
 echo "JQ_LIB_DIR configured to: $LIB_PATH"
