@@ -27,6 +27,10 @@ readme = "README.md"
 [lints]
 workspace = true
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lib]
 name = "drasi_lib"
 path = "src/lib.rs"
