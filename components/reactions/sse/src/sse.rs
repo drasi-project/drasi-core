@@ -27,7 +27,7 @@ use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
 use tower_http::cors::{Any, CorsLayer};
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
+use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::{QueryProvider, Reaction};
@@ -349,134 +349,116 @@ impl Reaction for SseReaction {
                 if let Some(config) = query_config {
                     // Per-query custom templates
                     for result in &query_result.results {
-                        if let Some(result_type) = result.get("type").and_then(|v| v.as_str()) {
-                            let template_spec = match result_type {
-                                "ADD" => config.added.as_ref(),
-                                "UPDATE" => config.updated.as_ref(),
-                                "DELETE" => config.deleted.as_ref(),
-                                _ => None,
+                        let (template_spec, operation) = match result {
+                            ResultDiff::Add { .. } => (config.added.as_ref(), "ADD"),
+                            ResultDiff::Update { .. } => (config.updated.as_ref(), "UPDATE"),
+                            ResultDiff::Delete { .. } => (config.deleted.as_ref(), "DELETE"),
+                            ResultDiff::Aggregation { .. } | ResultDiff::Noop => (None, "NOOP"),
+                        };
+
+                        if let Some(spec) = template_spec {
+                            // Prepare context for template
+                            let mut context = Map::new();
+
+                            match result {
+                                ResultDiff::Add { data } => {
+                                    context.insert("after".to_string(), data.clone());
+                                }
+                                ResultDiff::Update { before, after, .. } => {
+                                    context.insert("before".to_string(), before.clone());
+                                    context.insert("after".to_string(), after.clone());
+                                }
+                                ResultDiff::Delete { data } => {
+                                    context.insert("before".to_string(), data.clone());
+                                }
+                                ResultDiff::Aggregation { .. } | ResultDiff::Noop => {}
+                            }
+
+                            context.insert(
+                                "query_name".to_string(),
+                                Value::String(query_name.to_string()),
+                            );
+                            context.insert(
+                                "operation".to_string(),
+                                Value::String(operation.to_string()),
+                            );
+                            context.insert(
+                                "timestamp".to_string(),
+                                Value::Number(timestamp.into()),
+                            );
+
+                            // Determine the SSE path for this event
+                            let sse_path = SseReaction::resolve_sse_path(
+                                spec.extension.path.as_ref(),
+                                &base_sse_path,
+                                &handlebars,
+                                &context,
+                                &reaction_id,
+                            );
+
+                            // Render template if provided
+                            let payload = if !spec.template.is_empty() {
+                                match handlebars.render_template(&spec.template, &context) {
+                                    Ok(rendered) => rendered,
+                                    Err(e) => {
+                                        error!(
+                                            "[{reaction_id}] Failed to render template for query '{query_name}': {e}. Falling back to default format."
+                                        );
+                                        json!({
+                                            "queryId": query_name,
+                                            "result": result,
+                                            "timestamp": timestamp
+                                        })
+                                        .to_string()
+                                    }
+                                }
+                            } else {
+                                json!({
+                                    "queryId": query_name,
+                                    "result": result,
+                                    "timestamp": timestamp
+                                })
+                                .to_string()
                             };
 
-                            if let Some(spec) = template_spec {
-                                // Prepare context for template
-                                let mut context = Map::new();
-
-                                match result_type {
-                                    "ADD" => {
-                                        if let Some(data) = result.get("data") {
-                                            context.insert("after".to_string(), data.clone());
-                                        }
-                                    }
-                                    "UPDATE" => {
-                                        if let Some(data) = result.get("data") {
-                                            if let Some(obj) = data.as_object() {
-                                                if let Some(before) = obj.get("before") {
-                                                    context.insert(
-                                                        "before".to_string(),
-                                                        before.clone(),
-                                                    );
-                                                }
-                                                if let Some(after) = obj.get("after") {
-                                                    context
-                                                        .insert("after".to_string(), after.clone());
-                                                }
-                                            }
-                                        }
-                                    }
-                                    "DELETE" => {
-                                        if let Some(data) = result.get("data") {
-                                            context.insert("before".to_string(), data.clone());
-                                        }
-                                    }
-                                    _ => {}
-                                }
-
-                                context.insert(
-                                    "query_name".to_string(),
-                                    Value::String(query_name.to_string()),
-                                );
-                                context.insert(
-                                    "operation".to_string(),
-                                    Value::String(result_type.to_string()),
-                                );
-                                context.insert(
-                                    "timestamp".to_string(),
-                                    Value::Number(timestamp.into()),
-                                );
-
-                                // Determine the SSE path for this event
-                                let sse_path = SseReaction::resolve_sse_path(
-                                    spec.extension.path.as_ref(),
-                                    &base_sse_path,
-                                    &handlebars,
-                                    &context,
-                                    &reaction_id,
-                                );
-
-                                // Render template if provided
-                                let payload = if !spec.template.is_empty() {
-                                    match handlebars.render_template(&spec.template, &context) {
-                                        Ok(rendered) => rendered,
-                                        Err(e) => {
-                                            error!(
-                                                "[{reaction_id}] Failed to render template for query '{query_name}': {e}. Falling back to default format."
-                                            );
-                                            // Fallback to default format instead of skipping the event
-                                            json!({
-                                                "queryId": query_name,
-                                                "result": result,
-                                                "timestamp": timestamp
-                                            })
-                                            .to_string()
-                                        }
-                                    }
-                                } else {
-                                    // Default format if no template
-                                    json!({
-                                        "queryId": query_name,
-                                        "result": result,
-                                        "timestamp": timestamp
-                                    })
-                                    .to_string()
-                                };
-
-                                // Get or create broadcaster for this path (double-checked locking)
-                                let broadcaster = {
-                                    // Try read lock first (common case)
-                                    {
-                                        let broadcasters_read = broadcasters.read().await;
-                                        if let Some(broadcaster) = broadcasters_read.get(&sse_path)
+                            // Get or create broadcaster for this path (double-checked locking)
+                            let broadcaster = {
+                                // Try read lock first (common case)
+                                {
+                                    let broadcasters_read = broadcasters.read().await;
+                                    if let Some(broadcaster) = broadcasters_read.get(&sse_path) {
+                                        broadcaster.clone()
+                                    } else {
+                                        drop(broadcasters_read);
+                                        // Need to create broadcaster, acquire write lock
+                                        let mut broadcasters_write = broadcasters.write().await;
+                                        // Re-check if another thread created it while we waited for write lock
+                                        if let Some(broadcaster) = broadcasters_write.get(&sse_path)
                                         {
                                             broadcaster.clone()
                                         } else {
-                                            drop(broadcasters_read);
-                                            // Need to create broadcaster, acquire write lock
-                                            let mut broadcasters_write = broadcasters.write().await;
-                                            // Re-check if another thread created it while we waited for write lock
-                                            if let Some(broadcaster) =
-                                                broadcasters_write.get(&sse_path)
-                                            {
-                                                broadcaster.clone()
-                                            } else {
-                                                let (tx, _rx) =
-                                                    broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
-                                                debug!("[{reaction_id}] Created broadcaster for path: {sse_path}");
-                                                broadcasters_write
-                                                    .insert(sse_path.clone(), tx.clone());
-                                                tx
-                                            }
+                                            let (tx, _rx) =
+                                                broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
+                                            debug!(
+                                                "[{reaction_id}] Created broadcaster for path: {sse_path}"
+                                            );
+                                            broadcasters_write
+                                                .insert(sse_path.clone(), tx.clone());
+                                            tx
                                         }
                                     }
-                                };
-
-                                match broadcaster.send(payload.clone()) {
-                                    Ok(count) => {
-                                        debug!("[{reaction_id}] Broadcast to {count} SSE listeners on path {sse_path}")
-                                    }
-                                    Err(e) => debug!(
-                                        "[{reaction_id}] no SSE listeners on path {sse_path}: {e}"
-                                    ),
                                 }
+                            };
+
+                            match broadcaster.send(payload.clone()) {
+                                Ok(count) => {
+                                    debug!(
+                                        "[{reaction_id}] Broadcast to {count} SSE listeners on path {sse_path}"
+                                    )
+                                }
+                                Err(e) => debug!(
+                                    "[{reaction_id}] no SSE listeners on path {sse_path}: {e}"
+                                ),
                             }
                         }
                     }

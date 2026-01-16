@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tonic::transport::Channel;
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
+use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ResultDiff};
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::{QueryProvider, Reaction};
 
@@ -356,17 +356,36 @@ impl AdaptiveGrpcReaction {
 
                 // Convert results to proto format
                 for result in &query_result.results {
+                    let (result_type, data, before, after) = match result {
+                        ResultDiff::Add { data } => ("ADD", data.clone(), None, None),
+                        ResultDiff::Delete { data } => ("DELETE", data.clone(), None, None),
+                        ResultDiff::Update {
+                            data,
+                            before,
+                            after,
+                            ..
+                        } => ("UPDATE", data.clone(), Some(before.clone()), Some(after.clone())),
+                        ResultDiff::Aggregation { before, after } => (
+                            "aggregation",
+                            serde_json::to_value(result)
+                                .expect("ResultDiff serialization should succeed"),
+                            before.clone(),
+                            Some(after.clone()),
+                        ),
+                        ResultDiff::Noop => (
+                            "noop",
+                            serde_json::to_value(result)
+                                .expect("ResultDiff serialization should succeed"),
+                            None,
+                            None,
+                        ),
+                    };
+
                     let proto_item = ProtoQueryResultItem {
-                        r#type: result
-                            .get("type")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        data: Some(convert_json_to_proto_struct(
-                            result.get("data").unwrap_or(result),
-                        )),
-                        before: result.get("before").map(convert_json_to_proto_struct),
-                        after: result.get("after").map(convert_json_to_proto_struct),
+                        r#type: result_type.to_string(),
+                        data: Some(convert_json_to_proto_struct(&data)),
+                        before: before.as_ref().map(convert_json_to_proto_struct),
+                        after: after.as_ref().map(convert_json_to_proto_struct),
                     };
 
                     current_batch.push(proto_item);

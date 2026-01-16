@@ -14,7 +14,7 @@
 
 #[cfg(test)]
 mod tests {
-    use drasi_lib::channels::ComponentStatus;
+    use drasi_lib::channels::{ComponentStatus, ResultDiff};
     use drasi_lib::config::{ReactionConfig, ReactionSpecificConfig};
     use drasi_lib::reactions::common::AdaptiveBatchConfig as ConfigAdaptiveBatchConfig;
     use drasi_lib::reactions::http_adaptive::HttpAdaptiveReactionConfig;
@@ -116,17 +116,15 @@ mod tests {
         let batch_result = BatchResult {
             query_id: "test-query".to_string(),
             results: vec![
-                json!({
-                    "type": "ADD",
-                    "data": {"id": 1, "name": "Alice"},
-                    "after": {"id": 1, "name": "Alice"}
-                }),
-                json!({
-                    "type": "UPDATE",
-                    "data": {"id": 2, "name": "Bob Updated"},
-                    "before": {"id": 2, "name": "Bob"},
-                    "after": {"id": 2, "name": "Bob Updated"}
-                }),
+                ResultDiff::Add {
+                    data: json!({"id": 1, "name": "Alice"}),
+                },
+                ResultDiff::Update {
+                    data: json!({"id": 2, "name": "Bob Updated"}),
+                    before: json!({"id": 2, "name": "Bob"}),
+                    after: json!({"id": 2, "name": "Bob Updated"}),
+                    grouping_keys: None,
+                },
             ],
             timestamp: "2025-10-19T12:34:56.789Z".to_string(),
             count: 2,
@@ -150,15 +148,24 @@ mod tests {
         let batches = vec![
             BatchResult {
                 query_id: "query1".to_string(),
-                results: vec![json!({"type": "ADD", "data": {"id": 1}})],
+                results: vec![ResultDiff::Add {
+                    data: json!({"id": 1}),
+                }],
                 timestamp: "2025-10-19T12:34:56Z".to_string(),
                 count: 1,
             },
             BatchResult {
                 query_id: "query2".to_string(),
                 results: vec![
-                    json!({"type": "UPDATE", "data": {"id": 2}}),
-                    json!({"type": "DELETE", "data": {"id": 3}}),
+                    ResultDiff::Update {
+                        data: json!({"id": 2}),
+                        before: json!({"id": 2}),
+                        after: json!({"id": 2}),
+                        grouping_keys: None,
+                    },
+                    ResultDiff::Delete {
+                        data: json!({"id": 3}),
+                    },
                 ],
                 timestamp: "2025-10-19T12:34:57Z".to_string(),
                 count: 2,
@@ -183,22 +190,18 @@ mod tests {
         let batch_result = BatchResult {
             query_id: "user-changes".to_string(),
             results: vec![
-                json!({
-                    "type": "ADD",
-                    "data": {"id": "user_123", "name": "John Doe"},
-                    "after": {"id": "user_123", "name": "John Doe"}
-                }),
-                json!({
-                    "type": "UPDATE",
-                    "data": {"id": "user_456", "name": "Jane Smith"},
-                    "before": {"id": "user_456", "name": "Jane Doe"},
-                    "after": {"id": "user_456", "name": "Jane Smith"}
-                }),
-                json!({
-                    "type": "DELETE",
-                    "data": {"id": "user_789", "name": "Bob Wilson"},
-                    "before": {"id": "user_789", "name": "Bob Wilson"}
-                }),
+                ResultDiff::Add {
+                    data: json!({"id": "user_123", "name": "John Doe"}),
+                },
+                ResultDiff::Update {
+                    data: json!({"id": "user_456", "name": "Jane Smith"}),
+                    before: json!({"id": "user_456", "name": "Jane Doe"}),
+                    after: json!({"id": "user_456", "name": "Jane Smith"}),
+                    grouping_keys: None,
+                },
+                ResultDiff::Delete {
+                    data: json!({"id": "user_789", "name": "Bob Wilson"}),
+                },
             ],
             timestamp: "2025-10-19T12:34:56.789Z".to_string(),
             count: 3,
@@ -210,23 +213,28 @@ mod tests {
         assert_eq!(batch_result.results.len(), 3);
         assert!(!batch_result.timestamp.is_empty());
 
-        // Verify result types
-        assert_eq!(batch_result.results[0]["type"], "ADD");
-        assert_eq!(batch_result.results[1]["type"], "UPDATE");
-        assert_eq!(batch_result.results[2]["type"], "DELETE");
-
-        // Verify ADD structure
-        assert!(batch_result.results[0]["data"].is_object());
-        assert!(batch_result.results[0]["after"].is_object());
-
-        // Verify UPDATE structure
-        assert!(batch_result.results[1]["data"].is_object());
-        assert!(batch_result.results[1]["before"].is_object());
-        assert!(batch_result.results[1]["after"].is_object());
-
-        // Verify DELETE structure
-        assert!(batch_result.results[2]["data"].is_object());
-        assert!(batch_result.results[2]["before"].is_object());
+        // Verify result types and structures
+        match &batch_result.results[0] {
+            ResultDiff::Add { data } => assert!(data.is_object()),
+            _ => panic!("Expected add result"),
+        }
+        match &batch_result.results[1] {
+            ResultDiff::Update {
+                data,
+                before,
+                after,
+                ..
+            } => {
+                assert!(data.is_object());
+                assert!(before.is_object());
+                assert!(after.is_object());
+            }
+            _ => panic!("Expected update result"),
+        }
+        match &batch_result.results[2] {
+            ResultDiff::Delete { data } => assert!(data.is_object()),
+            _ => panic!("Expected delete result"),
+        }
     }
 
     #[tokio::test]
@@ -256,9 +264,15 @@ mod tests {
     fn test_batch_result_count_matches_results_length() {
         // Test that count field matches the actual number of results
         let results = vec![
-            json!({"type": "ADD", "data": {"id": 1}}),
-            json!({"type": "ADD", "data": {"id": 2}}),
-            json!({"type": "ADD", "data": {"id": 3}}),
+            ResultDiff::Add {
+                data: json!({"id": 1}),
+            },
+            ResultDiff::Add {
+                data: json!({"id": 2}),
+            },
+            ResultDiff::Add {
+                data: json!({"id": 3}),
+            },
         ];
 
         let batch_result = BatchResult {
@@ -382,10 +396,9 @@ mod tests {
         // Test that BatchResult can handle large batches
         let mut results = Vec::new();
         for i in 0..1000 {
-            results.push(json!({
-                "type": "ADD",
-                "data": {"id": i, "value": format!("item_{}", i)}
-            }));
+            results.push(ResultDiff::Add {
+                data: json!({"id": i, "value": format!("item_{}", i)}),
+            });
         }
 
         let batch_result = BatchResult {

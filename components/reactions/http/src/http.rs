@@ -26,7 +26,7 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
+use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::{QueryProvider, Reaction};
@@ -416,39 +416,67 @@ impl Reaction for HttpReaction {
 
                 // Process each result
                 for result in &query_result.results {
-                    if let Some(result_type) = result.get("type").and_then(|v| v.as_str()) {
-                        // For UPDATE, we need the whole result object to access before/after
-                        // For ADD/DELETE, we just need the data field
-                        let data_to_process = if result_type == "UPDATE" {
-                            result
-                        } else {
-                            result.get("data").unwrap_or(result)
-                        };
-
-                        let call_spec = match result_type {
-                            "ADD" => query_config.added.as_ref(),
-                            "UPDATE" => query_config.updated.as_ref(),
-                            "DELETE" => query_config.deleted.as_ref(),
-                            _ => None,
-                        };
-
-                        if let Some(spec) = call_spec {
-                            if let Err(e) = Self::process_result(
-                                &client,
-                                &handlebars,
-                                &base_url,
-                                &token,
-                                spec,
-                                result_type,
-                                data_to_process,
-                                query_name,
-                                &reaction_name,
-                            )
-                            .await
-                            {
-                                error!("[{reaction_name}] Failed to process result: {e}");
+                    match result {
+                        ResultDiff::Add { data } => {
+                            if let Some(spec) = query_config.added.as_ref() {
+                                if let Err(e) = Self::process_result(
+                                    &client,
+                                    &handlebars,
+                                    &base_url,
+                                    &token,
+                                    spec,
+                                    "ADD",
+                                    data,
+                                    query_name,
+                                    &reaction_name,
+                                )
+                                .await
+                                {
+                                    error!("[{reaction_name}] Failed to process result: {e}");
+                                }
                             }
                         }
+                        ResultDiff::Delete { data } => {
+                            if let Some(spec) = query_config.deleted.as_ref() {
+                                if let Err(e) = Self::process_result(
+                                    &client,
+                                    &handlebars,
+                                    &base_url,
+                                    &token,
+                                    spec,
+                                    "DELETE",
+                                    data,
+                                    query_name,
+                                    &reaction_name,
+                                )
+                                .await
+                                {
+                                    error!("[{reaction_name}] Failed to process result: {e}");
+                                }
+                            }
+                        }
+                        ResultDiff::Update { .. } => {
+                            if let Some(spec) = query_config.updated.as_ref() {
+                                let data_to_process = serde_json::to_value(result)
+                                    .expect("ResultDiff serialization should succeed");
+                                if let Err(e) = Self::process_result(
+                                    &client,
+                                    &handlebars,
+                                    &base_url,
+                                    &token,
+                                    spec,
+                                    "UPDATE",
+                                    &data_to_process,
+                                    query_name,
+                                    &reaction_name,
+                                )
+                                .await
+                                {
+                                    error!("[{reaction_name}] Failed to process result: {e}");
+                                }
+                            }
+                        }
+                        ResultDiff::Aggregation { .. } | ResultDiff::Noop => {}
                     }
                 }
             }
