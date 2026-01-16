@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-lib"
-version = "0.2.2"
+version = "0.2.1"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "Drasi Lib"
@@ -26,6 +26,7 @@ readme = "README.md"
 
 [lints]
 workspace = true
+
 
 [lib]
 name = "drasi_lib"
