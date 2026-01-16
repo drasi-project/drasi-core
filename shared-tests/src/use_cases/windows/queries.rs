@@ -12,16 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod distinct;
-mod index_of;
-mod insert;
-mod range;
-mod reduce;
-mod tail;
+pub fn sliding_window_max_query() -> &'static str {
+    "
+MATCH 
+  (s:Sensor)
+RETURN
+  drasi.slidingWindow(duration({ minutes: 10 }), max(s.value)) AS slidingMax
+  "
+}
 
-pub use distinct::Distinct;
-pub use index_of::IndexOf;
-pub use insert::Insert;
-pub use range::Range;
-pub use reduce::Reduce;
-pub use tail::Tail;
+pub fn sliding_window_avg_grouped_query() -> &'static str {
+    "
+MATCH 
+  (s:Sensor)
+RETURN
+  s.group AS sensorGroup,
+  drasi.slidingWindow(duration({ minutes: 10 }), avg(s.value)) AS slidingAvg
+  "
+}
