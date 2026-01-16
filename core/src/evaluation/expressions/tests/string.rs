@@ -15,8 +15,8 @@
 use std::sync::Arc;
 
 use crate::evaluation::functions::{
-    Function, LTrim, Left, RTrim, Replace, Reverse, Right, Split, Substring, ToLower, ToString,
-    ToUpper, Trim,
+    Function, LTrim, Left, RTrim, RandomUUID, Replace, Reverse, Right, Split, Substring, ToLower,
+    ToString, ToUpper, Trim,
 };
 use crate::evaluation::variable_value::VariableValue;
 
@@ -41,6 +41,7 @@ fn create_string_expression_test_function_registry() -> Arc<FunctionRegistry> {
     registry.register_function("toString", Function::Scalar(Arc::new(ToString {})));
     registry.register_function("toUpper", Function::Scalar(Arc::new(ToUpper {})));
     registry.register_function("trim", Function::Scalar(Arc::new(Trim {})));
+    registry.register_function("randomUUID", Function::Scalar(Arc::new(RandomUUID {})));
 
     registry
 }
@@ -600,5 +601,28 @@ async fn test_trim() {
                 .unwrap(),
             VariableValue::Null
         );
+    }
+}
+
+#[tokio::test]
+async fn test_random_uuid() {
+    let expr = "randomUUID()";
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+
+    let function_registry = create_string_expression_test_function_registry();
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+
+    let variables = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+
+    let result = evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap();
+
+    if let VariableValue::String(uuid) = result {
+        assert_eq!(uuid.len(), 36);
     }
 }
