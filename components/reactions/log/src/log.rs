@@ -552,9 +552,7 @@ impl Reaction for LogReaction {
                             } else {
                                 #[allow(clippy::print_stdout)]
                                 {
-                                    println!(
-                                        "[{reaction_name}]   [UPDATE] {before} -> {after}"
-                                    );
+                                    println!("[{reaction_name}]   [UPDATE] {before} -> {after}");
                                 }
                             }
                         }

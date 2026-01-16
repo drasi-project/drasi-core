@@ -382,10 +382,8 @@ impl Reaction for SseReaction {
                                 "operation".to_string(),
                                 Value::String(operation.to_string()),
                             );
-                            context.insert(
-                                "timestamp".to_string(),
-                                Value::Number(timestamp.into()),
-                            );
+                            context
+                                .insert("timestamp".to_string(), Value::Number(timestamp.into()));
 
                             // Determine the SSE path for this event
                             let sse_path = SseReaction::resolve_sse_path(
@@ -442,8 +440,7 @@ impl Reaction for SseReaction {
                                             debug!(
                                                 "[{reaction_id}] Created broadcaster for path: {sse_path}"
                                             );
-                                            broadcasters_write
-                                                .insert(sse_path.clone(), tx.clone());
+                                            broadcasters_write.insert(sse_path.clone(), tx.clone());
                                             tx
                                         }
                                     }

@@ -364,7 +364,12 @@ impl AdaptiveGrpcReaction {
                             before,
                             after,
                             ..
-                        } => ("UPDATE", data.clone(), Some(before.clone()), Some(after.clone())),
+                        } => (
+                            "UPDATE",
+                            data.clone(),
+                            Some(before.clone()),
+                            Some(after.clone()),
+                        ),
                         ResultDiff::Aggregation { before, after } => (
                             "aggregation",
                             serde_json::to_value(result)

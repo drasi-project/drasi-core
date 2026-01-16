@@ -250,7 +250,8 @@ impl AdaptiveHttpReaction {
         if let Some(call_spec) = call_spec {
             // Prepare context for template rendering
             let mut context = Map::new();
-            let data = serde_json::to_value(result).expect("ResultDiff serialization should succeed");
+            let data =
+                serde_json::to_value(result).expect("ResultDiff serialization should succeed");
             context.insert("data".to_string(), data.clone());
             context.insert("query_id".to_string(), Value::String(query_id.to_string()));
             context.insert(
