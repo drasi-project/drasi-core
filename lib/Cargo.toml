@@ -36,7 +36,7 @@ name = "drasi_lib"
 path = "src/lib.rs"
 
 [dependencies]
-drasi-core = { version = "0.2.1", path = "../core" }
+drasi-core = { version = "0.2.2", path = "../core" }
 drasi-functions-cypher = { version = "0.2.1", path = "../functions-cypher" }
 drasi-functions-gql = { version = "0.2.1", path = "../functions-gql" }
 drasi-query-ast = { version = "0.2.2", path = "../query-ast" }

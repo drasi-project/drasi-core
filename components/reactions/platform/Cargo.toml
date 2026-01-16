@@ -40,4 +40,4 @@ chrono = "0.4"
 tokio-stream = "0.1"
 prost-types = "0.12"
 ordered-float = "3.0"
-drasi-core = { version = "0.2.1", path = "../../../core" }
+drasi-core = { version = "0.2.2", path = "../../../core" }
