@@ -63,7 +63,7 @@ impl QueryConfiguration for DefaultQueryConfig {
     }
 }
 
-/// Convert QueryVariables (BTreeMap<Box<str>, VariableValue>) to JSON
+/// Convert QueryVariables (`BTreeMap<Box<str>, VariableValue>`) to JSON
 fn convert_query_variables_to_json(vars: &QueryVariables) -> serde_json::Value {
     let mut result = serde_json::Map::new();
     for (key, value) in vars.iter() {
