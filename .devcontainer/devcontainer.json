@@ -9,10 +9,6 @@
 
 "postCreateCommand": ".devcontainer/setup.sh",
 
-"remoteEnv": {
-"JQ_LIB_DIR": "/usr/lib/x86_64-linux-gnu"
-},
-
 "customizations": {
 "vscode": {
 "extensions": [
