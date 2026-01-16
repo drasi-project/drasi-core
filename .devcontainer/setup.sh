@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "Installing libjq and dependencies..."
+echo "Installing build dependencies..."
 sudo apt-get update
-sudo apt-get install -y libjq-dev libonig-dev
+sudo apt-get install -y libjq-dev libonig-dev protobuf-compiler
 
 echo "Configuring Rust build environment..."
 
@@ -25,3 +25,4 @@ export JQ_LIB_DIR="$LIB_PATH"
 
 echo "Development environment setup complete!"
 echo "JQ_LIB_DIR configured to: $LIB_PATH"
+echo "protoc version: $(protoc --version)"
