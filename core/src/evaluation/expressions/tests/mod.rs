@@ -35,6 +35,7 @@ mod logical;
 mod numeric;
 mod string;
 mod time;
+mod trigonometric;
 
 #[tokio::test]
 async fn evaluate_property_access() {
