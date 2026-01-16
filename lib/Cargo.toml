@@ -40,7 +40,7 @@ drasi-core = { version = "0.2.1", path = "../core" }
 drasi-functions-cypher = { version = "0.2.1", path = "../functions-cypher" }
 drasi-functions-gql = { version = "0.2.1", path = "../functions-gql" }
 drasi-query-ast = { version = "0.2.2", path = "../query-ast" }
-drasi-query-cypher = { version = "0.2.1", path = "../query-cypher" }
+drasi-query-cypher = { version = "0.2.2", path = "../query-cypher" }
 drasi-query-gql = { version = "0.2.1", path = "../query-gql" }
 drasi-middleware = { version = "0.2.1", path = "../middleware" }
 
