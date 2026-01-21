@@ -41,4 +41,4 @@ uuid = { version = "1.0", features = ["v4"] }
 tokio-stream = "0.1"
 prost-types = "0.12"
 ordered-float = "3.0"
-drasi-reaction-http = { version = "0.1.1", path = "../http" }
+drasi-reaction-http = { version = "0.1.2", path = "../http" }
