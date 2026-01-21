@@ -1,8 +1,8 @@
 [package]
 name = "shared-tests"
-version = "0.1.0"
+version = "0.2.3"
 publish = false
-edition = "2021"
+edition.workspace = true
 
 [lints]
 workspace = true
@@ -10,11 +10,11 @@ workspace = true
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-drasi-query-ast = { path = "../query-ast" }
-drasi-core = { path = "../core" }
-drasi-query-cypher = { path = "../query-cypher" }
-drasi-functions-cypher = { path = "../functions-cypher" }
-drasi-middleware = { path = "../middleware" }
+drasi-query-ast.workspace = true
+drasi-core.workspace = true
+drasi-query-cypher.workspace = true
+drasi-functions-cypher.workspace = true
+drasi-middleware.workspace = true
 serde = "1.0.163"
 serde_json = "1.0.96"
 async-trait = "0.1.68"
@@ -32,7 +32,7 @@ redis = { version = "0.27", features = ["tokio-comp"] }
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["redis" ] }
 # For test utilities that need to create test sources/queries
-drasi-lib = { path = "../lib" }
+drasi-lib.workspace = true
 
 [dev-dependencies]
 serial_test = "3.0"
