@@ -40,7 +40,9 @@ Implementation is **ONLY complete** when:
 Confirm the plan includes:
 - [ ] POC verification with evidence
 - [ ] Data mapping strategy
-- [ ] Exact Docker image specification
+- [ ] Testing category identified (system-target or protocol-target)
+- [ ] For system-target: Exact Docker image specification
+- [ ] For protocol-target: Client harness design specification
 - [ ] Integration test specification
 - [ ] Definition of Done
 
@@ -82,15 +84,19 @@ cargo test -p drasi-reaction-[name]
 
 #### Integration Test ⭐ **REQUIRED**
 
-Create `tests/integration_test.rs` following plan's specification:
+Create `tests/integration_test.rs` following plan's specification.
 
 **Dependencies** (`Cargo.toml` under `[dev-dependencies]`):
 ```toml
 [dev-dependencies]
 tokio-test = "0.4"
-testcontainers = "0.26.3"
+testcontainers = "0.26.3"  # Only needed for system-target reactions
 drasi-source-application = { path = "../../../components/sources/application" }
 ```
+
+---
+
+### For System-Target Reactions (Docker-based testing)
 
 **Test Structure**:
 1. Use **testcontainers** to start actual target system (exact Docker image from plan)
@@ -101,44 +107,7 @@ drasi-source-application = { path = "../../../components/sources/application" }
 6. **ASSERT** each change is detected and flows through to target system by inspecting reaction logs
 7. If possible, **QUERY** target system to verify changes applied
 
-Mark test with `#[ignore]` and run with:
-```bash
-cargo test -p drasi-reaction-[name] --ignored --nocapture
-```
-
-**Required**: INSERT, UPDATE, DELETE all detected and asserted
-
-**Critical**: Iterate on integration tests to uncover and fix ALL runtime issues
-
-#### Integration Test Checklist
-
-- [ ] Test uses testcontainers with exact Docker image from plan
-- [ ] Test performs INSERT and verifies detection
-- [ ] Test performs UPDATE and verifies detection
-- [ ] Test performs DELETE and verifies detection
-- [ ] Test FAILS if change detection is broken
-- [ ] **Test has been PERSONALLY RUN and PASSES** ⭐
-- [ ] Test output captured showing all assertions pass
-- [ ] Test is documented in README
-
-Create `tests/integration_test.rs` that:
-
-After writing the integration tests, review them to make sure they meet the requirements above.
-
-Mark test with `#[ignore]` and run with: `cargo test --ignored --nocapture`
-
-**Dependencies for Integration Tests**:
-
-Add to your `Cargo.toml` under `[dev-dependencies]`:
-
-```toml
-[dev-dependencies]
-tokio-test = "0.4"
-testcontainers = "0.26.3"
-drasi-source-application = { path = "../../../components/sources/application" }
-```
-
-**Template**:
+**Template for System-Target**:
 
 ```rust
 #[cfg(test)]
@@ -185,76 +154,169 @@ mod integration_tests {
       .unwrap();
     
     drasi.start().await.unwrap();
-    
-    // Wait for startup to complete
     tokio::time::sleep(Duration::from_secs(2)).await;
     
-    // 6. TEST INSERT - Pump insert via ApplicationSource and verify in target system
-    source_handle.insert("test_table", serde_json::json!({
-      "id": 1,
-      "name": "Alice"
-    })).await.unwrap();
-    
-    // Wait for change to propagate through reaction
+    // 6. TEST INSERT
+    source_handle.insert("test_table", serde_json::json!({"id": 1, "name": "Alice"})).await.unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(/* verify insert in target */, "INSERT was not applied!");
     
-    // Verify INSERT was applied to target system
-    /* Query target system, e.g.:
-       let result = container.query("SELECT * FROM target_table WHERE id = 1").await;
-       assert!(result.contains("Alice"), "INSERT was not applied to target system!");
-    */
-    assert!(/* verify insert in target */, "INSERT was not applied to target system!");
-    
-    // 7. TEST UPDATE - Pump update via ApplicationSource and verify in target system
-    source_handle.update("test_table", serde_json::json!({
-      "id": 1,
-      "name": "Alice Updated"
-    })).await.unwrap();
-    
+    // 7. TEST UPDATE
+    source_handle.update("test_table", serde_json::json!({"id": 1, "name": "Alice Updated"})).await.unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(/* verify update in target */, "UPDATE was not applied!");
     
-    // Verify UPDATE was applied to target system
-    /* Query target system, e.g.:
-       let result = container.query("SELECT name FROM target_table WHERE id = 1").await;
-       assert!(result.contains("Alice Updated"), "UPDATE was not applied to target system!");
-    */
-    assert!(/* verify update in target */, "UPDATE was not applied to target system!");
-    
-    // 8. TEST DELETE - Pump delete via ApplicationSource and verify in target system
-    source_handle.delete("test_table", serde_json::json!({
-      "id": 1
-    })).await.unwrap();
-    
+    // 8. TEST DELETE
+    source_handle.delete("test_table", serde_json::json!({"id": 1})).await.unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(/* verify delete in target */, "DELETE was not applied!");
     
-    // Verify DELETE was applied to target system
-    /* Query target system, e.g.:
-       let result = container.query("SELECT * FROM target_table WHERE id = 1").await;
-       assert!(result.is_empty(), "DELETE was not applied to target system!");
-    */
-    assert!(/* verify delete in target */, "DELETE was not applied to target system!");
-    
-    // Clean up
     drasi.stop().await.unwrap();
   }
 }
 ```
 
-**Key Points**:
+---
 
-- Uses **testcontainers** to start actual target system (e.g., database, message queue)
-- Uses **ApplicationSource** to pump data programmatically (INSERT/UPDATE/DELETE)
-- Verifies changes are applied to target system by querying it directly
-- Each test assertion verifies that changes flow through: source → query → reaction → target system
-- Test **MUST fail** if change detection or target system writes are broken
-- Uses realistic timing (2 second waits) to allow change propagation
+### For Protocol-Target Reactions (Client Harness testing)
+
+When the target is a protocol/endpoint (e.g., SignalR, WebSocket, gRPC), create a **client harness** that acts as a test receiver.
+
+**Test Structure**:
+1. Create a **client harness** that connects to the reaction's endpoint
+2. The harness captures incoming messages in a thread-safe collection
+3. Create **DrasiLib** instance with **ApplicationSource** and the reaction
+4. Perform **INSERT**, **UPDATE**, **DELETE** operations
+5. **ASSERT** harness received the expected messages
+
+**Template for Protocol-Target**:
+
+```rust
+#[cfg(test)]
+mod integration_tests {
+  use drasi_lib::DrasiLib;
+  use drasi_source_application::ApplicationSource;
+  use std::sync::Arc;
+  use std::time::Duration;
+  use tokio::sync::Mutex;
+  
+  #[tokio::test]
+  #[ignore] // Run with: cargo test --ignored
+  async fn test_reaction_end_to_end() {
+    // 1. Create a client harness to receive messages
+    let received_messages: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let harness_messages = received_messages.clone();
+    
+    // 2. Create application source
+    let (source, source_handle) = ApplicationSource::builder("test-source")
+      .with_labels(vec!["test_table".to_string()])
+      .build();
+    
+    // 3. Create query
+    let query = Query::cypher("test-query")
+      .query("MATCH (n:test_table) RETURN n.id AS id, n.name AS name")
+      .from_source("test-source")
+      .auto_start(true)
+      .build();
+    
+    // 4. Create the reaction - it will host the endpoint
+    let reaction = MyProtocolReaction::builder("test-reaction")
+      .with_query("test-query")
+      .with_port(0)  // Use ephemeral port
+      /* configure other settings */
+      .build()
+      .unwrap();
+    
+    let endpoint_port = reaction.get_port();  // Get the assigned port
+    
+    // 5. Build and start DrasiLib
+    let drasi = DrasiLib::builder()
+      .with_source(source)
+      .with_query(query)
+      .with_reaction(reaction)
+      .build()
+      .await
+      .unwrap();
+    
+    drasi.start().await.unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    
+    // 6. Connect client harness to the reaction's endpoint
+    let harness_handle = tokio::spawn(async move {
+      // Example: Connect to SignalR/WebSocket/gRPC endpoint
+      // let client = MyProtocolClient::connect(format!("http://localhost:{}", endpoint_port)).await;
+      // Loop receiving messages and pushing to harness_messages
+    });
+    
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    
+    // 7. TEST INSERT
+    source_handle.insert("test_table", serde_json::json!({"id": 1, "name": "Alice"})).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    {
+      let messages = received_messages.lock().await;
+      assert!(messages.iter().any(|m| m.contains("Alice")), "INSERT message not received!");
+    }
+    
+    // 8. TEST UPDATE
+    source_handle.update("test_table", serde_json::json!({"id": 1, "name": "Alice Updated"})).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    {
+      let messages = received_messages.lock().await;
+      assert!(messages.iter().any(|m| m.contains("Alice Updated")), "UPDATE message not received!");
+    }
+    
+    // 9. TEST DELETE
+    source_handle.delete("test_table", serde_json::json!({"id": 1})).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    {
+      let messages = received_messages.lock().await;
+      assert!(messages.len() >= 3, "DELETE message not received!");
+    }
+    
+    // Cleanup
+    harness_handle.abort();
+    drasi.stop().await.unwrap();
+  }
+}
+```
+
+**Key Differences for Protocol-Target**:
+- **No Docker container** - the reaction itself hosts the endpoint
+- **Client harness** connects to the reaction and captures messages
+- Verification is done by inspecting captured messages, not querying a target system
+- May need to handle connection/reconnection logic in the harness
+
+---
+
+#### Integration Test Checklist
+
+- [ ] Test category identified (system-target or protocol-target)
+- [ ] For system-target: Test uses testcontainers with exact Docker image from plan
+- [ ] For protocol-target: Test uses client harness to capture messages
+- [ ] Test performs INSERT and verifies detection
+- [ ] Test performs UPDATE and verifies detection
+- [ ] Test performs DELETE and verifies detection
+- [ ] Test FAILS if change detection is broken
+- [ ] **Test has been PERSONALLY RUN and PASSES** ⭐
+- [ ] Test output captured showing all assertions pass
+- [ ] Test is documented in README
+
+Mark test with `#[ignore]` and run with:
+```bash
+cargo test -p drasi-reaction-[name] --ignored --nocapture
+```
+
+**Required**: INSERT, UPDATE, DELETE all detected and asserted
+
+**Critical**: Iterate on integration tests to uncover and fix ALL runtime issues
 
 **Requirements**:
 - Mark tests with `#[ignore]` attribute
 - Include a Makefile target to run integration tests
 - Test MUST fail if change detection is broken
 - Test should complete in < 30 seconds
-- Clean up containers after test
+- Clean up resources after test
 - Integration test has been PERSONALLY RUN and PASSES
 
 
@@ -316,9 +378,11 @@ Document in completion report:
 Implementation is complete when ALL are true:
 
 - [ ] Plan received and validated
+- [ ] Testing category identified (system-target or protocol-target)
 - [ ] All unit tests RUN and PASS
 - [ ] Integration test RUNS and PASSES (INSERT/UPDATE/DELETE verified)
-- [ ] Integration test uses testcontainers
+- [ ] For system-target: Integration test uses testcontainers
+- [ ] For protocol-target: Integration test uses client harness
 - [ ] Evidence of runtime execution documented
 - [ ] All runtime issues FIXED
 - [ ] No placeholders in core code

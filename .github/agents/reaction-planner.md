@@ -92,12 +92,20 @@ Write a comprehensive plan in markdown format with the following sections:
 
 ### Integration Test ⭐ **REQUIRED**
 
-**MANDATORY Docker Container Requirement:**
-- Integration test MUST use testcontainers with real Docker image
-- Manual example MUST provision Docker container
-- NO exceptions for "external" dependencies
+**Determine Testing Category:**
 
-**Test Specification:**
+1. **System-Target Reactions** (e.g., databases, message queues, storage systems):
+   - Target system can be hosted in a Docker container
+   - Use testcontainers with real Docker image
+   - Verify changes by querying the target system
+
+2. **Protocol-Target Reactions** (e.g., SignalR, WebSocket, gRPC endpoints):
+   - Target is a protocol/endpoint, not a hostable system
+   - Create a **client harness** that acts as a test receiver
+   - The harness listens for messages and captures them for assertions
+   - No Docker container needed for the target
+
+**Test Specification for System-Target:**
 - **Exact Docker image** (verify it exists on Docker Hub or MCR)
 - Container startup commands
 - How reaction system will be set up programmatically
@@ -107,6 +115,18 @@ Write a comprehensive plan in markdown format with the following sections:
   - DELETE operation → verification approach
 - How test will verify changes are detected
 - Expected test duration and resource requirements
+- Cleanup strategy
+
+**Test Specification for Protocol-Target:**
+- **Client harness design** - how the test will receive/capture messages
+- Protocol connection details (port, endpoint path, etc.)
+- Message format expectations
+- Exact test scenario:
+  - INSERT operation → expected message content
+  - UPDATE operation → expected message content
+  - DELETE operation → expected message content
+- How harness will verify correct messages received
+- Timeout and synchronization strategy
 - Cleanup strategy
 
 ## 6. Implementation Phases
