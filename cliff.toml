@@ -70,3 +70,10 @@ filter_commits = false
 # Sort commits by oldest to newest
 date_order = false
 sort_commits = "oldest"
+
+# Pre-1.0 versioning (0.major.minor format):
+# - fix:/feat: bump the last number (acts like patch)
+# - feat!: bumps the middle number (acts like minor)
+[bump]
+features_always_bump_minor = false  # feat: acts like fix: in 0.x
+breaking_always_bump_major = false  # feat!: bumps minor, not major, in 0.x
