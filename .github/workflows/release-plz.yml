@@ -38,7 +38,7 @@ jobs:
         run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-action@1.88.0
+        run: rustup show
 
       - name: Run release-plz (dry-run)
         if: ${{ inputs.dry_run == true }}
