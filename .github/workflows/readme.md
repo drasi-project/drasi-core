@@ -99,7 +99,7 @@ The workflow detects the type of commit and runs the appropriate action:
 #### Release Flow
 
 1. **Merge feature/fix PRs to main** → Workflow creates a "Release PR" with:
-   - Version bumps based on conventional commits (feat = minor, fix = patch)
+   - Version bumps based on conventional commits
    - Updated CHANGELOG.md files
    - Updated dependency versions
 
@@ -109,6 +109,39 @@ The workflow detects the type of commit and runs the appropriate action:
    - Publishes all updated crates to crates.io
    - Creates git tags for each published version
    - Creates GitHub releases
+
+#### Conventional Commits and Versioning
+
+This project uses [Conventional Commits](https://www.conventionalcommits.org/) to determine version bumps. Commit messages must be prefixed with a type:
+
+```
+type: description
+
+# Examples:
+fix: resolve null pointer in query parser
+feat: add support for PostgreSQL 15
+feat!: rename QueryResult to QueryOutput
+docs: update installation guide
+chore: update dependencies
+```
+
+**Pre-1.0 Versioning Strategy**
+
+Until the project reaches 1.0.0, we use a `0.major.minor` versioning scheme (no patch releases):
+
+| Commit Prefix | Meaning | Version Bump Example |
+|---------------|---------|---------------------|
+| `fix:` | Bug fix | 0.3.1 → 0.3.**2** |
+| `feat:` | New feature (non-breaking) | 0.3.1 → 0.3.**2** |
+| `feat!:` | Breaking change | 0.3.1 → 0.**4**.0 |
+| `docs:`, `chore:`, `test:`, `refactor:` | No version change | 0.3.1 → 0.3.1 |
+
+**Note:** Both `fix:` and `feat:` increment the last number (minor in our scheme) until we release 1.0.0. Use `feat!:` or include `BREAKING CHANGE:` in the commit body for changes that should bump the middle number.
+
+After 1.0.0, standard semantic versioning will apply:
+- `fix:` → patch bump (1.2.3 → 1.2.4)
+- `feat:` → minor bump (1.2.3 → 1.3.0)
+- `feat!:` → major bump (1.2.3 → 2.0.0)
 
 #### Semver Checking
 
