@@ -175,6 +175,7 @@ This runs automatically during the release process - no manual invocation needed
 - **Trigger**: Automatically triggered on pull requests to the `main`, `feature/*`, or `release/*` branches and pushes to the `main` branch.
   - Note: Performance tests are skipped for draft pull requests.
 
+
 ## Viewing Workflow Status
 
 Navigate to the **Actions** tab in your repository to view the status, logs, and results of each workflow run.
