@@ -46,13 +46,13 @@ jobs:
 
       - name: Run release-plz (dry-run)
         if: ${{ inputs.dry_run == true }}
-        run: release-plz release --dry-run --backend github
+        run: release-plz release --dry-run --git-token "$GITHUB_TOKEN" --backend github
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run release-plz
         if: ${{ inputs.dry_run != true }}
-        run: release-plz release --backend github
+        run: release-plz release --git-token "$GITHUB_TOKEN" --backend github
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
