@@ -38,7 +38,7 @@ jobs:
         run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-action@1.88.0
 
       - name: Run release-plz (dry-run)
         if: ${{ inputs.dry_run == true }}
@@ -46,12 +46,15 @@ jobs:
         with:
           command: release
           args: --dry-run
+          version: "0.3.120"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run release-plz
         if: ${{ inputs.dry_run != true }}
         uses: release-plz/action@v0.5
+        with:
+          version: "0.3.120"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
