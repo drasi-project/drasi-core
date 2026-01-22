@@ -81,10 +81,12 @@ jobs:
       - name: Dry run - preview version bumps
         if: ${{ inputs.dry_run == true }}
         run: |
-          echo "=== Preview: Version bumps that would be made ==="
+          echo "=== Preview: Version bumps and changelog updates ==="
+          echo ""
           release-plz update
           echo ""
-          echo "=== Preview: Crates that would be published ==="
-          release-plz release --dry-run --allow-dirty --git-token "$GITHUB_TOKEN" --backend github
+          echo "=== Dry run complete ==="
+          echo "The above shows what versions would be bumped and changelog entries created."
+          echo "To create a release PR, run this workflow with dry_run=false."
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
