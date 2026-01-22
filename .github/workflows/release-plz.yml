@@ -40,21 +40,19 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
 
+      - name: Install release-plz
+        run: |
+          curl -sSfL https://github.com/release-plz/release-plz/releases/download/release-plz-v0.3.120/release-plz-x86_64-unknown-linux-musl.tar.gz | tar xz -C /usr/local/bin
+
       - name: Run release-plz (dry-run)
         if: ${{ inputs.dry_run == true }}
-        uses: release-plz/action@v0.5
-        with:
-          command: release
-          args: --dry-run
-          version: "0.3.120"
+        run: release-plz release --dry-run --backend github
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run release-plz
         if: ${{ inputs.dry_run != true }}
-        uses: release-plz/action@v0.5
-        with:
-          version: "0.3.120"
+        run: release-plz release --backend github
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
