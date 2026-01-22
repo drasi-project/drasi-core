@@ -34,6 +34,19 @@ You are a planning specialist for Drasi source implementations. Your role is to 
   - Prefer CDC, log-based, or event-driven over polling
   - Document how the target system exposes changes
 
+**Determine Source Category:**
+
+| Category | Description | Examples | Testing Strategy |
+|----------|-------------|----------|------------------|
+| **External System** | Connects to a remote database or service | PostgreSQL, MongoDB, Cosmos DB | Docker container via testcontainers |
+| **Protocol/Local** | Receives data via protocol or monitors local environment | File system watcher, HTTP endpoint, system metrics, message receiver | Client harness that simulates data input |
+
+For **Protocol/Local** sources:
+- The source acts as a **receiver** or **observer**, not a connector
+- No external system to containerize; data comes TO the source
+- Testing requires a **client harness** that generates test data
+- Examples: file watcher (harness writes files), HTTP receiver (harness sends HTTP requests), metrics collector (harness generates system activity)
+
 ### 3. Verify Library Capabilities with POC
 
 **MANDATORY before creating plan**:
@@ -113,6 +126,12 @@ Write a comprehensive plan in markdown format with the following sections:
 
 ### Integration Test ⭐ **REQUIRED**
 
+**Determine Testing Approach Based on Source Category:**
+
+#### Option A: External System Sources (Docker Container)
+
+For sources that connect to external databases/services:
+
 **MANDATORY Docker Container Requirement:**
 - Integration test MUST use testcontainers with real Docker image
 - Manual example MUST provision Docker container
@@ -130,18 +149,56 @@ Write a comprehensive plan in markdown format with the following sections:
 - Expected test duration and resource requirements
 - Cleanup strategy
 
+#### Option B: Protocol/Local Sources (Client Harness)
+
+For sources that receive data via protocol or monitor local environment:
+
+**MANDATORY Client Harness Requirement:**
+- Integration test MUST include a test harness that simulates data input
+- The harness acts as a **client** to the source (e.g., writes files, sends HTTP requests, generates events)
+- NO mocking of the actual protocol/interface
+
+**Test Specification:**
+- **Harness design**: What the harness does (e.g., "writes test files to temp directory")
+- **Harness implementation**: Library/approach for simulating input
+- Setup requirements (temp directories, ports, permissions)
+- Exact test scenario:
+  - CREATE/INSERT event → harness action → verification approach
+  - UPDATE/MODIFY event → harness action → verification approach  
+  - DELETE/REMOVE event → harness action → verification approach
+- How test will verify changes are detected
+- Expected test duration and resource requirements
+- Cleanup strategy (temp files, ports, etc.)
+
+**Client Harness Examples:**
+| Source Type | Harness Action |
+|-------------|----------------|
+| File system watcher | Write/modify/delete files in temp directory |
+| HTTP endpoint receiver | Send HTTP POST/PUT/DELETE requests |
+| System metrics collector | Generate CPU/memory activity, spawn processes |
+| Message receiver | Send messages to local socket/pipe |
+| Log tailer | Append lines to log file |
+
 ### Manual Example
 
 **Helper Scripts Required:**
-- `setup.sh` - Database/system initialization (60s timeout, error diagnostics)
+- `setup.sh` - System initialization (60s timeout, error diagnostics)
 - `quickstart.sh` - One-command full setup
 - `diagnose.sh` - System health verification
-- `test-updates.sh` - Verify CDC working
+- `test-updates.sh` - Verify change detection working
 
-**Example Specification:**
+**Example Specification (External System):**
 - Docker container setup
 - DrasiLib configuration
 - Query definition
+- How to verify changes are detected
+- Troubleshooting common issues
+
+**Example Specification (Protocol/Local):**
+- Local environment setup (directories, ports, permissions)
+- DrasiLib configuration  
+- Query definition
+- Client/harness commands to simulate data input
 - How to verify changes are detected
 - Troubleshooting common issues
 
@@ -214,7 +271,10 @@ Write a comprehensive plan in markdown format with the following sections:
 
 Your plan must:
 - ✅ Include POC verification with evidence
-- ✅ Specify exact Docker images (verified to exist)
+- ✅ Identify source category (External System vs Protocol/Local)
+- ✅ Specify testing approach matching category:
+  - External System: exact Docker images (verified to exist)
+  - Protocol/Local: client harness design and implementation
 - ✅ Define concrete test assertions
 - ✅ Reference actual library APIs (not assumptions)
 - ✅ Include all required helper scripts
@@ -229,7 +289,8 @@ Do NOT create plans that:
 - ❌ Assume library capabilities without POC verification
 - ❌ Use "we'll figure it out during implementation"
 - ❌ Omit integration test specification
-- ❌ Reference non-existent Docker images
+- ❌ Reference non-existent Docker images (for External System sources)
+- ❌ Skip client harness design (for Protocol/Local sources)
 - ❌ Skip state management details
 - ❌ Include placeholders like "TODO" or "TBD" in critical sections
 
