@@ -74,6 +74,63 @@ To modify or create agentic workflows, you'll need to:
   - Pull requests targeting `main`.
   - Scheduled weekly (every Sunday at 00:30 UTC).
 
+### [release-plz.yml](release-plz.yml)
+- **Purpose**: Automates version bumps, changelog generation, and crate publishing using release-plz.
+- **Triggers**:
+  - Automatically on push to `main` branch
+  - Manual workflow dispatch with optional dry-run mode
+
+#### Automatic Behavior (Push to Main)
+
+The workflow detects the type of commit and runs the appropriate action:
+
+| Commit Type | Detection | Action |
+|-------------|-----------|--------|
+| Regular commit | Commit message does NOT start with `chore: release` | Creates/updates a Release PR with version bumps and CHANGELOGs |
+| Release PR merge | Commit message starts with `chore: release`, `chore(release)`, or `release:` | Publishes crates to crates.io and creates git tags |
+
+#### Manual Trigger
+
+| Input | Effect |
+|-------|--------|
+| `dry_run = false` (default) | Same as automatic - detects commit type and runs appropriate action |
+| `dry_run = true` | Preview mode - shows what versions would be bumped and what crates would be published without making any changes |
+
+#### Release Flow
+
+1. **Merge feature/fix PRs to main** → Workflow creates a "Release PR" with:
+   - Version bumps based on conventional commits (feat = minor, fix = patch)
+   - Updated CHANGELOG.md files
+   - Updated dependency versions
+
+2. **Review the Release PR** → Check the proposed version bumps and changelog entries
+
+3. **Merge the Release PR** → Workflow detects the release commit and:
+   - Publishes all updated crates to crates.io
+   - Creates git tags for each published version
+   - Creates GitHub releases
+
+#### Semver Checking
+
+The workflow includes **cargo-semver-checks** which automatically detects breaking API changes:
+
+- Scans for removed public items, changed function signatures, removed struct fields, etc.
+- Warns if a patch/minor version bump is proposed but breaking changes are detected
+- Helps ensure downstream users won't get surprise compile errors after updating
+
+This runs automatically during the release process - no manual invocation needed.
+
+#### Configuration
+
+- **release-plz.toml**: Controls versioning behavior, changelog generation, and which packages to publish
+- **cliff.toml**: Configures changelog format (conventional commits)
+- Packages marked with `publish = false` in release-plz.toml are excluded from releases (shared-tests, query-perf, examples)
+
+#### Required Secrets
+
+- `GITHUB_TOKEN`: Automatically provided, used for creating PRs and releases
+- `CARGO_REGISTRY_TOKEN`: Must be configured in repository secrets for publishing to crates.io
+
 ### [scorecard.yaml](scorecard.yaml)
 - **Purpose**: Runs OpenSSF Scorecard analysis to evaluate repository security and best practices.
 - **Triggers**:
@@ -84,32 +141,6 @@ To modify or create agentic workflows, you'll need to:
 - **Purpose**: Executes `cargo test` to run unit tests and performance tests.
 - **Trigger**: Automatically triggered on pull requests to the `main`, `feature/*`, or `release/*` branches and pushes to the `main` branch.
   - Note: Performance tests are skipped for draft pull requests.
-
-### [release.yml](release.yml)
-- **Purpose**: Publishes crates to crates.io for both core libraries and individual components.
-- **Trigger**: Manual via workflow dispatch
-- **Environment**: Requires `drasi-core-release` environment with `CARGO_REGISTRY_TOKEN` secret
-- **Inputs**:
-  - `release_target`: Choose between `core-and-lib` (releases all core libraries) or `component` (releases a single component)
-  - `component_name`: Select from dropdown of available components (required when `release_target` is `component`)
-  - `version_bump`: Choose `patch`, `minor`, `major`, or `custom` version bump
-  - `custom_version`: Specify exact version (only when `version_bump` is `custom`)
-  - `dry_run`: Set to `true` (default) to preview changes without publishing, or `false` to publish to crates.io
-- **Features**:
-  - Runs on `ubuntu-latest-8-cores` for faster builds
-  - Uses cargo-release 0.25.20 with `--locked` flag for dependency stability
-  - Requires environment approval before execution
-  - Provides detailed summary of release outcome
-
-### [test-release.yml](test-release.yml)
-- **Purpose**: Tests the release process safely without publishing to crates.io.
-- **Trigger**: Manual via workflow dispatch
-- **Inputs**:
-  - `test_branch`: Branch to test on (will be modified with commits and tags)
-  - `release_target`: Choose between `core-and-lib` or `component`
-  - `component_name`: Component to release (if `release_target` is `component`)
-  - `version_bump`: Choose `patch`, `minor`, or `major`
-- **Note**: Always uses `--no-publish` flag to prevent actual publication to crates.io. Creates commits and tags on the test branch for verification.
 
 
 ## Viewing Workflow Status
