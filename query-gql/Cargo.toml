@@ -1,13 +1,16 @@
 [package]
 name = "drasi-query-gql"
-version = "0.2.3"
-edition = "2021"
-license = "Apache-2.0"
+version = "0.3.1"
+edition.workspace = true
+license.workspace = true
 description = "Drasi Core GQL Parser"
-repository = "https://github.com/drasi-project/drasi-core"
-keywords = ["drasi"]
-categories = ["database"]
-readme = "../readme.md"    
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../readme.md"
+
+[lints]
+workspace = true
 
 [lints]
 workspace = true
@@ -15,7 +18,7 @@ workspace = true
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-drasi-query-ast = { version = "0.2.3", path = "../query-ast" }
+drasi-query-ast.workspace = true
 peg = "0.8.1"
 serde = "1.0.164"
 serde_json = "1.0.96"

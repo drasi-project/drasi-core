@@ -74,6 +74,96 @@ To modify or create agentic workflows, you'll need to:
   - Pull requests targeting `main`.
   - Scheduled weekly (every Sunday at 00:30 UTC).
 
+### [release-plz.yml](release-plz.yml)
+- **Purpose**: Automates version bumps, changelog generation, and crate publishing using release-plz.
+- **Triggers**:
+  - Automatically on push to `main` branch
+  - Manual workflow dispatch with optional dry-run mode
+
+#### Automatic Behavior (Push to Main)
+
+The workflow detects the type of commit and runs the appropriate action:
+
+| Commit Type | Detection | Action |
+|-------------|-----------|--------|
+| Regular commit | Commit message does NOT start with `chore: release` | Creates/updates a Release PR with version bumps and CHANGELOGs |
+| Release PR merge | Commit message starts with `chore: release`, `chore(release)`, or `release:` | Publishes crates to crates.io and creates git tags |
+
+#### Manual Trigger
+
+| Input | Effect |
+|-------|--------|
+| `dry_run = false` (default) | Same as automatic - detects commit type and runs appropriate action |
+| `dry_run = true` | Preview mode - shows what versions would be bumped and what crates would be published without making any changes |
+
+#### Release Flow
+
+1. **Merge feature/fix PRs to main** → Workflow creates a "Release PR" with:
+   - Version bumps based on conventional commits
+   - Updated CHANGELOG.md files
+   - Updated dependency versions
+
+2. **Review the Release PR** → Check the proposed version bumps and changelog entries
+
+3. **Merge the Release PR** → Workflow detects the release commit and:
+   - Publishes all updated crates to crates.io
+   - Creates git tags for each published version
+   - Creates GitHub releases
+
+#### Conventional Commits and Versioning
+
+This project uses [Conventional Commits](https://www.conventionalcommits.org/) to determine version bumps. Commit messages must be prefixed with a type:
+
+```
+type: description
+
+# Examples:
+fix: resolve null pointer in query parser
+feat: add support for PostgreSQL 15
+feat!: rename QueryResult to QueryOutput
+docs: update installation guide
+chore: update dependencies
+```
+
+**Pre-1.0 Versioning Strategy**
+
+Until the project reaches 1.0.0, we use a `0.major.minor` versioning scheme (no patch releases):
+
+| Commit Prefix | Meaning | Version Bump Example |
+|---------------|---------|---------------------|
+| `fix:` | Bug fix | 0.3.1 → 0.3.**2** |
+| `feat:` | New feature (non-breaking) | 0.3.1 → 0.3.**2** |
+| `feat!:` | Breaking change | 0.3.1 → 0.**4**.0 |
+| `docs:`, `chore:`, `test:`, `refactor:` | No version change | 0.3.1 → 0.3.1 |
+
+**Note:** Both `fix:` and `feat:` increment the last number (minor in our scheme) until we release 1.0.0. Use `feat!:` or include `BREAKING CHANGE:` in the commit body for changes that should bump the middle number.
+
+After 1.0.0, standard semantic versioning will apply:
+- `fix:` → patch bump (1.2.3 → 1.2.4)
+- `feat:` → minor bump (1.2.3 → 1.3.0)
+- `feat!:` → major bump (1.2.3 → 2.0.0)
+
+#### Semver Checking
+
+The workflow includes **cargo-semver-checks** which automatically detects breaking API changes:
+
+- Scans for removed public items, changed function signatures, removed struct fields, etc.
+- Warns if a patch/minor version bump is proposed but breaking changes are detected
+- Helps ensure downstream users won't get surprise compile errors after updating
+
+This runs automatically during the release process - no manual invocation needed.
+
+#### Configuration
+
+- **release-plz.toml**: Controls versioning behavior, changelog generation, and which packages to publish
+- **cliff.toml**: Configures changelog format (conventional commits)
+- Packages marked with `publish = false` in release-plz.toml are excluded from releases (shared-tests, query-perf, examples)
+
+#### Required Secrets
+
+- `GITHUB_TOKEN`: Automatically provided, used for creating PRs and releases
+- `CARGO_REGISTRY_TOKEN`: Must be configured in repository secrets for publishing to crates.io
+
 ### [scorecard.yaml](scorecard.yaml)
 - **Purpose**: Runs OpenSSF Scorecard analysis to evaluate repository security and best practices.
 - **Triggers**:

@@ -1,0 +1,92 @@
+name: Release-plz
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run only (no publishing)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  pull-requests: write
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release-plz:
+    name: Release-plz
+    runs-on: ubuntu-latest-8-cores
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq libjq-dev protobuf-compiler
+
+      - name: Set JQ_LIB_DIR
+        run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Install release-plz
+        run: |
+          curl -sSfL https://github.com/release-plz/release-plz/releases/download/release-plz-v0.3.120/release-plz-x86_64-unknown-linux-musl.tar.gz | tar xz -C /usr/local/bin
+
+      - name: Install cargo-semver-checks
+        run: |
+          curl -sSfL https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v0.45.0/cargo-semver-checks-x86_64-unknown-linux-musl.tar.gz | tar xz -C /usr/local/bin
+          cargo-semver-checks --version
+
+      # Check if this commit is from a release PR (commit message starts with "chore: release" or similar)
+      - name: Check if release commit
+        id: check_release
+        run: |
+          COMMIT_MSG=$(git log -1 --pretty=%B)
+          if echo "$COMMIT_MSG" | grep -qE "^chore\(release\)|^chore: release|^release:"; then
+            echo "is_release=true" >> $GITHUB_OUTPUT
+            echo "This is a release commit - will publish crates"
+          else
+            echo "is_release=false" >> $GITHUB_OUTPUT
+            echo "This is a regular commit - will create/update release PR"
+          fi
+
+      # On regular commits: Create/update release PR with version bumps and changelog
+      - name: Create/update release PR
+        if: ${{ steps.check_release.outputs.is_release != 'true' && inputs.dry_run != true }}
+        run: release-plz release-pr --git-token "$GITHUB_TOKEN" --backend github
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # On release PR merge: Publish crates to crates.io and create git tags
+      - name: Publish crates
+        if: ${{ steps.check_release.outputs.is_release == 'true' && inputs.dry_run != true }}
+        run: release-plz release --git-token "$GITHUB_TOKEN" --backend github
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      # Dry run mode - preview what would happen
+      - name: Dry run - preview version bumps
+        if: ${{ inputs.dry_run == true }}
+        run: |
+          echo "=== Preview: Version bumps and changelog updates ==="
+          echo ""
+          release-plz update
+          echo ""
+          echo "=== Dry run complete ==="
+          echo "The above shows what versions would be bumped and changelog entries created."
+          echo "To create a release PR, run this workflow with dry_run=false."
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

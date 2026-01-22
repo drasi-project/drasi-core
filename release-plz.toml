@@ -1,0 +1,42 @@
+# release-plz configuration for independent versioning
+# See: https://release-plz.ieni.dev/docs/config
+
+[workspace]
+# Changelog configuration
+changelog_config = "cliff.toml"
+allow_dirty = false
+
+# Git release settings
+git_release_enable = true
+git_release_type = "prod"
+
+# Publishing settings
+publish = true
+
+# PR settings
+pr_labels = ["release"]
+
+# Dependencies updates
+dependencies_update = true
+
+# Unpublished/internal packages - exclude from releases
+[[package]]
+name = "shared-tests"
+publish = false
+changelog_update = false
+git_release_enable = false
+release = false
+
+[[package]]
+name = "query-perf"
+publish = false
+changelog_update = false
+git_release_enable = false
+release = false
+
+[[package]]
+name = "examples"
+publish = false
+changelog_update = false
+git_release_enable = false
+release = false
