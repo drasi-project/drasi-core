@@ -1,13 +1,13 @@
 [package]
 name = "drasi-core"
-version = "0.2.3"
-edition = "2021"
-license = "Apache-2.0"
+version = "0.3.1"
+edition.workspace = true
+license.workspace = true
 description = "Drasi Core"
-repository = "https://github.com/drasi-project/drasi-core"
-keywords = ["drasi"]
-categories = ["database"]
-readme = "../readme.md"    
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../readme.md"
 
 [lints]
 workspace = true
@@ -20,7 +20,8 @@ parallel_solver = []
 
 [dependencies]
 async-trait = "0.1.68"
-drasi-query-ast = { version = "0.2.3", path = "../query-ast" }
+drasi-query-ast.workspace = true
+drasi-query-cypher.workspace = true
 hashers = "1.0.1"
 ordered-float = "3.7.0"
 serde = { version = "1", features = ["derive"] }
@@ -54,4 +55,3 @@ time-macros = { version = "0.2.6", features = ["serde"] }
 
 [dev-dependencies]
 mockall = "0.13.1"
-drasi-query-cypher = { version = "0.2.3", path = "../query-cypher" }
