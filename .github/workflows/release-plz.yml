@@ -44,6 +44,11 @@ jobs:
         run: |
           curl -sSfL https://github.com/release-plz/release-plz/releases/download/release-plz-v0.3.120/release-plz-x86_64-unknown-linux-musl.tar.gz | tar xz -C /usr/local/bin
 
+      - name: Install cargo-semver-checks
+        run: |
+          curl -sSfL https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v0.45.0/cargo-semver-checks-x86_64-unknown-linux-musl.tar.gz | tar xz -C /usr/local/bin
+          cargo-semver-checks --version
+
       # Check if this commit is from a release PR (commit message starts with "chore: release" or similar)
       - name: Check if release commit
         id: check_release
@@ -80,6 +85,6 @@ jobs:
           release-plz update
           echo ""
           echo "=== Preview: Crates that would be published ==="
-          release-plz release --dry-run --git-token "$GITHUB_TOKEN" --backend github
+          release-plz release --dry-run --allow-dirty --git-token "$GITHUB_TOKEN" --backend github
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
