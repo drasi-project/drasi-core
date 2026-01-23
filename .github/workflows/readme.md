@@ -95,6 +95,17 @@ The workflow detects the type of commit and runs the appropriate action:
 |-------|--------|
 | `dry_run = false` (default) | Same as automatic - detects commit type and runs appropriate action |
 | `dry_run = true` | Preview mode - shows what versions would be bumped and what crates would be published without making any changes |
+| `force_publish = true` | Force publish crates to crates.io, bypassing commit message detection. Use this to recover from a failed release where the commit message doesn't match the expected pattern |
+
+#### Recovering from Failed Releases
+
+If a release PR was merged but publishing failed (or the commit message didn't match the expected pattern), you can manually trigger publishing:
+
+1. Go to **Actions** → **Release-plz** → **Run workflow**
+2. Check the **"Force publish crates"** checkbox
+3. Click **Run workflow**
+
+This will run `release-plz release` which publishes all crates that have local versions newer than what's on crates.io.
 
 #### Release Flow
 
