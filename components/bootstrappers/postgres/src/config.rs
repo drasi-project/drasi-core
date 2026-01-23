@@ -105,7 +105,7 @@ pub struct PostgresBootstrapConfig {
 }
 
 fn default_postgres_host() -> String {
-    "localhost".to_string() // DevSkim: ignore DS137138
+    "localhost".to_string() // DevSkim: ignore DS162092
 }
 
 fn default_postgres_port() -> u16 {
