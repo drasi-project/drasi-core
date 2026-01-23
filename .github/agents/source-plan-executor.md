@@ -766,6 +766,7 @@ Implementation is complete when ALL are true:
 - [ ] Clippy passes: `cargo clippy --all-targets -- -D warnings`
 - [ ] Code formatted: `cargo fmt`
 - [ ] Documentation complete (source, bootstrap, example READMEs)
+- [ ] Makefile targets tested and verified working
 
 **If ANY checkbox is unchecked, implementation is INCOMPLETE.**
 
