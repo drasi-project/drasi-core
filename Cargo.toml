@@ -49,7 +49,7 @@ members = [
   # Internal
   "shared-tests",
   "query-perf",
-  "examples/query",
+  "examples/query", "sync-vectorstore-core", "sync-vectorstore-qdrant",
   ]
 
 # Exclude internal crates from workspace packaging

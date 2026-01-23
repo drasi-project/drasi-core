@@ -1,0 +1,22 @@
+[package]
+name = "sync-vectorstore-qdrant"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+sync-vectorstore-core = { path = "../sync-vectorstore-core" }
+drasi-core = { path = "../core" }
+qdrant-client = "1.16.0" 
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+uuid = { version = "1.0", features = ["v4", "v5"] }
+
+[lints]
+workspace = true
