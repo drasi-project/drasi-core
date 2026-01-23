@@ -11,6 +11,11 @@ on:
         required: false
         type: boolean
         default: false
+      force_publish:
+        description: 'Force publish crates (use after failed release)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   pull-requests: write
@@ -64,14 +69,14 @@ jobs:
 
       # On regular commits: Create/update release PR with version bumps and changelog
       - name: Create/update release PR
-        if: ${{ steps.check_release.outputs.is_release != 'true' && inputs.dry_run != true }}
+        if: ${{ steps.check_release.outputs.is_release != 'true' && inputs.dry_run != true && inputs.force_publish != true }}
         run: release-plz release-pr --git-token "$GITHUB_TOKEN" --backend github
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # On release PR merge: Publish crates to crates.io and create git tags
+      # On release PR merge OR force_publish: Publish crates to crates.io and create git tags
       - name: Publish crates
-        if: ${{ steps.check_release.outputs.is_release == 'true' && inputs.dry_run != true }}
+        if: ${{ (steps.check_release.outputs.is_release == 'true' || inputs.force_publish == true) && inputs.dry_run != true }}
         run: release-plz release --git-token "$GITHUB_TOKEN" --backend github
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
