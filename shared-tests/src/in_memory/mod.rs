@@ -629,3 +629,14 @@ mod source_update_upsert {
         source_update_upsert::test_aggregation_with_upserts(&test_config).await;
     }
 }
+
+mod monotonic_guard {
+    use super::InMemoryQueryConfig;
+    use crate::use_cases::*;
+
+    #[tokio::test]
+    async fn monotonic_guard_tests() {
+        let test_config = InMemoryQueryConfig::new();
+        monotonic_guard::monotonic_guard_tests(&test_config).await;
+    }
+}

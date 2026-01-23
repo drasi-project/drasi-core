@@ -30,6 +30,13 @@ impl MonotonicGuard {
         }
         element.get_effective_from() as i64
     }
+
+    fn has_timestamp_property(&self, element: &Element) -> bool {
+        element
+            .get_properties()
+            .get(&self.timestamp_property)
+            .is_some()
+    }
 }
 
 #[async_trait]
@@ -46,7 +53,12 @@ impl SourceMiddleware for MonotonicGuard {
 
                 match element_index.get_element(element_ref).await {
                     Ok(Some(existing_element)) => {
-                        let old_timestamp = self.extract_timestamp(&existing_element);
+                        let old_timestamp = if self.has_timestamp_property(element) {
+                            self.extract_timestamp(&existing_element)
+                        } else {
+                            existing_element.get_effective_from() as i64
+                        };
+
                         if new_timestamp > old_timestamp {
                             Ok(vec![source_change])
                         } else {
