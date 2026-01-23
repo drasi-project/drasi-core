@@ -1276,3 +1276,18 @@ async fn start(&self) -> Result<()> {
 - See individual plugin directories for implementation examples
 - Check `lib/CLAUDE.md` for library architecture details
 - Review the parent `drasi-core/CLAUDE.md` for query engine information
+
+## AI Generated Sources (experimental)
+
+We have experimental AI agents for developing new sources. These agents work as a planner/executor pair where the `source-planner` will generate a comprehensive plan for building a source that the user must then review and refine. Once the user is satisfied with the plan, switch to the `source-plan-executor` agent to implement it.
+
+For local usage with the Copilot CLI:
+
+- Start Copilot CLI
+- Select the `source-planner` agent using `/agent`
+- Select the `claude-sonnet-4.5` or `claude-opus-4.5` model using `/model` (CLI does not use the model defined in the frontmatter)
+- Run a prompt like `Please write a plan for an XXXX source and save it to file in my workspace`
+- Once the plan is complete, review it and tweak it in the generated file
+- Switch to the `gpt-5.2-codex` model using `/model`
+- Switch to the `source-plan-executor` agent using `/agent`
+- Run the prompt: `please implement the plan`
