@@ -47,6 +47,11 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
 
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+                  
       - name: Install release-plz
         run: |
           curl -sSfL https://github.com/release-plz/release-plz/releases/download/release-plz-v0.3.120/release-plz-x86_64-unknown-linux-musl.tar.gz | tar xz -C /usr/local/bin
