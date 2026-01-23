@@ -16,6 +16,7 @@ pub mod common;
 pub mod decoder;
 pub mod jq;
 pub mod map;
+pub mod monotonic_guard;
 pub mod parse_json;
 pub mod promote;
 pub mod relabel;
