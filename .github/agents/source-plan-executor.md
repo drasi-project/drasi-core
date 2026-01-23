@@ -767,6 +767,7 @@ Implementation is complete when ALL are true:
 - [ ] Code formatted: `cargo fmt`
 - [ ] Documentation complete (source, bootstrap, example READMEs)
 - [ ] Makefile targets tested and verified working
+- [ ] doctests RUN and PASS
 
 **If ANY checkbox is unchecked, implementation is INCOMPLETE.**
 
