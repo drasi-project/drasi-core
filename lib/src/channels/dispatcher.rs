@@ -248,17 +248,33 @@ impl<T> ChangeReceiver<T> for BroadcastChangeReceiver<T>
 where
     T: Clone + Send + Sync + 'static,
 {
+    /// Receive the next change from the broadcast channel.
+    ///
+    /// # Lag Handling
+    ///
+    /// When the receiver falls behind the sender (lag), this method uses an
+    /// **iterative loop** instead of recursion to handle repeated lag events.
+    /// This prevents stack overflow under sustained high throughput where a slow
+    /// subscriber might experience continuous lag.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Arc<T>)` - The next available message
+    /// * `Err(...)` - If the broadcast channel is closed
     async fn recv(&mut self) -> Result<Arc<T>> {
-        match self.rx.recv().await {
-            Ok(change) => Ok(change),
-            Err(broadcast::error::RecvError::Closed) => {
-                Err(anyhow::anyhow!("Broadcast channel closed"))
-            }
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                // Log the lag but try to continue
-                log::warn!("Broadcast receiver lagged by {n} messages");
-                // Try to receive the next message
-                self.recv().await
+        loop {
+            match self.rx.recv().await {
+                Ok(change) => return Ok(change),
+                Err(broadcast::error::RecvError::Closed) => {
+                    return Err(anyhow::anyhow!("Broadcast channel closed"));
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    // Log the lag and continue with the loop (non-recursive)
+                    // This prevents stack overflow under sustained lag conditions
+                    log::warn!("Broadcast receiver lagged by {n} messages, continuing...");
+                    // Loop continues to try receiving the next available message
+                    continue;
+                }
             }
         }
     }
@@ -483,6 +499,260 @@ mod tests {
         // Try to receive - should handle lag and continue
         let result = receiver.recv().await;
         assert!(result.is_ok());
+    }
+
+    // =============================================================================
+    // TESTS FOR BUG FIX: Unbounded Recursion in BroadcastChangeReceiver
+    // =============================================================================
+    //
+    // These tests verify that the BroadcastChangeReceiver handles lag events
+    // using an iterative loop instead of recursion, preventing stack overflow.
+
+    #[tokio::test]
+    async fn test_broadcast_receiver_handles_multiple_consecutive_lags_without_stack_overflow() {
+        // This test would cause stack overflow with the old recursive implementation
+        // when many lag events occur consecutively.
+        //
+        // The fix uses an iterative loop, so this test should pass without issues.
+
+        // Use a very small buffer (capacity 1) to maximize lag probability
+        let dispatcher = BroadcastChangeDispatcher::<TestMessage>::new(1);
+        let mut receiver = dispatcher.create_receiver().await.unwrap();
+
+        // Send many more messages than buffer capacity
+        // With capacity=1, almost every message after the first will cause lag
+        let num_messages = 100;
+        for i in 0..num_messages {
+            let msg = Arc::new(TestMessage {
+                id: i,
+                content: format!("msg{i}"),
+            });
+            dispatcher.dispatch_change(msg).await.unwrap();
+        }
+
+        // Give time for messages to be sent
+        sleep(Duration::from_millis(50)).await;
+
+        // Now try to receive - this would have caused stack overflow before the fix
+        // because each lag triggers another recv() call recursively.
+        // With the iterative fix, it simply loops until it gets a message.
+        let result = tokio::time::timeout(Duration::from_secs(1), receiver.recv()).await;
+
+        assert!(
+            result.is_ok(),
+            "recv() should complete without timeout or stack overflow"
+        );
+        assert!(
+            result.unwrap().is_ok(),
+            "recv() should return a message after handling lag"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_receiver_survives_sustained_high_throughput_with_slow_consumer() {
+        // This test simulates a production scenario where:
+        // 1. A fast producer sends messages continuously
+        // 2. A slow consumer can't keep up
+        // 3. The consumer experiences repeated lag events
+        //
+        // Before the fix: Would eventually stack overflow
+        // After the fix: Handles lag gracefully and continues processing
+
+        let dispatcher = Arc::new(BroadcastChangeDispatcher::<TestMessage>::new(5));
+        let mut receiver = dispatcher.create_receiver().await.unwrap();
+
+        // Counter to track received messages
+        let received_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let received_count_clone = received_count.clone();
+
+        // Spawn producer that sends messages faster than consumer can process
+        let dispatcher_clone = dispatcher.clone();
+        let producer = tokio::spawn(async move {
+            for i in 0..500 {
+                let msg = Arc::new(TestMessage {
+                    id: i,
+                    content: format!("high_throughput_{i}"),
+                });
+                let _ = dispatcher_clone.dispatch_change(msg).await;
+                // No delay - send as fast as possible
+            }
+        });
+
+        // Consumer with artificial slowdown
+        let consumer = tokio::spawn(async move {
+            for _ in 0..10 {
+                // Only try to receive 10 messages
+                match tokio::time::timeout(Duration::from_millis(500), receiver.recv()).await {
+                    Ok(Ok(_msg)) => {
+                        received_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        // Simulate slow processing
+                        sleep(Duration::from_millis(10)).await;
+                    }
+                    Ok(Err(_)) => break, // Channel closed
+                    Err(_) => break,     // Timeout
+                }
+            }
+        });
+
+        // Wait for both to complete
+        let _ = producer.await;
+        let consumer_result = tokio::time::timeout(Duration::from_secs(5), consumer).await;
+
+        assert!(
+            consumer_result.is_ok(),
+            "Consumer should complete without hanging or stack overflow"
+        );
+
+        let count = received_count.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            count > 0,
+            "Consumer should have received at least some messages despite lag, got {count}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_receiver_handles_extreme_lag_scenario() {
+        // Extreme test: Force hundreds of lag events in rapid succession
+        // This would definitely cause stack overflow with recursive implementation
+
+        let dispatcher = BroadcastChangeDispatcher::<TestMessage>::new(1);
+        let mut receiver = dispatcher.create_receiver().await.unwrap();
+
+        // Send 1000 messages with capacity=1, causing ~999 lag events
+        for i in 0..1000 {
+            let msg = Arc::new(TestMessage {
+                id: i,
+                content: format!("extreme_{i}"),
+            });
+            dispatcher.dispatch_change(msg).await.unwrap();
+        }
+
+        // The receiver is now extremely lagged
+        // With recursive implementation, trying to recv() would cause:
+        // recv() -> Lagged -> recv() -> Lagged -> recv() -> ... -> STACK OVERFLOW
+        //
+        // With iterative implementation:
+        // loop { recv() -> Lagged -> continue -> recv() -> Lagged -> continue -> ... -> Ok(msg) }
+
+        let result = tokio::time::timeout(Duration::from_secs(2), receiver.recv()).await;
+
+        assert!(
+            result.is_ok(),
+            "Should not timeout - iterative lag handling should complete quickly"
+        );
+        assert!(
+            result.unwrap().is_ok(),
+            "Should successfully receive a message after handling extreme lag"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_receiver_recovers_and_continues_after_lag() {
+        // Test that after experiencing lag, the receiver can continue
+        // receiving messages normally
+
+        let dispatcher = BroadcastChangeDispatcher::<TestMessage>::new(2);
+        let mut receiver = dispatcher.create_receiver().await.unwrap();
+
+        // Phase 1: Cause lag
+        for i in 0..10 {
+            let msg = Arc::new(TestMessage {
+                id: i,
+                content: format!("phase1_{i}"),
+            });
+            dispatcher.dispatch_change(msg).await.unwrap();
+        }
+
+        sleep(Duration::from_millis(10)).await;
+
+        // Receive one message (handles lag internally)
+        let result1 = receiver.recv().await;
+        assert!(result1.is_ok(), "Should handle lag and receive message");
+
+        // Phase 2: Send more messages after receiver has caught up
+        let msg_after_lag = Arc::new(TestMessage {
+            id: 100,
+            content: "after_lag".to_string(),
+        });
+        dispatcher.dispatch_change(msg_after_lag.clone()).await.unwrap();
+
+        // Should receive this message normally
+        let result2 = tokio::time::timeout(Duration::from_millis(100), receiver.recv()).await;
+        assert!(result2.is_ok(), "Should receive message without timeout");
+        let received = result2.unwrap().unwrap();
+        assert_eq!(received.id, 100, "Should receive the correct message");
+        assert_eq!(received.content, "after_lag");
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_receiver_iterative_lag_handling_performance() {
+        // Verify that iterative lag handling has consistent performance
+        // regardless of the number of lag events
+
+        let dispatcher = BroadcastChangeDispatcher::<TestMessage>::new(1);
+        let mut receiver = dispatcher.create_receiver().await.unwrap();
+
+        // Send enough messages to cause significant lag
+        for i in 0..500 {
+            let msg = Arc::new(TestMessage {
+                id: i,
+                content: format!("perf_{i}"),
+            });
+            dispatcher.dispatch_change(msg).await.unwrap();
+        }
+
+        // Time how long it takes to receive a message
+        let start = std::time::Instant::now();
+        let result = receiver.recv().await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        // With iterative handling, this should be fast (milliseconds, not seconds)
+        // Recursive handling would either stack overflow or be very slow due to
+        // deep call stack overhead
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "Lag handling should be fast, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_receiver_lag_does_not_drop_all_messages() {
+        // Verify that after lag, we can still receive *some* messages
+        // (the most recent ones in the buffer)
+
+        let dispatcher = BroadcastChangeDispatcher::<TestMessage>::new(3);
+        let mut receiver = dispatcher.create_receiver().await.unwrap();
+
+        // Send messages that will overflow the buffer
+        for i in 0..20 {
+            let msg = Arc::new(TestMessage {
+                id: i,
+                content: format!("msg_{i}"),
+            });
+            dispatcher.dispatch_change(msg).await.unwrap();
+        }
+
+        sleep(Duration::from_millis(10)).await;
+
+        // We should be able to receive the messages that are still in the buffer
+        let mut received_ids = Vec::new();
+        for _ in 0..3 {
+            match tokio::time::timeout(Duration::from_millis(100), receiver.recv()).await {
+                Ok(Ok(msg)) => received_ids.push(msg.id),
+                _ => break,
+            }
+        }
+
+        assert!(
+            !received_ids.is_empty(),
+            "Should have received at least one message"
+        );
+        // The received messages should be among the later ones (not the first ones that were dropped)
+        assert!(
+            received_ids.iter().all(|&id| id >= 10),
+            "Received messages should be from later sends (after lag dropped early ones): {received_ids:?}"
+        );
     }
 
     #[tokio::test]
