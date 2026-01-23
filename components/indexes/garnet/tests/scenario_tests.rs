@@ -449,22 +449,27 @@ mod source_update_upsert {
 }
 
 mod redis_container {
-    use tokio::sync::OnceCell;
     use testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt};
     use testcontainers_modules::redis::Redis;
+    use tokio::sync::OnceCell;
 
     static GLOBAL_CONTAINER: OnceCell<ContainerAsync<Redis>> = OnceCell::const_new();
 
     pub async fn get_redis_url() -> String {
-        let container = GLOBAL_CONTAINER.get_or_init(|| async {
-            Redis::default()
-                .with_tag("7.2")
-                .start()
-                .await
-                .expect("Failed to start Redis container")
-        }).await;
+        let container = GLOBAL_CONTAINER
+            .get_or_init(|| async {
+                Redis::default()
+                    .with_tag("7.2")
+                    .start()
+                    .await
+                    .expect("Failed to start Redis container")
+            })
+            .await;
 
-        let port = container.get_host_port_ipv4(6379).await.expect("Failed to get port");
+        let port = container
+            .get_host_port_ipv4(6379)
+            .await
+            .expect("Failed to get port");
         format!("redis://127.0.0.1:{port}")
     }
 }
