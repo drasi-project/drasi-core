@@ -23,6 +23,7 @@ use drasi_core::{
     interface::ElementIndex,
     query::QueryBuilder,
 };
+use shared_tests::redis_helpers::RedisGuard;
 use shared_tests::QueryTestConfig;
 use uuid::Uuid;
 
@@ -35,17 +36,20 @@ struct GarnetQueryConfig {
     url: String,
     use_cache: bool,
     element_index: Mutex<Option<Arc<dyn ElementIndex>>>,
+    _redis_guard: RedisGuard,
 }
 
 #[allow(clippy::unwrap_used)]
 impl GarnetQueryConfig {
     pub async fn new(use_cache: bool) -> Self {
-        let url = redis_container::get_redis_url().await;
+        let redis_guard = shared_tests::redis_helpers::setup_redis().await;
+        let url = redis_guard.url().to_string();
 
         GarnetQueryConfig {
             url,
             use_cache,
             element_index: Mutex::new(None),
+            _redis_guard: redis_guard,
         }
     }
 
@@ -445,31 +449,5 @@ mod source_update_upsert {
     async fn test_aggregation_with_upserts() {
         let test_config = GarnetQueryConfig::new(false).await;
         source_update_upsert::test_aggregation_with_upserts(&test_config).await;
-    }
-}
-
-mod redis_container {
-    use testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt};
-    use testcontainers_modules::redis::Redis;
-    use tokio::sync::OnceCell;
-
-    static GLOBAL_CONTAINER: OnceCell<ContainerAsync<Redis>> = OnceCell::const_new();
-
-    pub async fn get_redis_url() -> String {
-        let container = GLOBAL_CONTAINER
-            .get_or_init(|| async {
-                Redis::default()
-                    .with_tag("7.2")
-                    .start()
-                    .await
-                    .expect("Failed to start Redis container")
-            })
-            .await;
-
-        let port = container
-            .get_host_port_ipv4(6379)
-            .await
-            .expect("Failed to get port");
-        format!("redis://127.0.0.1:{port}")
     }
 }
