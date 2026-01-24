@@ -604,6 +604,14 @@ impl PgOutputDecoder {
     pub fn get_relation(&self, relation_id: u32) -> Option<&RelationInfo> {
         self.relations.get(&relation_id)
     }
+
+    /// Add a relation for testing purposes.
+    /// This allows tests to set up the decoder state without going through the full
+    /// replication protocol.
+    #[cfg(test)]
+    pub fn add_relation_for_testing(&mut self, relation: RelationInfo) {
+        self.relations.insert(relation.id, relation);
+    }
 }
 
 fn read_cstring(cursor: &mut Cursor<&[u8]>) -> Result<String> {
