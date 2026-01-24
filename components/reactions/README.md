@@ -35,8 +35,7 @@ Reactions are responsible for:
 | `drasi-reaction-log` | Console logging with template support | `log/` |
 | `drasi-reaction-http` | HTTP POST to external endpoints | `http/` |
 | `drasi-reaction-http-adaptive` | HTTP with adaptive batching | `http-adaptive/` |
-| `drasi-reaction-grpc` | gRPC streaming delivery | `grpc/` |
-| `drasi-reaction-grpc-adaptive` | gRPC with adaptive batching | `grpc-adaptive/` |
+| `drasi-reaction-grpc` | gRPC streaming delivery (supports fixed and adaptive batching) | `grpc/` |
 | `drasi-reaction-sse` | Server-Sent Events streaming | `sse/` |
 | `drasi-reaction-application` | Programmatic/in-memory for embedded use | `application/` |
 | `drasi-reaction-platform` | Redis Streams publisher for platform integration | `platform/` |
@@ -1033,22 +1032,26 @@ let processing_task = tokio::spawn(async move {
 
 ### Adaptive Batching (Advanced)
 
-For high-throughput reactions, consider using `AdaptiveBatcher` which automatically adjusts batch size and timing based on traffic:
+For high-throughput reactions, consider using adaptive batching which automatically adjusts batch size and timing based on traffic patterns.
+
+The `drasi-reaction-grpc` crate supports both fixed and adaptive batching:
 
 ```rust
-use drasi_lib::utils::adaptive_batcher::{AdaptiveBatcher, AdaptiveBatchConfig};
+use drasi_reaction_grpc::GrpcReaction;
 
-let batcher_config = AdaptiveBatchConfig {
-    adaptive_min_batch_size: 1,
-    adaptive_max_batch_size: 100,
-    adaptive_window_size: 10,
-    adaptive_batch_timeout_ms: 1000,
-};
+// Fixed batching (default)
+let reaction = GrpcReaction::builder("fixed-batcher")
+    .with_batch_size(100)
+    .build()?;
 
-let batcher = AdaptiveBatcher::new(batcher_config);
+// Adaptive batching
+let reaction = GrpcReaction::builder("adaptive-batcher")
+    .with_adaptive_min_batch_size(10)
+    .with_adaptive_max_batch_size(500)
+    .build()?;
 ```
 
-See `http-adaptive/` and `grpc-adaptive/` for examples.
+See `grpc/` and `http-adaptive/` for implementation examples.
 
 ## Additional Resources
 

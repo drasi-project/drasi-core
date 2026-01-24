@@ -12,6 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Adaptive batching implementation for throughput-based batch size adjustment.
+//!
+//! This module provides intelligent batching that automatically adjusts batch sizes
+//! and wait times based on real-time throughput patterns.
+
 use log::{debug, trace};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -27,9 +32,11 @@ pub enum ThroughputLevel {
     Burst,  // > 10,000 msgs/sec
 }
 
-/// Configuration for adaptive batching
+/// Internal configuration for adaptive batching
+///
+/// This is converted from the public `AdaptiveBatchConfig` in drasi-lib.
 #[derive(Debug, Clone)]
-pub struct AdaptiveBatchConfig {
+pub struct InternalAdaptiveBatchConfig {
     /// Maximum number of items in a batch
     pub max_batch_size: usize,
     /// Minimum number of items to consider efficient batching
@@ -44,7 +51,7 @@ pub struct AdaptiveBatchConfig {
     pub adaptive_enabled: bool,
 }
 
-impl Default for AdaptiveBatchConfig {
+impl Default for InternalAdaptiveBatchConfig {
     fn default() -> Self {
         Self {
             max_batch_size: 1000,
@@ -57,28 +64,25 @@ impl Default for AdaptiveBatchConfig {
     }
 }
 
-impl AdaptiveBatchConfig {
+impl InternalAdaptiveBatchConfig {
+    /// Create from drasi-lib AdaptiveBatchConfig
+    pub fn from_lib_config(config: &drasi_lib::reactions::common::AdaptiveBatchConfig) -> Self {
+        Self {
+            min_batch_size: config.adaptive_min_batch_size,
+            max_batch_size: config.adaptive_max_batch_size,
+            throughput_window: Duration::from_millis(config.adaptive_window_size as u64 * 100),
+            max_wait_time: Duration::from_millis(config.adaptive_batch_timeout_ms),
+            min_wait_time: Duration::from_millis(100),
+            adaptive_enabled: true,
+        }
+    }
+
     /// Calculate recommended channel capacity for the internal batching channel
     ///
     /// Returns `max_batch_size × 5` to provide sufficient buffering for:
     /// - **Pipeline parallelism**: Next batch can accumulate while current batch is being processed
     /// - **Burst handling**: Absorbs temporary traffic spikes without triggering backpressure
     /// - **Throughput smoothing**: Reduces frequency of blocking on channel sends
-    ///
-    /// # Buffer Multiplier Rationale
-    ///
-    /// The 5x multiplier is chosen to balance memory usage and throughput:
-    /// - **2-3x**: Minimum for effective pipelining (current + next batch)
-    /// - **5x**: Good balance for most workloads (2-3 batches buffered)
-    /// - **10x+**: For extreme burst scenarios (may use excessive memory)
-    ///
-    /// # Scaling Examples
-    ///
-    /// | max_batch_size | Channel Capacity | Memory Impact (1KB/event) |
-    /// |----------------|------------------|---------------------------|
-    /// | 100            | 500              | ~500 KB                   |
-    /// | 1,000          | 5,000            | ~5 MB                     |
-    /// | 5,000          | 25,000           | ~25 MB                    |
     pub fn recommended_channel_capacity(&self) -> usize {
         self.max_batch_size * 5
     }
@@ -158,14 +162,14 @@ impl ThroughputMonitor {
 /// Adaptive batcher that adjusts batch size and timing based on throughput
 pub struct AdaptiveBatcher<T> {
     receiver: mpsc::Receiver<T>,
-    config: AdaptiveBatchConfig,
+    config: InternalAdaptiveBatchConfig,
     monitor: ThroughputMonitor,
     current_batch_size: usize,
     current_wait_time: Duration,
 }
 
 impl<T> AdaptiveBatcher<T> {
-    pub fn new(receiver: mpsc::Receiver<T>, config: AdaptiveBatchConfig) -> Self {
+    pub fn new(receiver: mpsc::Receiver<T>, config: InternalAdaptiveBatchConfig) -> Self {
         let monitor = ThroughputMonitor::new(config.throughput_window);
         Self {
             receiver,
@@ -316,54 +320,6 @@ impl<T> AdaptiveBatcher<T> {
     }
 }
 
-/// Simple non-adaptive batcher for comparison/fallback
-#[allow(dead_code)]
-pub struct FixedBatcher<T> {
-    receiver: mpsc::Receiver<T>,
-    batch_size: usize,
-    timeout: Duration,
-}
-
-#[allow(dead_code)]
-impl<T> FixedBatcher<T> {
-    pub fn new(receiver: mpsc::Receiver<T>, batch_size: usize, timeout: Duration) -> Self {
-        Self {
-            receiver,
-            batch_size,
-            timeout,
-        }
-    }
-
-    pub async fn next_batch(&mut self) -> Option<Vec<T>> {
-        let mut batch = Vec::new();
-        let deadline = Instant::now() + self.timeout;
-
-        while batch.len() < self.batch_size {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() && !batch.is_empty() {
-                break;
-            }
-
-            match timeout(remaining, self.receiver.recv()).await {
-                Ok(Some(item)) => batch.push(item),
-                Ok(None) => {
-                    if batch.is_empty() {
-                        return None;
-                    }
-                    break;
-                }
-                Err(_) => break,
-            }
-        }
-
-        if batch.is_empty() {
-            None
-        } else {
-            Some(batch)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,7 +328,7 @@ mod tests {
     #[test]
     fn test_recommended_channel_capacity() {
         // Default config: max_batch_size = 1000
-        let config = AdaptiveBatchConfig::default();
+        let config = InternalAdaptiveBatchConfig::default();
         assert_eq!(
             config.recommended_channel_capacity(),
             5000,
@@ -380,7 +336,7 @@ mod tests {
         );
 
         // Small batch size
-        let small_config = AdaptiveBatchConfig {
+        let small_config = InternalAdaptiveBatchConfig {
             max_batch_size: 100,
             min_batch_size: 10,
             max_wait_time: Duration::from_millis(100),
@@ -395,7 +351,7 @@ mod tests {
         );
 
         // Large batch size
-        let large_config = AdaptiveBatchConfig {
+        let large_config = InternalAdaptiveBatchConfig {
             max_batch_size: 5000,
             min_batch_size: 100,
             max_wait_time: Duration::from_millis(500),
@@ -410,7 +366,7 @@ mod tests {
         );
 
         // Very small batch
-        let tiny_config = AdaptiveBatchConfig {
+        let tiny_config = InternalAdaptiveBatchConfig {
             max_batch_size: 10,
             min_batch_size: 1,
             max_wait_time: Duration::from_millis(10),
@@ -444,7 +400,7 @@ mod tests {
     #[tokio::test]
     async fn test_adaptive_batcher_low_traffic() {
         let (tx, rx) = mpsc::channel(100);
-        let config = AdaptiveBatchConfig::default();
+        let config = InternalAdaptiveBatchConfig::default();
         let mut batcher = AdaptiveBatcher::new(rx, config);
 
         // Send a few messages slowly
@@ -459,7 +415,7 @@ mod tests {
     async fn test_adaptive_batcher_burst() {
         let (tx, rx) = mpsc::channel(1000);
         // Start with slightly higher defaults for testing
-        let config = AdaptiveBatchConfig {
+        let config = InternalAdaptiveBatchConfig {
             min_batch_size: 20,
             max_batch_size: 100,
             ..Default::default()

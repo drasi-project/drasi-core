@@ -14,6 +14,7 @@
 
 //! Configuration types for gRPC reactions.
 
+use drasi_lib::reactions::common::AdaptiveBatchConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -46,6 +47,37 @@ fn default_initial_connection_timeout_ms() -> u64 {
 }
 
 /// gRPC reaction configuration
+///
+/// This configuration supports two batching modes:
+///
+/// 1. **Fixed Batching** (default): Uses `batch_size` and `batch_flush_timeout_ms`
+///    to send batches of a fixed maximum size.
+///
+/// 2. **Adaptive Batching**: When the `adaptive` field is set, dynamically adjusts
+///    batch sizes based on throughput patterns. This mode ignores `batch_size` and
+///    `batch_flush_timeout_ms`, using the adaptive configuration instead.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// // Fixed batching (default)
+/// let config = GrpcReactionConfig {
+///     endpoint: "grpc://localhost:50052".to_string(),
+///     batch_size: 100,
+///     ..Default::default()
+/// };
+///
+/// // Adaptive batching
+/// let config = GrpcReactionConfig {
+///     endpoint: "grpc://localhost:50052".to_string(),
+///     adaptive: Some(AdaptiveBatchConfig {
+///         adaptive_min_batch_size: 10,
+///         adaptive_max_batch_size: 500,
+///         ..Default::default()
+///     }),
+///     ..Default::default()
+/// };
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GrpcReactionConfig {
     /// gRPC server URL
@@ -79,6 +111,10 @@ pub struct GrpcReactionConfig {
     /// Metadata headers to include in requests
     #[serde(default)]
     pub metadata: HashMap<String, String>,
+
+    /// Optional adaptive batching configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive: Option<AdaptiveBatchConfig>,
 }
 
 impl Default for GrpcReactionConfig {
@@ -92,6 +128,14 @@ impl Default for GrpcReactionConfig {
             connection_retry_attempts: default_connection_retry_attempts(),
             initial_connection_timeout_ms: default_initial_connection_timeout_ms(),
             metadata: HashMap::new(),
+            adaptive: None,
         }
+    }
+}
+
+impl GrpcReactionConfig {
+    /// Returns true if adaptive batching is enabled
+    pub fn is_adaptive(&self) -> bool {
+        self.adaptive.is_some()
     }
 }

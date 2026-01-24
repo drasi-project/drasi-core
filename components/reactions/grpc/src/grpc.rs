@@ -19,6 +19,7 @@ use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tonic::transport::Channel;
 
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ResultDiff};
@@ -30,6 +31,7 @@ pub use super::config::GrpcReactionConfig;
 use super::GrpcReactionBuilder;
 
 // Use modules declared in lib.rs
+use crate::adaptive_batcher::{AdaptiveBatcher, InternalAdaptiveBatchConfig};
 use crate::connection::{create_client, create_client_with_retry, ConnectionState};
 use crate::helpers::convert_json_to_proto_struct;
 use crate::proto::{
@@ -344,6 +346,47 @@ impl GrpcReaction {
             backoff = (backoff * 2).min(Duration::from_secs(5));
         }
     }
+
+    async fn send_batch(
+        client: &mut ReactionServiceClient<Channel>,
+        batch: Vec<ProtoQueryResultItem>,
+        query_id: &str,
+        metadata: &HashMap<String, String>,
+    ) -> Result<()> {
+        let proto_result = ProtoQueryResult {
+            query_id: query_id.to_string(),
+            results: batch,
+            timestamp: None,
+        };
+
+        let request = ProcessResultsRequest {
+            results: Some(proto_result),
+            metadata: metadata.clone(),
+        };
+
+        let mut req = tonic::Request::new(request);
+
+        // Add metadata to request
+        for (key, value) in metadata {
+            if let Ok(key_str) =
+                tonic::metadata::MetadataKey::<tonic::metadata::Ascii>::from_bytes(key.as_bytes())
+            {
+                if let Ok(value_str) = tonic::metadata::MetadataValue::try_from(value.as_str()) {
+                    req.metadata_mut().insert(key_str, value_str);
+                }
+            }
+        }
+
+        let response = client.process_results(req).await?;
+        let resp = response.into_inner();
+
+        if !resp.success {
+            return Err(anyhow::anyhow!("Batch processing failed: {}", resp.error));
+        }
+
+        Ok(())
+    }
+
 }
 
 #[async_trait]
@@ -370,6 +413,20 @@ impl Reaction for GrpcReaction {
             "timeout_ms".to_string(),
             serde_json::Value::Number(self.config.timeout_ms.into()),
         );
+        props.insert(
+            "adaptive_enabled".to_string(),
+            serde_json::Value::Bool(self.config.is_adaptive()),
+        );
+        if let Some(ref adaptive) = self.config.adaptive {
+            props.insert(
+                "adaptive_min_batch_size".to_string(),
+                serde_json::Value::Number(adaptive.adaptive_min_batch_size.into()),
+            );
+            props.insert(
+                "adaptive_max_batch_size".to_string(),
+                serde_json::Value::Number(adaptive.adaptive_max_batch_size.into()),
+            );
+        }
         props
     }
 
@@ -386,18 +443,23 @@ impl Reaction for GrpcReaction {
     }
 
     async fn start(&self) -> Result<()> {
-        log_component_start("gRPC Reaction", &self.base.id);
+        let batching_mode = if self.config.is_adaptive() {
+            "adaptive"
+        } else {
+            "fixed"
+        };
+        log_component_start(&format!("gRPC Reaction ({batching_mode} batching)"), &self.base.id);
 
         info!(
-            "[{}] gRPC reaction starting - sending to endpoint: {}",
-            self.base.id, self.config.endpoint
+            "[{}] gRPC reaction starting - sending to endpoint: {} (mode: {})",
+            self.base.id, self.config.endpoint, batching_mode
         );
 
         // Transition to Starting
         self.base
             .set_status_with_event(
                 ComponentStatus::Starting,
-                Some("Starting gRPC reaction".to_string()),
+                Some(format!("Starting gRPC reaction ({batching_mode} batching)")),
             )
             .await?;
 
@@ -409,14 +471,309 @@ impl Reaction for GrpcReaction {
         self.base
             .set_status_with_event(
                 ComponentStatus::Running,
-                Some("gRPC reaction started".to_string()),
+                Some(format!("gRPC reaction started ({batching_mode} batching)")),
             )
             .await?;
 
         // Create shutdown channel for graceful termination
-        let mut shutdown_rx = self.base.create_shutdown_channel().await;
+        let shutdown_rx = self.base.create_shutdown_channel().await;
 
-        // Start processing task that dequeues from priority queue
+        // Branch based on batching mode
+        let processing_task_handle = if let Some(ref adaptive_config) = self.config.adaptive {
+            // Adaptive batching mode
+            self.start_adaptive_processing(adaptive_config, shutdown_rx).await
+        } else {
+            // Fixed batching mode (original implementation)
+            self.start_fixed_processing(shutdown_rx).await
+        };
+
+        self.base.set_processing_task(processing_task_handle).await;
+
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        self.base.stop_common().await?;
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        self.base
+            .set_status_with_event(
+                ComponentStatus::Stopped,
+                Some("gRPC reaction stopped successfully".to_string()),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn status(&self) -> ComponentStatus {
+        self.base.get_status().await
+    }
+}
+
+impl GrpcReaction {
+    /// Start adaptive batching processing
+    async fn start_adaptive_processing(
+        &self,
+        adaptive_config: &drasi_lib::reactions::common::AdaptiveBatchConfig,
+        mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    ) -> tokio::task::JoinHandle<()> {
+        let reaction_name = self.base.id.clone();
+        let endpoint = self.config.endpoint.clone();
+        let max_retries = self.config.max_retries;
+        let metadata = self.config.metadata.clone();
+        let initial_connection_timeout_ms = self.config.initial_connection_timeout_ms;
+        let internal_adaptive_config = InternalAdaptiveBatchConfig::from_lib_config(adaptive_config);
+        let priority_queue = self.base.priority_queue.clone();
+        let status = self.base.status.clone();
+
+        tokio::spawn(async move {
+            // Create channel for batching with capacity based on batch configuration
+            let batch_channel_capacity = internal_adaptive_config.recommended_channel_capacity();
+            let (batch_tx, batch_rx) = mpsc::channel(batch_channel_capacity);
+
+            debug!(
+                "[{reaction_name}] Adaptive batching using channel capacity: {} (max_batch_size: {} × 5)",
+                batch_channel_capacity, internal_adaptive_config.max_batch_size
+            );
+
+            // Spawn adaptive batcher task
+            let batcher_endpoint = endpoint.clone();
+            let batcher_metadata = metadata.clone();
+            let batcher_reaction_name = reaction_name.clone();
+            let batcher_handle = tokio::spawn(async move {
+                let mut batcher = AdaptiveBatcher::new(batch_rx, internal_adaptive_config);
+                let mut client: Option<ReactionServiceClient<Channel>> = None;
+                let mut consecutive_failures = 0u32;
+                let mut successful_sends = 0u64;
+                let mut failed_sends = 0u64;
+
+                info!("[{batcher_reaction_name}] Adaptive gRPC reaction starting for endpoint: {batcher_endpoint} (lazy connection)");
+
+                while let Some(batch) = batcher.next_batch().await {
+                    if batch.is_empty() {
+                        continue;
+                    }
+
+                    debug!("[{batcher_reaction_name}] Adaptive batch ready with {} items", batch.len());
+
+                    // Ensure we have a client
+                    if client.is_none() {
+                        match create_client(&batcher_endpoint, initial_connection_timeout_ms).await {
+                            Ok(c) => {
+                                info!("[{batcher_reaction_name}] Successfully created gRPC client for endpoint: {batcher_endpoint}");
+                                client = Some(c);
+                                consecutive_failures = 0;
+                            }
+                            Err(e) => {
+                                consecutive_failures += 1;
+                                error!("[{batcher_reaction_name}] Failed to create client (attempt {consecutive_failures}): {e}");
+
+                                // Exponential backoff
+                                let backoff =
+                                    Duration::from_millis(100 * 2u64.pow(consecutive_failures.min(10)));
+                                tokio::time::sleep(backoff).await;
+                                continue;
+                            }
+                        }
+                    }
+
+                    // Send the batch
+                    {
+                        let should_clear_client = if let Some(ref mut c) = client {
+                            // Group batch items by query_id
+                            let mut batches_by_query: HashMap<String, Vec<ProtoQueryResultItem>> =
+                                HashMap::new();
+                            for (query_id, items) in batch {
+                                batches_by_query.entry(query_id).or_default().extend(items);
+                            }
+
+                            let mut needs_clear = false;
+
+                            // Send each query's batch
+                            for (query_id, items) in batches_by_query.into_iter() {
+                                let mut retries = 0;
+                                let mut sent = false;
+
+                                while !sent && retries <= max_retries {
+                                    match Self::send_batch(c, items.clone(), &query_id, &batcher_metadata).await
+                                    {
+                                        Ok(_) => {
+                                            sent = true;
+                                            successful_sends += 1;
+                                            consecutive_failures = 0;
+
+                                            if successful_sends % 100 == 0 {
+                                                info!(
+                                                    "[{batcher_reaction_name}] Adaptive metrics - Successful: {successful_sends}, Failed: {failed_sends}"
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            retries += 1;
+                                            warn!(
+                                                "[{batcher_reaction_name}] Failed to send batch (retry {retries}/{max_retries}): {e}"
+                                            );
+
+                                            if retries > max_retries {
+                                                failed_sends += 1;
+                                                error!(
+                                                    "[{batcher_reaction_name}] Failed to send batch after {max_retries} retries"
+                                                );
+                                                break;
+                                            }
+
+                                            // Exponential backoff
+                                            let backoff =
+                                                Duration::from_millis(100 * 2u64.pow(retries));
+                                            tokio::time::sleep(backoff).await;
+
+                                            // Mark that client needs to be cleared
+                                            needs_clear = true;
+                                        }
+                                    }
+                                }
+                            }
+
+                            needs_clear
+                        } else {
+                            false
+                        };
+
+                        // Clear client if needed (outside of borrow scope)
+                        if should_clear_client {
+                            client = None;
+                        }
+                    }
+                }
+
+                info!(
+                    "[{batcher_reaction_name}] Adaptive batcher task completed - Successful: {successful_sends}, Failed: {failed_sends}"
+                );
+            });
+
+            // Main task: receive query results from priority queue and forward to batcher
+            let mut last_query_id = String::new();
+            let mut current_batch: Vec<ProtoQueryResultItem> = Vec::new();
+
+            loop {
+                // Use select to wait for either a result OR shutdown signal
+                let query_result = tokio::select! {
+                    biased;
+
+                    _ = &mut shutdown_rx => {
+                        debug!("[{reaction_name}] Received shutdown signal, exiting processing loop");
+                        break;
+                    }
+
+                    result = priority_queue.dequeue() => result,
+                };
+
+                if !matches!(*status.read().await, ComponentStatus::Running) {
+                    info!("[{reaction_name}] Reaction status changed to non-running, exiting");
+                    break;
+                }
+
+                if query_result.results.is_empty() {
+                    debug!("[{reaction_name}] Received empty result set from query");
+                    continue;
+                }
+
+                let query_id = query_result.query_id.clone();
+
+                // If query_id changes, send current batch
+                if !last_query_id.is_empty()
+                    && last_query_id != query_id
+                    && !current_batch.is_empty()
+                {
+                    if batch_tx
+                        .send((last_query_id.clone(), current_batch.clone()))
+                        .await
+                        .is_err()
+                    {
+                        error!("[{reaction_name}] Failed to send batch to adaptive batcher");
+                        break;
+                    }
+                    current_batch.clear();
+                }
+
+                last_query_id = query_id.clone();
+
+                // Convert results to proto format
+                for result in &query_result.results {
+                    let (result_type, data, before, after) = match result {
+                        ResultDiff::Add { data } => ("ADD", data.clone(), None, None),
+                        ResultDiff::Delete { data } => ("DELETE", data.clone(), None, None),
+                        ResultDiff::Update {
+                            data,
+                            before,
+                            after,
+                            ..
+                        } => (
+                            "UPDATE",
+                            data.clone(),
+                            Some(before.clone()),
+                            Some(after.clone()),
+                        ),
+                        ResultDiff::Aggregation { before, after } => (
+                            "aggregation",
+                            serde_json::to_value(result)
+                                .expect("ResultDiff serialization should succeed"),
+                            before.clone(),
+                            Some(after.clone()),
+                        ),
+                        ResultDiff::Noop => (
+                            "noop",
+                            serde_json::to_value(result)
+                                .expect("ResultDiff serialization should succeed"),
+                            None,
+                            None,
+                        ),
+                    };
+
+                    let proto_item = ProtoQueryResultItem {
+                        r#type: result_type.to_string(),
+                        data: Some(convert_json_to_proto_struct(&data)),
+                        before: before.as_ref().map(convert_json_to_proto_struct),
+                        after: after.as_ref().map(convert_json_to_proto_struct),
+                    };
+
+                    current_batch.push(proto_item);
+                }
+
+                // Send immediately if batch is large enough
+                if current_batch.len() >= 100 {
+                    if batch_tx
+                        .send((last_query_id.clone(), current_batch.clone()))
+                        .await
+                        .is_err()
+                    {
+                        error!("[{reaction_name}] Failed to send batch to adaptive batcher");
+                        break;
+                    }
+                    current_batch.clear();
+                }
+            }
+
+            if !current_batch.is_empty() && !last_query_id.is_empty() {
+                let _ = batch_tx.send((last_query_id, current_batch)).await;
+            }
+
+            drop(batch_tx);
+
+            let _ = batcher_handle.await;
+
+            info!("[{reaction_name}] Adaptive gRPC reaction completed");
+            *status.write().await = ComponentStatus::Stopped;
+        })
+    }
+
+    /// Start fixed batching processing (original implementation)
+    async fn start_fixed_processing(
+        &self,
+        mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    ) -> tokio::task::JoinHandle<()> {
         let reaction_name = self.base.id.clone();
         let status = self.base.status.clone();
         let endpoint = self.config.endpoint.clone();
@@ -429,7 +786,7 @@ impl Reaction for GrpcReaction {
         let initial_connection_timeout_ms = self.config.initial_connection_timeout_ms;
         let priority_queue = self.base.priority_queue.clone();
 
-        let processing_task_handle = tokio::spawn(async move {
+        tokio::spawn(async move {
             info!("gRPC reaction starting for endpoint: {endpoint} (lazy connection)");
 
             let mut client: Option<ReactionServiceClient<Channel>> = None;
@@ -811,29 +1168,6 @@ impl Reaction for GrpcReaction {
 
             info!("[{reaction_name}] gRPC reaction processing task stopped");
             *status.write().await = ComponentStatus::Stopped;
-        });
-
-        self.base.set_processing_task(processing_task_handle).await;
-
-        Ok(())
-    }
-
-    async fn stop(&self) -> Result<()> {
-        self.base.stop_common().await?;
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        self.base
-            .set_status_with_event(
-                ComponentStatus::Stopped,
-                Some("gRPC reaction stopped successfully".to_string()),
-            )
-            .await?;
-
-        Ok(())
-    }
-
-    async fn status(&self) -> ComponentStatus {
-        self.base.get_status().await
+        })
     }
 }

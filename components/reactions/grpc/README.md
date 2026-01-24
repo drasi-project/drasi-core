@@ -9,12 +9,21 @@ The gRPC Reaction component forwards query results from Drasi continuous queries
 ### Key Capabilities
 
 - **Batched Processing**: Bundles multiple query results into efficient batches before sending
+- **Adaptive Batching**: Optionally adjusts batch sizes dynamically based on throughput patterns
 - **Automatic Retry Logic**: Implements exponential backoff for transient failures
 - **Connection Management**: Handles connection failures with automatic reconnection
 - **Lazy Connections**: Establishes connections only when needed, reducing overhead
 - **Metadata Support**: Allows custom metadata headers in gRPC requests
 - **Priority Queue**: Uses priority-based queuing to ensure orderly processing
 - **Multiple Query Support**: Can subscribe to multiple continuous queries simultaneously
+
+### Batching Modes
+
+The gRPC Reaction supports two batching modes:
+
+1. **Fixed Batching** (default): Uses a constant batch size for predictable behavior. Best for workloads with consistent throughput.
+
+2. **Adaptive Batching**: Dynamically adjusts batch sizes based on real-time throughput patterns. Best for variable workloads that need to optimize both latency and throughput.
 
 ### Use Cases
 
@@ -95,20 +104,82 @@ let config = GrpcReactionConfig::default();
 let reaction = GrpcReaction::new("my-reaction", vec!["my-query".to_string()], config);
 ```
 
+### Adaptive Batching Configuration
+
+Enable adaptive batching for variable throughput workloads:
+
+```rust
+use drasi_reaction_grpc::GrpcReaction;
+
+// Adaptive batching with builder methods
+let reaction = GrpcReaction::builder("adaptive-reaction")
+    .with_endpoint("grpc://api.example.com:50052")
+    .with_query("event-stream")
+    .with_adaptive_min_batch_size(10)
+    .with_adaptive_max_batch_size(500)
+    .with_adaptive_window_size(50)  // 5 seconds (50 × 100ms)
+    .with_adaptive_batch_timeout_ms(100)
+    .build()?;
+```
+
+Or with the full adaptive config:
+
+```rust
+use drasi_reaction_grpc::{GrpcReaction, AdaptiveBatchConfig};
+
+let adaptive_config = AdaptiveBatchConfig {
+    adaptive_min_batch_size: 10,
+    adaptive_max_batch_size: 500,
+    adaptive_window_size: 50,
+    adaptive_batch_timeout_ms: 100,
+};
+
+let reaction = GrpcReaction::builder("adaptive-reaction")
+    .with_endpoint("grpc://api.example.com:50052")
+    .with_query("event-stream")
+    .with_adaptive_batching(adaptive_config)
+    .build()?;
+```
+
 ## Configuration Options
+
+### Core Settings
 
 | Name | Description | Data Type | Valid Values | Default |
 |------|-------------|-----------|--------------|---------|
 | `endpoint` | gRPC server URL | String | Valid gRPC URL (grpc://host:port) | `grpc://localhost:50052` |
 | `timeout_ms` | Request timeout in milliseconds | u64 | Positive integer | `5000` |
-| `batch_size` | Maximum number of items per batch | usize | Positive integer | `100` |
-| `batch_flush_timeout_ms` | Maximum time to wait before flushing partial batch | u64 | Positive integer | `1000` |
+| `batch_size` | Maximum number of items per batch (fixed mode) | usize | Positive integer | `100` |
+| `batch_flush_timeout_ms` | Maximum time to wait before flushing partial batch (fixed mode) | u64 | Positive integer | `1000` |
 | `max_retries` | Maximum retry attempts for failed requests | u32 | 0 or positive integer | `3` |
 | `connection_retry_attempts` | Number of connection retry attempts | u32 | Positive integer | `5` |
 | `initial_connection_timeout_ms` | Initial connection timeout in milliseconds | u64 | Positive integer | `10000` |
 | `metadata` | Custom metadata headers to include in requests | HashMap<String, String> | Key-value pairs | Empty map |
 | `priority_queue_capacity` | Capacity of the internal priority queue | Option<usize> | None or positive integer | None (uses default) |
 | `auto_start` | Whether to automatically start the reaction | bool | true or false | `true` |
+
+### Adaptive Batching Settings
+
+When adaptive batching is enabled, `batch_size` and `batch_flush_timeout_ms` are ignored.
+
+| Name | Description | Data Type | Valid Values | Default |
+|------|-------------|-----------|--------------|---------|
+| `adaptive.adaptive_min_batch_size` | Minimum batch size (low traffic) | usize | 1-10000 | `1` |
+| `adaptive.adaptive_max_batch_size` | Maximum batch size (high traffic) | usize | 10-100000 | `100` |
+| `adaptive.adaptive_window_size` | Throughput window size (100ms units) | usize | 1-300 | `10` (1 second) |
+| `adaptive.adaptive_batch_timeout_ms` | Max wait time for batch completion | u64 | 1-10000 | `1000` |
+
+### Adaptive Batching Behavior
+
+The adaptive batcher classifies traffic into five levels and adjusts parameters:
+
+| Throughput Level | Messages/Sec | Batch Size Strategy | Wait Time |
+|-----------------|--------------|---------------------|-----------|
+| **Idle** | < 1 | Minimum (optimize latency) | 1ms |
+| **Low** | 1-100 | 2× minimum | 1ms |
+| **Medium** | 100-1,000 | 25% of range | 10ms |
+| **High** | 1,000-10,000 | 50% of range | 25ms |
+| **Burst** | > 10,000 | Maximum (optimize throughput) | 50ms |
 
 ### Configuration Details
 
@@ -282,12 +353,12 @@ let reaction = GrpcReaction::builder("authenticated-integration")
     .build()?;
 ```
 
-### Example 4: High-Throughput Data Pipeline
+### Example 4: High-Throughput Data Pipeline (Fixed Batching)
 
 ```rust
 use drasi_reaction_grpc::GrpcReaction;
 
-// Configure for high-throughput scenarios
+// Configure for high-throughput scenarios with fixed batch size
 let reaction = GrpcReaction::builder("high-throughput-pipeline")
     .with_endpoint("grpc://pipeline.example.com:50052")
     .with_query("real-time-events")
@@ -299,7 +370,24 @@ let reaction = GrpcReaction::builder("high-throughput-pipeline")
     .build()?;
 ```
 
-### Example 5: Programmatic Control
+### Example 5: Adaptive Batching for Variable Traffic
+
+```rust
+use drasi_reaction_grpc::GrpcReaction;
+
+// Use adaptive batching for workloads with variable throughput
+let reaction = GrpcReaction::builder("adaptive-pipeline")
+    .with_endpoint("grpc://pipeline.example.com:50052")
+    .with_query("variable-events")
+    .with_adaptive_min_batch_size(10)     // Small batches when idle
+    .with_adaptive_max_batch_size(2000)   // Large batches during bursts
+    .with_adaptive_window_size(50)        // 5-second measurement window
+    .with_priority_queue_capacity(10000)
+    .with_timeout_ms(30000)
+    .build()?;
+```
+
+### Example 6: Programmatic Control
 
 ```rust
 use drasi_reaction_grpc::GrpcReaction;
@@ -503,6 +591,37 @@ Key dependencies:
 - `async-trait`: Async trait support
 - `serde`: Configuration serialization
 - `anyhow`: Error handling
+
+## Migration from grpc-adaptive
+
+The `drasi-reaction-grpc-adaptive` crate has been merged into this crate. To migrate:
+
+**Before (grpc-adaptive):**
+```rust
+use drasi_reaction_grpc_adaptive::AdaptiveGrpcReaction;
+
+let reaction = AdaptiveGrpcReaction::builder("my-reaction")
+    .with_endpoint("grpc://localhost:50052")
+    .with_min_batch_size(10)
+    .with_max_batch_size(500)
+    .build()?;
+```
+
+**After (grpc with adaptive batching):**
+```rust
+use drasi_reaction_grpc::GrpcReaction;
+
+let reaction = GrpcReaction::builder("my-reaction")
+    .with_endpoint("grpc://localhost:50052")
+    .with_adaptive_min_batch_size(10)
+    .with_adaptive_max_batch_size(500)
+    .build()?;
+```
+
+Key changes:
+- Use `GrpcReaction` instead of `AdaptiveGrpcReaction`
+- Use `drasi_reaction_grpc` instead of `drasi_reaction_grpc_adaptive`
+- Prefix adaptive builder methods with `adaptive_` (e.g., `with_adaptive_min_batch_size`)
 
 ## License
 
