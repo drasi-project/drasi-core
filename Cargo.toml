@@ -27,7 +27,6 @@ members = [
 
   # Reaction Plugins
   "components/reactions/http",
-  "components/reactions/http-adaptive",
   "components/reactions/grpc",
   "components/reactions/grpc-adaptive",
   "components/reactions/sse",

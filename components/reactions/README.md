@@ -33,8 +33,7 @@ Reactions are responsible for:
 | Plugin | Description | Directory |
 |--------|-------------|-----------|
 | `drasi-reaction-log` | Console logging with template support | `log/` |
-| `drasi-reaction-http` | HTTP POST to external endpoints | `http/` |
-| `drasi-reaction-http-adaptive` | HTTP with adaptive batching | `http-adaptive/` |
+| `drasi-reaction-http` | HTTP POST to external endpoints with adaptive batching | `http/` |
 | `drasi-reaction-grpc` | gRPC streaming delivery | `grpc/` |
 | `drasi-reaction-grpc-adaptive` | gRPC with adaptive batching | `grpc-adaptive/` |
 | `drasi-reaction-sse` | Server-Sent Events streaming | `sse/` |
@@ -1048,7 +1047,7 @@ let batcher_config = AdaptiveBatchConfig {
 let batcher = AdaptiveBatcher::new(batcher_config);
 ```
 
-See `http-adaptive/` and `grpc-adaptive/` for examples.
+See the `http/` reaction (which includes adaptive batching) and `grpc-adaptive/` for examples.
 
 ## Additional Resources
 

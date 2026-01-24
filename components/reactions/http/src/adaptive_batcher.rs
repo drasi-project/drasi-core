@@ -316,54 +316,6 @@ impl<T> AdaptiveBatcher<T> {
     }
 }
 
-/// Simple non-adaptive batcher for comparison/fallback
-#[allow(dead_code)]
-pub struct FixedBatcher<T> {
-    receiver: mpsc::Receiver<T>,
-    batch_size: usize,
-    timeout: Duration,
-}
-
-#[allow(dead_code)]
-impl<T> FixedBatcher<T> {
-    pub fn new(receiver: mpsc::Receiver<T>, batch_size: usize, timeout: Duration) -> Self {
-        Self {
-            receiver,
-            batch_size,
-            timeout,
-        }
-    }
-
-    pub async fn next_batch(&mut self) -> Option<Vec<T>> {
-        let mut batch = Vec::new();
-        let deadline = Instant::now() + self.timeout;
-
-        while batch.len() < self.batch_size {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() && !batch.is_empty() {
-                break;
-            }
-
-            match timeout(remaining, self.receiver.recv()).await {
-                Ok(Some(item)) => batch.push(item),
-                Ok(None) => {
-                    if batch.is_empty() {
-                        return None;
-                    }
-                    break;
-                }
-                Err(_) => break,
-            }
-        }
-
-        if batch.is_empty() {
-            None
-        } else {
-            Some(batch)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

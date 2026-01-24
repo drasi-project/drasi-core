@@ -14,9 +14,10 @@
 
 //! Configuration types for HTTP reactions.
 //!
-//! This module contains configuration types for HTTP reaction and shared types
-//! used by HTTP Adaptive reaction implementations.
+//! This module contains configuration types for HTTP reaction, including
+//! adaptive batching configuration.
 
+use drasi_lib::reactions::common::AdaptiveBatchConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -72,13 +73,52 @@ pub struct QueryConfig {
 }
 
 /// HTTP reaction configuration
+///
+/// This configuration supports both standard (non-batching) and adaptive batching modes:
+///
+/// - **Standard mode** (default): Each query result is sent as an individual HTTP request.
+///   This is the default behavior when `adaptive` is `None`.
+///
+/// - **Adaptive batching mode**: Results are intelligently batched based on throughput patterns.
+///   Enable by setting `adaptive` to `Some(AdaptiveBatchConfig { ... })`.
+///   Batches are sent to `{base_url}/batch` endpoint.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use drasi_reaction_http::HttpReactionConfig;
+/// use drasi_lib::reactions::common::AdaptiveBatchConfig;
+///
+/// // Standard mode (no batching)
+/// let config = HttpReactionConfig {
+///     base_url: "https://api.example.com".to_string(),
+///     adaptive: None,  // or just omit this field
+///     ..Default::default()
+/// };
+///
+/// // Adaptive batching mode
+/// let config = HttpReactionConfig {
+///     base_url: "https://api.example.com".to_string(),
+///     adaptive: Some(AdaptiveBatchConfig {
+///         adaptive_min_batch_size: 10,
+///         adaptive_max_batch_size: 500,
+///         adaptive_window_size: 50,  // 5 seconds
+///         adaptive_batch_timeout_ms: 1000,
+///     }),
+///     ..Default::default()
+/// };
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HttpReactionConfig {
-    /// Base URL for HTTP requests
+    /// Base URL for HTTP requests.
+    ///
+    /// In adaptive batching mode, batch requests are sent to `{base_url}/batch`.
     #[serde(default = "default_base_url")]
     pub base_url: String,
 
-    /// Optional authentication token
+    /// Optional bearer token for authentication.
+    ///
+    /// If provided, adds `Authorization: Bearer {token}` header to all requests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
 
@@ -89,6 +129,20 @@ pub struct HttpReactionConfig {
     /// Query-specific call configurations
     #[serde(default)]
     pub routes: HashMap<String, QueryConfig>,
+
+    /// Adaptive batching configuration.
+    ///
+    /// When `Some(...)`, enables intelligent batching based on throughput patterns:
+    /// - Low traffic: Results sent immediately for minimal latency
+    /// - Medium traffic: Moderate batching for balanced performance
+    /// - High traffic: Large batches for network efficiency
+    /// - Burst traffic: Maximum batches to handle spikes
+    ///
+    /// Batches are sent to `{base_url}/batch` as a JSON array of `BatchResult` objects.
+    ///
+    /// When `None` (default), each result is sent as an individual HTTP request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adaptive: Option<AdaptiveBatchConfig>,
 }
 
 impl Default for HttpReactionConfig {
@@ -98,6 +152,7 @@ impl Default for HttpReactionConfig {
             token: None,
             timeout_ms: default_timeout_ms(),
             routes: HashMap::new(),
+            adaptive: None,
         }
     }
 }
