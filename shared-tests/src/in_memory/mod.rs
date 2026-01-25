@@ -540,6 +540,12 @@ mod windows {
         let test_config = InMemoryQueryConfig::new();
         windows::sliding_window_avg_grouped(&test_config).await;
     }
+
+    #[tokio::test]
+    async fn sliding_window_sum_delete_after_expiry() {
+        let test_config = InMemoryQueryConfig::new();
+        windows::sliding_window_sum_delete_after_expiry(&test_config).await;
+    }
 }
 
 mod collect_aggregation {

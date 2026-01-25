@@ -535,3 +535,136 @@ pub async fn sliding_window_avg_grouped(config: &(impl QueryTestConfig + Send)) 
         }));
     }
 }
+
+#[allow(clippy::print_stdout, clippy::unwrap_used)]
+pub async fn sliding_window_sum_delete_after_expiry(config: &(impl QueryTestConfig + Send)) {
+    let cq = {
+        let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let parser = Arc::new(CypherParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::sliding_window_sum_query(), parser)
+            .with_function_registry(function_registry);
+        builder = config.config_query(builder).await;
+        Arc::new(builder.build().await)
+    };
+
+    let now_override = Arc::new(AtomicU64::new(0));
+    let fqc =
+        Arc::new(AutoFutureQueueConsumer::new(cq.clone()).with_now_override(now_override.clone()));
+    cq.set_future_consumer(fqc.clone()).await;
+
+    let eff_date = NaiveDateTime::new(NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(), NaiveTime::MIN);
+    let mut now = eff_date.and_utc().timestamp_millis() as u64;
+    now_override.store(now, Ordering::Relaxed);
+
+    {
+        let change = SourceChange::Insert {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("test", "o1"),
+                    labels: Arc::new([Arc::from("Order")]),
+                    effective_from: now,
+                },
+                properties: ElementPropertyMap::from(json!({
+                    "id": "o1",
+                    "amount": 100
+                })),
+            },
+        };
+
+        let result = cq.process_source_change(change.clone()).await.unwrap();
+        assert_eq!(result.len(), 1);
+        println!("result: {result:#?}");
+
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
+            before: Some(variablemap!("windowed_sum"=>VariableValue::Null)),
+            after: variablemap!("windowed_sum"=>VariableValue::Float(Float::from(100.0))),
+            grouping_keys: vec![],
+            default_before: true,
+            default_after: false
+        }));
+    }
+
+    {
+        let change = SourceChange::Insert {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("test", "o2"),
+                    labels: Arc::new([Arc::from("Order")]),
+                    effective_from: now,
+                },
+                properties: ElementPropertyMap::from(json!({
+                    "id": "o2",
+                    "amount": 200
+                })),
+            },
+        };
+
+        let result = cq.process_source_change(change.clone()).await.unwrap();
+        assert_eq!(result.len(), 1);
+        println!("result: {result:#?}");
+
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
+            before: Some(variablemap!("windowed_sum"=>VariableValue::Float(Float::from(100.0)))),
+            after: variablemap!("windowed_sum"=>VariableValue::Float(Float::from(300.0))),
+            grouping_keys: vec![],
+            default_before: true,
+            default_after: false
+        }));
+    }
+
+    {
+        println!("-----------------later (15 seconds)---------------------");
+        now += Duration::seconds(15).num_milliseconds() as u64;
+        now_override.store(now, Ordering::Relaxed);
+
+        let result = fqc.recv(std::time::Duration::from_secs(5)).await.unwrap();
+        assert_eq!(result.len(), 1);
+        println!("result: {result:#?}");
+    }
+
+    {
+        println!("-----------------delete o1 after window expiry---------------------");
+        let change = SourceChange::Delete {
+            metadata: ElementMetadata {
+                reference: ElementReference::new("test", "o1"),
+                labels: Arc::new([Arc::from("Order")]),
+                effective_from: now,
+            },
+        };
+
+        let result = cq.process_source_change(change.clone()).await.unwrap();
+        assert_eq!(result.len(), 1);
+        println!("result: {result:#?}");
+
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
+            before: Some(variablemap!("windowed_sum"=>VariableValue::Float(Float::from(300.0)))),
+            after: variablemap!("windowed_sum"=>VariableValue::Float(Float::from(200.0))),
+            grouping_keys: vec![],
+            default_before: false,
+            default_after: false
+        }));
+    }
+
+    {
+        println!("-----------------delete o2 after window expiry---------------------");
+        let change = SourceChange::Delete {
+            metadata: ElementMetadata {
+                reference: ElementReference::new("test", "o2"),
+                labels: Arc::new([Arc::from("Order")]),
+                effective_from: now,
+            },
+        };
+
+        let result = cq.process_source_change(change.clone()).await.unwrap();
+        assert_eq!(result.len(), 1);
+        println!("result: {result:#?}");
+
+        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
+            before: Some(variablemap!("windowed_sum"=>VariableValue::Float(Float::from(200.0)))),
+            after: variablemap!("windowed_sum"=>VariableValue::Float(Float::from(0.0))),
+            grouping_keys: vec![],
+            default_before: false,
+            default_after: true
+        }));
+    }
+}

@@ -189,11 +189,8 @@ impl LazyScalarFunction for SlidingWindow {
                                     })
                                 }
                             };
-
-                            let mut new_context = context.clone();
-                            new_context.set_side_effects(SideEffects::Snapshot);
                             return match expression_evaluator
-                                .evaluate_expression(&new_context, expression_arg)
+                                .evaluate_expression(context, expression_arg)
                                 .await
                             {
                                 Ok(value) => Ok(value),

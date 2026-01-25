@@ -30,3 +30,12 @@ RETURN
   drasi.slidingWindow(duration({ minutes: 10 }), avg(s.value)) AS slidingAvg
   "
 }
+
+pub fn sliding_window_sum_query() -> &'static str {
+    "
+MATCH 
+  (o:Order)
+RETURN
+  drasi.slidingWindow(duration({ seconds: 10 }), sum(o.amount)) AS windowed_sum
+  "
+}
