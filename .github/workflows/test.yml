@@ -21,7 +21,6 @@ env:
 permissions:
   contents: read
 
-
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -38,7 +37,7 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
     - name: Show Rust toolchain
       run: rustup show
@@ -52,7 +51,7 @@ jobs:
       run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
 
     - name: Cache Cargo registry
-      uses: actions/cache@v4.2.2 # v4.0.2
+      uses: actions/cache@d4323d4df104b026a6c56196130b0b927889557a # v4.2.0
       with:
         path: ~/.cargo/registry
         key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
@@ -60,7 +59,7 @@ jobs:
           ${{ runner.os }}-cargo-registry-
 
     - name: Cache Cargo index
-      uses: actions/cache@v4.2.2 # v4.0.2
+      uses: actions/cache@d4323d4df104b026a6c56196130b0b927889557a # v4.2.0
       with:
         path: ~/.cargo/git
         key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
@@ -68,7 +67,7 @@ jobs:
           ${{ runner.os }}-cargo-index-
 
     - name: Cache Cargo build
-      uses: actions/cache@v4.2.2 # v4.0.2
+      uses: actions/cache@d4323d4df104b026a6c56196130b0b927889557a # v4.2.0
       with:
         path: target
         key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
@@ -108,13 +107,13 @@ jobs:
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
     - name: Show Rust toolchain
       run: rustup show
 
     - name: Cache Cargo registry
-      uses: actions/cache@v4.2.2
+      uses: actions/cache@d4323d4df104b026a6c56196130b0b927889557a # v4.2.0
       with:
         path: ~/.cargo/registry
         key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
@@ -122,7 +121,7 @@ jobs:
           ${{ runner.os }}-cargo-registry-
 
     - name: Cache Cargo index
-      uses: actions/cache@v4.2.2 # v4.0.2
+      uses: actions/cache@d4323d4df104b026a6c56196130b0b927889557a # v4.2.0
       with:
         path: ~/.cargo/git
         key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
@@ -130,7 +129,7 @@ jobs:
           ${{ runner.os }}-cargo-index-
 
     - name: Cache Cargo build
-      uses: actions/cache@v4.2.2 # v4.0.2
+      uses: actions/cache@d4323d4df104b026a6c56196130b0b927889557a # v4.2.0
       with:
         path: target
         key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
