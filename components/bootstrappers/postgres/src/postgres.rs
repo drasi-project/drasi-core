@@ -29,6 +29,37 @@ use drasi_lib::channels::SourceChangeEvent;
 
 pub use drasi_source_postgres::{PostgresSourceConfig, SslMode, TableKeyConfig};
 
+/// Validates and quotes a PostgreSQL identifier to prevent SQL injection.
+/// Only allows alphanumeric characters and underscores.
+fn quote_identifier(identifier: &str) -> Result<String> {
+    // Validate: identifier cannot be empty
+    if identifier.is_empty() {
+        return Err(anyhow!("Identifier cannot be empty"));
+    }
+
+    // Validate: must start with a letter or underscore
+    let first_char = identifier.chars().next().unwrap();
+    if !first_char.is_ascii_alphabetic() && first_char != '_' {
+        return Err(anyhow!(
+            "Identifier must start with a letter or underscore: {identifier}"
+        ));
+    }
+
+    // Validate: only allow alphanumeric and underscore characters
+    if !identifier
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Err(anyhow!(
+            "Identifier contains invalid characters: {identifier}"
+        ));
+    }
+
+    // Double-quote the identifier (PostgreSQL standard for identifiers)
+    // Also escape any internal double quotes by doubling them
+    Ok(format!("\"{}\"", identifier.replace('"', "\"\"")))
+}
+
 /// Bootstrap provider for PostgreSQL sources
 ///
 /// This provider takes its configuration directly at construction time,
@@ -438,7 +469,9 @@ impl PostgresBootstrapHandler {
         let columns = self.get_table_columns(transaction, table_name).await?;
 
         // Use cursor for memory efficiency
-        let query = format!("SELECT * FROM {table_name}");
+        // Quote the table name to prevent SQL injection
+        let quoted_table = quote_identifier(table_name)?;
+        let query = format!("SELECT * FROM {quoted_table}");
         let rows = transaction.query(&query, &[]).await?;
 
         let mut count = 0;
