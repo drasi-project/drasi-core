@@ -656,6 +656,12 @@ impl GrpcReaction {
             // Main task: receive query results from priority queue and forward to batcher
             let mut last_query_id = String::new();
             let mut current_batch: Vec<ProtoQueryResultItem> = Vec::new();
+            
+            // Pre-send threshold: send batches immediately when they reach max_batch_size
+            // to avoid accumulating too many items before forwarding to the adaptive batcher.
+            // This threshold is derived from the adaptive configuration to ensure consistency
+            // with the batching parameters.
+            let pre_send_threshold = internal_adaptive_config.max_batch_size;
 
             loop {
                 // Use select to wait for either a result OR shutdown signal
@@ -743,7 +749,7 @@ impl GrpcReaction {
                 }
 
                 // Send immediately if batch is large enough
-                if current_batch.len() >= 100 {
+                if current_batch.len() >= pre_send_threshold {
                     if batch_tx
                         .send((last_query_id.clone(), current_batch.clone()))
                         .await
