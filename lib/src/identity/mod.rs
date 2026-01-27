@@ -55,6 +55,11 @@ impl Credentials {
 mod password;
 pub use password::PasswordIdentityProvider;
 
+#[cfg(feature = "azure-identity")]
+mod azure;
+#[cfg(feature = "azure-identity")]
+pub use azure::AzureIdentityProvider;
+
 #[cfg(test)]
 mod tests {
     use super::*;

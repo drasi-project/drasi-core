@@ -59,6 +59,13 @@ async-trait = "0.1"
 ordered-float = "3.7"
 rand = "0.8"
 
+azure_identity = { version = "0.31", optional = true, default-features = false, features = ["tokio"] }
+azure_core = { version = "0.31", optional = true, default-features = false, features = ["tokio"] }
+
+[features]
+default = []
+azure-identity = ["dep:azure_identity", "dep:azure_core"]
+
 [dev-dependencies]
 # Testing utilities
 tempfile = "3.8"
