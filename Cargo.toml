@@ -88,6 +88,8 @@ drasi-reaction-http = { version = "0.1.3", path = "components/reactions/http" }
 drasi-reaction-grpc = { version = "0.2.1", path = "components/reactions/grpc" }
 drasi-index-rocksdb = { version = "0.2.1", path = "components/indexes/rocksdb" }
 drasi-index-garnet = { version = "0.1.2", path = "components/indexes/garnet" }
+drasi-bootstrap-postgres = { path = "components/bootstrappers/postgres" }
+drasi-reaction-application = { path = "components/reactions/application" }
 
 [workspace.lints.rust]
 warnings = "deny"
