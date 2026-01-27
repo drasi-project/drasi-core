@@ -62,9 +62,14 @@ rand = "0.8"
 azure_identity = { version = "0.31", optional = true, default-features = false, features = ["tokio"] }
 azure_core = { version = "0.31", optional = true, default-features = false, features = ["tokio"] }
 
+aws-config = { version = "1.5", optional = true }
+aws-sdk-rds = { version = "1.77", optional = true }
+
 [features]
 default = []
 azure-identity = ["dep:azure_identity", "dep:azure_core"]
+aws-identity = ["dep:aws-config", "dep:aws-sdk-rds"]
+all-identity = ["azure-identity", "aws-identity"]
 
 [dev-dependencies]
 # Testing utilities

@@ -60,6 +60,11 @@ mod azure;
 #[cfg(feature = "azure-identity")]
 pub use azure::AzureIdentityProvider;
 
+#[cfg(feature = "aws-identity")]
+mod aws;
+#[cfg(feature = "aws-identity")]
+pub use aws::AwsIdentityProvider;
+
 #[cfg(test)]
 mod tests {
     use super::*;
