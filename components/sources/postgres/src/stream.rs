@@ -337,6 +337,9 @@ impl ReplicationStream {
             }
             Err(e) => {
                 // Log but don't fail on decode errors - might be partial message
+                // TODO: Persistent decode errors (e.g., from unsupported PostgreSQL versions
+                // or corrupted WAL) will wedge progress since we never advance confirmed_lsn.
+                // Consider adding a configurable skip mechanism or error threshold.
                 if !wal_data.is_empty() {
                     debug!(
                         "Failed to decode WAL message type {} ({}): {}, data length: {}",
@@ -582,30 +585,48 @@ impl ReplicationStream {
     /// because that helper always returns `Ok(())` even when dispatch fails
     /// (see lib/src/sources/base.rs lines 551-556). We need proper error propagation
     /// to prevent premature LSN advancement and data loss.
+    ///
+    /// Behavior:
+    /// - If no dispatchers are registered, logs a warning and returns Ok (vacuously delivered).
+    ///   This handles the case where sources start before queries subscribe.
+    /// - Attempts dispatch to ALL registered dispatchers, collecting any errors.
+    /// - Returns error only if ANY dispatcher failed, preventing LSN advancement.
     async fn dispatch_event_directly(&self, wrapper: SourceEventWrapper) -> Result<()> {
         let dispatchers_guard = self.dispatchers.read().await;
 
-        // If no dispatchers are registered, return error to prevent LSN advancement.
-        // This ensures PostgreSQL will replay events on reconnect when subscribers appear.
+        // If no dispatchers are registered, treat as vacuously delivered.
+        // This allows sources to start before queries subscribe and handles
+        // dynamic query addition/removal without causing crash loops.
         if dispatchers_guard.is_empty() {
-            return Err(anyhow!(
-                "[{}] No dispatchers registered - cannot confirm LSN without delivery",
+            warn!(
+                "[{}] No dispatchers registered - event treated as delivered (vacuously true)",
                 self.source_id
-            ));
+            );
+            return Ok(());
         }
 
         let arc_wrapper = Arc::new(wrapper);
 
-        // Dispatch to each registered dispatcher and track errors
+        // Dispatch to ALL registered dispatchers and collect errors.
+        // We attempt delivery to every dispatcher even if some fail, to avoid
+        // leaving subscribers in inconsistent states.
+        let mut errors: Vec<String> = Vec::new();
+
         for dispatcher in dispatchers_guard.iter() {
             if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
-                // Return error immediately on first failure
-                // This prevents LSN advancement when dispatch fails
-                return Err(anyhow!(
-                    "Dispatcher failed to deliver event: {}",
-                    e
-                ));
+                errors.push(e.to_string());
             }
+        }
+
+        // If ANY dispatcher failed, return error to prevent LSN advancement.
+        // This ensures PostgreSQL will replay the event on reconnect.
+        if !errors.is_empty() {
+            return Err(anyhow!(
+                "Dispatch failed for {} of {} dispatchers: {}",
+                errors.len(),
+                dispatchers_guard.len(),
+                errors.join("; ")
+            ));
         }
 
         Ok(())
@@ -1250,5 +1271,113 @@ mod tests {
         // The fix ensures flush_lsn can be different from write_lsn
         assert!(status.write_lsn > status.flush_lsn);
         assert_eq!(status.flush_lsn, status.apply_lsn);
+    }
+
+    // ==========================================================================
+    // Dispatch Failure Tests
+    // ==========================================================================
+
+    /// A mock dispatcher that always fails
+    struct FailingDispatcher;
+
+    #[async_trait::async_trait]
+    impl drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> for FailingDispatcher {
+        async fn dispatch_change(&self, _change: Arc<SourceEventWrapper>) -> anyhow::Result<()> {
+            Err(anyhow::anyhow!("Simulated dispatch failure"))
+        }
+
+        async fn create_receiver(
+            &self,
+        ) -> anyhow::Result<Box<dyn drasi_lib::channels::ChangeReceiver<SourceEventWrapper>>> {
+            Err(anyhow::anyhow!("Not implemented for test"))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_failure_does_not_advance_confirmed_lsn() {
+        // This test verifies the critical safety property: if dispatch fails,
+        // confirmed_lsn must NOT advance, ensuring PostgreSQL replays the event.
+        let config = super::super::PostgresSourceConfig {
+            host: "localhost".to_string(),
+            port: 5432,
+            database: "testdb".to_string(),
+            user: "testuser".to_string(),
+            password: String::new(),
+            tables: vec!["test_table".to_string()],
+            slot_name: "test_slot".to_string(),
+            publication_name: "test_pub".to_string(),
+            ssl_mode: super::super::SslMode::Disable,
+            table_keys: vec![],
+        };
+
+        // Register a dispatcher that always fails
+        let dispatchers: Arc<
+            RwLock<Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>,
+        > = Arc::new(RwLock::new(vec![Box::new(FailingDispatcher)]));
+        let status_tx = Arc::new(RwLock::new(None));
+        let status = Arc::new(RwLock::new(ComponentStatus::Running));
+
+        let mut stream =
+            ReplicationStream::new(config, "test-source".to_string(), dispatchers, status_tx, status);
+
+        // Setup relation mapping
+        stream.relations.insert(
+            1,
+            RelationMapping {
+                table_name: "test_table".to_string(),
+                schema_name: "public".to_string(),
+                label: "test_table".to_string(),
+            },
+        );
+
+        stream.decoder.add_relation_for_testing(super::super::types::RelationInfo {
+            id: 1,
+            namespace: "public".to_string(),
+            name: "test_table".to_string(),
+            replica_identity: super::super::types::ReplicaIdentity::Default,
+            columns: vec![super::super::types::ColumnInfo {
+                name: "id".to_string(),
+                type_oid: 23,
+                type_modifier: -1,
+                is_key: true,
+            }],
+        });
+
+        // Record initial confirmed_lsn
+        let initial_lsn = stream.confirmed_lsn;
+        assert_eq!(initial_lsn, 0);
+
+        // BEGIN transaction
+        let begin_msg = super::super::types::WalMessage::Begin(super::super::types::TransactionInfo {
+            xid: 999,
+            commit_lsn: 0,
+            commit_timestamp: chrono::Utc::now(),
+        });
+        stream.process_wal_message(begin_msg, 0x1000).await.unwrap();
+
+        // INSERT (buffered in transaction)
+        let insert_msg = super::super::types::WalMessage::Insert {
+            relation_id: 1,
+            tuple: vec![super::super::types::PostgresValue::Int4(123)],
+        };
+        stream.process_wal_message(insert_msg, 0x2000).await.unwrap();
+
+        // COMMIT - this will attempt dispatch and FAIL
+        let commit_lsn = 0x3000;
+        let commit_msg = super::super::types::WalMessage::Commit(super::super::types::TransactionInfo {
+            xid: 999,
+            commit_lsn,
+            commit_timestamp: chrono::Utc::now(),
+        });
+
+        // The commit should fail due to dispatch failure
+        let result = stream.process_wal_message(commit_msg, commit_lsn).await;
+        assert!(result.is_err(), "Commit should fail when dispatch fails");
+
+        // CRITICAL: confirmed_lsn must NOT have advanced
+        assert_eq!(
+            stream.confirmed_lsn, initial_lsn,
+            "confirmed_lsn must NOT advance when dispatch fails"
+        );
     }
 }
