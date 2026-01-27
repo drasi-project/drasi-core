@@ -68,6 +68,8 @@ impl LazySortedSet {
         let mut storage_cursor = self.store.get_next(self.set_id, None).await?;
         let mut changelog_iter = self.change_log.iter().peekable();
 
+        // Key invariant: deletions always create change_log entries, so we must check
+        // change_log before returning any storage value to handle deleted entries.
         loop {
             match (changelog_iter.peek(), &storage_cursor) {
                 // Both iterators exhausted
