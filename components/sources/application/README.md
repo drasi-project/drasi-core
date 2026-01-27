@@ -357,23 +357,27 @@ The Application Source supports pluggable bootstrap providers via the `Bootstrap
 
 ```rust
 use drasi_source_application::{ApplicationSource, ApplicationSourceConfig};
-use drasi_bootstrap_application::ApplicationBootstrapProvider;
+// Bootstrap providers are separate crates - add the one you need to your Cargo.toml
+// use drasi_bootstrap_application::ApplicationBootstrapProvider;
+// use drasi_bootstrap_scriptfile::ScriptFileBootstrapProvider;
 
 // Create source
 let config = ApplicationSourceConfig { properties: HashMap::new() };
 let (source, handle) = ApplicationSource::new("my-source", config)?;
 
-// Configure bootstrap provider
-let bootstrap_provider = ApplicationBootstrapProvider::new();
-source.set_bootstrap_provider(Box::new(bootstrap_provider)).await;
+// Configure bootstrap provider (example with ApplicationBootstrapProvider)
+// let bootstrap_provider = ApplicationBootstrapProvider::new();
+// source.set_bootstrap_provider(Box::new(bootstrap_provider)).await;
 ```
 
 ### Common Bootstrap Provider Options
 
+Bootstrap providers are independent crates that you can add as dependencies:
+
 - `ApplicationBootstrapProvider` (`drasi-bootstrap-application`) - Replays stored insert events from shared state
 - `ScriptFileBootstrapProvider` (`drasi-bootstrap-scriptfile`) - Loads initial data from JSONL files
 - `NoopBootstrapProvider` (`drasi-bootstrap-noop`) - Skips bootstrap entirely
-- Custom implementations of the `BootstrapProvider` trait
+- Custom implementations of the `BootstrapProvider` trait from `drasi-lib`
 
 ### Bootstrap Behavior
 
