@@ -17,8 +17,8 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use azure_core::credentials::TokenCredential;
 use azure_identity::{
-    AzureCliCredential, ManagedIdentityCredential, ManagedIdentityCredentialOptions,
-    UserAssignedId,
+    AzureCliCredential, DeveloperToolsCredential, ManagedIdentityCredential,
+    ManagedIdentityCredentialOptions, UserAssignedId,
 };
 use std::sync::Arc;
 
@@ -89,6 +89,39 @@ impl AzureIdentityProvider {
     pub fn with_cli(username: impl Into<String>) -> Result<Self> {
         let credential = AzureCliCredential::new(None)
             .map_err(|e| anyhow!("Failed to create Azure CLI credential: {e}"))?;
+
+        Ok(Self {
+            credential: credential as Arc<dyn TokenCredential>,
+            username: username.into(),
+            scope: DEFAULT_AZURE_SCOPE.to_string(),
+        })
+    }
+
+    /// Create provider using Azure default credential chain.
+    ///
+    /// This attempts multiple developer tool authentication methods in order:
+    /// 1. **Azure CLI**: If `az login` has been run locally
+    /// 2. **Azure Developer CLI**: If `azd auth login` has been run
+    /// 3. **Azure PowerShell**: If `Connect-AzAccount` has been run
+    ///
+    /// This is recommended for local development where developers have authenticated
+    /// using one of the Azure developer tools. For production deployments in Azure,
+    /// use `new()` for system-assigned managed identity or `with_managed_identity()`
+    /// for user-assigned managed identity.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use drasi_lib::identity::AzureIdentityProvider;
+    ///
+    /// // Works with az login, azd auth login, or Connect-AzAccount
+    /// let provider = AzureIdentityProvider::with_default_credentials(
+    ///     "myuser@tenant.onmicrosoft.com"
+    /// )?;
+    /// ```
+    pub fn with_default_credentials(username: impl Into<String>) -> Result<Self> {
+        let credential = DeveloperToolsCredential::new(None)
+            .map_err(|e| anyhow!("Failed to create developer tools credential: {e}"))?;
 
         Ok(Self {
             credential: credential as Arc<dyn TokenCredential>,
@@ -192,6 +225,25 @@ mod tests {
                 // Expected if Azure CLI is not installed or configured
             }
         }
+    }
+
+    #[test]
+    fn test_with_default_credentials() {
+        // Test that the function creates a provider
+        let provider = AzureIdentityProvider::with_default_credentials("user@tenant.onmicrosoft.com")
+            .expect("Failed to create default credentials provider");
+
+        assert_eq!(provider.username, "user@tenant.onmicrosoft.com");
+        assert_eq!(provider.scope, DEFAULT_AZURE_SCOPE);
+    }
+
+    #[test]
+    fn test_default_credentials_with_custom_scope() {
+        let provider = AzureIdentityProvider::with_default_credentials("user@tenant.onmicrosoft.com")
+            .expect("Failed to create provider")
+            .with_scope("https://custom.scope/.default");
+
+        assert_eq!(provider.scope, "https://custom.scope/.default");
     }
 
     #[test]
@@ -311,6 +363,31 @@ mod integration_tests {
                 assert_eq!(username, "user@tenant.onmicrosoft.com");
                 assert!(!token.is_empty());
                 println!("✓ Successfully authenticated with Managed Identity");
+            }
+            _ => panic!("Expected Token credentials"),
+        }
+    }
+
+    /// Integration test for default credential chain
+    /// Works with az login locally or managed identity in Azure
+    #[tokio::test]
+    #[ignore]
+    async fn test_default_credentials_authentication_real() {
+        let provider = AzureIdentityProvider::with_default_credentials("user@tenant.onmicrosoft.com")
+            .expect("Failed to create default credentials provider");
+
+        let credentials = provider
+            .get_credentials()
+            .await
+            .expect("Failed to get credentials. Make sure 'az login' was run or managed identity is configured.");
+
+        match credentials {
+            Credentials::Token { username, token } => {
+                assert_eq!(username, "user@tenant.onmicrosoft.com");
+                assert!(!token.is_empty());
+                assert!(token.len() > 100);
+                println!("✓ Successfully authenticated with Default Credentials");
+                println!("  Token length: {}", token.len());
             }
             _ => panic!("Expected Token credentials"),
         }
