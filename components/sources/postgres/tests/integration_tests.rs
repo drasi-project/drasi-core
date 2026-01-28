@@ -15,7 +15,10 @@
 mod postgres_helpers;
 
 use anyhow::Result;
-use drasi_bootstrap_postgres::PostgresBootstrapProvider;
+use drasi_bootstrap_postgres::{
+    PostgresBootstrapConfig, PostgresBootstrapProvider,
+    SslMode as BootstrapSslMode, TableKeyConfig as BootstrapTableKeyConfig,
+};
 use drasi_lib::{DrasiLib, Query};
 use drasi_reaction_application::ApplicationReaction;
 use drasi_source_postgres::{PostgresReplicationSource, PostgresSourceConfig, SslMode, TableKeyConfig};
@@ -83,7 +86,23 @@ async fn build_core(
         }],
     };
 
-    let bootstrap_provider = PostgresBootstrapProvider::new(source_config.clone());
+    let bootstrap_config = PostgresBootstrapConfig {
+        host: source_config.host.clone(),
+        port: source_config.port,
+        database: source_config.database.clone(),
+        user: source_config.user.clone(),
+        password: source_config.password.clone(),
+        tables: source_config.tables.clone(),
+        slot_name: source_config.slot_name.clone(),
+        publication_name: source_config.publication_name.clone(),
+        ssl_mode: BootstrapSslMode::Disable,
+        table_keys: vec![BootstrapTableKeyConfig {
+            table: TEST_TABLE.to_string(),
+            key_columns: vec!["id".to_string()],
+        }],
+    };
+
+    let bootstrap_provider = PostgresBootstrapProvider::new(bootstrap_config);
 
     let source = PostgresReplicationSource::builder("pg-test-source")
         .with_config(source_config)
