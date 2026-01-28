@@ -31,7 +31,7 @@ pub use super::config::GrpcReactionConfig;
 use super::GrpcReactionBuilder;
 
 // Use modules declared in lib.rs
-use crate::connection::{self, ConnectionState, create_client, create_client_with_retry};
+use crate::connection::{self, create_client, create_client_with_retry, ConnectionState};
 use crate::helpers::convert_json_to_proto_struct;
 use crate::proto::{
     ProcessResultsRequest, ProtoQueryResult, ProtoQueryResultItem, ReactionServiceClient,
@@ -159,7 +159,7 @@ impl GrpcReaction {
         Self {
             base: ReactionBase::new(params),
             adaptive_config: utils_adaptive_config,
-            config
+            config,
         }
     }
 
@@ -462,7 +462,6 @@ impl GrpcReaction {
         Ok(ReactionServiceClient::new(channel))
     }
 
-
     async fn run_adaptive_internal(
         params: RunInternalAdaptiveParams,
         mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
@@ -719,329 +718,98 @@ impl GrpcReaction {
         params: RunInternalFixedParams,
         mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) {
-            let endpoint = params.endpoint;
-            let batch_size = params.batch_size;
-            let batch_flush_timeout_ms = params.batch_flush_timeout_ms;
-            let max_retries = params.max_retries;
-            let metadata = params.metadata;
-            let timeout_ms = params.timeout_ms;
-            let initial_connection_timeout_ms = params.initial_connection_timeout_ms;
-            let reaction_name = params.reaction_name;
-            let priority_queue = params.priority_queue;
-            let status = params.status;
-            let connection_retry_attempts = params.connection_retry_attempts;
+        let endpoint = params.endpoint;
+        let batch_size = params.batch_size;
+        let batch_flush_timeout_ms = params.batch_flush_timeout_ms;
+        let max_retries = params.max_retries;
+        let metadata = params.metadata;
+        let timeout_ms = params.timeout_ms;
+        let initial_connection_timeout_ms = params.initial_connection_timeout_ms;
+        let reaction_name = params.reaction_name;
+        let priority_queue = params.priority_queue;
+        let status = params.status;
+        let connection_retry_attempts = params.connection_retry_attempts;
 
-            info!("gRPC reaction starting for endpoint: {endpoint} (lazy connection)");
+        info!("gRPC reaction starting for endpoint: {endpoint} (lazy connection)");
 
-            let mut client: Option<ReactionServiceClient<Channel>> = None;
-            let mut connection_state = ConnectionState::Disconnected;
+        let mut client: Option<ReactionServiceClient<Channel>> = None;
+        let mut connection_state = ConnectionState::Disconnected;
 
-            let mut consecutive_failures = 0u32;
-            let mut last_connection_attempt = std::time::Instant::now();
-            let mut last_successful_send = std::time::Instant::now();
-            let base_backoff = Duration::from_millis(500);
-            let max_backoff = Duration::from_secs(30);
+        let mut consecutive_failures = 0u32;
+        let mut last_connection_attempt = std::time::Instant::now();
+        let mut last_successful_send = std::time::Instant::now();
+        let base_backoff = Duration::from_millis(500);
+        let max_backoff = Duration::from_secs(30);
 
-            let mut _total_connection_attempts = 0u32;
-            let mut _successful_sends = 0u32;
-            let mut _failed_sends = 0u32;
-            let mut _goaway_count = 0u32;
+        let mut _total_connection_attempts = 0u32;
+        let mut _successful_sends = 0u32;
+        let mut _failed_sends = 0u32;
+        let mut _goaway_count = 0u32;
 
-            let mut batch = Vec::new();
-            let mut last_query_id = String::new();
-            let flush_timeout = Duration::from_millis(batch_flush_timeout_ms);
+        let mut batch = Vec::new();
+        let mut last_query_id = String::new();
+        let flush_timeout = Duration::from_millis(batch_flush_timeout_ms);
 
-            let mut flush_timer = tokio::time::interval(flush_timeout);
-            flush_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut flush_timer = tokio::time::interval(flush_timeout);
+        flush_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-            loop {
-                // Use select to wait for either a result OR shutdown signal
-                let query_result = tokio::select! {
-                    biased;
+        loop {
+            // Use select to wait for either a result OR shutdown signal
+            let query_result = tokio::select! {
+                biased;
 
-                    _ = &mut shutdown_rx => {
-                        debug!("[{reaction_name}] Received shutdown signal, exiting processing loop");
-                        break;
-                    }
-
-                    result = priority_queue.dequeue() => result,
-                };
-                debug!(
-                    "Dequeued query result with {} items for processing",
-                    query_result.results.len()
-                );
-
-                if !matches!(*status.read().await, ComponentStatus::Running) {
-                    info!("[{}] Reaction status changed to non-running, exiting main loop (batch has {} items)",
-                          reaction_name, batch.len());
+                _ = &mut shutdown_rx => {
+                    debug!("[{reaction_name}] Received shutdown signal, exiting processing loop");
                     break;
                 }
 
-                if query_result.results.is_empty() {
-                    debug!("[{reaction_name}] Received empty result set from query");
-                    continue;
-                }
+                result = priority_queue.dequeue() => result,
+            };
+            debug!(
+                "Dequeued query result with {} items for processing",
+                query_result.results.len()
+            );
 
-                let query_id = &query_result.query_id;
-                trace!("Processing results for query_id: {query_id}");
-
-                if !last_query_id.is_empty()
-                    && last_query_id != query_result.query_id
-                    && !batch.is_empty()
-                {
-                    if client.is_none() || !matches!(connection_state, ConnectionState::Connected) {
-                        let time_since_last_attempt = last_connection_attempt.elapsed();
-                        let backoff_duration =
-                            base_backoff * 2u32.pow(consecutive_failures.min(10));
-                        let backoff_duration = backoff_duration.min(max_backoff);
-
-                        if time_since_last_attempt < backoff_duration
-                            && connection_state == ConnectionState::Failed
-                        {
-                            let wait_time = backoff_duration - time_since_last_attempt;
-                            warn!(
-                                "State: {} - Waiting {:.2}s before retrying (failures: {})",
-                                connection_state,
-                                wait_time.as_secs_f64(),
-                                consecutive_failures
-                            );
-                            continue;
-                        }
-
-                        _total_connection_attempts += 1;
-                        let _connecting_state = ConnectionState::Connecting;
-                        last_connection_attempt = std::time::Instant::now();
-
-                        match create_client_with_retry(
-                            &endpoint,
-                            initial_connection_timeout_ms,
-                            connection_retry_attempts,
-                        )
-                        .await
-                        {
-                            Ok(c) => {
-                                connection_state = ConnectionState::Connected;
-                                consecutive_failures = 0;
-                                client = Some(c);
-                            }
-                            Err(e) => {
-                                connection_state = ConnectionState::Failed;
-                                consecutive_failures += 1;
-                                error!("State transition: Connecting -> Failed (attempt {consecutive_failures}, total: {_total_connection_attempts}): {e}");
-                                continue;
-                            }
-                        }
-                    }
-
-                    if client.is_some() {
-                        let mut sent = false;
-                        let mut retry_swaps = 0u32;
-                        while !sent {
-                            if let Some(ref mut c) = client {
-                                match Self::send_batch_with_retry(
-                                    c,
-                                    batch.clone(),
-                                    &last_query_id,
-                                    &metadata,
-                                    max_retries,
-                                    &endpoint,
-                                    timeout_ms,
-                                )
-                                .await
-                                {
-                                    Ok((needs_new_client, new_client)) => {
-                                        if needs_new_client {
-                                            if last_successful_send.elapsed()
-                                                > Duration::from_secs(5)
-                                            {
-                                                _goaway_count += 1;
-                                            }
-
-                                            if let Some(nc) = new_client {
-                                                connection_state = ConnectionState::Connected;
-                                                client = Some(nc);
-                                                consecutive_failures = 0;
-                                                retry_swaps += 1;
-                                                if retry_swaps > 2 {
-                                                    break;
-                                                }
-                                                continue;
-                                            } else {
-                                                connection_state = ConnectionState::Reconnecting;
-                                                client = None;
-                                                consecutive_failures += 1;
-                                                last_connection_attempt = std::time::Instant::now();
-                                                break;
-                                            }
-                                        } else {
-                                            consecutive_failures = 0;
-                                            _successful_sends += 1;
-                                            last_successful_send = std::time::Instant::now();
-                                            sent = true;
-                                        }
-                                    }
-                                    Err(e) => {
-                                        _failed_sends += 1;
-                                        error!(
-                                            "[{reaction_name}] Failed to send batch (total failures: {_failed_sends}): {e}"
-                                        );
-                                        break;
-                                    }
-                                }
-                            } else {
-                                break;
-                            }
-                        }
-                        if sent {
-                            batch.clear();
-                        }
-                    }
-                }
-
-                last_query_id = query_id.clone();
-
-                for result in &query_result.results {
-                    let (result_type, data, before, after) = match result {
-                        ResultDiff::Add { data } => ("ADD", data.clone(), None, None),
-                        ResultDiff::Delete { data } => ("DELETE", data.clone(), None, None),
-                        ResultDiff::Update {
-                            data,
-                            before,
-                            after,
-                            ..
-                        } => (
-                            "UPDATE",
-                            data.clone(),
-                            Some(before.clone()),
-                            Some(after.clone()),
-                        ),
-                        ResultDiff::Aggregation { before, after } => (
-                            "aggregation",
-                            serde_json::to_value(result)
-                                .expect("ResultDiff serialization should succeed"),
-                            before.clone(),
-                            Some(after.clone()),
-                        ),
-                        ResultDiff::Noop => (
-                            "noop",
-                            serde_json::to_value(result)
-                                .expect("ResultDiff serialization should succeed"),
-                            None,
-                            None,
-                        ),
-                    };
-
-                    let proto_item = ProtoQueryResultItem {
-                        r#type: result_type.to_string(),
-                        data: Some(convert_json_to_proto_struct(&data)),
-                        before: before.as_ref().map(convert_json_to_proto_struct),
-                        after: after.as_ref().map(convert_json_to_proto_struct),
-                    };
-
-                    batch.push(proto_item);
-
-                    if batch.len() >= batch_size {
-                        if client.is_none() {
-                            let time_since_last_attempt = last_connection_attempt.elapsed();
-                            let backoff_duration =
-                                base_backoff * 2u32.pow(consecutive_failures.min(10));
-                            let backoff_duration = backoff_duration.min(max_backoff);
-
-                            if time_since_last_attempt < backoff_duration {
-                                continue;
-                            }
-
-                            _total_connection_attempts += 1;
-                            last_connection_attempt = std::time::Instant::now();
-
-                            match create_client_with_retry(
-                                &endpoint,
-                                initial_connection_timeout_ms,
-                                connection_retry_attempts,
-                            )
-                            .await
-                            {
-                                Ok(c) => {
-                                    consecutive_failures = 0;
-                                    client = Some(c);
-                                }
-                                Err(e) => {
-                                    consecutive_failures += 1;
-                                    error!(
-                                        "Failed to create client (attempt {consecutive_failures}, total: {_total_connection_attempts}): {e}"
-                                    );
-                                    continue;
-                                }
-                            }
-                        }
-
-                        if client.is_some() {
-                            let mut sent = false;
-                            let mut retry_swaps = 0u32;
-                            while !sent {
-                                if let Some(ref mut c) = client {
-                                    match Self::send_batch_with_retry(
-                                        c,
-                                        batch.clone(),
-                                        query_id,
-                                        &metadata,
-                                        max_retries,
-                                        &endpoint,
-                                        timeout_ms,
-                                    )
-                                    .await
-                                    {
-                                        Ok((needs_new_client, new_client)) => {
-                                            if needs_new_client {
-                                                if let Some(nc) = new_client {
-                                                    client = Some(nc);
-                                                    consecutive_failures = 0;
-                                                    retry_swaps += 1;
-                                                    if retry_swaps > 2 {
-                                                        break;
-                                                    }
-                                                    continue;
-                                                } else {
-                                                    client = None;
-                                                    consecutive_failures += 1;
-                                                    last_connection_attempt =
-                                                        std::time::Instant::now();
-                                                    break;
-                                                }
-                                            } else {
-                                                consecutive_failures = 0;
-                                                _successful_sends += 1;
-                                                sent = true;
-                                            }
-                                        }
-                                        Err(e) => {
-                                            _failed_sends += 1;
-                                            error!("[{reaction_name}] Failed to send batch (total failures: {_failed_sends}): {e}");
-                                            break;
-                                        }
-                                    }
-                                } else {
-                                    break;
-                                }
-                            }
-                            if sent {
-                                batch.clear();
-                            }
-                        }
-                    }
-                }
+            if !matches!(*status.read().await, ComponentStatus::Running) {
+                info!("[{}] Reaction status changed to non-running, exiting main loop (batch has {} items)",
+                          reaction_name, batch.len());
+                break;
             }
 
-            // Send any remaining items in the batch
-            if !batch.is_empty() && !last_query_id.is_empty() {
-                info!(
-                    "[{}] Sending final batch with {} items for query '{}'",
-                    reaction_name,
-                    batch.len(),
-                    last_query_id
-                );
+            if query_result.results.is_empty() {
+                debug!("[{reaction_name}] Received empty result set from query");
+                continue;
+            }
 
-                if client.is_none() {
+            let query_id = &query_result.query_id;
+            trace!("Processing results for query_id: {query_id}");
+
+            if !last_query_id.is_empty()
+                && last_query_id != query_result.query_id
+                && !batch.is_empty()
+            {
+                if client.is_none() || !matches!(connection_state, ConnectionState::Connected) {
+                    let time_since_last_attempt = last_connection_attempt.elapsed();
+                    let backoff_duration = base_backoff * 2u32.pow(consecutive_failures.min(10));
+                    let backoff_duration = backoff_duration.min(max_backoff);
+
+                    if time_since_last_attempt < backoff_duration
+                        && connection_state == ConnectionState::Failed
+                    {
+                        let wait_time = backoff_duration - time_since_last_attempt;
+                        warn!(
+                            "State: {} - Waiting {:.2}s before retrying (failures: {})",
+                            connection_state,
+                            wait_time.as_secs_f64(),
+                            consecutive_failures
+                        );
+                        continue;
+                    }
+
+                    _total_connection_attempts += 1;
+                    let _connecting_state = ConnectionState::Connecting;
+                    last_connection_attempt = std::time::Instant::now();
+
                     match create_client_with_retry(
                         &endpoint,
                         initial_connection_timeout_ms,
@@ -1050,13 +818,15 @@ impl GrpcReaction {
                     .await
                     {
                         Ok(c) => {
+                            connection_state = ConnectionState::Connected;
+                            consecutive_failures = 0;
                             client = Some(c);
                         }
                         Err(e) => {
-                            error!(
-                                "[{reaction_name}] Failed to create client for final batch: {e}"
-                            );
-                            return;
+                            connection_state = ConnectionState::Failed;
+                            consecutive_failures += 1;
+                            error!("State transition: Connecting -> Failed (attempt {consecutive_failures}, total: {_total_connection_attempts}): {e}");
+                            continue;
                         }
                     }
                 }
@@ -1079,27 +849,38 @@ impl GrpcReaction {
                             {
                                 Ok((needs_new_client, new_client)) => {
                                     if needs_new_client {
+                                        if last_successful_send.elapsed() > Duration::from_secs(5) {
+                                            _goaway_count += 1;
+                                        }
+
                                         if let Some(nc) = new_client {
+                                            connection_state = ConnectionState::Connected;
                                             client = Some(nc);
+                                            consecutive_failures = 0;
                                             retry_swaps += 1;
                                             if retry_swaps > 2 {
                                                 break;
                                             }
                                             continue;
                                         } else {
+                                            connection_state = ConnectionState::Reconnecting;
+                                            client = None;
+                                            consecutive_failures += 1;
+                                            last_connection_attempt = std::time::Instant::now();
                                             break;
                                         }
                                     } else {
-                                        info!(
-                                            "[{}] Successfully sent final batch with {} items",
-                                            reaction_name,
-                                            batch.len()
-                                        );
+                                        consecutive_failures = 0;
+                                        _successful_sends += 1;
+                                        last_successful_send = std::time::Instant::now();
                                         sent = true;
                                     }
                                 }
                                 Err(e) => {
-                                    error!("[{reaction_name}] Failed to send final batch: {e}");
+                                    _failed_sends += 1;
+                                    error!(
+                                            "[{reaction_name}] Failed to send batch (total failures: {_failed_sends}): {e}"
+                                        );
                                     break;
                                 }
                             }
@@ -1107,12 +888,223 @@ impl GrpcReaction {
                             break;
                         }
                     }
+                    if sent {
+                        batch.clear();
+                    }
                 }
             }
 
-            info!("[{reaction_name}] gRPC reaction processing task stopped");
-            *status.write().await = ComponentStatus::Stopped;
+            last_query_id = query_id.clone();
 
+            for result in &query_result.results {
+                let (result_type, data, before, after) = match result {
+                    ResultDiff::Add { data } => ("ADD", data.clone(), None, None),
+                    ResultDiff::Delete { data } => ("DELETE", data.clone(), None, None),
+                    ResultDiff::Update {
+                        data,
+                        before,
+                        after,
+                        ..
+                    } => (
+                        "UPDATE",
+                        data.clone(),
+                        Some(before.clone()),
+                        Some(after.clone()),
+                    ),
+                    ResultDiff::Aggregation { before, after } => (
+                        "aggregation",
+                        serde_json::to_value(result)
+                            .expect("ResultDiff serialization should succeed"),
+                        before.clone(),
+                        Some(after.clone()),
+                    ),
+                    ResultDiff::Noop => (
+                        "noop",
+                        serde_json::to_value(result)
+                            .expect("ResultDiff serialization should succeed"),
+                        None,
+                        None,
+                    ),
+                };
+
+                let proto_item = ProtoQueryResultItem {
+                    r#type: result_type.to_string(),
+                    data: Some(convert_json_to_proto_struct(&data)),
+                    before: before.as_ref().map(convert_json_to_proto_struct),
+                    after: after.as_ref().map(convert_json_to_proto_struct),
+                };
+
+                batch.push(proto_item);
+
+                if batch.len() >= batch_size {
+                    if client.is_none() {
+                        let time_since_last_attempt = last_connection_attempt.elapsed();
+                        let backoff_duration =
+                            base_backoff * 2u32.pow(consecutive_failures.min(10));
+                        let backoff_duration = backoff_duration.min(max_backoff);
+
+                        if time_since_last_attempt < backoff_duration {
+                            continue;
+                        }
+
+                        _total_connection_attempts += 1;
+                        last_connection_attempt = std::time::Instant::now();
+
+                        match create_client_with_retry(
+                            &endpoint,
+                            initial_connection_timeout_ms,
+                            connection_retry_attempts,
+                        )
+                        .await
+                        {
+                            Ok(c) => {
+                                consecutive_failures = 0;
+                                client = Some(c);
+                            }
+                            Err(e) => {
+                                consecutive_failures += 1;
+                                error!(
+                                        "Failed to create client (attempt {consecutive_failures}, total: {_total_connection_attempts}): {e}"
+                                    );
+                                continue;
+                            }
+                        }
+                    }
+
+                    if client.is_some() {
+                        let mut sent = false;
+                        let mut retry_swaps = 0u32;
+                        while !sent {
+                            if let Some(ref mut c) = client {
+                                match Self::send_batch_with_retry(
+                                    c,
+                                    batch.clone(),
+                                    query_id,
+                                    &metadata,
+                                    max_retries,
+                                    &endpoint,
+                                    timeout_ms,
+                                )
+                                .await
+                                {
+                                    Ok((needs_new_client, new_client)) => {
+                                        if needs_new_client {
+                                            if let Some(nc) = new_client {
+                                                client = Some(nc);
+                                                consecutive_failures = 0;
+                                                retry_swaps += 1;
+                                                if retry_swaps > 2 {
+                                                    break;
+                                                }
+                                                continue;
+                                            } else {
+                                                client = None;
+                                                consecutive_failures += 1;
+                                                last_connection_attempt = std::time::Instant::now();
+                                                break;
+                                            }
+                                        } else {
+                                            consecutive_failures = 0;
+                                            _successful_sends += 1;
+                                            sent = true;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        _failed_sends += 1;
+                                        error!("[{reaction_name}] Failed to send batch (total failures: {_failed_sends}): {e}");
+                                        break;
+                                    }
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                        if sent {
+                            batch.clear();
+                        }
+                    }
+                }
+            }
+        }
+
+        // Send any remaining items in the batch
+        if !batch.is_empty() && !last_query_id.is_empty() {
+            info!(
+                "[{}] Sending final batch with {} items for query '{}'",
+                reaction_name,
+                batch.len(),
+                last_query_id
+            );
+
+            if client.is_none() {
+                match create_client_with_retry(
+                    &endpoint,
+                    initial_connection_timeout_ms,
+                    connection_retry_attempts,
+                )
+                .await
+                {
+                    Ok(c) => {
+                        client = Some(c);
+                    }
+                    Err(e) => {
+                        error!("[{reaction_name}] Failed to create client for final batch: {e}");
+                        return;
+                    }
+                }
+            }
+
+            if client.is_some() {
+                let mut sent = false;
+                let mut retry_swaps = 0u32;
+                while !sent {
+                    if let Some(ref mut c) = client {
+                        match Self::send_batch_with_retry(
+                            c,
+                            batch.clone(),
+                            &last_query_id,
+                            &metadata,
+                            max_retries,
+                            &endpoint,
+                            timeout_ms,
+                        )
+                        .await
+                        {
+                            Ok((needs_new_client, new_client)) => {
+                                if needs_new_client {
+                                    if let Some(nc) = new_client {
+                                        client = Some(nc);
+                                        retry_swaps += 1;
+                                        if retry_swaps > 2 {
+                                            break;
+                                        }
+                                        continue;
+                                    } else {
+                                        break;
+                                    }
+                                } else {
+                                    info!(
+                                        "[{}] Successfully sent final batch with {} items",
+                                        reaction_name,
+                                        batch.len()
+                                    );
+                                    sent = true;
+                                }
+                            }
+                            Err(e) => {
+                                error!("[{reaction_name}] Failed to send final batch: {e}");
+                                break;
+                            }
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
+        info!("[{reaction_name}] gRPC reaction processing task stopped");
+        *status.write().await = ComponentStatus::Stopped;
     }
 }
 
@@ -1136,7 +1128,7 @@ impl Reaction for GrpcReaction {
             "timeout_ms".to_string(),
             serde_json::Value::Number(self.config.timeout_ms.into()),
         );
-        if self.config.adaptive_enable == false {
+        if !self.config.adaptive_enable {
             props.insert(
                 "batch_size".to_string(),
                 serde_json::Value::Number(self.config.batch_size.into()),
@@ -1209,8 +1201,8 @@ impl Reaction for GrpcReaction {
         let base = self.base.clone_shared();
         let adaptive_enable = self.config.adaptive_enable;
 
-        let processing_task_handle = tokio::spawn(async move {   
-            if adaptive_enable == false {
+        let processing_task_handle = tokio::spawn(async move {
+            if !adaptive_enable {
                 let params = RunInternalFixedParams {
                     reaction_name,
                     endpoint,
@@ -1224,7 +1216,7 @@ impl Reaction for GrpcReaction {
                     priority_queue,
                     status,
                 };
-                return Self::run_fixed_internal(params, shutdown_rx).await;
+                Self::run_fixed_internal(params, shutdown_rx).await
             } else {
                 let params = RunInternalAdaptiveParams {
                     reaction_name,
@@ -1236,7 +1228,7 @@ impl Reaction for GrpcReaction {
                     adaptive_config,
                     base,
                 };
-                return Self::run_adaptive_internal(params, shutdown_rx).await;
+                Self::run_adaptive_internal(params, shutdown_rx).await
             }
         });
 
