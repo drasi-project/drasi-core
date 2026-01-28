@@ -14,6 +14,7 @@
 
 //! Configuration types for gRPC reactions.
 
+use drasi_lib::reactions::common::AdaptiveBatchConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -43,6 +44,10 @@ fn default_connection_retry_attempts() -> u32 {
 
 fn default_initial_connection_timeout_ms() -> u64 {
     10000
+}
+
+fn default_adaptive_enable() -> bool {
+    false
 }
 
 /// gRPC reaction configuration
@@ -79,6 +84,14 @@ pub struct GrpcReactionConfig {
     /// Metadata headers to include in requests
     #[serde(default)]
     pub metadata: HashMap<String, String>,
+
+    /// Adaptive batching enable option
+    #[serde(default)]
+    pub adaptive_enable: bool,
+
+    /// Adaptive batching configuration (flattened into parent config)
+    #[serde(flatten)]
+    pub adaptive: AdaptiveBatchConfig,
 }
 
 impl Default for GrpcReactionConfig {
@@ -92,6 +105,8 @@ impl Default for GrpcReactionConfig {
             connection_retry_attempts: default_connection_retry_attempts(),
             initial_connection_timeout_ms: default_initial_connection_timeout_ms(),
             metadata: HashMap::new(),
+            adaptive_enable: default_adaptive_enable(),
+            adaptive: AdaptiveBatchConfig::default(),
         }
     }
 }

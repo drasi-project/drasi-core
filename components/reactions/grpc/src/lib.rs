@@ -29,6 +29,7 @@
 //!     .build()?;
 //! ```
 
+mod adaptive_batcher;
 pub mod config;
 pub mod connection;
 pub mod grpc;
@@ -43,6 +44,7 @@ pub use helpers::convert_json_to_proto_struct;
 pub use proto::{
     ProcessResultsRequest, ProtoQueryResult, ProtoQueryResultItem, ReactionServiceClient,
 };
+use drasi_lib::reactions::common::AdaptiveBatchConfig;
 
 use std::collections::HashMap;
 
@@ -62,6 +64,8 @@ pub struct GrpcReactionBuilder {
     metadata: HashMap<String, String>,
     priority_queue_capacity: Option<usize>,
     auto_start: bool,
+    adaptive_enable: bool,
+    adaptive: AdaptiveBatchConfig,
 }
 
 impl GrpcReactionBuilder {
@@ -80,6 +84,8 @@ impl GrpcReactionBuilder {
             metadata: HashMap::new(),
             priority_queue_capacity: None,
             auto_start: true,
+            adaptive_enable: false,
+            adaptive: AdaptiveBatchConfig::default(),  
         }
     }
 
@@ -165,6 +171,8 @@ impl GrpcReactionBuilder {
         self.connection_retry_attempts = config.connection_retry_attempts;
         self.initial_connection_timeout_ms = config.initial_connection_timeout_ms;
         self.metadata = config.metadata;
+        self.adaptive_enable = config.adaptive_enable;
+        self.adaptive = config.adaptive;
         self
     }
 
@@ -179,6 +187,8 @@ impl GrpcReactionBuilder {
             connection_retry_attempts: self.connection_retry_attempts,
             initial_connection_timeout_ms: self.initial_connection_timeout_ms,
             metadata: self.metadata,
+            adaptive_enable: self.adaptive_enable,
+            adaptive: self.adaptive,
         };
 
         Ok(GrpcReaction::from_builder(
