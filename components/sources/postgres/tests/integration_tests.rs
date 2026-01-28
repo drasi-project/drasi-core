@@ -16,12 +16,14 @@ mod postgres_helpers;
 
 use anyhow::Result;
 use drasi_bootstrap_postgres::{
-    PostgresBootstrapConfig, PostgresBootstrapProvider,
-    SslMode as BootstrapSslMode, TableKeyConfig as BootstrapTableKeyConfig,
+    PostgresBootstrapConfig, PostgresBootstrapProvider, SslMode as BootstrapSslMode,
+    TableKeyConfig as BootstrapTableKeyConfig,
 };
 use drasi_lib::{DrasiLib, Query};
 use drasi_reaction_application::ApplicationReaction;
-use drasi_source_postgres::{PostgresReplicationSource, PostgresSourceConfig, SslMode, TableKeyConfig};
+use drasi_source_postgres::{
+    PostgresReplicationSource, PostgresSourceConfig, SslMode, TableKeyConfig,
+};
 use postgres_helpers::{
     create_logical_replication_slot, create_publication, create_test_table, delete_test_row,
     grant_replication, grant_table_access, insert_test_row, setup_replication_postgres,
@@ -191,7 +193,9 @@ async fn test_insert_detection() -> Result<()> {
     insert_test_row(&client, TEST_TABLE, 1, "Alice").await?;
 
     wait_for_query_results(&core, "test-query", |results| {
-        results.iter().any(|row| row.get("name") == Some(&"Alice".into()))
+        results
+            .iter()
+            .any(|row| row.get("name") == Some(&"Alice".into()))
     })
     .await?;
 
@@ -223,7 +227,9 @@ async fn test_update_detection() -> Result<()> {
 
     insert_test_row(&client, TEST_TABLE, 1, "Alice").await?;
     wait_for_query_results(&core, "test-query", |results| {
-        results.iter().any(|row| row.get("name") == Some(&"Alice".into()))
+        results
+            .iter()
+            .any(|row| row.get("name") == Some(&"Alice".into()))
     })
     .await?;
 
@@ -263,7 +269,9 @@ async fn test_delete_detection() -> Result<()> {
 
     insert_test_row(&client, TEST_TABLE, 1, "Alice").await?;
     wait_for_query_results(&core, "test-query", |results| {
-        results.iter().any(|row| row.get("name") == Some(&"Alice".into()))
+        results
+            .iter()
+            .any(|row| row.get("name") == Some(&"Alice".into()))
     })
     .await?;
 
@@ -298,7 +306,9 @@ async fn test_full_crud_cycle() -> Result<()> {
 
     insert_test_row(&client, TEST_TABLE, 1, "Alice").await?;
     wait_for_query_results(&core, "test-query", |results| {
-        results.iter().any(|row| row.get("name") == Some(&"Alice".into()))
+        results
+            .iter()
+            .any(|row| row.get("name") == Some(&"Alice".into()))
     })
     .await?;
 

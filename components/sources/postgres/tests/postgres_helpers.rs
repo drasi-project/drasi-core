@@ -203,16 +203,16 @@ pub async fn create_publication(
 }
 
 pub async fn insert_test_row(client: &Client, table: &str, id: i32, name: &str) -> Result<()> {
-    let sql = format!("INSERT INTO {} (id, name) VALUES ($1, $2)", quote_ident(table));
+    let sql = format!(
+        "INSERT INTO {} (id, name) VALUES ($1, $2)",
+        quote_ident(table)
+    );
     client.execute(&sql, &[&id, &name]).await?;
     Ok(())
 }
 
 pub async fn update_test_row(client: &Client, table: &str, id: i32, name: &str) -> Result<()> {
-    let sql = format!(
-        "UPDATE {} SET name = $1 WHERE id = $2",
-        quote_ident(table)
-    );
+    let sql = format!("UPDATE {} SET name = $1 WHERE id = $2", quote_ident(table));
     client.execute(&sql, &[&name, &id]).await?;
     Ok(())
 }
