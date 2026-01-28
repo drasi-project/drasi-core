@@ -60,8 +60,7 @@ async fn wait_for_query_results(
         }
         if start.elapsed() > timeout {
             anyhow::bail!(
-                "Timed out waiting for query results for query_id `{}`",
-                query_id
+                "Timed out waiting for query results for query_id `{query_id}`"
             )
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
