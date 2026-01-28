@@ -47,7 +47,7 @@ let query = query_builder.build().await;
 ```
 
 Let's load a Vehicle (v1) and a Zone (z1) as nodes into the query.
-We can do this by processsing a `SourceChange::Insert` into the query, this in turn takes an `Element`, which can be of either a `Element::Node` or `Element::Relation`, which represent nodes and relations in the graph model that can be queried.  When constructing an `Element`, you will also need to supply `ElementMetadata` which contains it's unique identity (`ElementReference`), any labels the be applied tro it on the labeled property graph and an effective from time.
+We can do this by processing a `SourceChange::Insert` into the query, this in turn takes an `Element`, which can be of either a `Element::Node` or `Element::Relation`, which represent nodes and relations in the graph model that can be queried.  When constructing an `Element`, you will also need to supply `ElementMetadata` which contains it's unique identity (`ElementReference`), any labels to be applied to it on the labeled property graph and an effective from time.
 
 ```rust
 query.process_source_change(SourceChange::Insert {
