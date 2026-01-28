@@ -16,7 +16,16 @@
 //!
 //! This plugin implements gRPC reactions for Drasi.
 //!
-//! # Example
+//! Supports both fixed and adaptive batching.
+//!
+//! Adaptive batching dynamically adjusts batch sizes and wait times based on traffic patterns
+//! Key features include:
+//! - **Dynamic Batching**: Adjusts batch size based on throughput
+//! - **Lazy Connection**: Connects only when first batch is ready
+//! - **Automatic Retry**: Exponential backoff with configurable retries
+//! - **Traffic Classification**: Five levels (Idle/Low/Medium/High/Burst)
+//!
+//! # Fixed batching Example
 //!
 //! ```rust,ignore
 //! use drasi_reaction_grpc::GrpcReaction;
@@ -27,6 +36,17 @@
 //!     .with_batch_size(200)
 //!     .with_timeout_ms(10000)
 //!     .build()?;
+//! ```
+//! # Adaptive batching Example
+//! ```rust,ignore
+//! use drasi_reaction_grpc::GrpcReaction;
+//!
+//! let reaction = GrpcReaction::builder("my-grpc-adaptive")
+//!    .with_queries(vec!["query1".to_string()])
+//!    .with_endpoint("grpc://localhost:50052")
+//!    .with_max_batch_size(500)
+//!    .with_adaptive_enable(true)
+//!    .build()?;
 //! ```
 
 mod adaptive_batcher;
@@ -40,11 +60,11 @@ pub use config::GrpcReactionConfig;
 pub use grpc::GrpcReaction;
 
 // Re-export types for plugin-grpc-adaptive
+use drasi_lib::reactions::common::AdaptiveBatchConfig;
 pub use helpers::convert_json_to_proto_struct;
 pub use proto::{
     ProcessResultsRequest, ProtoQueryResult, ProtoQueryResultItem, ReactionServiceClient,
 };
-use drasi_lib::reactions::common::AdaptiveBatchConfig;
 
 use std::collections::HashMap;
 
@@ -85,7 +105,7 @@ impl GrpcReactionBuilder {
             priority_queue_capacity: None,
             auto_start: true,
             adaptive_enable: false,
-            adaptive: AdaptiveBatchConfig::default(),  
+            adaptive: AdaptiveBatchConfig::default(),
         }
     }
 
@@ -140,6 +160,24 @@ impl GrpcReactionBuilder {
     /// Set the initial connection timeout in milliseconds
     pub fn with_initial_connection_timeout_ms(mut self, timeout_ms: u64) -> Self {
         self.initial_connection_timeout_ms = timeout_ms;
+        self
+    }
+
+    /// Enable or disable adaptive batching
+    pub fn with_adaptive_enable(mut self, enable: bool) -> Self {
+        self.adaptive_enable = enable;
+        self
+    }
+
+    /// Set the minimum batch size for adaptive batching
+    pub fn with_min_batch_size(mut self, size: usize) -> Self {
+        self.adaptive.adaptive_min_batch_size = size;
+        self
+    }
+
+    /// Set the maximum batch size for adaptive batching
+    pub fn with_max_batch_size(mut self, size: usize) -> Self {
+        self.adaptive.adaptive_max_batch_size = size;
         self
     }
 
@@ -245,5 +283,38 @@ mod tests {
 
         assert_eq!(reaction.id(), "test-reaction");
         assert_eq!(reaction.query_ids(), vec!["query1".to_string()]);
+    }
+
+    #[test]
+    fn test_grpc_adaptive_builder_defaults() {
+        let reaction = GrpcReactionBuilder::new("test-reaction")
+            .with_adaptive_enable(true)
+            .build()
+            .unwrap();
+        assert_eq!(reaction.id(), "test-reaction");
+    }
+
+    #[test]
+    fn test_grpc_adaptive_builder_custom() {
+        let reaction = GrpcReaction::builder("test-reaction")
+            .with_endpoint("grpc://api.example.com:50052")
+            .with_queries(vec!["query1".to_string()])
+            .with_max_batch_size(500)
+            .with_adaptive_enable(true)
+            .build()
+            .unwrap();
+
+        assert_eq!(reaction.id(), "test-reaction");
+        assert_eq!(reaction.query_ids(), vec!["query1".to_string()]);
+    }
+
+    #[test]
+    fn test_grpc_adaptive_new_constructor() {
+        let mut config = config::GrpcReactionConfig {
+            adaptive_enable: true,
+            ..Default::default()
+        };
+        let reaction = GrpcReaction::new("test-reaction", vec!["query1".to_string()], config);
+        assert_eq!(reaction.id(), "test-reaction");
     }
 }
