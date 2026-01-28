@@ -17,6 +17,7 @@
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
 use log::{debug, info};
+use postgres_native_tls::MakeTlsConnector;
 use serde_json::Value;
 use std::error::Error;
 use std::sync::Arc;
@@ -112,29 +113,78 @@ impl PostgresExecutor {
     pub async fn new(config: &PostgresStoredProcReactionConfig) -> Result<Self> {
         let port = config.get_port();
 
+        // Get credentials from identity provider or fall back to user/password
+        let (username, password) = if let Some(provider) = &config.identity_provider {
+            debug!("Using identity provider for authentication");
+            let credentials = provider.get_credentials().await?;
+            credentials.into_auth_pair()
+        } else {
+            debug!("Using username/password for authentication");
+            (config.user.clone(), config.password.clone())
+        };
+
         // Build connection string
         let ssl_mode = if config.ssl { "require" } else { "disable" };
+
+        // Log connection attempt (without password)
+        debug!(
+            "Connection details - host: {}, port: {}, user: {}, database: {}, ssl: {}",
+            config.hostname, port, username, config.database, ssl_mode
+        );
+
         let connection_string = format!(
             "host={} port={} user={} password={} dbname={} sslmode={}",
-            config.hostname, port, config.user, config.password, config.database, ssl_mode
+            config.hostname, port, username, password, config.database, ssl_mode
         );
 
         info!(
-            "Connecting to PostgreSQL: {}:{}/{}",
-            config.hostname, port, config.database
+            "Connecting to PostgreSQL: {}:{}/{} (SSL: {})",
+            config.hostname, port, config.database, config.ssl
         );
 
-        // Connect to database
-        let (client, connection) = tokio_postgres::connect(&connection_string, NoTls)
-            .await
-            .map_err(|e| anyhow!("Failed to connect to database: {e}"))?;
+        // Connect to database with appropriate TLS configuration
+        let client = if config.ssl {
+            // Use native TLS with system certificates (includes Azure PostgreSQL CA)
+            // Note: Azure PostgreSQL uses DigiCert Global Root G2, which should be in system trust store
+            let tls_connector = native_tls::TlsConnector::builder()
+                .min_protocol_version(Some(native_tls::Protocol::Tlsv12))
+                .danger_accept_invalid_hostnames(false) // Validate hostname matches certificate
+                .danger_accept_invalid_certs(false) // Ensure we validate certificates
+                .build()
+                .map_err(|e| anyhow!("Failed to create TLS connector: {e}"))?;
+            let connector = MakeTlsConnector::new(tls_connector);
 
-        // Spawn connection handler
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                log::error!("PostgreSQL connection error: {e}");
-            }
-        });
+            debug!("Attempting SSL connection to PostgreSQL...");
+            debug!("TLS connector created, attempting connection with sslmode=require");
+            let (client, connection) = tokio_postgres::connect(&connection_string, connector)
+                .await
+                .map_err(|e| {
+                    log::error!("Detailed SSL connection error: {:?}", e);
+                    anyhow!("Failed to connect to database with SSL: {}. Ensure SSL is enabled on the server and certificates are valid.", e)
+                })?;
+
+            // Spawn connection handler
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    log::error!("PostgreSQL connection error: {e}");
+                }
+            });
+
+            client
+        } else {
+            let (client, connection) = tokio_postgres::connect(&connection_string, NoTls)
+                .await
+                .map_err(|e| anyhow!("Failed to connect to database: {e}"))?;
+
+            // Spawn connection handler
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    log::error!("PostgreSQL connection error: {e}");
+                }
+            });
+
+            client
+        };
 
         info!(
             "Connected to PostgreSQL: {}:{}/{}",

@@ -28,6 +28,14 @@ const DEFAULT_AZURE_SCOPE: &str = "https://ossrdbms-aad.database.windows.net/.de
 ///
 /// Each instance represents a single authentication method.
 /// Create multiple providers if you need fallback behavior.
+///
+/// # Username Format
+///
+/// For Azure Database for PostgreSQL, the username should be in the format:
+/// `username@servername` (e.g., `myuser@myserver`).
+///
+/// For Azure AD authentication, use the Azure AD principal name
+/// (e.g., `user@tenant.onmicrosoft.com`).
 #[derive(Clone)]
 pub struct AzureIdentityProvider {
     credential: Arc<dyn TokenCredential>,
