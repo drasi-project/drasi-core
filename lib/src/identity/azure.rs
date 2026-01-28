@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use azure_core::credentials::TokenCredential;
 use azure_identity::{
     AzureCliCredential, DeveloperToolsCredential, ManagedIdentityCredential,
-    ManagedIdentityCredentialOptions, UserAssignedId,
+    ManagedIdentityCredentialOptions, UserAssignedId, WorkloadIdentityCredential,
 };
 use std::sync::Arc;
 
@@ -82,20 +82,6 @@ impl AzureIdentityProvider {
         })
     }
 
-    /// Create provider using Azure CLI credentials.
-    ///
-    /// This is appropriate for local development when the developer has
-    /// run `az login` in their terminal.
-    pub fn with_cli(username: impl Into<String>) -> Result<Self> {
-        let credential = AzureCliCredential::new(None)
-            .map_err(|e| anyhow!("Failed to create Azure CLI credential: {e}"))?;
-
-        Ok(Self {
-            credential: credential as Arc<dyn TokenCredential>,
-            username: username.into(),
-            scope: DEFAULT_AZURE_SCOPE.to_string(),
-        })
-    }
 
     /// Create provider using Azure default credential chain.
     ///
@@ -122,6 +108,36 @@ impl AzureIdentityProvider {
     pub fn with_default_credentials(username: impl Into<String>) -> Result<Self> {
         let credential = DeveloperToolsCredential::new(None)
             .map_err(|e| anyhow!("Failed to create developer tools credential: {e}"))?;
+
+        Ok(Self {
+            credential: credential as Arc<dyn TokenCredential>,
+            username: username.into(),
+            scope: DEFAULT_AZURE_SCOPE.to_string(),
+        })
+    }
+
+    /// Create provider using Workload Identity for AKS.
+    ///
+    /// This uses environment variables injected by AKS Workload Identity:
+    /// - `AZURE_CLIENT_ID`
+    /// - `AZURE_TENANT_ID`
+    /// - `AZURE_FEDERATED_TOKEN_FILE`
+    ///
+    /// This is the **recommended method for AKS deployments** with Workload Identity enabled.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use drasi_lib::identity::AzureIdentityProvider;
+    ///
+    /// // For AKS with Workload Identity
+    /// let provider = AzureIdentityProvider::with_workload_identity(
+    ///     "myidentity"  // The managed identity name
+    /// )?;
+    /// ```
+    pub fn with_workload_identity(username: impl Into<String>) -> Result<Self> {
+        let credential = WorkloadIdentityCredential::new(None)
+            .map_err(|e| anyhow!("Failed to create workload identity credential: {e}"))?;
 
         Ok(Self {
             credential: credential as Arc<dyn TokenCredential>,
@@ -210,23 +226,7 @@ mod tests {
         let _cloned = provider.clone();
     }
 
-    #[test]
-    fn test_with_cli_creates_cli_credential() {
-        // This test will fail if Azure CLI is not installed, but validates the API
-        let result = AzureIdentityProvider::with_cli("user@tenant.onmicrosoft.com");
-        // Just check that the function exists and returns a Result
-        // We can't test actual authentication without CLI setup
-        match result {
-            Ok(provider) => {
-                assert_eq!(provider.username, "user@tenant.onmicrosoft.com");
-                assert_eq!(provider.scope, DEFAULT_AZURE_SCOPE);
-            }
-            Err(_) => {
-                // Expected if Azure CLI is not installed or configured
-            }
-        }
-    }
-
+ 
     #[test]
     fn test_with_default_credentials() {
         // Test that the function creates a provider
@@ -318,32 +318,6 @@ mod tests {
 #[cfg(test)]
 mod integration_tests {
     use super::*;
-
-    /// Integration test that requires actual Azure credentials
-    /// Run with: cargo test --features azure-identity,integration-tests
-    /// Requires: az login or managed identity configured
-    #[tokio::test]
-    #[ignore] // Ignored by default, run explicitly with --ignored
-    async fn test_azure_cli_authentication_real() {
-        let provider = AzureIdentityProvider::with_cli("user@tenant.onmicrosoft.com")
-            .expect("Failed to create Azure CLI provider. Make sure 'az login' was run.");
-
-        let credentials = provider
-            .get_credentials()
-            .await
-            .expect("Failed to get credentials. Make sure you're logged in with 'az login'.");
-
-        match credentials {
-            Credentials::Token { username, token } => {
-                assert_eq!(username, "user@tenant.onmicrosoft.com");
-                assert!(!token.is_empty());
-                assert!(token.len() > 100); // JWT tokens are typically quite long
-                println!("✓ Successfully authenticated with Azure CLI");
-                println!("  Token length: {}", token.len());
-            }
-            _ => panic!("Expected Token credentials"),
-        }
-    }
 
     /// Integration test for managed identity
     /// Only works when running in Azure with managed identity configured
