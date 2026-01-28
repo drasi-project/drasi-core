@@ -177,51 +177,70 @@ pub async fn create_test_table(client: &Client, table_name: &str) -> Result<()> 
     Ok(())
 }
 
+fn quote_ident(ident: &str) -> String {
+    // Quote a PostgreSQL identifier by wrapping it in double quotes
+    // and doubling any embedded double quotes.
+    format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
 pub async fn create_publication(
     client: &Client,
     publication_name: &str,
     tables: &[String],
 ) -> Result<()> {
-    let tables_list = tables.join(", ");
+    let tables_list = tables
+        .iter()
+        .map(|t| quote_ident(t))
+        .collect::<Vec<_>>()
+        .join(", ");
     let sql = format!(
-        "CREATE PUBLICATION {publication_name} FOR TABLE {tables_list}"
+        "CREATE PUBLICATION {} FOR TABLE {}",
+        quote_ident(publication_name),
+        tables_list
     );
     execute_sql(client, &sql).await?;
     Ok(())
 }
 
 pub async fn insert_test_row(client: &Client, table: &str, id: i32, name: &str) -> Result<()> {
-    let sql = format!("INSERT INTO {table} (id, name) VALUES ($1, $2)");
+    let sql = format!("INSERT INTO {} (id, name) VALUES ($1, $2)", quote_ident(table));
     client.execute(&sql, &[&id, &name]).await?;
     Ok(())
 }
 
 pub async fn update_test_row(client: &Client, table: &str, id: i32, name: &str) -> Result<()> {
-    let sql = format!("UPDATE {table} SET name = $1 WHERE id = $2");
+    let sql = format!(
+        "UPDATE {} SET name = $1 WHERE id = $2",
+        quote_ident(table)
+    );
     client.execute(&sql, &[&name, &id]).await?;
     Ok(())
 }
 
 pub async fn delete_test_row(client: &Client, table: &str, id: i32) -> Result<()> {
-    let sql = format!("DELETE FROM {table} WHERE id = $1");
+    let sql = format!("DELETE FROM {} WHERE id = $1", quote_ident(table));
     client.execute(&sql, &[&id]).await?;
     Ok(())
 }
 
 pub async fn grant_replication(client: &Client, user: &str) -> Result<()> {
-    let sql = format!("ALTER ROLE {user} WITH REPLICATION");
+    let sql = format!("ALTER ROLE {} WITH REPLICATION", quote_ident(user));
     execute_sql(client, &sql).await?;
     Ok(())
 }
 
 pub async fn grant_table_access(client: &Client, table: &str, user: &str) -> Result<()> {
-    let sql = format!("GRANT SELECT ON TABLE {table} TO {user}");
+    let sql = format!(
+        "GRANT SELECT ON TABLE {} TO {}",
+        quote_ident(table),
+        quote_ident(user)
+    );
     execute_sql(client, &sql).await?;
     Ok(())
 }
 
 pub async fn create_logical_replication_slot(client: &Client, slot_name: &str) -> Result<()> {
-    let sql = format!("SELECT pg_create_logical_replication_slot('{slot_name}', 'pgoutput')");
-    let _ = client.query_one(&sql, &[]).await?;
+    let sql = "SELECT pg_create_logical_replication_slot($1, 'pgoutput')";
+    let _ = client.query_one(sql, &[&slot_name]).await?;
     Ok(())
 }
