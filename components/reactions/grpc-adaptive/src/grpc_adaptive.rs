@@ -521,33 +521,7 @@ impl Reaction for AdaptiveGrpcReaction {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<()> {
-        info!("[{}] Stopping adaptive gRPC reaction", self.base.id);
-
-        // Set status to Stopping
-        self.base
-            .set_status_with_event(
-                ComponentStatus::Stopping,
-                Some("Stopping adaptive gRPC reaction".to_string()),
-            )
-            .await?;
-
-        // Perform common cleanup
-        self.base.stop_common().await?;
-
-        // Wait a moment for cleanup
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Set status to Stopped
-        self.base
-            .set_status_with_event(
-                ComponentStatus::Stopped,
-                Some("Adaptive gRPC reaction stopped successfully".to_string()),
-            )
-            .await?;
-
-        Ok(())
-    }
+    async fn stop(&self) 
 
     async fn status(&self) -> ComponentStatus {
         self.base.get_status().await
