@@ -185,4 +185,126 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_multiple_providers_with_different_scopes() {
+        let provider1 = AzureIdentityProvider::with_managed_identity(
+            "user1@tenant.onmicrosoft.com",
+            "client-id-1",
+        )
+        .unwrap()
+        .with_scope("https://scope1.com/.default");
+
+        let provider2 = AzureIdentityProvider::with_managed_identity(
+            "user2@tenant.onmicrosoft.com",
+            "client-id-2",
+        )
+        .unwrap()
+        .with_scope("https://scope2.com/.default");
+
+        assert_eq!(provider1.username, "user1@tenant.onmicrosoft.com");
+        assert_eq!(provider1.scope, "https://scope1.com/.default");
+
+        assert_eq!(provider2.username, "user2@tenant.onmicrosoft.com");
+        assert_eq!(provider2.scope, "https://scope2.com/.default");
+    }
+
+    #[test]
+    fn test_username_formats() {
+        // Test different valid username formats
+        let formats = vec![
+            "user@tenant.onmicrosoft.com",
+            "first.last@company.com",
+            "user_name@domain.com",
+            "user-name@sub.domain.com",
+        ];
+
+        for username in formats {
+            let provider = AzureIdentityProvider::with_managed_identity(username, "client-id")
+                .unwrap();
+            assert_eq!(provider.username, username);
+        }
+    }
+
+    #[test]
+    fn test_scope_formats() {
+        let provider = AzureIdentityProvider::with_managed_identity(
+            "user@tenant.onmicrosoft.com",
+            "client-id",
+        )
+        .unwrap();
+
+        // Test different scope formats
+        let scopes = vec![
+            "https://ossrdbms-aad.database.windows.net/.default",
+            "https://management.azure.com/.default",
+            "https://graph.microsoft.com/.default",
+            "api://custom-api/.default",
+        ];
+
+        for scope in scopes {
+            let p = provider.clone().with_scope(scope);
+            assert_eq!(p.scope, scope);
+        }
+    }
+
+    #[test]
+    fn test_provider_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<AzureIdentityProvider>();
+    }
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+
+    /// Integration test that requires actual Azure credentials
+    /// Run with: cargo test --features azure-identity,integration-tests
+    /// Requires: az login or managed identity configured
+    #[tokio::test]
+    #[ignore] // Ignored by default, run explicitly with --ignored
+    async fn test_azure_cli_authentication_real() {
+        let provider = AzureIdentityProvider::with_cli("user@tenant.onmicrosoft.com")
+            .expect("Failed to create Azure CLI provider. Make sure 'az login' was run.");
+
+        let credentials = provider
+            .get_credentials()
+            .await
+            .expect("Failed to get credentials. Make sure you're logged in with 'az login'.");
+
+        match credentials {
+            Credentials::Token { username, token } => {
+                assert_eq!(username, "user@tenant.onmicrosoft.com");
+                assert!(!token.is_empty());
+                assert!(token.len() > 100); // JWT tokens are typically quite long
+                println!("✓ Successfully authenticated with Azure CLI");
+                println!("  Token length: {}", token.len());
+            }
+            _ => panic!("Expected Token credentials"),
+        }
+    }
+
+    /// Integration test for managed identity
+    /// Only works when running in Azure with managed identity configured
+    #[tokio::test]
+    #[ignore]
+    async fn test_managed_identity_authentication_real() {
+        let provider = AzureIdentityProvider::new("user@tenant.onmicrosoft.com")
+            .expect("Failed to create managed identity provider");
+
+        let credentials = provider
+            .get_credentials()
+            .await
+            .expect("Failed to get credentials. This test only works in Azure with managed identity.");
+
+        match credentials {
+            Credentials::Token { username, token } => {
+                assert_eq!(username, "user@tenant.onmicrosoft.com");
+                assert!(!token.is_empty());
+                println!("✓ Successfully authenticated with Managed Identity");
+            }
+            _ => panic!("Expected Token credentials"),
+        }
+    }
 }

@@ -209,5 +209,192 @@ mod tests {
 
         let _cloned = provider.clone();
     }
+
+    #[test]
+    fn test_multiple_providers_different_regions() {
+        let config = SdkConfig::builder().build();
+
+        let provider1 = AwsIdentityProvider::with_config(
+            config.clone(),
+            "user1",
+            "db1.rds.amazonaws.com",
+            5432,
+            "us-west-2",
+        );
+
+        let provider2 = AwsIdentityProvider::with_config(
+            config,
+            "user2",
+            "db2.rds.amazonaws.com",
+            3306,
+            "eu-west-1",
+        );
+
+        assert_eq!(provider1.username, "user1");
+        assert_eq!(provider1.region, "us-west-2");
+        assert_eq!(provider1.hostname, "db1.rds.amazonaws.com");
+        assert_eq!(provider1.port, 5432);
+
+        assert_eq!(provider2.username, "user2");
+        assert_eq!(provider2.region, "eu-west-1");
+        assert_eq!(provider2.hostname, "db2.rds.amazonaws.com");
+        assert_eq!(provider2.port, 3306);
+    }
+
+    #[test]
+    fn test_different_database_ports() {
+        let config = SdkConfig::builder().build();
+
+        // PostgreSQL
+        let pg_provider = AwsIdentityProvider::with_config(
+            config.clone(),
+            "pguser",
+            "pg.rds.amazonaws.com",
+            5432,
+            "us-east-1",
+        );
+        assert_eq!(pg_provider.port, 5432);
+
+        // MySQL
+        let mysql_provider = AwsIdentityProvider::with_config(
+            config.clone(),
+            "mysqluser",
+            "mysql.rds.amazonaws.com",
+            3306,
+            "us-east-1",
+        );
+        assert_eq!(mysql_provider.port, 3306);
+
+        // Aurora PostgreSQL
+        let aurora_provider = AwsIdentityProvider::with_config(
+            config,
+            "aurorauser",
+            "aurora-cluster.cluster-xxx.us-east-1.rds.amazonaws.com",
+            5432,
+            "us-east-1",
+        );
+        assert_eq!(aurora_provider.port, 5432);
+    }
+
+    #[test]
+    fn test_valid_rds_hostnames() {
+        let config = SdkConfig::builder().build();
+
+        let hostnames = vec![
+            "mydb.123456789012.us-east-1.rds.amazonaws.com",
+            "aurora-cluster.cluster-abc123.eu-west-1.rds.amazonaws.com",
+            "mydb-instance-1.abc123def456.ap-southeast-2.rds.amazonaws.com",
+        ];
+
+        for hostname in hostnames {
+            let provider = AwsIdentityProvider::with_config(
+                config.clone(),
+                "testuser",
+                hostname,
+                5432,
+                "us-east-1",
+            );
+            assert_eq!(provider.hostname, hostname);
+        }
+    }
+
+    #[test]
+    fn test_valid_aws_regions() {
+        let config = SdkConfig::builder().build();
+
+        let regions = vec![
+            "us-east-1",
+            "us-west-2",
+            "eu-west-1",
+            "eu-central-1",
+            "ap-southeast-1",
+            "ap-northeast-1",
+            "sa-east-1",
+            "ca-central-1",
+        ];
+
+        for region in regions {
+            let provider = AwsIdentityProvider::with_config(
+                config.clone(),
+                "testuser",
+                "test.rds.amazonaws.com",
+                5432,
+                region,
+            );
+            assert_eq!(provider.region, region);
+        }
+    }
+
+    #[test]
+    fn test_provider_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<AwsIdentityProvider>();
+    }
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+
+    /// Integration test that requires actual AWS credentials and RDS instance
+    /// Run with: cargo test --features aws-identity,integration-tests -- --ignored
+    /// Requires: AWS credentials configured (env vars, ~/.aws/credentials, or instance profile)
+    #[tokio::test]
+    #[ignore] // Ignored by default, run explicitly with --ignored
+    async fn test_aws_iam_authentication_real() {
+        // NOTE: Update these values to match your actual RDS instance
+        let username = "iamuser";
+        let hostname = "mydb.123456789012.us-east-1.rds.amazonaws.com";
+        let port = 5432;
+        let region = "us-east-1";
+
+        let provider = AwsIdentityProvider::with_region(username, hostname, port, region)
+            .await
+            .expect("Failed to create AWS provider. Make sure AWS credentials are configured.");
+
+        let credentials = provider
+            .get_credentials()
+            .await
+            .expect("Failed to get credentials. Make sure AWS credentials are valid and RDS instance exists.");
+
+        match credentials {
+            Credentials::Token { username: user, token } => {
+                assert_eq!(user, username);
+                assert!(!token.is_empty());
+                assert!(token.contains(&hostname)); // Token should contain the hostname
+                println!("✓ Successfully generated AWS IAM auth token");
+                println!("  Token length: {}", token.len());
+                println!("  Token is a signed URL for RDS authentication");
+            }
+            _ => panic!("Expected Token credentials"),
+        }
+    }
+
+    /// Test token generation for Aurora cluster
+    #[tokio::test]
+    #[ignore]
+    async fn test_aurora_iam_authentication_real() {
+        let username = "iamuser";
+        let hostname = "aurora-cluster.cluster-xxx.us-east-1.rds.amazonaws.com";
+        let port = 5432;
+
+        let provider = AwsIdentityProvider::new(username, hostname, port)
+            .await
+            .expect("Failed to create AWS provider");
+
+        let result = provider.get_credentials().await;
+
+        match result {
+            Ok(Credentials::Token { token, .. }) => {
+                assert!(!token.is_empty());
+                println!("✓ Successfully generated Aurora IAM auth token");
+            }
+            Ok(_) => panic!("Expected Token credentials"),
+            Err(e) => {
+                println!("⚠ Failed to generate token (expected if Aurora cluster doesn't exist)");
+                println!("  Error: {}", e);
+            }
+        }
+    }
 }
 
