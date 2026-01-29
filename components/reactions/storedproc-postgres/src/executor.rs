@@ -144,23 +144,21 @@ impl PostgresExecutor {
 
         // Connect to database with appropriate TLS configuration
         let client = if config.ssl {
-            // Use native TLS with system certificates (includes Azure PostgreSQL CA)
-            // Note: Azure PostgreSQL uses DigiCert Global Root G2, which should be in system trust store
+            // Use native TLS with system certificates
             let tls_connector = native_tls::TlsConnector::builder()
                 .min_protocol_version(Some(native_tls::Protocol::Tlsv12))
-                .danger_accept_invalid_hostnames(false) // Validate hostname matches certificate
-                .danger_accept_invalid_certs(false) // Ensure we validate certificates
+                .danger_accept_invalid_hostnames(false)
+                .danger_accept_invalid_certs(false)
                 .build()
                 .map_err(|e| anyhow!("Failed to create TLS connector: {e}"))?;
             let connector = MakeTlsConnector::new(tls_connector);
 
             debug!("Attempting SSL connection to PostgreSQL...");
-            debug!("TLS connector created, attempting connection with sslmode=require");
             let (client, connection) = tokio_postgres::connect(&connection_string, connector)
                 .await
                 .map_err(|e| {
-                    log::error!("Detailed SSL connection error: {:?}", e);
-                    anyhow!("Failed to connect to database with SSL: {}. Ensure SSL is enabled on the server and certificates are valid.", e)
+                    log::error!("SSL connection error: {:?}", e);
+                    anyhow!("Failed to connect to database with SSL: {}", e)
                 })?;
 
             // Spawn connection handler
