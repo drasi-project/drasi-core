@@ -103,6 +103,75 @@ impl AwsIdentityProvider {
             region: region.into(),
         }
     }
+
+    /// Create a provider that assumes an IAM role.
+    ///
+    /// This method assumes the specified IAM role using STS and configures the provider
+    /// to use the temporary credentials from the assumed role session.
+    ///
+    /// # Arguments
+    /// * `username` - IAM database username
+    /// * `hostname` - RDS endpoint hostname
+    /// * `port` - Database port (typically 5432 for PostgreSQL, 3306 for MySQL)
+    /// * `role_arn` - ARN of the IAM role to assume (e.g., "arn:aws:iam::123456789012:role/RDSAccessRole")
+    /// * `session_name` - Optional session name (defaults to "drasi-rds-session")
+    ///
+    /// # Example
+    /// ```no_run
+    /// use drasi_lib::identity::AwsIdentityProvider;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> anyhow::Result<()> {
+    ///     let provider = AwsIdentityProvider::with_assumed_role(
+    ///         "db_user",
+    ///         "mydb.rds.amazonaws.com",
+    ///         5432,
+    ///         "arn:aws:iam::123456789012:role/RDSAccessRole",
+    ///         None
+    ///     ).await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn with_assumed_role(
+        username: impl Into<String>,
+        hostname: impl Into<String>,
+        port: u16,
+        role_arn: impl Into<String>,
+        session_name: Option<String>,
+    ) -> Result<Self> {
+        use aws_config::sts::AssumeRoleProvider;
+        use aws_sdk_sts::config::Region;
+
+        // Load the base AWS configuration
+        let base_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+        let region = base_config
+            .region()
+            .ok_or_else(|| anyhow!("AWS region not configured"))?
+            .clone();
+
+        // Set up the role assumption provider
+        let session = session_name.unwrap_or_else(|| "drasi-rds-session".to_string());
+        let role_provider = AssumeRoleProvider::builder(role_arn.into())
+            .session_name(session)
+            .region(Region::from(region.clone()))
+            .build()
+            .await;
+
+        // Build a new config with the assumed role credentials
+        let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .credentials_provider(role_provider)
+            .region(region.clone())
+            .load()
+            .await;
+
+        Ok(Self {
+            config: Arc::new(config),
+            username: username.into(),
+            hostname: hostname.into(),
+            port,
+            region: region.to_string(),
+        })
+    }
 }
 
 #[async_trait]

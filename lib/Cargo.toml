@@ -65,11 +65,12 @@ reqwest = { version = "0.12", optional = true, default-features = false, feature
 
 aws-config = { version = "1.5", optional = true }
 aws-sdk-rds = { version = "1.77", optional = true }
+aws-sdk-sts = { version = "1.50", optional = true }
 
 [features]
 default = []
 azure-identity = ["dep:azure_identity", "dep:azure_core", "dep:reqwest"]
-aws-identity = ["dep:aws-config", "dep:aws-sdk-rds"]
+aws-identity = ["dep:aws-config", "dep:aws-sdk-rds", "dep:aws-sdk-sts"]
 all-identity = ["azure-identity", "aws-identity"]
 
 [dev-dependencies]
