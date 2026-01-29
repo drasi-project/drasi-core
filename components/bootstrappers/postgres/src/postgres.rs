@@ -30,34 +30,54 @@ use drasi_lib::channels::SourceChangeEvent;
 pub use drasi_source_postgres::{PostgresSourceConfig, SslMode, TableKeyConfig};
 
 /// Validates and quotes a PostgreSQL identifier to prevent SQL injection.
-/// Only allows alphanumeric characters and underscores.
+///
+/// Supports schema-qualified identifiers (e.g., "schema.table") by splitting on dots
+/// and validating/quoting each part individually.
+///
+/// Each part must:
+/// - Not be empty
+/// - Start with a letter or underscore
+/// - Contain only alphanumeric characters and underscores
 fn quote_identifier(identifier: &str) -> Result<String> {
     // Validate: identifier cannot be empty
     if identifier.is_empty() {
         return Err(anyhow!("Identifier cannot be empty"));
     }
 
-    // Validate: must start with a letter or underscore
-    let first_char = identifier.chars().next().unwrap();
-    if !first_char.is_ascii_alphabetic() && first_char != '_' {
-        return Err(anyhow!(
-            "Identifier must start with a letter or underscore: {identifier}"
-        ));
+    let parts: Vec<&str> = identifier.split('.').collect();
+    let mut quoted_parts = Vec::with_capacity(parts.len());
+
+    for part in parts {
+        // Validate: part cannot be empty (catches ".table", "schema.", "schema..table")
+        if part.is_empty() {
+            return Err(anyhow!(
+                "Identifier contains empty part: '{identifier}'"
+            ));
+        }
+
+        // Validate: must start with a letter or underscore
+        let first_char = part.chars().next().unwrap();
+        if !first_char.is_ascii_alphabetic() && first_char != '_' {
+            return Err(anyhow!(
+                "Identifier part must start with a letter or underscore: '{part}'"
+            ));
+        }
+
+        // Validate: only allow alphanumeric and underscore characters
+        if !part
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Err(anyhow!(
+                "Identifier part contains invalid characters: '{part}'"
+            ));
+        }
+
+        // Double-quote the identifier part (PostgreSQL standard for identifiers)
+        quoted_parts.push(format!("\"{}\"", part));
     }
 
-    // Validate: only allow alphanumeric and underscore characters
-    if !identifier
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
-        return Err(anyhow!(
-            "Identifier contains invalid characters: {identifier}"
-        ));
-    }
-
-    // Double-quote the identifier (PostgreSQL standard for identifiers)
-    // Also escape any internal double quotes by doubling them
-    Ok(format!("\"{}\"", identifier.replace('"', "\"\"")))
+    Ok(quoted_parts.join("."))
 }
 
 /// Bootstrap provider for PostgreSQL sources
@@ -791,4 +811,133 @@ impl PostgresBootstrapHandler {
 struct ColumnInfo {
     name: String,
     type_oid: i32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_quote_identifier_simple_table_names() {
+        // Valid simple table names
+        assert_eq!(quote_identifier("users").unwrap(), "\"users\"");
+        assert_eq!(quote_identifier("_temp").unwrap(), "\"_temp\"");
+        assert_eq!(quote_identifier("table_123").unwrap(), "\"table_123\"");
+        assert_eq!(quote_identifier("MyTable").unwrap(), "\"MyTable\"");
+        assert_eq!(quote_identifier("a").unwrap(), "\"a\"");
+        assert_eq!(quote_identifier("_").unwrap(), "\"_\"");
+    }
+
+    #[test]
+    fn test_quote_identifier_schema_qualified_names() {
+        // Schema-qualified identifiers
+        assert_eq!(
+            quote_identifier("public.users").unwrap(),
+            "\"public\".\"users\""
+        );
+        assert_eq!(
+            quote_identifier("analytics.user_events").unwrap(),
+            "\"analytics\".\"user_events\""
+        );
+        assert_eq!(
+            quote_identifier("my_schema.my_table").unwrap(),
+            "\"my_schema\".\"my_table\""
+        );
+    }
+
+    #[test]
+    fn test_quote_identifier_empty_identifier() {
+        let result = quote_identifier("");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_quote_identifier_empty_parts() {
+        // Empty schema part
+        let result = quote_identifier(".table");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty part"));
+
+        // Empty table part
+        let result = quote_identifier("schema.");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty part"));
+
+        // Double dots
+        let result = quote_identifier("schema..table");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty part"));
+    }
+
+    #[test]
+    fn test_quote_identifier_invalid_first_char() {
+        // Starts with number
+        let result = quote_identifier("123table");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("start with a letter or underscore"));
+
+        // Schema part starts with number
+        let result = quote_identifier("1schema.table");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("start with a letter or underscore"));
+
+        // Table part starts with number
+        let result = quote_identifier("schema.2table");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("start with a letter or underscore"));
+    }
+
+    #[test]
+    fn test_quote_identifier_invalid_characters() {
+        // Space in name
+        let result = quote_identifier("my table");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid characters"));
+
+        // Special characters
+        let result = quote_identifier("table$name");
+        assert!(result.is_err());
+
+        let result = quote_identifier("table-name");
+        assert!(result.is_err());
+
+        let result = quote_identifier("table;DROP TABLE users;--");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_quote_identifier_sql_injection_attempts() {
+        // Attempt to break out of quotes
+        let result = quote_identifier("users\"--");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid characters"));
+
+        // Attempt SQL injection through schema
+        let result = quote_identifier("public\".\"users;DROP TABLE users;--");
+        assert!(result.is_err());
+
+        // Attempt with semicolon
+        let result = quote_identifier("users; DROP TABLE users");
+        assert!(result.is_err());
+
+        // Attempt with single quotes
+        let result = quote_identifier("users'--");
+        assert!(result.is_err());
+    }
 }
