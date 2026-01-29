@@ -27,7 +27,7 @@ use tokio_postgres::{Client, NoTls, Row, Transaction};
 use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 use drasi_lib::channels::SourceChangeEvent;
 
-pub use drasi_source_postgres::{PostgresSourceConfig, SslMode, TableKeyConfig};
+pub use crate::config::{PostgresBootstrapConfig, SslMode, TableKeyConfig};
 
 /// Validates and quotes a PostgreSQL identifier to prevent SQL injection.
 ///
@@ -90,9 +90,9 @@ pub struct PostgresBootstrapProvider {
 
 impl PostgresBootstrapProvider {
     /// Create a new PostgreSQL bootstrap provider with the given configuration
-    pub fn new(postgres_config: PostgresSourceConfig) -> Self {
+    pub fn new(postgres_config: PostgresBootstrapConfig) -> Self {
         Self {
-            config: PostgresConfig::from_source_config(postgres_config),
+            config: PostgresConfig::from_bootstrap_config(postgres_config),
         }
     }
 
@@ -225,7 +225,7 @@ impl PostgresBootstrapProviderBuilder {
 
     /// Build the PostgresBootstrapProvider
     pub fn build(self) -> PostgresBootstrapProvider {
-        let config = PostgresSourceConfig {
+        let config = PostgresBootstrapConfig {
             host: self.host,
             port: self.port,
             database: self.database,
@@ -299,7 +299,7 @@ struct PostgresConfig {
 }
 
 impl PostgresConfig {
-    fn from_source_config(postgres_config: PostgresSourceConfig) -> Self {
+    fn from_bootstrap_config(postgres_config: PostgresBootstrapConfig) -> Self {
         PostgresConfig {
             host: postgres_config.host.clone(),
             port: postgres_config.port,
