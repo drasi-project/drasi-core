@@ -371,11 +371,6 @@ impl InMemoryElementIndex {
             .entry((query_join.id.clone(), value_hash))
             .or_default();
 
-        // Defensively handle missing join key - this can occur during:
-        // 1. Out-of-order event delivery (delete arrives before insert completes)
-        // 2. Crash recovery scenarios
-        // 3. Hot join configuration changes
-        // 4. Race conditions between concurrent insert/delete operations
         let did_remove = match partial_joins.get_mut(join_key) {
             Some(element_set) => element_set.remove(old_element),
             None => {
