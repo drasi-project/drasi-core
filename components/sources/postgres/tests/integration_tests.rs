@@ -25,9 +25,9 @@ use drasi_source_postgres::{
     PostgresReplicationSource, PostgresSourceConfig, SslMode, TableKeyConfig,
 };
 use postgres_helpers::{
-    create_logical_replication_slot, create_publication, create_test_table, delete_test_row,
-    grant_replication, grant_table_access, insert_test_row, setup_replication_postgres,
-    update_test_row,
+    create_logical_replication_slot, create_publication, create_test_table,
+    create_test_table_replica_identity_default, delete_test_row, grant_replication,
+    grant_table_access, insert_test_row, setup_replication_postgres, update_test_row,
 };
 use serial_test::serial;
 use std::sync::Arc;
@@ -235,6 +235,49 @@ async fn test_update_detection() -> Result<()> {
         results
             .iter()
             .any(|row| row.get("name") == Some(&"Alice Updated".into()))
+    })
+    .await?;
+
+    core.stop().await?;
+    pg.cleanup().await;
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn test_update_without_old_tuple_stays_update() -> Result<()> {
+    init_logging();
+
+    let pg = setup_replication_postgres().await;
+    let client = pg.get_client().await?;
+
+    grant_replication(&client, "postgres").await?;
+    create_test_table_replica_identity_default(&client, TEST_TABLE).await?;
+    grant_table_access(&client, TEST_TABLE, "postgres").await?;
+    create_publication(&client, TEST_PUBLICATION, &[TEST_TABLE.to_string()]).await?;
+
+    let slot_name = slot_name();
+    create_logical_replication_slot(&client, &slot_name).await?;
+
+    let core = build_core(pg.config(), slot_name).await?;
+    core.start().await?;
+
+    insert_test_row(&client, TEST_TABLE, 1, "Alice").await?;
+    wait_for_query_results(&core, "test-query", |results| {
+        results
+            .iter()
+            .any(|row| row.get("name") == Some(&"Alice".into()))
+    })
+    .await?;
+
+    update_test_row(&client, TEST_TABLE, 1, "Alice Updated").await?;
+    wait_for_query_results(&core, "test-query", |results| {
+        results.len() == 1
+            && results
+                .iter()
+                .any(|row| row.get("name") == Some(&"Alice Updated".into()))
     })
     .await?;
 

@@ -604,6 +604,11 @@ impl PgOutputDecoder {
     pub fn get_relation(&self, relation_id: u32) -> Option<&RelationInfo> {
         self.relations.get(&relation_id)
     }
+
+    #[cfg(test)]
+    pub fn insert_relation_for_test(&mut self, relation: RelationInfo) {
+        self.relations.insert(relation.id, relation);
+    }
 }
 
 fn read_cstring(cursor: &mut Cursor<&[u8]>) -> Result<String> {
