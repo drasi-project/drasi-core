@@ -115,7 +115,8 @@ mod query_joins_tests {
     ) {
         let (event_tx, event_rx) = mpsc::channel(100);
 
-        let source_manager = Arc::new(SourceManager::new(event_tx.clone()));
+        let log_registry = Arc::new(crate::managers::ComponentLogRegistry::new());
+        let source_manager = Arc::new(SourceManager::new(event_tx.clone(), log_registry.clone()));
 
         // Create a test IndexFactory with empty backends (no plugin, memory only)
         let index_factory = Arc::new(crate::indexes::IndexFactory::new(vec![], None));
@@ -128,6 +129,7 @@ mod query_joins_tests {
             source_manager.clone(),
             index_factory,
             middleware_registry,
+            log_registry,
         ));
 
         (query_manager, event_rx, event_tx, source_manager)

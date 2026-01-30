@@ -14,6 +14,9 @@
 
 use std::sync::Arc;
 
+use futures::stream::{self, Stream};
+
+use crate::channels::ComponentEvent;
 use crate::config::{DrasiLibConfig, RuntimeConfig};
 use crate::error::DrasiError;
 use crate::queries::QueryManager;
@@ -357,5 +360,264 @@ impl InspectionAPI {
             storage_backends: vec![],
             queries,
         })
+    }
+
+    // ============================================================================
+    // Component Event History Methods
+    // ============================================================================
+
+    /// Get events for a specific source as an async stream.
+    ///
+    /// Returns events in chronological order (oldest first).
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # use futures::StreamExt;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut events = core.get_source_events("my-source").await?;
+    /// while let Some(event) = events.next().await {
+    ///     println!("Event: {:?} - {:?}", event.status, event.message);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_source_events(
+        &self,
+        id: &str,
+    ) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
+        self.state_guard.require_initialized().await?;
+        let events = self.source_manager.get_source_events(id).await;
+        Ok(stream::iter(events))
+    }
+
+    /// Get events for a specific query as an async stream.
+    ///
+    /// Returns events in chronological order (oldest first).
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # use futures::StreamExt;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut events = core.get_query_events("my-query").await?;
+    /// while let Some(event) = events.next().await {
+    ///     println!("Event: {:?} - {:?}", event.status, event.message);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_query_events(
+        &self,
+        id: &str,
+    ) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
+        self.state_guard.require_initialized().await?;
+        let events = self.query_manager.get_query_events(id).await;
+        Ok(stream::iter(events))
+    }
+
+    /// Get events for a specific reaction as an async stream.
+    ///
+    /// Returns events in chronological order (oldest first).
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # use futures::StreamExt;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut events = core.get_reaction_events("my-reaction").await?;
+    /// while let Some(event) = events.next().await {
+    ///     println!("Event: {:?} - {:?}", event.status, event.message);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_reaction_events(
+        &self,
+        id: &str,
+    ) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
+        self.state_guard.require_initialized().await?;
+        let events = self.reaction_manager.get_reaction_events(id).await;
+        Ok(stream::iter(events))
+    }
+
+    /// Get all events across all sources as an async stream.
+    ///
+    /// Returns events sorted by timestamp (oldest first).
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # use futures::StreamExt;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut events = core.get_all_source_events().await?;
+    /// while let Some(event) = events.next().await {
+    ///     println!("{}: {:?}", event.component_id, event.status);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_all_source_events(
+        &self,
+    ) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
+        self.state_guard.require_initialized().await?;
+        let events = self.source_manager.get_all_events().await;
+        Ok(stream::iter(events))
+    }
+
+    /// Get all events across all queries as an async stream.
+    ///
+    /// Returns events sorted by timestamp (oldest first).
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # use futures::StreamExt;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut events = core.get_all_query_events().await?;
+    /// while let Some(event) = events.next().await {
+    ///     println!("{}: {:?}", event.component_id, event.status);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_all_query_events(
+        &self,
+    ) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
+        self.state_guard.require_initialized().await?;
+        let events = self.query_manager.get_all_events().await;
+        Ok(stream::iter(events))
+    }
+
+    /// Get all events across all reactions as an async stream.
+    ///
+    /// Returns events sorted by timestamp (oldest first).
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # use futures::StreamExt;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut events = core.get_all_reaction_events().await?;
+    /// while let Some(event) = events.next().await {
+    ///     println!("{}: {:?}", event.component_id, event.status);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_all_reaction_events(
+        &self,
+    ) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
+        self.state_guard.require_initialized().await?;
+        let events = self.reaction_manager.get_all_events().await;
+        Ok(stream::iter(events))
+    }
+
+    /// Get all events across all components (sources, queries, reactions) as an async stream.
+    ///
+    /// Returns events sorted by timestamp (oldest first).
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # use futures::StreamExt;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut events = core.get_all_events().await?;
+    /// while let Some(event) = events.next().await {
+    ///     println!("{} ({:?}): {:?}", event.component_id, event.component_type, event.status);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_all_events(&self) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
+        self.state_guard.require_initialized().await?;
+
+        // Collect events from all managers
+        let mut all_events = Vec::new();
+        all_events.extend(self.source_manager.get_all_events().await);
+        all_events.extend(self.query_manager.get_all_events().await);
+        all_events.extend(self.reaction_manager.get_all_events().await);
+
+        // Sort by timestamp
+        all_events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+        Ok(stream::iter(all_events))
+    }
+
+    // ============================================================================
+    // Log Subscription Methods
+    // ============================================================================
+
+    /// Subscribe to live logs for a source.
+    ///
+    /// Returns the log history and a broadcast receiver for new logs.
+    /// The receiver will receive new log messages as they are emitted by the source.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// let (history, mut receiver) = core.subscribe_source_logs("my-source").await?;
+    ///
+    /// // Print historical logs
+    /// for log in history {
+    ///     println!("[{:?}] {}", log.level, log.message);
+    /// }
+    ///
+    /// // Listen for new logs
+    /// while let Ok(log) = receiver.recv().await {
+    ///     println!("[{:?}] {}", log.level, log.message);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn subscribe_source_logs(
+        &self,
+        id: &str,
+    ) -> crate::error::Result<(
+        Vec<crate::managers::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
+    )> {
+        self.state_guard.require_initialized().await?;
+        self.source_manager
+            .subscribe_logs(id)
+            .await
+            .ok_or_else(|| DrasiError::component_not_found("source", id))
+    }
+
+    /// Subscribe to live logs for a query.
+    ///
+    /// Returns the log history and a broadcast receiver for new logs.
+    /// The receiver will receive new log messages as they are emitted by the query.
+    pub async fn subscribe_query_logs(
+        &self,
+        id: &str,
+    ) -> crate::error::Result<(
+        Vec<crate::managers::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
+    )> {
+        self.state_guard.require_initialized().await?;
+        self.query_manager
+            .subscribe_logs(id)
+            .await
+            .ok_or_else(|| DrasiError::component_not_found("query", id))
+    }
+
+    /// Subscribe to live logs for a reaction.
+    ///
+    /// Returns the log history and a broadcast receiver for new logs.
+    /// The receiver will receive new log messages as they are emitted by the reaction.
+    pub async fn subscribe_reaction_logs(
+        &self,
+        id: &str,
+    ) -> crate::error::Result<(
+        Vec<crate::managers::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
+    )> {
+        self.state_guard.require_initialized().await?;
+        self.reaction_manager
+            .subscribe_logs(id)
+            .await
+            .ok_or_else(|| DrasiError::component_not_found("reaction", id))
     }
 }

@@ -17,7 +17,9 @@
 //! This module provides all reaction-related operations including adding, removing,
 //! starting, and stopping reactions.
 
-use crate::channels::ComponentStatus;
+use futures::stream::Stream;
+
+use crate::channels::{ComponentEvent, ComponentStatus};
 use crate::component_ops::map_state_error;
 use crate::config::ReactionRuntime;
 use crate::error::{DrasiError, Result};
@@ -198,5 +200,102 @@ impl DrasiLib {
     /// ```
     pub async fn get_reaction_status(&self, id: &str) -> Result<ComponentStatus> {
         self.inspection.get_reaction_status(id).await
+    }
+
+    /// Get lifecycle events for a specific reaction as an async stream.
+    ///
+    /// Returns events in chronological order (oldest first). Up to 100 most recent
+    /// events are retained per component.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # use futures::StreamExt;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut events = core.get_reaction_events("my-reaction").await?;
+    /// while let Some(event) = events.next().await {
+    ///     println!("Event: {:?} - {:?}", event.status, event.message);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_reaction_events(
+        &self,
+        id: &str,
+    ) -> Result<impl Stream<Item = ComponentEvent>> {
+        self.inspection.get_reaction_events(id).await
+    }
+
+    /// Get all lifecycle events across all reactions as an async stream.
+    ///
+    /// Returns events sorted by timestamp (oldest first).
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # use futures::StreamExt;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut events = core.get_all_reaction_events().await?;
+    /// while let Some(event) = events.next().await {
+    ///     println!("{}: {:?}", event.component_id, event.status);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_all_reaction_events(&self) -> Result<impl Stream<Item = ComponentEvent>> {
+        self.inspection.get_all_reaction_events().await
+    }
+
+    /// Get all lifecycle events across all components (sources, queries, reactions) as an async stream.
+    ///
+    /// Returns events sorted by timestamp (oldest first).
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # use futures::StreamExt;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut events = core.get_all_events().await?;
+    /// while let Some(event) = events.next().await {
+    ///     println!("{} ({:?}): {:?}", event.component_id, event.component_type, event.status);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_all_events(&self) -> Result<impl Stream<Item = ComponentEvent>> {
+        self.inspection.get_all_events().await
+    }
+
+    /// Subscribe to live logs for a reaction.
+    ///
+    /// Returns the log history and a broadcast receiver for new logs.
+    /// The receiver will receive new log messages as they are emitted by the reaction.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// let (history, mut receiver) = core.subscribe_reaction_logs("my-reaction").await?;
+    ///
+    /// // Print historical logs
+    /// for log in history {
+    ///     println!("[{:?}] {}", log.level, log.message);
+    /// }
+    ///
+    /// // Listen for new logs
+    /// while let Ok(log) = receiver.recv().await {
+    ///     println!("[{:?}] {}", log.level, log.message);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn subscribe_reaction_logs(
+        &self,
+        id: &str,
+    ) -> Result<(
+        Vec<crate::managers::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
+    )> {
+        self.inspection.subscribe_reaction_logs(id).await
     }
 }

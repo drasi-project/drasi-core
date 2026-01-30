@@ -61,6 +61,7 @@
 use std::sync::Arc;
 
 use crate::channels::ComponentEventSender;
+use crate::managers::ComponentLogger;
 use crate::reactions::QueryProvider;
 use crate::state_store::StateStoreProvider;
 
@@ -74,6 +75,7 @@ use crate::state_store::StateStoreProvider;
 /// - `source_id`: The unique identifier for this source instance
 /// - `status_tx`: Channel for reporting component status/lifecycle events
 /// - `state_store`: Optional persistent state storage (if configured)
+/// - `logger`: Component logger for emitting structured logs that can be streamed
 ///
 /// # Clone
 ///
@@ -95,6 +97,13 @@ pub struct SourceRuntimeContext {
     /// This is `Some` if a state store provider was configured on DrasiLib,
     /// otherwise `None`. Sources can use this to persist state across restarts.
     pub state_store: Option<Arc<dyn StateStoreProvider>>,
+
+    /// Component logger for emitting structured logs.
+    ///
+    /// Use this to emit logs that can be streamed by subscribers.
+    /// This is optional during construction but will always be present
+    /// when the context is provided by DrasiLib.
+    pub logger: Option<ComponentLogger>,
 }
 
 impl SourceRuntimeContext {
@@ -117,6 +126,25 @@ impl SourceRuntimeContext {
             source_id: source_id.into(),
             status_tx,
             state_store,
+            logger: None,
+        }
+    }
+
+    /// Create a new source runtime context with a logger.
+    ///
+    /// This is typically called by `SourceManager` when adding a source to DrasiLib.
+    /// Plugin developers do not need to call this directly.
+    pub fn with_logger(
+        source_id: impl Into<String>,
+        status_tx: ComponentEventSender,
+        state_store: Option<Arc<dyn StateStoreProvider>>,
+        logger: ComponentLogger,
+    ) -> Self {
+        Self {
+            source_id: source_id.into(),
+            status_tx,
+            state_store,
+            logger: Some(logger),
         }
     }
 
@@ -140,6 +168,14 @@ impl SourceRuntimeContext {
     pub fn state_store(&self) -> Option<&Arc<dyn StateStoreProvider>> {
         self.state_store.as_ref()
     }
+
+    /// Get a reference to the logger if configured.
+    ///
+    /// Returns `Some(&ComponentLogger)` if a logger was provided,
+    /// otherwise `None`.
+    pub fn logger(&self) -> Option<&ComponentLogger> {
+        self.logger.as_ref()
+    }
 }
 
 impl std::fmt::Debug for SourceRuntimeContext {
@@ -151,6 +187,7 @@ impl std::fmt::Debug for SourceRuntimeContext {
                 "state_store",
                 &self.state_store.as_ref().map(|_| "<StateStoreProvider>"),
             )
+            .field("logger", &self.logger.as_ref().map(|_| "<ComponentLogger>"))
             .finish()
     }
 }
@@ -166,6 +203,7 @@ impl std::fmt::Debug for SourceRuntimeContext {
 /// - `status_tx`: Channel for reporting component status/lifecycle events
 /// - `state_store`: Optional persistent state storage (if configured)
 /// - `query_provider`: Access to query instances for subscription
+/// - `logger`: Component logger for emitting structured logs that can be streamed
 ///
 /// # Clone
 ///
@@ -193,6 +231,13 @@ pub struct ReactionRuntimeContext {
     /// Reactions use this to get query instances and subscribe to their results.
     /// This is always available (not optional) since reactions require queries.
     pub query_provider: Arc<dyn QueryProvider>,
+
+    /// Component logger for emitting structured logs.
+    ///
+    /// Use this to emit logs that can be streamed by subscribers.
+    /// This is optional during construction but will always be present
+    /// when the context is provided by DrasiLib.
+    pub logger: Option<ComponentLogger>,
 }
 
 impl ReactionRuntimeContext {
@@ -218,6 +263,27 @@ impl ReactionRuntimeContext {
             status_tx,
             state_store,
             query_provider,
+            logger: None,
+        }
+    }
+
+    /// Create a new reaction runtime context with a logger.
+    ///
+    /// This is typically called by `ReactionManager` when adding a reaction to DrasiLib.
+    /// Plugin developers do not need to call this directly.
+    pub fn with_logger(
+        reaction_id: impl Into<String>,
+        status_tx: ComponentEventSender,
+        state_store: Option<Arc<dyn StateStoreProvider>>,
+        query_provider: Arc<dyn QueryProvider>,
+        logger: ComponentLogger,
+    ) -> Self {
+        Self {
+            reaction_id: reaction_id.into(),
+            status_tx,
+            state_store,
+            query_provider,
+            logger: Some(logger),
         }
     }
 
@@ -248,6 +314,14 @@ impl ReactionRuntimeContext {
     pub fn query_provider(&self) -> &Arc<dyn QueryProvider> {
         &self.query_provider
     }
+
+    /// Get a reference to the logger if configured.
+    ///
+    /// Returns `Some(&ComponentLogger)` if a logger was provided,
+    /// otherwise `None`.
+    pub fn logger(&self) -> Option<&ComponentLogger> {
+        self.logger.as_ref()
+    }
 }
 
 impl std::fmt::Debug for ReactionRuntimeContext {
@@ -260,6 +334,7 @@ impl std::fmt::Debug for ReactionRuntimeContext {
                 &self.state_store.as_ref().map(|_| "<StateStoreProvider>"),
             )
             .field("query_provider", &"<QueryProvider>")
+            .field("logger", &self.logger.as_ref().map(|_| "<ComponentLogger>"))
             .finish()
     }
 }

@@ -21,6 +21,7 @@ use crate::channels::*;
 use crate::config::{DrasiLibConfig, RuntimeConfig};
 use crate::inspection::InspectionAPI;
 use crate::lifecycle::LifecycleManager;
+use crate::managers::ComponentLogRegistry;
 use crate::queries::QueryManager;
 use crate::reactions::ReactionManager;
 use crate::sources::SourceManager;
@@ -162,6 +163,8 @@ pub struct DrasiLib {
     pub(crate) lifecycle: Arc<RwLock<LifecycleManager>>,
     // Middleware registry for source middleware
     pub(crate) middleware_registry: Arc<MiddlewareTypeRegistry>,
+    // Component log registry for live log streaming
+    pub(crate) log_registry: Arc<ComponentLogRegistry>,
 }
 
 impl Clone for DrasiLib {
@@ -176,6 +179,7 @@ impl Clone for DrasiLib {
             inspection: self.inspection.clone(),
             lifecycle: Arc::clone(&self.lifecycle),
             middleware_registry: Arc::clone(&self.middleware_registry),
+            log_registry: Arc::clone(&self.log_registry),
         }
     }
 }
@@ -199,7 +203,13 @@ impl DrasiLib {
     pub(crate) fn new(config: Arc<RuntimeConfig>) -> Self {
         let (channels, receivers) = EventChannels::new();
 
-        let source_manager = Arc::new(SourceManager::new(channels.component_event_tx.clone()));
+        // Create the log registry for component log streaming
+        let log_registry = Arc::new(ComponentLogRegistry::new());
+
+        let source_manager = Arc::new(SourceManager::new(
+            channels.component_event_tx.clone(),
+            log_registry.clone(),
+        ));
 
         // Initialize middleware registry and register all standard middleware factories
         let mut middleware_registry = MiddlewareTypeRegistry::new();
@@ -223,9 +233,13 @@ impl DrasiLib {
             source_manager.clone(),
             config.index_factory.clone(),
             middleware_registry.clone(),
+            log_registry.clone(),
         ));
 
-        let reaction_manager = Arc::new(ReactionManager::new(channels.component_event_tx.clone()));
+        let reaction_manager = Arc::new(ReactionManager::new(
+            channels.component_event_tx.clone(),
+            log_registry.clone(),
+        ));
 
         let state_guard = StateGuard::new();
 
@@ -255,6 +269,7 @@ impl DrasiLib {
             inspection,
             lifecycle,
             middleware_registry,
+            log_registry,
         }
     }
 

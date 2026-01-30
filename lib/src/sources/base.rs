@@ -37,6 +37,7 @@ use tokio::sync::RwLock;
 use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 use crate::channels::*;
 use crate::context::SourceRuntimeContext;
+use crate::managers::ComponentLogger;
 use crate::profiling;
 use crate::state_store::StateStoreProvider;
 use drasi_core::models::SourceChange;
@@ -153,6 +154,8 @@ pub struct SourceBase {
     status_tx: Arc<RwLock<Option<ComponentEventSender>>>,
     /// State store provider (extracted from context for convenience)
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
+    /// Component logger (extracted from context for convenience)
+    logger: Arc<RwLock<Option<ComponentLogger>>>,
     /// Handle to the source's main task
     pub task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     /// Sender for shutdown signal
@@ -201,6 +204,7 @@ impl SourceBase {
             context: Arc::new(RwLock::new(None)), // Set by initialize()
             status_tx: Arc::new(RwLock::new(None)), // Extracted from context
             state_store: Arc::new(RwLock::new(None)), // Extracted from context
+            logger: Arc::new(RwLock::new(None)),  // Extracted from context
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
             bootstrap_provider: Arc::new(RwLock::new(bootstrap_provider)),
@@ -221,6 +225,7 @@ impl SourceBase {
     /// - `source_id`: The source's unique identifier
     /// - `status_tx`: Channel for reporting component status events
     /// - `state_store`: Optional persistent state storage
+    /// - `logger`: Component logger for emitting structured logs
     pub async fn initialize(&self, context: SourceRuntimeContext) {
         // Store context for later use
         *self.context.write().await = Some(context.clone());
@@ -230,6 +235,10 @@ impl SourceBase {
 
         if let Some(state_store) = context.state_store.as_ref() {
             *self.state_store.write().await = Some(state_store.clone());
+        }
+
+        if let Some(logger) = context.logger.as_ref() {
+            *self.logger.write().await = Some(logger.clone());
         }
     }
 
@@ -245,6 +254,58 @@ impl SourceBase {
     /// Returns `None` if no state store was provided in the context.
     pub async fn state_store(&self) -> Option<Arc<dyn StateStoreProvider>> {
         self.state_store.read().await.clone()
+    }
+
+    /// Get the component logger if configured.
+    ///
+    /// Returns `None` if no logger was provided in the context.
+    pub async fn logger(&self) -> Option<ComponentLogger> {
+        self.logger.read().await.clone()
+    }
+
+    /// Log a trace message.
+    ///
+    /// If no logger is configured, this is a no-op.
+    pub async fn log_trace(&self, message: impl Into<String>) {
+        if let Some(logger) = self.logger.read().await.as_ref() {
+            logger.trace(message).await;
+        }
+    }
+
+    /// Log a debug message.
+    ///
+    /// If no logger is configured, this is a no-op.
+    pub async fn log_debug(&self, message: impl Into<String>) {
+        if let Some(logger) = self.logger.read().await.as_ref() {
+            logger.debug(message).await;
+        }
+    }
+
+    /// Log an info message.
+    ///
+    /// If no logger is configured, this is a no-op.
+    pub async fn log_info(&self, message: impl Into<String>) {
+        if let Some(logger) = self.logger.read().await.as_ref() {
+            logger.info(message).await;
+        }
+    }
+
+    /// Log a warning message.
+    ///
+    /// If no logger is configured, this is a no-op.
+    pub async fn log_warn(&self, message: impl Into<String>) {
+        if let Some(logger) = self.logger.read().await.as_ref() {
+            logger.warn(message).await;
+        }
+    }
+
+    /// Log an error message.
+    ///
+    /// If no logger is configured, this is a no-op.
+    pub async fn log_error(&self, message: impl Into<String>) {
+        if let Some(logger) = self.logger.read().await.as_ref() {
+            logger.error(message).await;
+        }
     }
 
     /// Get the status channel Arc for internal use by spawned tasks
@@ -272,6 +333,7 @@ impl SourceBase {
             context: self.context.clone(),
             status_tx: self.status_tx.clone(),
             state_store: self.state_store.clone(),
+            logger: self.logger.clone(),
             task_handle: self.task_handle.clone(),
             shutdown_tx: self.shutdown_tx.clone(),
             bootstrap_provider: self.bootstrap_provider.clone(),

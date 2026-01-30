@@ -39,6 +39,7 @@ use crate::channels::{
     ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, QueryResult,
 };
 use crate::context::ReactionRuntimeContext;
+use crate::managers::ComponentLogger;
 use crate::reactions::QueryProvider;
 use crate::state_store::StateStoreProvider;
 
@@ -112,6 +113,8 @@ pub struct ReactionBase {
     query_provider: Arc<RwLock<Option<Arc<dyn QueryProvider>>>>,
     /// State store provider (extracted from context for convenience)
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
+    /// Component logger (extracted from context for convenience)
+    logger: Arc<RwLock<Option<ComponentLogger>>>,
     /// Priority queue for timestamp-ordered result processing
     pub priority_queue: PriorityQueue<QueryResult>,
     /// Handles to subscription forwarder tasks
@@ -138,6 +141,7 @@ impl ReactionBase {
             status_tx: Arc::new(RwLock::new(None)), // Extracted from context
             query_provider: Arc::new(RwLock::new(None)), // Extracted from context
             state_store: Arc::new(RwLock::new(None)), // Extracted from context
+            logger: Arc::new(RwLock::new(None)),  // Extracted from context
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
             processing_task: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
@@ -154,6 +158,7 @@ impl ReactionBase {
     /// - `status_tx`: Channel for reporting component status events
     /// - `state_store`: Optional persistent state storage
     /// - `query_provider`: Access to query instances for subscription
+    /// - `logger`: Component logger for emitting structured logs
     pub async fn initialize(&self, context: ReactionRuntimeContext) {
         // Store context for later use
         *self.context.write().await = Some(context.clone());
@@ -164,6 +169,10 @@ impl ReactionBase {
 
         if let Some(state_store) = context.state_store.as_ref() {
             *self.state_store.write().await = Some(state_store.clone());
+        }
+
+        if let Some(logger) = context.logger.as_ref() {
+            *self.logger.write().await = Some(logger.clone());
         }
     }
 
@@ -179,6 +188,58 @@ impl ReactionBase {
     /// Returns `None` if no state store was provided in the context.
     pub async fn state_store(&self) -> Option<Arc<dyn StateStoreProvider>> {
         self.state_store.read().await.clone()
+    }
+
+    /// Get the component logger if configured.
+    ///
+    /// Returns `None` if no logger was provided in the context.
+    pub async fn logger(&self) -> Option<ComponentLogger> {
+        self.logger.read().await.clone()
+    }
+
+    /// Log a trace message.
+    ///
+    /// If no logger is configured, this is a no-op.
+    pub async fn log_trace(&self, message: impl Into<String>) {
+        if let Some(logger) = self.logger.read().await.as_ref() {
+            logger.trace(message).await;
+        }
+    }
+
+    /// Log a debug message.
+    ///
+    /// If no logger is configured, this is a no-op.
+    pub async fn log_debug(&self, message: impl Into<String>) {
+        if let Some(logger) = self.logger.read().await.as_ref() {
+            logger.debug(message).await;
+        }
+    }
+
+    /// Log an info message.
+    ///
+    /// If no logger is configured, this is a no-op.
+    pub async fn log_info(&self, message: impl Into<String>) {
+        if let Some(logger) = self.logger.read().await.as_ref() {
+            logger.info(message).await;
+        }
+    }
+
+    /// Log a warning message.
+    ///
+    /// If no logger is configured, this is a no-op.
+    pub async fn log_warn(&self, message: impl Into<String>) {
+        if let Some(logger) = self.logger.read().await.as_ref() {
+            logger.warn(message).await;
+        }
+    }
+
+    /// Log an error message.
+    ///
+    /// If no logger is configured, this is a no-op.
+    pub async fn log_error(&self, message: impl Into<String>) {
+        if let Some(logger) = self.logger.read().await.as_ref() {
+            logger.error(message).await;
+        }
     }
 
     /// Get whether this reaction should auto-start
@@ -210,6 +271,7 @@ impl ReactionBase {
             status_tx: self.status_tx.clone(),
             query_provider: self.query_provider.clone(),
             state_store: self.state_store.clone(),
+            logger: self.logger.clone(),
             priority_queue: self.priority_queue.clone(),
             subscription_tasks: self.subscription_tasks.clone(),
             processing_task: self.processing_task.clone(),

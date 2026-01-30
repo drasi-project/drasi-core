@@ -18,8 +18,9 @@
 //! starting, and stopping queries.
 
 use anyhow::Result as AnyhowResult;
+use futures::stream::Stream;
 
-use crate::channels::ComponentStatus;
+use crate::channels::{ComponentEvent, ComponentStatus};
 use crate::component_ops::map_state_error;
 use crate::config::{QueryConfig, QueryRuntime};
 use crate::error::{DrasiError, Result};
@@ -223,6 +224,80 @@ impl DrasiLib {
     /// ```
     pub async fn get_query_config(&self, id: &str) -> Result<QueryConfig> {
         self.inspection.get_query_config(id).await
+    }
+
+    /// Get lifecycle events for a specific query as an async stream.
+    ///
+    /// Returns events in chronological order (oldest first). Up to 100 most recent
+    /// events are retained per component.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # use futures::StreamExt;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut events = core.get_query_events("my-query").await?;
+    /// while let Some(event) = events.next().await {
+    ///     println!("Event: {:?} - {:?}", event.status, event.message);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_query_events(&self, id: &str) -> Result<impl Stream<Item = ComponentEvent>> {
+        self.inspection.get_query_events(id).await
+    }
+
+    /// Get all lifecycle events across all queries as an async stream.
+    ///
+    /// Returns events sorted by timestamp (oldest first).
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # use futures::StreamExt;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut events = core.get_all_query_events().await?;
+    /// while let Some(event) = events.next().await {
+    ///     println!("{}: {:?}", event.component_id, event.status);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_all_query_events(&self) -> Result<impl Stream<Item = ComponentEvent>> {
+        self.inspection.get_all_query_events().await
+    }
+
+    /// Subscribe to live logs for a query.
+    ///
+    /// Returns the log history and a broadcast receiver for new logs.
+    /// The receiver will receive new log messages as they are emitted by the query.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// let (history, mut receiver) = core.subscribe_query_logs("my-query").await?;
+    ///
+    /// // Print historical logs
+    /// for log in history {
+    ///     println!("[{:?}] {}", log.level, log.message);
+    /// }
+    ///
+    /// // Listen for new logs
+    /// while let Ok(log) = receiver.recv().await {
+    ///     println!("[{:?}] {}", log.level, log.message);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn subscribe_query_logs(
+        &self,
+        id: &str,
+    ) -> Result<(
+        Vec<crate::managers::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
+    )> {
+        self.inspection.subscribe_query_logs(id).await
     }
 
     /// Internal helper for creating queries with auto-start control
