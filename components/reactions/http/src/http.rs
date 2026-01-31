@@ -39,7 +39,7 @@ use super::HttpReactionBuilder;
 
 /// Batch result for sending multiple results in one HTTP call.
 ///
-/// When adaptive batching is enabled, batches are sent to `{base_url}/batch`
+/// When adaptive batching is enabled, batches are sent to `{base_url}{batch_endpoint_path}`
 /// as a JSON array of `BatchResult` objects.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchResult {
@@ -147,12 +147,11 @@ impl HttpReaction {
     }
 
     /// Create an HTTP client with appropriate configuration
-    fn create_client(timeout_ms: u64, adaptive_enabled: bool) -> Result<Client> {
-        let mut builder = Client::builder()
-            .timeout(Duration::from_millis(timeout_ms));
+    fn create_client(timeout_ms: u64, http2_enabled: bool) -> Result<Client> {
+        let mut builder = Client::builder().timeout(Duration::from_millis(timeout_ms));
 
-        // Enable HTTP/2 connection pooling for adaptive mode
-        if adaptive_enabled {
+        // Enable HTTP/2 connection pooling when requested
+        if http2_enabled {
             builder = builder
                 .pool_idle_timeout(Duration::from_secs(90))
                 .pool_max_idle_per_host(10)
@@ -303,6 +302,7 @@ impl HttpReaction {
     async fn send_batch(
         client: &Client,
         base_url: &str,
+        batch_endpoint_path: &str,
         token: &Option<String>,
         query_configs: &HashMap<String, QueryConfig>,
         batch: Vec<(String, Vec<ResultDiff>)>,
@@ -327,14 +327,14 @@ impl HttpReaction {
             let batch_results: Vec<BatchResult> = batches_by_query
                 .into_iter()
                 .map(|(query_id, results)| BatchResult {
-                    query_id: query_id.clone(),
+                    query_id,
                     count: results.len(),
                     results,
                     timestamp: chrono::Utc::now().to_rfc3339(),
                 })
                 .collect();
 
-            let batch_url = format!("{}/batch", base_url);
+            let batch_url = format!("{}{}", base_url, batch_endpoint_path);
             let body = serde_json::to_string(&batch_results)?;
 
             // Build headers
@@ -502,7 +502,7 @@ impl HttpReaction {
         base_url: String,
         token: Option<String>,
         timeout_ms: u64,
-        priority_queue: Arc<drasi_lib::channels::priority_queue::PriorityQueue<drasi_lib::channels::events::QueryResult>>,
+        priority_queue: drasi_lib::channels::priority_queue::PriorityQueue<drasi_lib::channels::events::QueryResult>,
         mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) {
         let client = match Self::create_client(timeout_ms, false) {
@@ -665,13 +665,15 @@ impl HttpReaction {
         status: Arc<tokio::sync::RwLock<ComponentStatus>>,
         query_configs: HashMap<String, QueryConfig>,
         base_url: String,
+        batch_endpoint_path: String,
         token: Option<String>,
         timeout_ms: u64,
+        http2_enabled: bool,
         adaptive_config: drasi_lib::reactions::common::AdaptiveBatchConfig,
-        priority_queue: Arc<drasi_lib::channels::priority_queue::PriorityQueue<drasi_lib::channels::events::QueryResult>>,
+        priority_queue: drasi_lib::channels::priority_queue::PriorityQueue<drasi_lib::channels::events::QueryResult>,
         mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) {
-        let client = match Self::create_client(timeout_ms, true) {
+        let client = match Self::create_client(timeout_ms, http2_enabled) {
             Ok(c) => c,
             Err(e) => {
                 error!("[{reaction_name}] Failed to create HTTP client: {e}");
@@ -702,6 +704,7 @@ impl HttpReaction {
         let batcher_reaction_name = reaction_name.clone();
         let batcher_client = client.clone();
         let batcher_base_url = base_url.clone();
+        let batcher_batch_endpoint_path = batch_endpoint_path.clone();
         let batcher_token = token.clone();
         let batcher_query_configs = query_configs.clone();
 
@@ -730,6 +733,7 @@ impl HttpReaction {
                 if let Err(e) = Self::send_batch(
                     &batcher_client,
                     &batcher_base_url,
+                    &batcher_batch_endpoint_path,
                     &batcher_token,
                     &batcher_query_configs,
                     batch,
@@ -826,6 +830,14 @@ impl Reaction for HttpReaction {
             "adaptive_enabled".to_string(),
             serde_json::Value::Bool(self.is_adaptive_enabled()),
         );
+        props.insert(
+            "batch_endpoint_path".to_string(),
+            serde_json::Value::String(self.config.batch_endpoint_path.clone()),
+        );
+        props.insert(
+            "http2_enabled".to_string(),
+            serde_json::Value::Bool(self.config.http2_enabled),
+        );
         props
     }
 
@@ -879,9 +891,11 @@ impl Reaction for HttpReaction {
         let status = self.base.status.clone();
         let query_configs = self.config.routes.clone();
         let base_url = self.config.base_url.clone();
+        let batch_endpoint_path = self.config.batch_endpoint_path.clone();
         let token = self.config.token.clone();
         let timeout_ms = self.config.timeout_ms;
-        let priority_queue = Arc::new(self.base.priority_queue.clone());
+        let http2_enabled = self.config.http2_enabled;
+        let priority_queue = self.base.priority_queue.clone();
 
         // Spawn the appropriate processing task based on mode
         let processing_task_handle = if let Some(adaptive_config) = self.config.adaptive.clone() {
@@ -890,8 +904,10 @@ impl Reaction for HttpReaction {
                 status,
                 query_configs,
                 base_url,
+                batch_endpoint_path,
                 token,
                 timeout_ms,
+                http2_enabled,
                 adaptive_config,
                 priority_queue,
                 shutdown_rx,

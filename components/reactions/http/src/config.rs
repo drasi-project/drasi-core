@@ -29,6 +29,10 @@ fn default_timeout_ms() -> u64 {
     5000
 }
 
+fn default_batch_endpoint_path() -> String {
+    "/batch".to_string()
+}
+
 /// Specification for an HTTP call, including URL, method, headers, and body template.
 ///
 /// This type is used to configure HTTP requests for different operation types (added, updated, deleted).
@@ -81,7 +85,7 @@ pub struct QueryConfig {
 ///
 /// - **Adaptive batching mode**: Results are intelligently batched based on throughput patterns.
 ///   Enable by setting `adaptive` to `Some(AdaptiveBatchConfig { ... })`.
-///   Batches are sent to `{base_url}/batch` endpoint.
+///   Batches are sent to `{base_url}{batch_endpoint_path}` endpoint.
 ///
 /// # Example
 ///
@@ -112,7 +116,7 @@ pub struct QueryConfig {
 pub struct HttpReactionConfig {
     /// Base URL for HTTP requests.
     ///
-    /// In adaptive batching mode, batch requests are sent to `{base_url}/batch`.
+    /// In adaptive batching mode, batch requests are sent to `{base_url}{batch_endpoint_path}`.
     #[serde(default = "default_base_url")]
     pub base_url: String,
 
@@ -138,11 +142,26 @@ pub struct HttpReactionConfig {
     /// - High traffic: Large batches for network efficiency
     /// - Burst traffic: Maximum batches to handle spikes
     ///
-    /// Batches are sent to `{base_url}/batch` as a JSON array of `BatchResult` objects.
+    /// Batches are sent to `{base_url}{batch_endpoint_path}` as a JSON array
+    /// of `BatchResult` objects.
     ///
     /// When `None` (default), each result is sent as an individual HTTP request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub adaptive: Option<AdaptiveBatchConfig>,
+
+    /// Custom batch endpoint path (default: "/batch").
+    ///
+    /// Only used when adaptive batching is enabled. Batch requests are sent
+    /// to `{base_url}{batch_endpoint_path}`.
+    #[serde(default = "default_batch_endpoint_path")]
+    pub batch_endpoint_path: String,
+
+    /// Enable HTTP/2 for connection pooling (default: false).
+    ///
+    /// When true, the HTTP client uses HTTP/2 with connection pooling,
+    /// which can improve throughput for adaptive batching scenarios.
+    #[serde(default)]
+    pub http2_enabled: bool,
 }
 
 impl Default for HttpReactionConfig {
@@ -153,6 +172,8 @@ impl Default for HttpReactionConfig {
             timeout_ms: default_timeout_ms(),
             routes: HashMap::new(),
             adaptive: None,
+            batch_endpoint_path: default_batch_endpoint_path(),
+            http2_enabled: false,
         }
     }
 }
