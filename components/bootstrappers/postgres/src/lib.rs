@@ -33,10 +33,9 @@
 //!     .build();
 //!
 //! // Or using configuration
-//! use drasi_bootstrap_postgres::PostgresSourceConfig;
-//! use drasi_source_postgres::SslMode;
+//! use drasi_bootstrap_postgres::{PostgresBootstrapConfig, SslMode};
 //!
-//! let config = PostgresSourceConfig {
+//! let config = PostgresBootstrapConfig {
 //!     host: "localhost".to_string(),
 //!     port: 5432,
 //!     database: "mydb".to_string(),
@@ -51,8 +50,8 @@
 //! let provider = PostgresBootstrapProvider::new(config);
 //! ```
 
+pub mod config;
 pub mod postgres;
 
-pub use postgres::{
-    PostgresBootstrapProvider, PostgresBootstrapProviderBuilder, PostgresSourceConfig,
-};
+pub use config::{PostgresBootstrapConfig, SslMode, TableKeyConfig};
+pub use postgres::{PostgresBootstrapProvider, PostgresBootstrapProviderBuilder};
