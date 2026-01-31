@@ -22,10 +22,10 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ResultDiff};
+use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::{QueryProvider, Reaction};
+use drasi_lib::Reaction;
 
 use crate::config::{PostgresStoredProcReactionConfig, QueryConfig};
 use crate::executor::PostgresExecutor;

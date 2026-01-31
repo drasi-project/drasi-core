@@ -13,8 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-extern crate generational_arena;
 use drasi_core::models::ElementPropertyMap;
+use generational_arena;
 use generational_arena::{Arena, Index};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;

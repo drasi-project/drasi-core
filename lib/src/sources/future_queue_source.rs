@@ -21,7 +21,7 @@ use std::time::SystemTime;
 use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
 
-use crate::channels::{ComponentEventSender, DispatchMode, SourceEvent, SourceEventWrapper};
+use crate::channels::{DispatchMode, SourceEvent, SourceEventWrapper};
 use crate::ComponentStatus;
 
 /// Internal source ID for the future queue source (used for lifecycle management only)

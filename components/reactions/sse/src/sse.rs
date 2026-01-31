@@ -27,10 +27,10 @@ use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
 use tower_http::cors::{Any, CorsLayer};
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ResultDiff};
+use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::{QueryProvider, Reaction};
+use drasi_lib::Reaction;
 
 pub use super::config::SseReactionConfig;
 use super::SseReactionBuilder;
