@@ -239,21 +239,15 @@ impl LogReactionBuilder {
     /// use drasi_reaction_log::{QueryConfig, TemplateSpec};
     ///
     /// let default_template = QueryConfig {
-    ///     added: Some(TemplateSpec {
-    ///         template: "[ADD] {{after.id}}".to_string(),
-    ///     }),
-    ///     updated: Some(TemplateSpec {
-    ///         template: "[UPD] {{after.id}}".to_string(),
-    ///     }),
-    ///     deleted: Some(TemplateSpec {
-    ///         template: "[DEL] {{before.id}}".to_string(),
-    ///     }),
+    ///     added: Some(TemplateSpec::new("[ADD] {{after.id}}")),
+    ///     updated: Some(TemplateSpec::new("[UPD] {{after.id}}")),
+    ///     deleted: Some(TemplateSpec::new("[DEL] {{before.id}}"),
     /// };
     ///
     /// let reaction = LogReaction::builder("my-logger")
     ///     .with_query("my-query")
     ///     .with_default_template(default_template)
-    ///     .build();
+    ///     .build()?;
     /// ```
     pub fn with_default_template(mut self, template: crate::config::QueryConfig) -> Self {
         self.config.default_template = Some(template);
