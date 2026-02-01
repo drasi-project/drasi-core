@@ -14,11 +14,11 @@
 
 use std::sync::Arc;
 
-use crate::evaluation::functions::numeric::{E, Exp};
+use crate::evaluation::context::QueryVariables;
+use crate::evaluation::functions::numeric::{Exp, E};
 use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::variable_value::float::Float;
 use crate::evaluation::variable_value::VariableValue;
-use crate::evaluation::context::QueryVariables;
 use crate::evaluation::{ExpressionEvaluationContext, FunctionEvaluationError, InstantQueryClock};
 use drasi_query_ast::ast;
 
@@ -26,7 +26,8 @@ use drasi_query_ast::ast;
 async fn test_e() {
     let func = E {};
     let binding = QueryVariables::new();
-    let context = ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
+    let context =
+        ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
     let expression = ast::FunctionExpression {
         name: Arc::from("e"),
         args: vec![],
@@ -44,7 +45,8 @@ async fn test_e() {
 async fn test_exp() {
     let func = Exp {};
     let binding = QueryVariables::new();
-    let context = ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
+    let context =
+        ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
     let expression = ast::FunctionExpression {
         name: Arc::from("exp"),
         args: vec![],
@@ -53,17 +55,22 @@ async fn test_exp() {
 
     // Test with integer 0
     let result = func
-        .call(&context, &expression, vec![VariableValue::Integer(0.into())])
+        .call(
+            &context,
+            &expression,
+            vec![VariableValue::Integer(0.into())],
+        )
         .await
         .unwrap();
-    assert_eq!(
-        result,
-        VariableValue::Float(Float::from_f64(1.0).unwrap())
-    );
+    assert_eq!(result, VariableValue::Float(Float::from_f64(1.0).unwrap()));
 
     // Test with integer 1
     let result = func
-        .call(&context, &expression, vec![VariableValue::Integer(1.into())])
+        .call(
+            &context,
+            &expression,
+            vec![VariableValue::Integer(1.into())],
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -73,7 +80,11 @@ async fn test_exp() {
 
     // Test with float
     let result = func
-        .call(&context, &expression, vec![VariableValue::Float(Float::from_f64(2.0).unwrap())])
+        .call(
+            &context,
+            &expression,
+            vec![VariableValue::Float(Float::from_f64(2.0).unwrap())],
+        )
         .await
         .unwrap();
     match result {
@@ -85,7 +96,11 @@ async fn test_exp() {
 
     // Test with negative integer (-1)
     let result = func
-        .call(&context, &expression, vec![VariableValue::Integer((-1).into())])
+        .call(
+            &context,
+            &expression,
+            vec![VariableValue::Integer((-1).into())],
+        )
         .await
         .unwrap();
     match result {
@@ -101,7 +116,8 @@ async fn test_exp() {
 async fn test_exp_null() {
     let func = Exp {};
     let binding = QueryVariables::new();
-    let context = ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
+    let context =
+        ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
     let expression = ast::FunctionExpression {
         name: Arc::from("exp"),
         args: vec![],
@@ -119,7 +135,8 @@ async fn test_exp_null() {
 async fn test_exp_overflow() {
     let func = Exp {};
     let binding = QueryVariables::new();
-    let context = ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
+    let context =
+        ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
     let expression = ast::FunctionExpression {
         name: Arc::from("exp"),
         args: vec![],
@@ -128,10 +145,76 @@ async fn test_exp_overflow() {
 
     // exp(1000) overflows f64
     let result = func
-        .call(&context, &expression, vec![VariableValue::Integer(1000.into())])
+        .call(
+            &context,
+            &expression,
+            vec![VariableValue::Integer(1000.into())],
+        )
         .await;
 
     assert!(result.is_err());
     let err = result.err().unwrap();
     assert!(matches!(err.error, FunctionEvaluationError::OverflowError));
+}
+
+#[tokio::test]
+async fn test_e_arg_count() {
+    let func = E {};
+    let binding = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
+    let expression = ast::FunctionExpression {
+        name: Arc::from("e"),
+        args: vec![],
+        position_in_query: 0,
+    };
+
+    // Test with 1 argument (should be 0)
+    let result = func
+        .call(
+            &context, 
+            &expression, 
+            vec![VariableValue::Integer(1.into())]
+        )
+        .await;
+    
+    match result {
+        Err(crate::evaluation::FunctionError { error: crate::evaluation::FunctionEvaluationError::InvalidArgumentCount, .. }) => (),
+        _ => panic!("Expected InvalidArgumentCount error for e() with arguments"),
+    }
+}
+
+#[tokio::test]
+async fn test_exp_arg_count() {
+    let func = Exp {};
+    let binding = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
+    let expression = ast::FunctionExpression {
+        name: Arc::from("exp"),
+        args: vec![],
+        position_in_query: 0,
+    };
+
+    // Test with 0 arguments (should be 1)
+    let result = func
+        .call(&context, &expression, vec![])
+        .await;
+    match result {
+        Err(crate::evaluation::FunctionError { error: crate::evaluation::FunctionEvaluationError::InvalidArgumentCount, .. }) => (),
+        _ => panic!("Expected InvalidArgumentCount error for exp() with 0 arguments"),
+    }
+
+    // Test with 2 arguments (should be 1)
+    let result = func
+        .call(
+            &context, 
+            &expression, 
+            vec![VariableValue::Integer(1.into()), VariableValue::Integer(2.into())]
+        )
+        .await;
+    match result {
+        Err(crate::evaluation::FunctionError { error: crate::evaluation::FunctionEvaluationError::InvalidArgumentCount, .. }) => (),
+        _ => panic!("Expected InvalidArgumentCount error for exp() with 2 arguments"),
+    }
 }
