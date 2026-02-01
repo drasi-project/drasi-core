@@ -259,4 +259,3 @@ This data model is intentionally designed to:
 
 The same data model is reused across all scenarios to ensure **fair, consistent,
 and repeatable performance comparisons**.
-
