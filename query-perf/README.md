@@ -22,6 +22,32 @@ Before running these scenarios, ensure the following requirements are met.
 
 No external system libraries are required for the `memory` or `rocksdb` backends.
 
+## Redis server setup (if using redis backend)
+If you plan to use Redis backend, you need a running Redis instance.
+
+### 1. Installation
+*   **MacOS:**
+    ```bash
+    brew install redis
+    brew services start redis
+    ```
+*   **Ubuntu/Debian:**
+    ```bash
+    sudo apt-get install redis-server
+    sudo systemctl start redis-server
+    ```
+*   **Docker:**
+    ```bash
+    docker run -d -p 6379:6379 --name drasi-redis redis:latest
+    ```
+
+### 2. Verification (Ping-Pong)
+Ensure Redis is reachable before running tests:
+```bash
+redis-cli ping
+# Expected Output: PONG
+```
+
 ## Execution
 
 You can run the Component Performance Test Tool either from a compiled binary or using Cargo.
@@ -122,22 +148,10 @@ cargo run --release -p query-perf -- --scenario single_node_property_projection 
 ```
 
 ### Sample Output
-```text
- - Initializing Scenario...
- - Bootstrapping Scenario...
- - Running Scenario... 
- - Result: TestRunResult {
-    _scenario_name: "single_node_property_projection",
-    _element_index_type: Memory,
-    _result_index_type: Memory,
-    bootstrap_duration_ms: 107,
-    bootstrap_events: 4210,
-    avg_bootstrap_events_per_sec: 39345.79,
-    run_duration_ms: 95,
-    run_events: 1000,
-    avg_run_events_per_sec: 10526.31,
-}
-```
+
+<img width="1104" height="590" alt="Screenshot 2026-02-01 at 10 28 21 PM" src="https://github.com/user-attachments/assets/54acc56a-cacd-46e8-b7c9-68483674b79b" />
+
+
 ***Note:** Times associated with 'bootstrap' represent the time taken to load the initial dataset (2000 rooms + buildings). 'Run' metrics represent the performance of processing the dynamic updates.*
 
 # Data Model
@@ -148,3 +162,4 @@ All scenarios operate on a simulated **Building Comfort Model** with the followi
 -   **Total:** 2,000 Rooms
 
 Each `Room` node has dynamic properties: `temperature`, `humidity`, and `co2`.
+
