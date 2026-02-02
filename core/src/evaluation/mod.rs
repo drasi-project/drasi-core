@@ -31,7 +31,7 @@ pub use expressions::*;
 pub use instant_query_clock::InstantQueryClock;
 pub use parts::*;
 
-use crate::interface::{IndexError, MiddlewareError};
+use crate::{evaluation::functions::Function, interface::{IndexError, MiddlewareError}};
 
 #[derive(Debug)]
 pub enum EvaluationError {
@@ -71,6 +71,7 @@ pub enum FunctionEvaluationError {
     IndexError(IndexError),
     OverflowError,
     OutofRange,
+    DomainError,
     InvalidFormat { expected: String },
     CorruptData,
     InvalidType { expected: String },
@@ -88,6 +89,7 @@ impl PartialEq for FunctionEvaluationError {
                 FunctionEvaluationError::InvalidArgumentCount,
                 FunctionEvaluationError::InvalidArgumentCount,
             ) => true,
+            (FunctionEvaluationError::DomainError, FunctionEvaluationError::DomainError) => true,
             (FunctionEvaluationError::IndexError(a), FunctionEvaluationError::IndexError(b)) => {
                 a == b
             }
@@ -125,6 +127,7 @@ impl fmt::Display for FunctionEvaluationError {
                 write!(f, "Invalid type, expected: {expected}")
             }
             FunctionEvaluationError::EvaluationError(err) => write!(f, "Evaluation error: {err}"),
+            FunctionEvaluationError::DomainError => write!(f, "Domain error"),
         }
     }
 }
