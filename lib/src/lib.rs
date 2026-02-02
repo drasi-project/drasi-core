@@ -107,6 +107,12 @@ pub use channels::DispatchMode;
 /// Log level and log message types for component log streaming
 pub use managers::{LogLevel, LogMessage};
 
+/// Logging initialization functions - call before any other logger setup
+pub use managers::{
+    init_logging, init_logging_with_level, init_logging_with_logger, try_init_logging,
+    try_init_logging_with_level, try_init_logging_with_logger,
+};
+
 // ============================================================================
 // Configuration Types
 // ============================================================================

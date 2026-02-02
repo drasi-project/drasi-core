@@ -204,16 +204,20 @@ impl LoggingTestSource {
 
     /// Log a message at info level (for testing)
     pub async fn emit_log(&self, message: &str) {
-        self.base.log_info(message).await;
+        if let Some(logger) = self.base.logger().await {
+            logger.info(message).await;
+        }
     }
 
     /// Log messages at various levels (for testing)
     pub async fn emit_all_log_levels(&self) {
-        self.base.log_trace("trace level").await;
-        self.base.log_debug("debug level").await;
-        self.base.log_info("info level").await;
-        self.base.log_warn("warn level").await;
-        self.base.log_error("error level").await;
+        if let Some(logger) = self.base.logger().await {
+            logger.trace("trace level").await;
+            logger.debug("debug level").await;
+            logger.info("info level").await;
+            logger.warn("warn level").await;
+            logger.error("error level").await;
+        }
     }
 }
 

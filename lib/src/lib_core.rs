@@ -203,8 +203,12 @@ impl DrasiLib {
     pub(crate) fn new(config: Arc<RuntimeConfig>) -> Self {
         let (channels, receivers) = EventChannels::new();
 
-        // Use global log registry and initialize component-aware logger
+        // Use global log registry for component logging
         let log_registry = crate::managers::global_log_registry();
+
+        // Optionally try to install global component-aware logger
+        // This allows log::info!() etc. to also route to component streams
+        // but is not required - the component_info!() macros work independently
         let _ = crate::managers::init_global_component_logger();
 
         let source_manager = Arc::new(SourceManager::new(

@@ -21,7 +21,10 @@ use std::time::SystemTime;
 use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
 
-use crate::channels::{ComponentEventSender, DispatchMode, SourceEvent, SourceEventWrapper};
+use crate::channels::{
+    ComponentEventSender, ComponentType, DispatchMode, SourceEvent, SourceEventWrapper,
+};
+use crate::managers::{with_component_context, ComponentContext};
 use crate::ComponentStatus;
 
 /// Internal source ID for the future queue source (used for lifecycle management only)
@@ -90,7 +93,9 @@ impl FutureQueueSource {
         let query_id = self.query_id.clone();
         let dispatcher_clone = self.dispatcher.clone();
 
-        let handle = tokio::spawn(async move {
+        // Use component context to route logs to the query's log stream
+        let ctx = ComponentContext::new(query_id.clone(), ComponentType::Query);
+        let handle = tokio::spawn(with_component_context(ctx, async move {
             debug!("FutureQueueSource polling task started for query '{query_id}'");
 
             loop {
@@ -202,7 +207,7 @@ impl FutureQueueSource {
             }
 
             debug!("FutureQueueSource polling task exited for query '{query_id}'");
-        });
+        }));
 
         *self.task_handle.write().await = Some(handle);
 

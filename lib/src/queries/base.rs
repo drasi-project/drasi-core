@@ -120,51 +120,6 @@ impl QueryBase {
         self.logger.read().await.clone()
     }
 
-    /// Log a trace message.
-    ///
-    /// If no logger is configured, this is a no-op.
-    pub async fn log_trace(&self, message: impl Into<String>) {
-        if let Some(logger) = self.logger.read().await.as_ref() {
-            logger.trace(message).await;
-        }
-    }
-
-    /// Log a debug message.
-    ///
-    /// If no logger is configured, this is a no-op.
-    pub async fn log_debug(&self, message: impl Into<String>) {
-        if let Some(logger) = self.logger.read().await.as_ref() {
-            logger.debug(message).await;
-        }
-    }
-
-    /// Log an info message.
-    ///
-    /// If no logger is configured, this is a no-op.
-    pub async fn log_info(&self, message: impl Into<String>) {
-        if let Some(logger) = self.logger.read().await.as_ref() {
-            logger.info(message).await;
-        }
-    }
-
-    /// Log a warning message.
-    ///
-    /// If no logger is configured, this is a no-op.
-    pub async fn log_warn(&self, message: impl Into<String>) {
-        if let Some(logger) = self.logger.read().await.as_ref() {
-            logger.warn(message).await;
-        }
-    }
-
-    /// Log an error message.
-    ///
-    /// If no logger is configured, this is a no-op.
-    pub async fn log_error(&self, message: impl Into<String>) {
-        if let Some(logger) = self.logger.read().await.as_ref() {
-            logger.error(message).await;
-        }
-    }
-
     /// Subscribe to this query's results
     ///
     /// For broadcast mode: returns a receiver from the single broadcast dispatcher

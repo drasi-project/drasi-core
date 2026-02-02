@@ -37,7 +37,7 @@ use tokio::sync::RwLock;
 use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 use crate::channels::*;
 use crate::context::SourceRuntimeContext;
-use crate::managers::ComponentLogger;
+use crate::managers::{with_component_context, ComponentContext, ComponentLogger};
 use crate::profiling;
 use crate::state_store::StateStoreProvider;
 use drasi_core::models::SourceChange;
@@ -263,51 +263,6 @@ impl SourceBase {
         self.logger.read().await.clone()
     }
 
-    /// Log a trace message.
-    ///
-    /// If no logger is configured, this is a no-op.
-    pub async fn log_trace(&self, message: impl Into<String>) {
-        if let Some(logger) = self.logger.read().await.as_ref() {
-            logger.trace(message).await;
-        }
-    }
-
-    /// Log a debug message.
-    ///
-    /// If no logger is configured, this is a no-op.
-    pub async fn log_debug(&self, message: impl Into<String>) {
-        if let Some(logger) = self.logger.read().await.as_ref() {
-            logger.debug(message).await;
-        }
-    }
-
-    /// Log an info message.
-    ///
-    /// If no logger is configured, this is a no-op.
-    pub async fn log_info(&self, message: impl Into<String>) {
-        if let Some(logger) = self.logger.read().await.as_ref() {
-            logger.info(message).await;
-        }
-    }
-
-    /// Log a warning message.
-    ///
-    /// If no logger is configured, this is a no-op.
-    pub async fn log_warn(&self, message: impl Into<String>) {
-        if let Some(logger) = self.logger.read().await.as_ref() {
-            logger.warn(message).await;
-        }
-    }
-
-    /// Log an error message.
-    ///
-    /// If no logger is configured, this is a no-op.
-    pub async fn log_error(&self, message: impl Into<String>) {
-        if let Some(logger) = self.logger.read().await.as_ref() {
-            logger.error(message).await;
-        }
-    }
-
     /// Get the status channel Arc for internal use by spawned tasks
     ///
     /// This returns the internal status_tx wrapped in Arc<RwLock<Option<...>>>
@@ -473,9 +428,11 @@ impl SourceBase {
 
             // Clone settings for the async task
             let settings_clone = settings.clone();
+            let source_id = self.id.clone();
 
-            // Spawn bootstrap task
-            tokio::spawn(async move {
+            // Spawn bootstrap task with component context for proper log routing
+            let ctx = ComponentContext::new(source_id, ComponentType::Source);
+            tokio::spawn(with_component_context(ctx, async move {
                 match provider
                     .bootstrap(request, &context, bootstrap_tx, Some(&settings_clone))
                     .await
@@ -493,7 +450,7 @@ impl SourceBase {
                         );
                     }
                 }
-            });
+            }));
 
             Ok(Some(bootstrap_rx))
         } else {

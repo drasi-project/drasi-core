@@ -78,7 +78,7 @@ pub fn global_log_registry() -> Arc<ComponentLogRegistry> {
 /// Call once at startup. Returns error if logger already set.
 pub fn init_global_component_logger() -> Result<(), log::SetLoggerError> {
     let registry = global_log_registry();
-    ComponentAwareLogger::new(registry).init()
+    ComponentAwareLogger::new(registry, log::LevelFilter::Debug).init()
 }
 
 // ============================================================================
@@ -124,20 +124,158 @@ pub fn current_component_context() -> Option<ComponentContext> {
 // Component-Aware Logger
 // ============================================================================
 
+/// Initialize the Drasi component-aware logging system with a custom logger.
+///
+/// **This function must be called instead of setting up your logger directly.**
+///
+/// The wrapper will:
+/// - Route `log::info!()`, `log::error!()`, etc. to component log streams when
+///   running within a component context (inside `with_component_context`)
+/// - Forward all logs to your provided logger for normal output
+///
+/// # Example
+///
+/// ```ignore
+/// use drasi_lib::init_logging_with_logger;
+/// use env_logger::Logger;
+///
+/// // Create your logger but DON'T install it directly
+/// let my_logger = env_logger::Builder::from_default_env()
+///     .build();
+///
+/// // Let Drasi wrap it with component logging support
+/// init_logging_with_logger(my_logger, log::LevelFilter::Debug);
+///
+/// // Now create DrasiLib and use it - both component logging and your logger work!
+/// let drasi = DrasiLib::builder().build().await?;
+/// ```
+///
+/// # Panics
+///
+/// Panics if another logger has already been installed.
+pub fn init_logging_with_logger<L: log::Log + 'static>(inner_logger: L, max_level: log::LevelFilter) {
+    let registry = global_log_registry();
+    let logger = ComponentAwareLogger::wrapping(registry, Box::new(inner_logger), max_level);
+
+    if let Err(e) = logger.init() {
+        panic!(
+            "Failed to initialize Drasi logging: {e}. \
+             Ensure init_logging_with_logger() is called before any other logger is set up."
+        );
+    }
+}
+
+/// Try to initialize logging with a custom logger, returning an error if a logger is already set.
+///
+/// This is a non-panicking version of `init_logging_with_logger()`.
+pub fn try_init_logging_with_logger<L: log::Log + 'static>(
+    inner_logger: L,
+    max_level: log::LevelFilter,
+) -> Result<(), log::SetLoggerError> {
+    let registry = global_log_registry();
+    let logger = ComponentAwareLogger::wrapping(registry, Box::new(inner_logger), max_level);
+    logger.init()
+}
+
+/// Initialize the Drasi component-aware logging system with default stderr output.
+///
+/// **This function must be called before any other logger is initialized.**
+///
+/// The component-aware logger:
+/// - Routes `log::info!()`, `log::error!()`, etc. to component log streams when
+///   running within a component context (inside `with_component_context`)
+/// - Outputs logs to stderr with timestamps and level formatting
+///
+/// If you need custom log formatting or output, use `init_logging_with_logger()` instead.
+///
+/// # Example
+///
+/// ```ignore
+/// // Call this at the start of main(), before any other logging setup
+/// drasi_lib::init_logging();
+///
+/// // Now create DrasiLib and use it
+/// let drasi = DrasiLib::builder().build().await?;
+/// ```
+///
+/// # Panics
+///
+/// Panics if another logger has already been installed. To avoid this, ensure
+/// `init_logging()` is called before any other logging framework initialization.
+pub fn init_logging() {
+    init_logging_with_level(log::LevelFilter::Info);
+}
+
+/// Initialize logging with a specific maximum log level.
+///
+/// Like `init_logging()`, but allows specifying the log level directly.
+///
+/// # Panics
+///
+/// Panics if another logger has already been installed.
+pub fn init_logging_with_level(level: log::LevelFilter) {
+    let registry = global_log_registry();
+    let logger = ComponentAwareLogger::new(registry, level);
+
+    if let Err(e) = logger.init() {
+        panic!(
+            "Failed to initialize Drasi logging: {e}. \
+             Ensure init_logging() is called before any other logger is set up."
+        );
+    }
+}
+
+/// Try to initialize logging, returning an error if a logger is already set.
+///
+/// This is a non-panicking version of `init_logging()`.
+pub fn try_init_logging() -> Result<(), log::SetLoggerError> {
+    try_init_logging_with_level(log::LevelFilter::Info)
+}
+
+/// Try to initialize logging with a specific level, returning an error if a logger is already set.
+pub fn try_init_logging_with_level(level: log::LevelFilter) -> Result<(), log::SetLoggerError> {
+    let registry = global_log_registry();
+    let logger = ComponentAwareLogger::new(registry, level);
+    logger.init()
+}
+
 /// Logger that routes log crate calls to component log streams.
+///
+/// This logger serves two purposes:
+/// 1. Routes logs to component-specific streams when running within a component context
+/// 2. Forwards logs to an inner logger (or outputs to stderr if no inner logger)
+///
+/// Use `init_logging()` or `init_logging_with_logger()` to install this logger globally.
 pub struct ComponentAwareLogger {
     registry: Arc<ComponentLogRegistry>,
+    inner_logger: Option<Box<dyn log::Log>>,
     max_level: log::LevelFilter,
 }
 
 impl ComponentAwareLogger {
-    pub fn new(registry: Arc<ComponentLogRegistry>) -> Self {
+    /// Create a new ComponentAwareLogger with default stderr output.
+    pub fn new(registry: Arc<ComponentLogRegistry>, max_level: log::LevelFilter) -> Self {
         Self {
             registry,
-            max_level: log::LevelFilter::Debug,
+            inner_logger: None,
+            max_level,
         }
     }
 
+    /// Create a new ComponentAwareLogger that wraps an existing logger.
+    pub fn wrapping(
+        registry: Arc<ComponentLogRegistry>,
+        inner_logger: Box<dyn log::Log>,
+        max_level: log::LevelFilter,
+    ) -> Self {
+        Self {
+            registry,
+            inner_logger: Some(inner_logger),
+            max_level,
+        }
+    }
+
+    /// Install this logger as the global logger.
     pub fn init(self) -> Result<(), log::SetLoggerError> {
         let max_level = self.max_level;
         log::set_boxed_logger(Box::new(self))?;
@@ -158,7 +296,14 @@ impl ComponentAwareLogger {
 
 impl log::Log for ComponentAwareLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
-        metadata.level() <= self.max_level
+        if metadata.level() > self.max_level {
+            return false;
+        }
+        // Also check inner logger if present
+        if let Some(ref inner) = self.inner_logger {
+            return inner.enabled(metadata);
+        }
+        true
     }
 
     fn log(&self, record: &log::Record) {
@@ -183,16 +328,27 @@ impl log::Log for ComponentAwareLogger {
             }
         }
 
-        // Also print to stderr
-        eprintln!(
-            "[{}] {} - {}",
-            record.level(),
-            record.target(),
-            record.args()
-        );
+        // Forward to inner logger or output to stderr
+        if let Some(ref inner) = self.inner_logger {
+            inner.log(record);
+        } else {
+            // Default stderr output with timestamp
+            let now = chrono::Local::now();
+            eprintln!(
+                "{} {:5} [{}] {}",
+                now.format("%Y-%m-%d %H:%M:%S%.3f"),
+                record.level(),
+                record.target(),
+                record.args()
+            );
+        }
     }
 
-    fn flush(&self) {}
+    fn flush(&self) {
+        if let Some(ref inner) = self.inner_logger {
+            inner.flush();
+        }
+    }
 }
 
 /// Log severity level.
@@ -518,6 +674,7 @@ impl ComponentLogger {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use log::Log;
     use tokio::time::{sleep, Duration};
 
     #[tokio::test]
@@ -783,5 +940,78 @@ mod tests {
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].message, "from logger1");
         assert_eq!(history[1].message, "from logger2");
+    }
+
+    // ============================================================================
+    // ComponentAwareLogger Tests
+    // ============================================================================
+
+    #[test]
+    fn test_component_aware_logger_creation() {
+        let registry = Arc::new(ComponentLogRegistry::new());
+        let logger = ComponentAwareLogger::new(registry, log::LevelFilter::Debug);
+        assert_eq!(logger.max_level, log::LevelFilter::Debug);
+        assert!(logger.inner_logger.is_none());
+    }
+
+    #[test]
+    fn test_component_aware_logger_wrapping() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Create a simple test logger that counts log calls
+        struct CountingLogger {
+            count: Arc<AtomicUsize>,
+        }
+
+        impl log::Log for CountingLogger {
+            fn enabled(&self, _metadata: &log::Metadata) -> bool {
+                true
+            }
+
+            fn log(&self, _record: &log::Record) {
+                self.count.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn flush(&self) {}
+        }
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let counting_logger = CountingLogger {
+            count: count.clone(),
+        };
+
+        let registry = Arc::new(ComponentLogRegistry::new());
+        let logger =
+            ComponentAwareLogger::wrapping(registry, Box::new(counting_logger), log::LevelFilter::Info);
+
+        assert!(logger.inner_logger.is_some());
+        assert_eq!(logger.max_level, log::LevelFilter::Info);
+    }
+
+    #[test]
+    fn test_log_level_filtering() {
+        let registry = Arc::new(ComponentLogRegistry::new());
+        let logger = ComponentAwareLogger::new(registry, log::LevelFilter::Warn);
+
+        // Debug should be filtered out (Warn only allows Warn and Error)
+        let debug_meta = log::Metadata::builder()
+            .level(log::Level::Debug)
+            .target("test")
+            .build();
+        assert!(!logger.enabled(&debug_meta));
+
+        // Warn should be enabled
+        let warn_meta = log::Metadata::builder()
+            .level(log::Level::Warn)
+            .target("test")
+            .build();
+        assert!(logger.enabled(&warn_meta));
+
+        // Error should be enabled
+        let error_meta = log::Metadata::builder()
+            .level(log::Level::Error)
+            .target("test")
+            .build();
+        assert!(logger.enabled(&error_meta));
     }
 }
