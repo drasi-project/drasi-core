@@ -17,7 +17,7 @@ Before running these scenarios, ensure the following requirements are met.
   ```bash
   rustc --version
   cargo --version
--   (Optional) Redis server running if using `--element-index redis` or `--result-index redis`.
+- (Optional) Redis server running if using `--element-index redis` or `--result-index redis`.
 
 
 No external system libraries are required for the `memory` or `rocksdb` backends.
@@ -26,7 +26,7 @@ No external system libraries are required for the `memory` or `rocksdb` backends
 If you plan to use Redis backend, you need a running Redis instance.
 
 #### 1. Installation
-*   **MacOS:**
+*   **macOS:**
     ```bash
     brew install redis
     brew services start redis
@@ -87,7 +87,7 @@ If you prefer to run the binary directly (e.g., in a production environment):
     ```
 3.  **Typical Command Structure:**
     ```bash
-    ./query-perf --release -- --scenario <SCENARIO> --element-index <INDEX> --result-index <INDEX>
+    ./query-perf --scenario <SCENARIO> --element-index <INDEX> --result-index <INDEX>
     ```
 
 ## Using Cargo
@@ -136,7 +136,7 @@ Establishes the baseline performance for direct node access and property retriev
 
 ### `single_node_calculation_projection`
 **The Calculator.**
-Monitors `Room` nodes but computes a derived "Comfort Index" on the fly using arithmetic and conditional logic.
+Monitors `Room` nodes but computes a derived comfort level on the fly using arithmetic and conditional logic.
 
 **Query Explanation:** Calculates a derived `ComfortLevel` for each `Room` using arithmetic operations on properties and classifies it using a conditional `CASE` expression.
 
@@ -145,7 +145,7 @@ Evaluates the computational performance of the expression evaluation engine. Thi
 
 ### `single_path_averaging_projection`
 **The Aggregator.**
-Joins `Room` nodes to their parent `Floor` nodes and calculates the average comfort index per floor.
+Joins `Room` nodes to their parent `Floor` nodes and calculates the average comfort level per floor.
 
 **Query Explanation:** Matches `Room` nodes connected to `Floor` nodes via the `PART_OF` relationship. Results are grouped by `Floor` to calculate the average comfort level of associated rooms.
 
@@ -173,7 +173,7 @@ Validates the changelog suppression capabilities of the system. This scenario en
 <img width="1101" height="547" alt="Screenshot 2026-02-02 at 12 27 49 AM" src="https://github.com/user-attachments/assets/04553c44-b852-436d-92d8-92b4af2b18f3" />
 
 
-### Run a scenario with redis index (Using Cargo)
+### Run a scenario with Redis index (Using Cargo)
 ```bash
 cargo run --release -p query-perf -- --scenario single_node_property_projection --element-index redis --result-index redis -i 1000
 ```
@@ -189,7 +189,7 @@ cargo run --release -p query-perf -- --scenario single_node_property_projection 
 
 <img width="1105" height="589" alt="Screenshot 2026-02-01 at 11 46 18 PM" src="https://github.com/user-attachments/assets/7b33dd12-b6fc-466c-a200-921202fb9468" />
 
-***Note:** Times associated with 'bootstrap' represent the time taken to load the initial dataset (2000 rooms + buildings). 'Run' metrics represent the performance of processing the dynamic updates.*
+**Note:** Times associated with 'bootstrap' represent the time taken to load the initial dataset (2000 rooms + buildings). 'Run' metrics represent the performance of processing the dynamic updates.
 
 # Building Comfort Data Model
 
@@ -259,3 +259,4 @@ This data model is intentionally designed to:
 
 The same data model is reused across all scenarios to ensure **fair, consistent,
 and repeatable performance comparisons**.
+
