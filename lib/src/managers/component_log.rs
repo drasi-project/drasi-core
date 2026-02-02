@@ -538,4 +538,114 @@ mod tests {
         assert_eq!(format!("{}", LogLevel::Warn), "WARN");
         assert_eq!(format!("{}", LogLevel::Error), "ERROR");
     }
+
+    #[tokio::test]
+    async fn test_component_logger_logs_to_registry() {
+        let registry = Arc::new(ComponentLogRegistry::new());
+        let logger = registry.create_logger("test-source", ComponentType::Source);
+
+        // Log messages via ComponentLogger
+        logger.trace("trace message").await;
+        logger.debug("debug message").await;
+        logger.info("info message").await;
+        logger.warn("warn message").await;
+        logger.error("error message").await;
+
+        // Verify messages are in registry
+        let history = registry.get_history("test-source").await;
+        assert_eq!(history.len(), 5);
+        assert_eq!(history[0].level, LogLevel::Trace);
+        assert_eq!(history[0].message, "trace message");
+        assert_eq!(history[1].level, LogLevel::Debug);
+        assert_eq!(history[2].level, LogLevel::Info);
+        assert_eq!(history[3].level, LogLevel::Warn);
+        assert_eq!(history[4].level, LogLevel::Error);
+    }
+
+    #[tokio::test]
+    async fn test_component_logger_streams_to_subscribers() {
+        let registry = Arc::new(ComponentLogRegistry::new());
+        let logger = registry.create_logger("test-source", ComponentType::Source);
+
+        // Subscribe before logging
+        let (history, mut receiver) = registry.subscribe("test-source").await;
+        assert!(history.is_empty());
+
+        // Log a message
+        logger.info("streaming test").await;
+
+        // Should receive the message via broadcast
+        let received = tokio::time::timeout(Duration::from_millis(100), receiver.recv())
+            .await
+            .expect("Timeout waiting for log")
+            .expect("Channel error");
+
+        assert_eq!(received.level, LogLevel::Info);
+        assert_eq!(received.message, "streaming test");
+        assert_eq!(received.component_id, "test-source");
+        assert_eq!(received.component_type, ComponentType::Source);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_subscribers_receive_logs() {
+        let registry = Arc::new(ComponentLogRegistry::new());
+        let logger = registry.create_logger("test-source", ComponentType::Source);
+
+        // Create two subscribers
+        let (_history1, mut receiver1) = registry.subscribe("test-source").await;
+        let (_history2, mut receiver2) = registry.subscribe("test-source").await;
+
+        // Log a message
+        logger.info("broadcast test").await;
+
+        // Both should receive the message
+        let received1 = tokio::time::timeout(Duration::from_millis(100), receiver1.recv())
+            .await
+            .expect("Timeout on receiver1")
+            .expect("Channel error on receiver1");
+
+        let received2 = tokio::time::timeout(Duration::from_millis(100), receiver2.recv())
+            .await
+            .expect("Timeout on receiver2")
+            .expect("Channel error on receiver2");
+
+        assert_eq!(received1.message, "broadcast test");
+        assert_eq!(received2.message, "broadcast test");
+    }
+
+    #[tokio::test]
+    async fn test_late_subscriber_gets_history() {
+        let registry = Arc::new(ComponentLogRegistry::new());
+        let logger = registry.create_logger("test-source", ComponentType::Source);
+
+        // Log some messages before subscribing
+        logger.info("message 1").await;
+        logger.info("message 2").await;
+        logger.info("message 3").await;
+
+        // Subscribe after messages are logged
+        let (history, _receiver) = registry.subscribe("test-source").await;
+
+        // History should contain all 3 messages
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0].message, "message 1");
+        assert_eq!(history[1].message, "message 2");
+        assert_eq!(history[2].message, "message 3");
+    }
+
+    #[tokio::test]
+    async fn test_logger_clone_shares_registry() {
+        let registry = Arc::new(ComponentLogRegistry::new());
+        let logger1 = registry.create_logger("test-source", ComponentType::Source);
+        let logger2 = logger1.clone();
+
+        // Both loggers should write to the same component
+        logger1.info("from logger1").await;
+        logger2.info("from logger2").await;
+
+        let history = registry.get_history("test-source").await;
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].message, "from logger1");
+        assert_eq!(history[1].message, "from logger2");
+    }
 }

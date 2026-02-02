@@ -188,6 +188,86 @@ pub fn create_test_mock_source(id: String, event_tx: ComponentEventSender) -> Te
     TestMockSource::new(id, event_tx).unwrap()
 }
 
+/// A test source that uses SourceBase for logging integration tests.
+///
+/// This source uses the full SourceBase infrastructure including logger support.
+pub struct LoggingTestSource {
+    base: crate::sources::SourceBase,
+}
+
+impl LoggingTestSource {
+    pub fn new(id: impl Into<String>) -> Result<Self> {
+        let params = crate::sources::SourceBaseParams::new(id);
+        let base = crate::sources::SourceBase::new(params)?;
+        Ok(Self { base })
+    }
+
+    /// Log a message at info level (for testing)
+    pub async fn emit_log(&self, message: &str) {
+        self.base.log_info(message).await;
+    }
+
+    /// Log messages at various levels (for testing)
+    pub async fn emit_all_log_levels(&self) {
+        self.base.log_trace("trace level").await;
+        self.base.log_debug("debug level").await;
+        self.base.log_info("info level").await;
+        self.base.log_warn("warn level").await;
+        self.base.log_error("error level").await;
+    }
+}
+
+#[async_trait]
+impl Source for LoggingTestSource {
+    fn id(&self) -> &str {
+        self.base.get_id()
+    }
+
+    fn type_name(&self) -> &str {
+        "logging-test"
+    }
+
+    fn properties(&self) -> HashMap<String, serde_json::Value> {
+        HashMap::new()
+    }
+
+    fn auto_start(&self) -> bool {
+        self.base.auto_start
+    }
+
+    async fn start(&self) -> Result<()> {
+        self.base
+            .set_status_with_event(ComponentStatus::Running, Some("Started".to_string()))
+            .await?;
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        self.base.stop_common().await
+    }
+
+    async fn status(&self) -> ComponentStatus {
+        self.base.get_status().await
+    }
+
+    async fn subscribe(
+        &self,
+        settings: crate::config::SourceSubscriptionSettings,
+    ) -> Result<SubscriptionResponse> {
+        self.base
+            .subscribe_with_bootstrap(&settings, "logging-test")
+            .await
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
+        self.base.initialize(context).await;
+    }
+}
+
 #[cfg(test)]
 mod manager_tests {
     use super::*;
@@ -565,5 +645,136 @@ mod manager_tests {
             matches!(status, ComponentStatus::Running),
             "Source with auto_start=false should be manually startable"
         );
+    }
+
+    // ============================================================================
+    // Log Streaming Integration Tests
+    // ============================================================================
+
+    #[tokio::test]
+    async fn test_source_log_subscription() {
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        // Create a mock source
+        let source = create_test_mock_source("logging-source".to_string(), _event_tx);
+        manager.add_source(source).await.unwrap();
+
+        // Subscribe to logs
+        let result = manager.subscribe_logs("logging-source").await;
+        assert!(
+            result.is_some(),
+            "Should be able to subscribe to existing source logs"
+        );
+
+        let (history, _receiver) = result.unwrap();
+        // History should be empty initially
+        assert!(history.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_source_log_subscription_nonexistent() {
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        // Try to subscribe to a non-existent source
+        let result = manager.subscribe_logs("nonexistent-source").await;
+        assert!(
+            result.is_none(),
+            "Should return None for non-existent source"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_source_base_logs_flow_to_subscriber() {
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        // Create a LoggingTestSource that uses SourceBase
+        let source = LoggingTestSource::new("logger-source").unwrap();
+        manager.add_source(source).await.unwrap();
+
+        // Subscribe to logs before emitting
+        let (history, mut receiver) = manager.subscribe_logs("logger-source").await.unwrap();
+        assert!(history.is_empty(), "No logs should exist before logging");
+
+        // Get the source and emit a log
+        let source_instance = manager.get_source_instance("logger-source").await.unwrap();
+        let logging_source = source_instance
+            .as_any()
+            .downcast_ref::<LoggingTestSource>()
+            .unwrap();
+
+        logging_source.emit_log("test log message").await;
+
+        // Should receive the log via broadcast
+        let received = tokio::time::timeout(std::time::Duration::from_millis(100), receiver.recv())
+            .await
+            .expect("Timeout waiting for log")
+            .expect("Channel error");
+
+        assert_eq!(received.message, "test log message");
+        assert_eq!(received.component_id, "logger-source");
+        assert_eq!(received.level, crate::managers::LogLevel::Info);
+    }
+
+    #[tokio::test]
+    async fn test_source_base_logs_all_levels() {
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        // Create a LoggingTestSource
+        let source = LoggingTestSource::new("multi-level-source").unwrap();
+        manager.add_source(source).await.unwrap();
+
+        // Get the source and emit logs at all levels
+        let source_instance = manager
+            .get_source_instance("multi-level-source")
+            .await
+            .unwrap();
+        let logging_source = source_instance
+            .as_any()
+            .downcast_ref::<LoggingTestSource>()
+            .unwrap();
+
+        logging_source.emit_all_log_levels().await;
+
+        // Subscribe after logging to get history
+        let (history, _receiver) = manager.subscribe_logs("multi-level-source").await.unwrap();
+
+        // Should have 5 log messages (trace, debug, info, warn, error)
+        assert_eq!(history.len(), 5, "Should have 5 log messages");
+        assert_eq!(history[0].level, crate::managers::LogLevel::Trace);
+        assert_eq!(history[1].level, crate::managers::LogLevel::Debug);
+        assert_eq!(history[2].level, crate::managers::LogLevel::Info);
+        assert_eq!(history[3].level, crate::managers::LogLevel::Warn);
+        assert_eq!(history[4].level, crate::managers::LogLevel::Error);
+    }
+
+    #[tokio::test]
+    async fn test_source_base_log_history_persists() {
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        // Create and add source
+        let source = LoggingTestSource::new("history-source").unwrap();
+        manager.add_source(source).await.unwrap();
+
+        // Emit some logs
+        let source_instance = manager.get_source_instance("history-source").await.unwrap();
+        let logging_source = source_instance
+            .as_any()
+            .downcast_ref::<LoggingTestSource>()
+            .unwrap();
+
+        logging_source.emit_log("first").await;
+        logging_source.emit_log("second").await;
+        logging_source.emit_log("third").await;
+
+        // Subscribe and verify history
+        let (history, _receiver) = manager.subscribe_logs("history-source").await.unwrap();
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0].message, "first");
+        assert_eq!(history[1].message, "second");
+        assert_eq!(history[2].message, "third");
+
+        // Subscribe again - should get same history
+        let (history2, _receiver2) = manager.subscribe_logs("history-source").await.unwrap();
+        assert_eq!(history2.len(), 3);
     }
 }
