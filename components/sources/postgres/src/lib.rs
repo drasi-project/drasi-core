@@ -185,6 +185,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use drasi_lib::channels::{DispatchMode, *};
+use drasi_lib::managers::{with_component_context, ComponentContext};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
 
@@ -350,30 +351,36 @@ impl Source for PostgresReplicationSource {
         let status_tx = self.base.status_tx();
         let status_clone = self.base.status.clone();
 
+        // Create context for spawned task so log::info!, log::error! etc are routed
+        let ctx = ComponentContext::new(source_id.clone(), ComponentType::Source);
+
         let task = tokio::spawn(async move {
-            if let Err(e) = run_replication(
-                source_id.clone(),
-                config,
-                dispatchers,
-                status_tx.clone(),
-                status_clone.clone(),
-            )
-            .await
-            {
-                error!("Replication task failed for {source_id}: {e}");
-                *status_clone.write().await = ComponentStatus::Error;
-                if let Some(ref tx) = *status_tx.read().await {
-                    let _ = tx
-                        .send(ComponentEvent {
-                            component_id: source_id,
-                            component_type: ComponentType::Source,
-                            status: ComponentStatus::Error,
-                            timestamp: chrono::Utc::now(),
-                            message: Some(format!("Replication failed: {e}")),
-                        })
-                        .await;
+            with_component_context(ctx, async move {
+                if let Err(e) = run_replication(
+                    source_id.clone(),
+                    config,
+                    dispatchers,
+                    status_tx.clone(),
+                    status_clone.clone(),
+                )
+                .await
+                {
+                    error!("Replication task failed for {source_id}: {e}");
+                    *status_clone.write().await = ComponentStatus::Error;
+                    if let Some(ref tx) = *status_tx.read().await {
+                        let _ = tx
+                            .send(ComponentEvent {
+                                component_id: source_id,
+                                component_type: ComponentType::Source,
+                                status: ComponentStatus::Error,
+                                timestamp: chrono::Utc::now(),
+                                message: Some(format!("Replication failed: {e}")),
+                            })
+                            .await;
+                    }
                 }
-            }
+            })
+            .await
         });
 
         *self.base.task_handle.write().await = Some(task);

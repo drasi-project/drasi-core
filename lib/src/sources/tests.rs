@@ -279,8 +279,12 @@ mod manager_tests {
         mpsc::Receiver<ComponentEvent>,
         mpsc::Sender<ComponentEvent>,
     ) {
+        // Initialize global logger (only succeeds once)
+        let _ = crate::managers::init_global_component_logger();
+
         let (event_tx, event_rx) = mpsc::channel(100);
-        let log_registry = Arc::new(crate::managers::ComponentLogRegistry::new());
+        // Use global registry so ComponentAwareLogger can route logs
+        let log_registry = crate::managers::global_log_registry();
         let manager = Arc::new(SourceManager::new(event_tx.clone(), log_registry));
         (manager, event_rx, event_tx)
     }
@@ -776,5 +780,53 @@ mod manager_tests {
         // Subscribe again - should get same history
         let (history2, _receiver2) = manager.subscribe_logs("history-source").await.unwrap();
         assert_eq!(history2.len(), 3);
+    }
+
+    // ============================================================================
+    // Log Macro Routing Tests
+    // ============================================================================
+
+    #[tokio::test]
+    async fn test_log_macro_routed_to_component_logs() {
+        use crate::managers::{with_component_context, ComponentContext};
+        use crate::ComponentType;
+
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        let source = LoggingTestSource::new("log-routing-source").unwrap();
+        manager.add_source(source).await.unwrap();
+
+        let (_history, mut receiver) = manager.subscribe_logs("log-routing-source").await.unwrap();
+
+        // Call log::info!() within component context
+        let ctx = ComponentContext::new("log-routing-source", ComponentType::Source);
+        with_component_context(ctx, async {
+            log::info!("Test log from macro");
+        })
+        .await;
+
+        // Wait for async log task
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let received =
+            tokio::time::timeout(std::time::Duration::from_millis(200), receiver.recv()).await;
+
+        match received {
+            Ok(Ok(msg)) => {
+                assert!(
+                    msg.message.contains("Test log from macro"),
+                    "Expected message containing 'Test log from macro', got: {}",
+                    msg.message
+                );
+            }
+            Ok(Err(e)) => panic!("Channel error: {e:?}"),
+            Err(_) => {
+                let (history, _) = manager.subscribe_logs("log-routing-source").await.unwrap();
+                panic!(
+                    "Timeout. History: {:?}",
+                    history.iter().map(|m| &m.message).collect::<Vec<_>>()
+                );
+            }
+        }
     }
 }

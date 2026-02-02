@@ -195,7 +195,8 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
-use drasi_lib::channels::*;
+use drasi_lib::channels::{ComponentType, *};
+use drasi_lib::managers::{with_component_context, ComponentContext};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
 
@@ -676,14 +677,14 @@ impl Source for HttpSource {
         // Start adaptive batcher task
         let adaptive_config = self.adaptive_config.clone();
         let source_id = self.base.id.clone();
+        let dispatchers = self.base.dispatchers.clone();
 
         info!("[{source_id}] Starting adaptive batcher task");
-        tokio::spawn(Self::run_adaptive_batcher(
-            batch_rx,
-            self.base.dispatchers.clone(),
-            adaptive_config,
-            source_id.clone(),
-        ));
+        let ctx = ComponentContext::new(source_id.clone(), ComponentType::Source);
+        tokio::spawn(with_component_context(ctx, async move {
+            Self::run_adaptive_batcher(batch_rx, dispatchers, adaptive_config, source_id.clone())
+                .await
+        }));
 
         // Create app state
         let state = HttpAppState {
@@ -711,7 +712,9 @@ impl Source for HttpSource {
 
         // Start server
         let (error_tx, error_rx) = tokio::sync::oneshot::channel();
-        let server_handle = tokio::spawn(async move {
+        let source_id = self.base.id.clone();
+        let ctx = ComponentContext::new(source_id.clone(), ComponentType::Source);
+        let server_handle = tokio::spawn(with_component_context(ctx, async move {
             let addr = format!("{host}:{port}");
             info!("[{source_id}] Adaptive HTTP source attempting to bind to {addr}");
 
@@ -737,7 +740,7 @@ impl Source for HttpSource {
             {
                 error!("[{source_id}] HTTP server error: {e}");
             }
-        });
+        }));
 
         *self.base.task_handle.write().await = Some(server_handle);
         *self.base.shutdown_tx.write().await = Some(shutdown_tx);

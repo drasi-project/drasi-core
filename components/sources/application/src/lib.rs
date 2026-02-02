@@ -152,6 +152,7 @@ use tokio::sync::{mpsc, RwLock};
 
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ComponentType, *};
+use drasi_lib::managers::{with_component_context, ComponentContext};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
 
@@ -397,8 +398,10 @@ impl ApplicationSource {
         let base_dispatchers = self.base.dispatchers.clone();
         let status_tx = self.base.status_tx();
         let status = self.base.status.clone();
+        let source_id = self.base.id.clone();
 
-        let handle = tokio::spawn(async move {
+        let ctx = ComponentContext::new(source_id, ComponentType::Source);
+        let handle = tokio::spawn(with_component_context(ctx, async move {
             info!("ApplicationSource '{source_name}' event processor started");
 
             if let Some(ref tx) = *status_tx.read().await {
@@ -437,7 +440,7 @@ impl ApplicationSource {
             }
 
             info!("ApplicationSource '{source_name}' event processor stopped");
-        });
+        }));
 
         *self.base.task_handle.write().await = Some(handle);
         Ok(())

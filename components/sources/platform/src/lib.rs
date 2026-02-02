@@ -175,6 +175,7 @@ use drasi_lib::channels::{
     ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, ControlOperation,
     DispatchMode, SourceControl, SourceEvent, SourceEventWrapper, SubscriptionResponse,
 };
+use drasi_lib::managers::{with_component_context, ComponentContext};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::manager::convert_json_to_element_properties;
 use drasi_lib::Source;
@@ -721,7 +722,8 @@ impl PlatformSource {
         event_tx: Arc<RwLock<Option<ComponentEventSender>>>,
         status: Arc<RwLock<ComponentStatus>>,
     ) -> JoinHandle<()> {
-        tokio::spawn(async move {
+        let ctx = ComponentContext::new(source_id.clone(), ComponentType::Source);
+        tokio::spawn(with_component_context(ctx, async move {
             info!(
                 "Starting platform source consumer for source '{}' on stream '{}'",
                 source_id, platform_config.stream_key
@@ -1062,7 +1064,7 @@ impl PlatformSource {
                     }
                 }
             }
-        })
+        }))
     }
 }
 

@@ -39,7 +39,7 @@ use crate::channels::{
     ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, QueryResult,
 };
 use crate::context::ReactionRuntimeContext;
-use crate::managers::ComponentLogger;
+use crate::managers::{with_component_context, ComponentContext, ComponentLogger};
 use crate::reactions::QueryProvider;
 use crate::state_store::StateStoreProvider;
 
@@ -394,46 +394,49 @@ impl ReactionBase {
                 matches!(dispatch_mode, crate::channels::DispatchMode::Channel);
 
             // Spawn forwarder task to read from receiver and enqueue to priority queue
+            let ctx = ComponentContext::new(reaction_id.clone(), ComponentType::Reaction);
             let forwarder_task = tokio::spawn(async move {
-                debug!(
-                    "[{reaction_id}] Started result forwarder for query '{query_id_clone}' (dispatch_mode: {dispatch_mode:?}, blocking_enqueue: {use_blocking_enqueue})"
-                );
+                with_component_context(ctx, async move {
+                    debug!(
+                        "[{reaction_id}] Started result forwarder for query '{query_id_clone}' (dispatch_mode: {dispatch_mode:?}, blocking_enqueue: {use_blocking_enqueue})"
+                    );
 
-                loop {
-                    match receiver.recv().await {
-                        Ok(query_result) => {
-                            // Use appropriate enqueue method based on dispatch mode
-                            if use_blocking_enqueue {
-                                // Channel mode: Use blocking enqueue to prevent message loss
-                                // This creates backpressure when the priority queue is full
-                                priority_queue.enqueue_wait(query_result).await;
-                            } else {
-                                // Broadcast mode: Use non-blocking enqueue to prevent deadlock
-                                // Messages may be dropped when priority queue is full
-                                if !priority_queue.enqueue(query_result).await {
+                    loop {
+                        match receiver.recv().await {
+                            Ok(query_result) => {
+                                // Use appropriate enqueue method based on dispatch mode
+                                if use_blocking_enqueue {
+                                    // Channel mode: Use blocking enqueue to prevent message loss
+                                    // This creates backpressure when the priority queue is full
+                                    priority_queue.enqueue_wait(query_result).await;
+                                } else {
+                                    // Broadcast mode: Use non-blocking enqueue to prevent deadlock
+                                    // Messages may be dropped when priority queue is full
+                                    if !priority_queue.enqueue(query_result).await {
+                                        warn!(
+                                            "[{reaction_id}] Failed to enqueue result from query '{query_id_clone}' - priority queue at capacity (broadcast mode)"
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                // Check if it's a lag error or closed channel
+                                let error_str = e.to_string();
+                                if error_str.contains("lagged") {
                                     warn!(
-                                        "[{reaction_id}] Failed to enqueue result from query '{query_id_clone}' - priority queue at capacity (broadcast mode)"
+                                        "[{reaction_id}] Receiver lagged for query '{query_id_clone}': {error_str}"
                                     );
+                                    continue;
+                                } else {
+                                    info!(
+                                        "[{reaction_id}] Receiver error for query '{query_id_clone}': {error_str}"
+                                    );
+                                    break;
                                 }
                             }
                         }
-                        Err(e) => {
-                            // Check if it's a lag error or closed channel
-                            let error_str = e.to_string();
-                            if error_str.contains("lagged") {
-                                warn!(
-                                    "[{reaction_id}] Receiver lagged for query '{query_id_clone}': {error_str}"
-                                );
-                                continue;
-                            } else {
-                                info!(
-                                    "[{reaction_id}] Receiver error for query '{query_id_clone}': {error_str}"
-                                );
-                                break;
-                            }
-                        }
                     }
-                }
+                }).await
             });
 
             // Store the forwarder task handle

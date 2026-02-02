@@ -39,7 +39,8 @@ use crate::config::SourceSubscriptionSettings;
 use crate::config::{QueryConfig, QueryLanguage, QueryRuntime};
 use crate::managers::{
     is_operation_valid, log_component_error, log_component_start, log_component_stop,
-    ComponentEventHistory, ComponentLogRegistry, Operation,
+    with_component_context, ComponentContext, ComponentEventHistory, ComponentLogRegistry,
+    Operation,
 };
 use crate::queries::PriorityQueue;
 use crate::queries::QueryBase;
@@ -509,7 +510,8 @@ impl Query for DrasiQuery {
             let use_blocking_enqueue =
                 matches!(dispatch_mode, crate::channels::DispatchMode::Channel);
 
-            let task = tokio::spawn(async move {
+            let ctx = ComponentContext::new(query_id.clone(), ComponentType::Query);
+            let task = tokio::spawn(with_component_context(ctx, async move {
                 debug!(
                     "Query '{query_id}' started event forwarder for source '{source_id_clone}' (dispatch_mode: {dispatch_mode:?}, blocking_enqueue: {use_blocking_enqueue})"
                 );
@@ -545,7 +547,7 @@ impl Query for DrasiQuery {
                 }
 
                 debug!("Query '{query_id}' event forwarder exited for source '{source_id_clone}'");
-            });
+            }));
 
             subscription_tasks.push(task);
         }
@@ -612,7 +614,8 @@ impl Query for DrasiQuery {
                 let bootstrap_state_clone = bootstrap_state.clone();
                 let base_dispatchers_clone = base_dispatchers.clone();
 
-                tokio::spawn(async move {
+                let ctx = ComponentContext::new(query_id.clone(), ComponentType::Query);
+                tokio::spawn(with_component_context(ctx, async move {
                     let mut count = 0u64;
 
                     while let Some(bootstrap_event) = bootstrap_rx.recv().await {
@@ -698,7 +701,7 @@ impl Query for DrasiQuery {
                             );
                         }
                     }
-                });
+                }));
             }
         } else {
             info!(
@@ -735,7 +738,8 @@ impl Query for DrasiQuery {
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         self.base.set_shutdown_tx(shutdown_tx).await;
 
-        let handle = tokio::spawn(async move {
+        let ctx = ComponentContext::new(query_id.clone(), ComponentType::Query);
+        let handle = tokio::spawn(with_component_context(ctx, async move {
             info!("Query '{query_id}' starting priority queue event processor");
 
             loop {
@@ -936,7 +940,7 @@ impl Query for DrasiQuery {
             }
 
             info!("Query '{query_id}' processing task exited");
-        });
+        }));
 
         // Store the task handle
         *task_handle_clone.write().await = Some(handle);

@@ -45,7 +45,7 @@
 //! ```
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -58,6 +58,142 @@ pub const DEFAULT_MAX_LOGS_PER_COMPONENT: usize = 100;
 
 /// Default broadcast channel capacity for live log streaming.
 pub const DEFAULT_LOG_CHANNEL_CAPACITY: usize = 256;
+
+// ============================================================================
+// Global Registry for Log Routing
+// ============================================================================
+
+/// Global registry for component logs.
+/// Used by ComponentAwareLogger to route log::info!() etc to component streams.
+static GLOBAL_LOG_REGISTRY: OnceLock<Arc<ComponentLogRegistry>> = OnceLock::new();
+
+/// Get or initialize the global log registry.
+pub fn global_log_registry() -> Arc<ComponentLogRegistry> {
+    GLOBAL_LOG_REGISTRY
+        .get_or_init(|| Arc::new(ComponentLogRegistry::new()))
+        .clone()
+}
+
+/// Initialize the global component-aware logger.
+/// Call once at startup. Returns error if logger already set.
+pub fn init_global_component_logger() -> Result<(), log::SetLoggerError> {
+    let registry = global_log_registry();
+    ComponentAwareLogger::new(registry).init()
+}
+
+// ============================================================================
+// Task-Local Component Context
+// ============================================================================
+
+/// Context identifying the current component for log routing.
+#[derive(Clone, Debug)]
+pub struct ComponentContext {
+    pub component_id: String,
+    pub component_type: ComponentType,
+}
+
+impl ComponentContext {
+    pub fn new(component_id: impl Into<String>, component_type: ComponentType) -> Self {
+        Self {
+            component_id: component_id.into(),
+            component_type,
+        }
+    }
+}
+
+tokio::task_local! {
+    /// Task-local storage for current component context.
+    static COMPONENT_CONTEXT: ComponentContext;
+}
+
+/// Run an async block with the given component context.
+/// All log::info!(), log::error!() etc calls within will be routed to the component's log stream.
+pub async fn with_component_context<F, R>(context: ComponentContext, f: F) -> R
+where
+    F: std::future::Future<Output = R>,
+{
+    COMPONENT_CONTEXT.scope(context, f).await
+}
+
+/// Get the current component context if one is set.
+pub fn current_component_context() -> Option<ComponentContext> {
+    COMPONENT_CONTEXT.try_with(|ctx| ctx.clone()).ok()
+}
+
+// ============================================================================
+// Component-Aware Logger
+// ============================================================================
+
+/// Logger that routes log crate calls to component log streams.
+pub struct ComponentAwareLogger {
+    registry: Arc<ComponentLogRegistry>,
+    max_level: log::LevelFilter,
+}
+
+impl ComponentAwareLogger {
+    pub fn new(registry: Arc<ComponentLogRegistry>) -> Self {
+        Self {
+            registry,
+            max_level: log::LevelFilter::Debug,
+        }
+    }
+
+    pub fn init(self) -> Result<(), log::SetLoggerError> {
+        let max_level = self.max_level;
+        log::set_boxed_logger(Box::new(self))?;
+        log::set_max_level(max_level);
+        Ok(())
+    }
+
+    fn convert_level(level: log::Level) -> LogLevel {
+        match level {
+            log::Level::Error => LogLevel::Error,
+            log::Level::Warn => LogLevel::Warn,
+            log::Level::Info => LogLevel::Info,
+            log::Level::Debug => LogLevel::Debug,
+            log::Level::Trace => LogLevel::Trace,
+        }
+    }
+}
+
+impl log::Log for ComponentAwareLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= self.max_level
+    }
+
+    fn log(&self, record: &log::Record) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+
+        // Route to component log stream if in component context
+        if let Some(ctx) = current_component_context() {
+            let log_message = LogMessage::new(
+                Self::convert_level(record.level()),
+                record.args().to_string(),
+                ctx.component_id,
+                ctx.component_type,
+            );
+
+            let registry = self.registry.clone();
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    registry.log(log_message).await;
+                });
+            }
+        }
+
+        // Also print to stderr
+        eprintln!(
+            "[{}] {} - {}",
+            record.level(),
+            record.target(),
+            record.args()
+        );
+    }
+
+    fn flush(&self) {}
+}
 
 /// Log severity level.
 ///

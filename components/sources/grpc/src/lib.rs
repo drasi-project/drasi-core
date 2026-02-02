@@ -114,7 +114,9 @@ use tokio::sync::RwLock;
 use tonic::{transport::Server, Request, Response, Status};
 
 use drasi_lib::channels::{DispatchMode, *};
-use drasi_lib::managers::{log_component_start, log_component_stop};
+use drasi_lib::managers::{
+    log_component_start, log_component_stop, with_component_context, ComponentContext,
+};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
 
@@ -301,7 +303,8 @@ impl Source for GrpcSource {
         let source_id = self.base.id.clone();
         let status_tx = self.base.status_tx();
 
-        let task = tokio::spawn(async move {
+        let ctx = ComponentContext::new(source_id.clone(), ComponentType::Source);
+        let task = tokio::spawn(with_component_context(ctx, async move {
             *status.write().await = ComponentStatus::Running;
 
             let running_event = ComponentEvent {
@@ -331,7 +334,7 @@ impl Source for GrpcSource {
             }
 
             *status.write().await = ComponentStatus::Stopped;
-        });
+        }));
 
         *self.base.task_handle.write().await = Some(task);
         self.base.set_status(ComponentStatus::Running).await;
@@ -464,7 +467,8 @@ impl SourceService for GrpcSourceService {
 
         let (tx, rx) = tokio::sync::mpsc::channel(128);
 
-        tokio::spawn(async move {
+        let ctx = ComponentContext::new(source_id.clone(), ComponentType::Source);
+        tokio::spawn(with_component_context(ctx, async move {
             let mut events_processed = 0u64;
 
             while let Ok(Some(proto_change)) = stream.message().await {
@@ -529,7 +533,7 @@ impl SourceService for GrpcSourceService {
                     events_processed,
                 }))
                 .await;
-        });
+        }));
 
         Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
             rx,
@@ -547,14 +551,15 @@ impl SourceService for GrpcSourceService {
         // This could be extended to support bootstrap
         let (tx, rx) = tokio::sync::mpsc::channel(1);
 
-        tokio::spawn(async move {
+        let ctx = ComponentContext::new(self.source_id.clone(), ComponentType::Source);
+        tokio::spawn(with_component_context(ctx, async move {
             let _ = tx
                 .send(Ok(BootstrapResponse {
                     elements: vec![],
                     total_count: 0,
                 }))
                 .await;
-        });
+        }));
 
         Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
             rx,
