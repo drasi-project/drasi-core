@@ -1,0 +1,18 @@
+[package]
+name = "lib-integration-tests"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Test dependencies only - this crate has no library code
+drasi-lib.workspace = true
+drasi-source-postgres.workspace = true
+
+tokio = { version = "1.6", features = ["full"] }
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
+tokio-postgres = "0.7"
