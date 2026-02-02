@@ -31,7 +31,10 @@ pub use expressions::*;
 pub use instant_query_clock::InstantQueryClock;
 pub use parts::*;
 
-use crate::{evaluation::functions::Function, interface::{IndexError, MiddlewareError}};
+use crate::{
+    evaluation::functions::Function,
+    interface::{IndexError, MiddlewareError},
+};
 
 #[derive(Debug)]
 pub enum EvaluationError {
