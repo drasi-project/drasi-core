@@ -101,11 +101,17 @@ pub use channels::ComponentStatus;
 /// Component event for tracking lifecycle changes
 pub use channels::{ComponentEvent, ComponentType};
 
+/// Subscription response for source subscriptions
+pub use channels::SubscriptionResponse;
+
 /// Dispatch mode for configuring event routing (Broadcast or Channel)
 pub use channels::DispatchMode;
 
 /// Log level and log message types for component log streaming
 pub use managers::{LogLevel, LogMessage};
+
+/// Component logger for emitting logs from components
+pub use managers::ComponentLogger;
 
 /// Logging initialization functions - call before any other logger setup
 pub use managers::{
@@ -120,7 +126,7 @@ pub use managers::{
 /// Configuration types
 pub use config::{
     DrasiLibConfig, QueryConfig, QueryLanguage, QueryRuntime, ReactionRuntime, RuntimeConfig,
-    SourceRuntime,
+    SourceRuntime, SourceSubscriptionSettings,
 };
 
 /// Storage backend configuration types
