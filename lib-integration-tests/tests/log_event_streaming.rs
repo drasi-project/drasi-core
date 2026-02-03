@@ -211,8 +211,7 @@ async fn test_source_log_streaming() {
     // Initial logs should be empty before start
     assert!(
         initial_logs.is_empty(),
-        "Expected no logs before start, got: {:?}",
-        initial_logs
+        "Expected no logs before start, got: {initial_logs:?}"
     );
 
     // Start the server
@@ -238,14 +237,13 @@ async fn test_source_log_streaming() {
 
     // Check for expected log messages
     let log_messages: Vec<_> = received_logs.iter().map(|l| l.message.as_str()).collect();
-    println!("Received source logs: {:?}", log_messages);
+    println!("Received source logs: {log_messages:?}");
 
     assert!(
         log_messages
             .iter()
             .any(|m| m.contains("starting") || m.contains("started")),
-        "Expected lifecycle logs, got: {:?}",
-        log_messages
+        "Expected lifecycle logs, got: {log_messages:?}"
     );
 
     drasi.stop().await.expect("Failed to stop DrasiLib");
@@ -271,8 +269,7 @@ async fn test_source_event_streaming() {
     // Initial events should be empty before start
     assert!(
         initial_events.is_empty(),
-        "Expected no events before start, got: {:?}",
-        initial_events
+        "Expected no events before start, got: {initial_events:?}"
     );
 
     // Start the server
@@ -302,15 +299,14 @@ async fn test_source_event_streaming() {
 
     // Check for expected event statuses
     let statuses: Vec<_> = received_events.iter().map(|e| &e.status).collect();
-    println!("Received source events: {:?}", statuses);
+    println!("Received source events: {statuses:?}");
 
     // SourceBase.set_status_with_event sends Running event directly
     assert!(
         received_events
             .iter()
             .any(|e| e.status == ComponentStatus::Running),
-        "Expected Running event, got: {:?}",
-        statuses
+        "Expected Running event, got: {statuses:?}"
     );
 
     drasi.stop().await.expect("Failed to stop DrasiLib");
@@ -342,8 +338,7 @@ async fn test_query_event_streaming() {
     // Initial events should be empty before start
     assert!(
         initial_events.is_empty(),
-        "Expected no events before start, got: {:?}",
-        initial_events
+        "Expected no events before start, got: {initial_events:?}"
     );
 
     // Start the server
@@ -373,14 +368,13 @@ async fn test_query_event_streaming() {
 
     // Check for expected event statuses
     let statuses: Vec<_> = received_events.iter().map(|e| &e.status).collect();
-    println!("Received query events: {:?}", statuses);
+    println!("Received query events: {statuses:?}");
 
     assert!(
         received_events
             .iter()
             .any(|e| e.status == ComponentStatus::Running),
-        "Expected Running event, got: {:?}",
-        statuses
+        "Expected Running event, got: {statuses:?}"
     );
 
     drasi.stop().await.expect("Failed to stop DrasiLib");
@@ -414,7 +408,7 @@ async fn test_query_log_streaming() {
         .await
         .expect("Failed to subscribe to query logs");
 
-    println!("Query logs: {:?}", history);
+    println!("Query logs: {history:?}");
 
     // Queries emit lifecycle logs
     // (Note: depending on implementation, there may or may not be logs)
@@ -454,8 +448,7 @@ async fn test_reaction_event_streaming() {
     // Initial events should be empty before start
     assert!(
         initial_events.is_empty(),
-        "Expected no events before start, got: {:?}",
-        initial_events
+        "Expected no events before start, got: {initial_events:?}"
     );
 
     // Start the server
@@ -485,14 +478,13 @@ async fn test_reaction_event_streaming() {
 
     // Check for expected event statuses
     let statuses: Vec<_> = received_events.iter().map(|e| &e.status).collect();
-    println!("Received reaction events: {:?}", statuses);
+    println!("Received reaction events: {statuses:?}");
 
     assert!(
         received_events
             .iter()
             .any(|e| e.status == ComponentStatus::Running),
-        "Expected Running event, got: {:?}",
-        statuses
+        "Expected Running event, got: {statuses:?}"
     );
 
     drasi.stop().await.expect("Failed to stop DrasiLib");
@@ -546,14 +538,13 @@ async fn test_reaction_log_streaming() {
     );
 
     let log_messages: Vec<_> = received_logs.iter().map(|l| l.message.as_str()).collect();
-    println!("Received reaction logs: {:?}", log_messages);
+    println!("Received reaction logs: {log_messages:?}");
 
     assert!(
         log_messages
             .iter()
             .any(|m| m.contains("starting") || m.contains("started")),
-        "Expected lifecycle logs, got: {:?}",
-        log_messages
+        "Expected lifecycle logs, got: {log_messages:?}"
     );
 
     drasi.stop().await.expect("Failed to stop DrasiLib");
