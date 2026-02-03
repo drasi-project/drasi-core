@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use drasi_lib::channels::*;
-use drasi_lib::managers::{log_component_start, log_component_stop};
+use drasi_lib::managers::{log_component_start, log_component_stop, with_component_context, ComponentContext};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
 
@@ -157,21 +157,23 @@ impl Source for MockSource {
         let data_type = self.config.data_type.clone();
         let interval_ms = self.config.interval_ms;
 
-        // Start the data generation task
+        // Start the data generation task with component context for proper log routing
         let status = Arc::clone(&self.base.status);
         let source_name = self.base.id.clone();
+        let ctx = ComponentContext::new(source_id.clone(), ComponentType::Source);
         let task = tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
-            let mut seq = 0u64;
+            with_component_context(ctx, async move {
+                let mut interval =
+                    tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
+                let mut seq = 0u64;
 
-            loop {
-                interval.tick().await;
+                loop {
+                    interval.tick().await;
 
-                // Check if we should stop
-                if !matches!(*status.read().await, ComponentStatus::Running) {
-                    break;
-                }
+                    // Check if we should stop
+                    if !matches!(*status.read().await, ComponentStatus::Running) {
+                        break;
+                    }
 
                 seq += 1;
 
@@ -345,6 +347,8 @@ impl Source for MockSource {
             }
 
             info!("Mock source task completed");
+            })
+            .await
         });
 
         *self.base.task_handle.write().await = Some(task);
