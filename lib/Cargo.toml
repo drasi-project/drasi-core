@@ -27,6 +27,13 @@ readme = "README.md"
 [lints]
 workspace = true
 
+[features]
+default = []
+bundled-jq = ["drasi-middleware/bundled-jq"]
+
+[package.metadata.docs.rs]
+features = ["bundled-jq"]
+
 [lib]
 name = "drasi_lib"
 path = "src/lib.rs"

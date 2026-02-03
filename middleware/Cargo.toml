@@ -12,6 +12,13 @@ readme = "../readme.md"
 [lints]
 workspace = true
 
+[features]
+default = []
+bundled-jq = ["jq-rs/bundled"]
+
+[package.metadata.docs.rs]
+features = ["bundled-jq"]
+
 [dependencies]
 async-trait = "0.1.68"
 drasi-core.workspace = true
@@ -23,5 +30,5 @@ base64 = "0.22.0"
 ordered-float = "3.7.0"
 hex = "0.4.3"
 urlencoding = "2.1.2"
-jq-rs ="0.4.1"
+jq-rs = "0.4.1"
 tokio = { version = "1.29.1", features = ["rt-multi-thread", "sync", "time", "macros"] }
