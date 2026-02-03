@@ -159,8 +159,8 @@ impl PostgresExecutor {
             let (client, connection) = tokio_postgres::connect(&connection_string, connector)
                 .await
                 .map_err(|e| {
-                    log::error!("SSL connection error: {:?}", e);
-                    anyhow!("Failed to connect to database with SSL: {}. Ensure SSL CA certificates are installed in system trust store.", e)
+                    log::error!("SSL connection error: {e:?}");
+                    anyhow!("Failed to connect to database with SSL: {e}. Ensure SSL CA certificates are installed in system trust store.")
                 })?;
 
             // Spawn connection handler
