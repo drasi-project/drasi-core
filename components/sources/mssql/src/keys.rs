@@ -115,36 +115,62 @@ impl PrimaryKeyCache {
     /// * `row` - Tiberius row with data
     ///
     /// # Returns
-    /// Element ID string, or UUID fallback if no keys or all NULL
+    /// Element ID string
+    ///
+    /// # Errors
+    /// Returns an error if no primary key is configured for the table or if all
+    /// primary key values are NULL. This is intentional - without a stable primary
+    /// key, UPDATE and DELETE operations cannot be correctly matched to previous
+    /// INSERT operations, breaking change tracking.
     pub fn generate_element_id(&self, table: &str, row: &Row) -> Result<String> {
-        let pk_columns = self.get(table);
+        let keys = match self.get(table) {
+            Some(keys) => keys,
+            None => {
+                return Err(anyhow!(
+                    "No primary key configured for table '{table}'. \
+                     Add a 'table_keys' configuration entry to specify the primary key columns. \
+                     Without a primary key, UPDATE and DELETE operations cannot be tracked correctly."
+                ));
+            }
+        };
 
         let mut key_values = Vec::new();
+        let mut null_columns = Vec::new();
 
-        if let Some(keys) = pk_columns {
-            for pk_col in keys {
-                // Find column index
-                if let Some(col_idx) = row.columns().iter().position(|c| c.name() == pk_col) {
-                    let value = extract_column_value(row, col_idx)?;
+        for pk_col in keys {
+            // Find column index
+            if let Some(col_idx) = row.columns().iter().position(|c| c.name() == pk_col) {
+                let value = extract_column_value(row, col_idx)?;
 
-                    if !matches!(value, ElementValue::Null) {
-                        key_values.push(value_to_string(&value));
-                    } else {
-                        warn!("NULL value in primary key column '{pk_col}' for table '{table}'");
-                    }
+                if !matches!(value, ElementValue::Null) {
+                    key_values.push(value_to_string(&value));
+                } else {
+                    null_columns.push(pk_col.clone());
                 }
+            } else {
+                return Err(anyhow!(
+                    "Primary key column '{pk_col}' not found in row for table '{table}'. \
+                     Check that the column name in 'table_keys' matches the actual column name."
+                ));
             }
         }
 
         // Generate element ID
         if !key_values.is_empty() {
+            // Warn if some (but not all) key columns are NULL
+            if !null_columns.is_empty() {
+                warn!(
+                    "NULL value(s) in primary key column(s) {null_columns:?} for table '{table}'. \
+                     Using remaining key columns for element ID."
+                );
+            }
             Ok(format!("{}:{}", table, key_values.join("_")))
         } else {
-            // No primary key or all NULL - use UUID fallback
-            warn!(
-                "No primary key value for table '{table}'. Using UUID fallback. Consider adding 'table_keys' configuration."
-            );
-            Ok(format!("{}:{}", table, uuid::Uuid::new_v4()))
+            // All primary key values are NULL - this is an error
+            Err(anyhow!(
+                "All primary key values are NULL for table '{table}' (columns: {keys:?}). \
+                 Cannot generate a stable element ID. This row cannot be tracked for changes."
+            ))
         }
     }
 }
