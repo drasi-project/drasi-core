@@ -26,6 +26,7 @@ use drasi_lib::channels::{ChangeDispatcher, SourceEventWrapper};
 use log::{debug, error, info, warn};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::watch;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
 
@@ -55,12 +56,13 @@ fn is_connection_error(error: &anyhow::Error) -> bool {
 ///
 /// This continuously polls MS SQL CDC for changes and dispatches them to subscribers.
 /// If the connection is lost, it will automatically attempt to reconnect with
-/// exponential backoff.
+/// exponential backoff. The loop can be gracefully stopped using the shutdown receiver.
 pub async fn run_cdc_stream(
     source_id: String,
     config: MsSqlSourceConfig,
     dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     state_store: Option<Arc<dyn drasi_lib::state_store::StateStoreProvider>>,
+    mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     info!("Starting CDC stream for source '{source_id}'");
 
@@ -68,21 +70,47 @@ pub async fn run_cdc_stream(
 
     // Outer reconnection loop
     loop {
-        match run_cdc_polling_loop(&source_id, &config, &dispatchers, &state_store).await {
+        // Check for shutdown before attempting connection
+        if *shutdown_rx.borrow() {
+            info!("CDC stream for source '{source_id}' shutdown before connection");
+            return Ok(());
+        }
+
+        match run_cdc_polling_loop(
+            &source_id,
+            &config,
+            &dispatchers,
+            &state_store,
+            &mut shutdown_rx,
+        )
+        .await
+        {
             Ok(()) => {
-                // Normal exit (shouldn't happen in practice as the loop is infinite)
+                // Normal exit (loop was shutdown or exited gracefully)
                 info!("CDC polling loop exited normally for source '{source_id}'");
                 return Ok(());
             }
             Err(e) => {
+                // Check if we were shutdown
+                if *shutdown_rx.borrow() {
+                    info!("CDC stream for source '{source_id}' shutdown");
+                    return Ok(());
+                }
+
                 if is_connection_error(&e) {
                     error!(
                         "Connection error in CDC stream for source '{source_id}': {e}. \
                          Reconnecting in {reconnect_delay:?}..."
                     );
 
-                    // Wait before reconnecting
-                    sleep(reconnect_delay).await;
+                    // Wait before reconnecting, but check for shutdown
+                    tokio::select! {
+                        _ = sleep(reconnect_delay) => {}
+                        _ = shutdown_rx.changed() => {
+                            info!("CDC stream for source '{source_id}' shutdown during reconnect wait");
+                            return Ok(());
+                        }
+                    }
 
                     // Increase delay for next attempt (exponential backoff)
                     reconnect_delay = Duration::from_millis(
@@ -96,8 +124,14 @@ pub async fn run_cdc_stream(
                     // Reset backoff delay on non-connection errors
                     reconnect_delay = Duration::from_millis(INITIAL_RECONNECT_DELAY_MS);
 
-                    // Brief pause before retry
-                    sleep(Duration::from_secs(1)).await;
+                    // Brief pause before retry, but check for shutdown
+                    tokio::select! {
+                        _ = sleep(Duration::from_secs(1)) => {}
+                        _ = shutdown_rx.changed() => {
+                            info!("CDC stream for source '{source_id}' shutdown during error recovery");
+                            return Ok(());
+                        }
+                    }
                 }
             }
         }
@@ -110,6 +144,7 @@ async fn run_cdc_polling_loop(
     config: &MsSqlSourceConfig,
     dispatchers: &Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     state_store: &Option<Arc<dyn drasi_lib::state_store::StateStoreProvider>>,
+    shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<()> {
     // Connect to MS SQL
     info!("Connecting to MS SQL Server for source '{source_id}'");
@@ -139,6 +174,12 @@ async fn run_cdc_polling_loop(
     let poll_interval = Duration::from_millis(config.poll_interval_ms);
 
     loop {
+        // Check for shutdown at the start of each iteration
+        if *shutdown_rx.borrow() {
+            info!("CDC polling loop for source '{source_id}' received shutdown signal");
+            return Ok(());
+        }
+
         let lsn_before = current_lsn;
 
         match poll_cdc_changes(
@@ -202,8 +243,14 @@ async fn run_cdc_polling_loop(
             }
         }
 
-        // Sleep before next poll
-        sleep(poll_interval).await;
+        // Sleep before next poll, but check for shutdown
+        tokio::select! {
+            _ = sleep(poll_interval) => {}
+            _ = shutdown_rx.changed() => {
+                info!("CDC polling loop for source '{source_id}' shutdown during poll interval");
+                return Ok(());
+            }
+        }
     }
 }
 

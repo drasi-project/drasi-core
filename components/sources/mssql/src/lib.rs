@@ -91,6 +91,7 @@ use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::Source;
 use drasi_lib::state_store::StateStoreProvider;
 use std::sync::Arc;
+use tokio::sync::watch;
 use tokio::sync::RwLock;
 
 /// MS SQL CDC Source
@@ -111,6 +112,12 @@ pub struct MsSqlSource {
 
     /// CDC polling task handle
     task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+
+    /// Shutdown signal sender for graceful shutdown
+    shutdown_tx: watch::Sender<bool>,
+
+    /// Shutdown signal receiver (cloned for each task)
+    shutdown_rx: watch::Receiver<bool>,
 }
 
 impl MsSqlSource {
@@ -125,12 +132,17 @@ impl MsSqlSource {
         // Create base source parameters
         let params = SourceBaseParams::new(&source_id);
 
+        // Create shutdown channel (false = running, true = shutdown)
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
         Ok(Self {
             source_id,
             config,
             base: SourceBase::new(params)?,
             state_store: Arc::new(RwLock::new(None)),
             task_handle: Arc::new(RwLock::new(None)),
+            shutdown_tx,
+            shutdown_rx,
         })
     }
 
@@ -222,11 +234,18 @@ impl Source for MsSqlSource {
         let source_id = self.base.id.clone();
         let dispatchers = self.base.dispatchers.clone();
         let state_store = self.state_store.read().await.clone();
+        let shutdown_rx = self.shutdown_rx.clone();
 
         // Spawn CDC polling task
         let task_handle = tokio::spawn(async move {
-            if let Err(e) =
-                stream::run_cdc_stream(source_id.clone(), config, dispatchers, state_store).await
+            if let Err(e) = stream::run_cdc_stream(
+                source_id.clone(),
+                config,
+                dispatchers,
+                state_store,
+                shutdown_rx,
+            )
+            .await
             {
                 log::error!("CDC stream task failed for {source_id}: {e}");
             }
@@ -246,10 +265,25 @@ impl Source for MsSqlSource {
 
         log::info!("MS SQL source '{}' stopping", self.base.id);
 
-        // Stop CDC polling task
+        // Signal the CDC polling loop to stop gracefully
+        if let Err(e) = self.shutdown_tx.send(true) {
+            log::warn!("Failed to send shutdown signal: {e}");
+        }
+
+        // Wait for the task to complete (with timeout)
         if let Some(handle) = self.task_handle.write().await.take() {
-            handle.abort();
-            log::debug!("CDC polling task stopped");
+            // Give the task a chance to shut down gracefully
+            match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
+                Ok(Ok(())) => {
+                    log::debug!("CDC polling task stopped gracefully");
+                }
+                Ok(Err(e)) => {
+                    log::warn!("CDC polling task panicked: {e}");
+                }
+                Err(_) => {
+                    log::warn!("CDC polling task did not stop within timeout, it will be dropped");
+                }
+            }
         }
 
         self.base.set_status(ComponentStatus::Stopped).await;
@@ -420,12 +454,17 @@ impl MsSqlSourceBuilder {
             params = params.with_bootstrap_provider(provider);
         }
 
+        // Create shutdown channel (false = running, true = shutdown)
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
         Ok(MsSqlSource {
             source_id,
             config: self.config,
             base: SourceBase::new(params)?,
             state_store: Arc::new(RwLock::new(None)),
             task_handle: Arc::new(RwLock::new(None)),
+            shutdown_tx,
+            shutdown_rx,
         })
     }
 }
