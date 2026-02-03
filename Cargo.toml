@@ -71,23 +71,23 @@ categories = ["database"]
 
 [workspace.dependencies]
 # Internal workspace crates
-drasi-query-ast = { version = "0.3.1", path = "query-ast" }
-drasi-query-cypher = { version = "0.3.1", path = "query-cypher" }
-drasi-query-gql = { version = "0.3.1", path = "query-gql" }
-drasi-core = { version = "0.3.1", path = "core" }
-drasi-functions-cypher = { version = "0.3.1", path = "functions-cypher" }
-drasi-functions-gql = { version = "0.3.1", path = "functions-gql" }
-drasi-middleware = { version = "0.3.1", path = "middleware" }
-drasi-lib = { version = "0.3.1", path = "lib" }
+drasi-query-ast = { version = "0.3.2", path = "query-ast" }
+drasi-query-cypher = { version = "0.3.2", path = "query-cypher" }
+drasi-query-gql = { version = "0.3.2", path = "query-gql" }
+drasi-core = { version = "0.3.2", path = "core" }
+drasi-functions-cypher = { version = "0.3.2", path = "functions-cypher" }
+drasi-functions-gql = { version = "0.3.2", path = "functions-gql" }
+drasi-middleware = { version = "0.3.2", path = "middleware" }
+drasi-lib = { version = "0.3.2", path = "lib" }
 
 # Component plugins
-drasi-source-postgres = { version = "0.1.1", path = "components/sources/postgres" }
-drasi-source-application = { version = "0.1.1", path = "components/sources/application" }
-drasi-bootstrap-application = { version = "0.1.1", path = "components/bootstrappers/application" }
-drasi-reaction-http = { version = "0.1.2", path = "components/reactions/http" }
-drasi-reaction-grpc = { version = "0.2.0", path = "components/reactions/grpc" }
-drasi-index-rocksdb = { version = "0.2.0", path = "components/indexes/rocksdb" }
-drasi-index-garnet = { version = "0.1.1", path = "components/indexes/garnet" }
+drasi-source-postgres = { version = "0.1.2", path = "components/sources/postgres" }
+drasi-source-application = { version = "0.1.2", path = "components/sources/application" }
+drasi-bootstrap-application = { version = "0.1.2", path = "components/bootstrappers/application" }
+drasi-reaction-http = { version = "0.1.3", path = "components/reactions/http" }
+drasi-reaction-grpc = { version = "0.2.1", path = "components/reactions/grpc" }
+drasi-index-rocksdb = { version = "0.2.1", path = "components/indexes/rocksdb" }
+drasi-index-garnet = { version = "0.1.2", path = "components/indexes/garnet" }
 
 [workspace.lints.rust]
 warnings = "deny"

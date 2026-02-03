@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-source-application"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "Application source plugin for Drasi"
@@ -29,7 +29,6 @@ workspace = true
 [dependencies]
 drasi-lib.workspace = true
 drasi-core.workspace = true
-drasi-bootstrap-application.workspace = true
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
