@@ -17,39 +17,13 @@ Before running these scenarios, ensure the following requirements are met.
   ```bash
   rustc --version
   cargo --version
-- (Optional) Redis server running if using `--element-index redis` or `--result-index redis`.
-
-
-No external system libraries are required for the `memory` or `rocksdb` backends.
+  ```
 
 ## Redis server setup (if using redis backend)
 If you plan to use Redis backend, you need a running Redis instance.
 
-#### 1. Installation
-*   **macOS:**
-    ```bash
-    brew install redis
-    brew services start redis
-    ```
-*   **Ubuntu/Debian:**
-    ```bash
-    sudo apt-get install redis-server
-    sudo systemctl start redis-server
-    ```
-*   **Docker:**
-    ```bash
-    docker run -d -p 6379:6379 --name drasi-redis redis:latest
-    ```
-
-#### 2. Verification (Ping-Pong)
-Ensure Redis is reachable before running tests:
-```bash
-redis-cli ping
-# Expected Output: PONG
-```
-
 ## RocksDB path configuration (if using RocksDB backend)
-If you use the RocksDB backend (`--element-index rocksdb` or `--result-index rocksdb`), the tool creates a persistent database on disk.
+If you use the RocksDB backend, the tool creates a persistent database on disk.
 
 #### Default Location
 By default, the tool creates a directory named `test-data` in your current working directory.
@@ -58,16 +32,8 @@ By default, the tool creates a directory named `test-data` in your current worki
 You can change the storage location by setting the `ROCKS_PATH` environment variable:
 ```bash
 ROCKS_PATH=/tmp/my-custom-rocksdb cargo run --release -- --scenario <SCENARIO> --element-index <INDEX> --result-index <INDEX>
-# Note: (/tmp/my-custom-rocksdb) is the custom path
 ```
-
-#### Cleanup
-The database persists between runs. If you want to start fresh (e.g., to clear indices), simply delete the directory:
-```bash
-rm -rf test-data
-# or your custom path
-rm -rf /tmp/my-custom-rocksdb
-```
+*Note: `/tmp/my-custom-rocksdb` is the custom path.*
 
 # Execution
 
@@ -83,8 +49,8 @@ If you prefer to run the binary directly (e.g., in a production environment):
 2.  **Copy the build to current directory:**
     ```bash
     cp ../target/release/query-perf .
-    # Note: The 'space dot' at the end is critical! It means "copy to here".
     ```
+    *Note: The 'space dot' at the end is critical! It means "copy to here".*
 3.  **Typical Command Structure:**
     ```bash
     ./query-perf --scenario <SCENARIO> --element-index <INDEX> --result-index <INDEX>
@@ -109,8 +75,8 @@ cargo run -p query-perf --release -- --scenario <SCENARIO> --element-index <INDE
 | `-s <SCENARIO>`, `--scenario <SCENARIO>` | The Performance Test Scenario to run. To run all scenarios in sequence, use the value "all". |
 | `-e <INDEX>`, `--element-index <INDEX>` | The element index implementation to use: `memory`, `redis`, or `rocksdb`. |
 | `-r <INDEX>`, `--result-index <INDEX>` | The result index implementation to use: `memory`, `redis`, or `rocksdb`. |
-| `-i <N>`, `--iterations <N>` | (Optional) The number of source change events to simulate. Defaults to scenario-specific value (usually 10,000). |
-| `--seed <SEED>` | (Optional) Random number seed. Using the same seed ensures deterministic source change sequences. |
+| `-i <N>`, `--iterations <N>` | (Optional) The number of iterations to run, i.e. the number of source change events to simulate. If not provided, the default value defined in the Performance Test Scenario is used. |
+| `--seed <SEED>` | (Optional) The random number seed to use. Using the same seed ensures that the exact same sequence of source change events will be generated in the Scenario. If not provided, a random seed is used, and results will differ across test runs. |
 | `-h`, `--help` | Show help message |
 
 # Environment Variables
@@ -122,10 +88,23 @@ The tool uses the following environment variables for configuration if the corre
 | `ROCKS_PATH` | Directory path for RocksDB storage | `test-data` |
 
 
+
 # Scenarios
 The currently defined Performance Test Scenarios are:
 
 ### `single_node_property_projection`
+
+Path: `query-perf/src/scenario/building_comfort_scenarios/single_node_property_projection.rs`
+
+Query:
+```cypher
+MATCH (r:Room)
+RETURN
+  r.name as RoomName,
+  r.temperature AS Temperature,
+  r.humidity AS Humidity,
+  r.co2 AS CO2
+```
 **The Baseline.**
 Monitors all `Room` nodes and projects their raw property values (`temperature`, `humidity`, `co2`).
 
@@ -135,6 +114,19 @@ Monitors all `Room` nodes and projects their raw property values (`temperature`,
 Establishes the baseline performance for direct node access and property retrieval. This scenario isolates the I/O and deserialization overhead of the element index without introducing complex filtering or transformation logic.
 
 ### `single_node_calculation_projection`
+
+Path: `query-perf/src/scenario/building_comfort_scenarios/single_node_calculation.rs`
+
+Query:
+```cypher
+MATCH (r:Room)
+RETURN
+  r.name AS RoomName,
+  floor(
+    50 + (r.temperature - 72) + (r.humidity - 42) +
+    CASE WHEN r.co2 > 500 THEN (r.co2 - 500) / 25 ELSE 0 END
+  ) AS ComfortLevel
+```
 **The Calculator.**
 Monitors `Room` nodes but computes a derived comfort level on the fly using arithmetic and conditional logic.
 
@@ -144,6 +136,18 @@ Monitors `Room` nodes but computes a derived comfort level on the fly using arit
 Evaluates the computational performance of the expression evaluation engine. This scenario measures the overhead of scalar arithmetic and conditional logic processing per event, independent of complex graph traversals.
 
 ### `single_path_averaging_projection`
+
+Path: `query-perf/src/scenario/building_comfort_scenarios/single_path_averaging.rs`
+
+Query:
+```cypher
+MATCH (r:Room)-[:PART_OF]->(f:Floor)
+WITH f.name AS FloorName, floor(
+    50 + (r.temperature - 72) + (r.humidity - 42) +
+    CASE WHEN r.co2 > 500 THEN (r.co2 - 500) / 25 ELSE 0 END
+) AS RoomComfortLevel
+RETURN FloorName, avg(RoomComfortLevel) AS ComfortLevel
+```
 **The Aggregator.**
 Joins `Room` nodes to their parent `Floor` nodes and calculates the average comfort level per floor.
 
@@ -153,13 +157,25 @@ Joins `Room` nodes to their parent `Floor` nodes and calculates the average comf
 Assesses the performance of pattern matching (IO-bound) and aggregation (memory/CPU-bound). This scenario exercises the join algorithms for one-hop relationships and tests the efficiency of incremental state maintenance for aggregation functions.
 
 ### `single_path_no_change_averaging_projection`
-**The Filtered Aggregator.**
-Similar to the averaging projection, but consistently updates room data in a way that the *average* for the floor remains constant (e.g., oscillating values).
 
-**Query Explanation:** Identical to the Aggregator query, but executed against a data stream designed to produce oscillating inputs that result in stable aggregate outputs.
+Path: `query-perf/src/scenario/building_comfort_scenarios/single_path_no_change_averaging.rs`
+
+Query: (Identical to `single_path_averaging_projection`)
+```cypher
+MATCH (r:Room)-[:PART_OF]->(f:Floor)
+    WITH f.name AS FloorName, floor(
+        50 + (r.temperature - 72) + (r.humidity - 42) +
+        CASE WHEN r.co2 > 500 THEN (r.co2 - 500) / 25 ELSE 0 END
+) AS RoomComfortLevel
+RETURN FloorName, avg(RoomComfortLevel) AS ComfortLevel
+```
+**The Aggregator:**
+Joins `Room` nodes to their parent `Floor` nodes and calculates the average comfort level per floor.
+
+**Query Explanation:** Matches `Room` nodes connected to `Floor` nodes via the `PART_OF` relationship. Results are grouped by `Floor` to calculate the average comfort level of associated rooms.
 
 **What it Tests:**
-Validates the changelog suppression capabilities of the system. This scenario ensures that internal state updates which result in no net change to the projected output are correctly identified and do not trigger redundant downstream events.
+Uses an identical query to `single_path_averaging_projection`. Tests aggregation performance when many source changes do not affect the final aggregated result.
 
 # Examples & Sample Output
 
@@ -169,27 +185,145 @@ Validates the changelog suppression capabilities of the system. This scenario en
 ```
 
 ### Sample Output
+```
+--------------------------------
+Drasi Query Component Perf Tests
+--------------------------------
+Test Run Config: 
+TestRunConfig { scenario: "single_node_property_projection", element_index_type: Memory, result_index_type: Memory, iterations: Some(1000), seed: None }
 
-<img width="1101" height="547" alt="Screenshot 2026-02-02 at 12 27 49 AM" src="https://github.com/user-attachments/assets/04553c44-b852-436d-92d8-92b4af2b18f3" />
+--------------------------------
+Scenario - single_node_property_projection
+--------------------------------
+ - Scenario Config: 
+PerformanceTestScenarioConfig { name: "single_node_property_projection", query: "MATCH (r:Room) RETURN r.name as RoomName, r.temperature AS Temperature, r.humidity AS Humidity, r.co2 AS CO2", iterations: 1000, start_time_ms: 5000000, seed: 15920350805132563220 }
 
+ - Initializing Scenario...
+ - Bootstrapping Scenario...
+ - Running Scenario... 
+ - Result: TestRunResult {
+    _scenario_name: "single_node_property_projection",
+    _element_index_type: Memory,
+    _result_index_type: Memory,
+    bootstrap_start_time: 1770128382658,
+    bootstrap_end_time: 1770128382733,
+    bootstrap_duration_ms: 75,
+    bootstrap_events: 4210,
+    last_bootstrap_event_start_time: 1770128382733,
+    min_bootstrap_duration_ms: 0,
+    max_bootstrap_duration_ms: 1,
+    avg_bootstrap_duration_ms: 0.017814726840855107,
+    avg_bootstrap_events_per_sec: 56133.333333333336,
+    run_start_time: 1770128382733,
+    run_end_time: 1770128382796,
+    run_duration_ms: 63,
+    run_events: 1000,
+    last_run_event_start_time: 1770128382796,
+    min_run_duration_ms: 0,
+    max_run_duration_ms: 1,
+    avg_run_duration_ms: 0.063,
+    avg_run_events_per_sec: 15873.015873015873,
+}
+
+```
 
 ### Run a scenario with Redis index (Using Cargo)
 ```bash
 cargo run --release -p query-perf -- --scenario single_node_property_projection --element-index redis --result-index redis -i 1000
 ```
 ### Sample Output
+```
+    Finished `release` profile [optimized] target(s) in 0.90s
+     Running `target/release/query-perf --scenario single_node_property_projection --element-index redis --result-index redis -i 1000`
+--------------------------------
+Drasi Query Component Perf Tests
+--------------------------------
+Test Run Config: 
+TestRunConfig { scenario: "single_node_property_projection", element_index_type: Redis, result_index_type: Redis, iterations: Some(1000), seed: None }
 
-<img width="1104" height="588" alt="Screenshot 2026-02-01 at 11 22 53 PM" src="https://github.com/user-attachments/assets/23d06d7a-5836-4ae9-a6f1-248ed66e37fb" />
+--------------------------------
+Scenario - single_node_property_projection
+--------------------------------
+ - Scenario Config: 
+PerformanceTestScenarioConfig { name: "single_node_property_projection", query: "MATCH (r:Room) RETURN r.name as RoomName, r.temperature AS Temperature, r.humidity AS Humidity, r.co2 AS CO2", iterations: 1000, start_time_ms: 5000000, seed: 11558873445378713432 }
+
+ - Initializing Scenario...
+ - Bootstrapping Scenario...
+ - Running Scenario... 
+ - Result: TestRunResult {
+    _scenario_name: "single_node_property_projection",
+    _element_index_type: Redis,
+    _result_index_type: Redis,
+    bootstrap_start_time: 1770128465326,
+    bootstrap_end_time: 1770128466424,
+    bootstrap_duration_ms: 1098,
+    bootstrap_events: 4210,
+    last_bootstrap_event_start_time: 1770128466424,
+    min_bootstrap_duration_ms: 0,
+    max_bootstrap_duration_ms: 15,
+    avg_bootstrap_duration_ms: 0.2608076009501188,
+    avg_bootstrap_events_per_sec: 3834.244080145719,
+    run_start_time: 1770128466424,
+    run_end_time: 1770128466839,
+    run_duration_ms: 415,
+    run_events: 1000,
+    last_run_event_start_time: 1770128466838,
+    min_run_duration_ms: 0,
+    max_run_duration_ms: 2,
+    avg_run_duration_ms: 0.415,
+    avg_run_events_per_sec: 2409.6385542168678,
+}
+```
 
 ### Run a scenario with RocksDB index (Using Cargo)
 ```bash
 cargo run --release -p query-perf -- --scenario single_node_property_projection --element-index rocksdb --result-index rocksdb -i 1000
 ```
 ### Sample Output
+```
+   Finished `release` profile [optimized] target(s) in 0.99s
+     Running `target/release/query-perf --scenario single_node_property_projection --element-index rocksdb --result-index rocksdb -i 1000`
+--------------------------------
+Drasi Query Component Perf Tests
+--------------------------------
+Test Run Config: 
+TestRunConfig { scenario: "single_node_property_projection", element_index_type: RocksDB, result_index_type: RocksDB, iterations: Some(1000), seed: None }
 
-<img width="1105" height="589" alt="Screenshot 2026-02-01 at 11 46 18 PM" src="https://github.com/user-attachments/assets/7b33dd12-b6fc-466c-a200-921202fb9468" />
+--------------------------------
+Scenario - single_node_property_projection
+--------------------------------
+ - Scenario Config: 
+PerformanceTestScenarioConfig { name: "single_node_property_projection", query: "MATCH (r:Room) RETURN r.name as RoomName, r.temperature AS Temperature, r.humidity AS Humidity, r.co2 AS CO2", iterations: 1000, start_time_ms: 5000000, seed: 10234830241078594232 }
 
-**Note:** Times associated with 'bootstrap' represent the time taken to load the initial dataset (2000 rooms + buildings). 'Run' metrics represent the performance of processing the dynamic updates.
+ - Initializing Scenario...
+ - Bootstrapping Scenario...
+ - Running Scenario... 
+ - Result: TestRunResult {
+    _scenario_name: "single_node_property_projection",
+    _element_index_type: RocksDB,
+    _result_index_type: RocksDB,
+    bootstrap_start_time: 1770128551944,
+    bootstrap_end_time: 1770128552017,
+    bootstrap_duration_ms: 73,
+    bootstrap_events: 4210,
+    last_bootstrap_event_start_time: 1770128552017,
+    min_bootstrap_duration_ms: 0,
+    max_bootstrap_duration_ms: 2,
+    avg_bootstrap_duration_ms: 0.017339667458432306,
+    avg_bootstrap_events_per_sec: 57671.232876712325,
+    run_start_time: 1770128552017,
+    run_end_time: 1770128552082,
+    run_duration_ms: 65,
+    run_events: 1000,
+    last_run_event_start_time: 1770128552082,
+    min_run_duration_ms: 0,
+    max_run_duration_ms: 1,
+    avg_run_duration_ms: 0.065,
+    avg_run_events_per_sec: 15384.615384615385,
+}
+```
+
+*Note: Times associated with 'bootstrap' represent the time taken to load the initial dataset (2000 rooms + buildings). 'Run' metrics represent the performance of processing the dynamic updates.*
 
 # Building Comfort Data Model
 
@@ -259,4 +393,5 @@ This data model is intentionally designed to:
 
 The same data model is reused across all scenarios to ensure **fair, consistent,
 and repeatable performance comparisons**.
+
 
