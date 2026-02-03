@@ -598,6 +598,11 @@ impl PlatformSource {
                  Please specify a unique consumer name within the consumer group"
             ));
         }
+        if config.max_retries == 0 {
+            return Err(anyhow::anyhow!(
+                "Invalid configuration: max_retries must be greater than 0"
+            ));
+        }
 
         Ok(config)
     }
@@ -635,9 +640,7 @@ impl PlatformSource {
             }
         }
 
-        Err(anyhow::anyhow!(
-            "Failed to connect to Redis: max_retries must be greater than 0"
-        ))
+        unreachable!("connect_with_retry: max_retries is validated to be > 0 during config parsing");
     }
 
     /// Create or recreate consumer group based on configuration
