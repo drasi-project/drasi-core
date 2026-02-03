@@ -81,6 +81,7 @@ Implement components **exactly as specified** in the plan:
 - Implement CDC mechanism from plan (no placeholders)
 - Use StateStore to persist cursor/position/offset
 - Handle reconnection and resume scenarios
+- Handle graceful shutdown and restart
 - Add debug logging for troubleshooting
 
 ### 4. Testing & Verification
