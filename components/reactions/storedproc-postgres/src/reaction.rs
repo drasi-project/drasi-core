@@ -412,6 +412,10 @@ impl PostgresStoredProcReactionBuilder {
     }
 
     /// Enable or disable SSL/TLS
+    ///
+    /// SSL certificates must be installed in the system trust store.
+    /// For AWS RDS on macOS:
+    ///   sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/rds-ca-bundle.pem
     pub fn with_ssl(mut self, enable: bool) -> Self {
         self.config.ssl = enable;
         self

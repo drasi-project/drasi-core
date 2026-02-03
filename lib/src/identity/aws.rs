@@ -140,21 +140,25 @@ impl AwsIdentityProvider {
         session_name: Option<String>,
     ) -> Result<Self> {
         use aws_config::sts::AssumeRoleProvider;
-        use aws_sdk_sts::config::Region;
 
-        // Load the base AWS configuration
+        // Load the base AWS configuration (this loads the credentials from environment/config)
         let base_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
         let region = base_config
             .region()
             .ok_or_else(|| anyhow!("AWS region not configured"))?
             .clone();
 
-        // Set up the role assumption provider
+        // Get the base credentials provider
+        let base_credentials = base_config
+            .credentials_provider()
+            .ok_or_else(|| anyhow!("No AWS credentials found. Run 'aws configure' to set up credentials."))?;
+
+        // Set up the role assumption provider with base credentials
         let session = session_name.unwrap_or_else(|| "drasi-rds-session".to_string());
         let role_provider = AssumeRoleProvider::builder(role_arn.into())
             .session_name(session)
-            .region(Region::from(region.clone()))
-            .build()
+            .region(region.clone())
+            .build_from_provider(base_credentials)
             .await;
 
         // Build a new config with the assumed role credentials

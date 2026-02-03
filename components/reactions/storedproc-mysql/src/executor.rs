@@ -60,6 +60,8 @@ impl MySqlExecutor {
             .db_name(Some(&config.database));
 
         // Configure SSL if enabled
+        // Uses system trust store for certificate validation
+        // For AWS RDS on macOS: sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/rds-ca-bundle.pem
         if config.ssl {
             opts_builder = opts_builder.ssl_opts(Some(SslOpts::default()));
         }

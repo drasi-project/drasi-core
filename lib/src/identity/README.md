@@ -127,14 +127,47 @@ This ensures:
 - No stale tokens
 - Automatic credential rotation
 
-### SSL/TLS
+### SSL/TLS and Certificate Validation
 
 Always use SSL/TLS connections with cloud databases:
 - Azure Database for PostgreSQL/MySQL requires SSL by default
 - AWS RDS should have SSL enabled
 - Use `.with_ssl(true)` when building reactions
 
-For AWS RDS, install the [RDS CA certificate bundle](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html) in your system trust store.
+**Certificate Validation:**
+
+The implementation validates SSL/TLS certificates against your system's trust store. This ensures secure, authenticated connections.
+
+**For AWS RDS:**
+
+AWS RDS certificates must be installed in your system trust store:
+
+```bash
+# Download AWS RDS CA certificate bundle
+curl -o ~/rds-ca-bundle.pem https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+
+# macOS: Install to system keychain
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/rds-ca-bundle.pem
+
+# Linux: Install to system CA store (Ubuntu/Debian)
+sudo cp ~/rds-ca-bundle.pem /usr/local/share/ca-certificates/rds-ca-bundle.crt
+sudo update-ca-certificates
+
+# Linux: Install to system CA store (RHEL/CentOS)
+sudo cp ~/rds-ca-bundle.pem /etc/pki/ca-trust/source/anchors/
+sudo update-ca-trust
+```
+
+**For Azure Database for PostgreSQL/MySQL:**
+
+Azure uses DigiCert Global Root G2, which is typically already in system trust stores. No additional certificate installation is usually required.
+
+**Certificate Verification Details:**
+
+- ✅ Validates certificate chain against system trust store
+- ✅ Validates certificate hostname matches connection hostname
+- ✅ Enforces TLS 1.2 minimum
+- ❌ Does NOT accept self-signed or invalid certificates
 
 ## Examples
 

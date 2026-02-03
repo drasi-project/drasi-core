@@ -144,7 +144,9 @@ impl PostgresExecutor {
 
         // Connect to database with appropriate TLS configuration
         let client = if config.ssl {
-            // Use native TLS with system certificates
+            // Use system trust store for certificate validation
+            // On macOS: sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/rds-ca-bundle.pem
+            // On Linux: sudo cp ~/rds-ca-bundle.pem /usr/local/share/ca-certificates/ && sudo update-ca-certificates
             let tls_connector = native_tls::TlsConnector::builder()
                 .min_protocol_version(Some(native_tls::Protocol::Tlsv12))
                 .danger_accept_invalid_hostnames(false)
@@ -153,12 +155,12 @@ impl PostgresExecutor {
                 .map_err(|e| anyhow!("Failed to create TLS connector: {e}"))?;
             let connector = MakeTlsConnector::new(tls_connector);
 
-            debug!("Attempting SSL connection to PostgreSQL...");
+            debug!("Attempting SSL connection to PostgreSQL with system trust store...");
             let (client, connection) = tokio_postgres::connect(&connection_string, connector)
                 .await
                 .map_err(|e| {
                     log::error!("SSL connection error: {:?}", e);
-                    anyhow!("Failed to connect to database with SSL: {}", e)
+                    anyhow!("Failed to connect to database with SSL: {}. Ensure SSL CA certificates are installed in system trust store.", e)
                 })?;
 
             // Spawn connection handler
