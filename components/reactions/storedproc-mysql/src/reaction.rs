@@ -401,7 +401,10 @@ impl MySqlStoredProcReactionBuilder {
     ///
     /// This takes precedence over `with_user` and `with_password`.
     /// Use this for cloud authentication (Azure Managed Identity, AWS IAM, etc.)
-    pub fn with_identity_provider(mut self, provider: impl drasi_lib::identity::IdentityProvider + 'static) -> Self {
+    pub fn with_identity_provider(
+        mut self,
+        provider: impl drasi_lib::identity::IdentityProvider + 'static,
+    ) -> Self {
         self.config.identity_provider = Some(Box::new(provider));
         self
     }

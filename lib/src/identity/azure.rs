@@ -82,7 +82,6 @@ impl AzureIdentityProvider {
         })
     }
 
-
     /// Create provider using Azure default credential chain.
     ///
     /// This attempts multiple developer tool authentication methods in order:
@@ -226,12 +225,12 @@ mod tests {
         let _cloned = provider.clone();
     }
 
- 
     #[test]
     fn test_with_default_credentials() {
         // Test that the function creates a provider
-        let provider = AzureIdentityProvider::with_default_credentials("user@tenant.onmicrosoft.com")
-            .expect("Failed to create default credentials provider");
+        let provider =
+            AzureIdentityProvider::with_default_credentials("user@tenant.onmicrosoft.com")
+                .expect("Failed to create default credentials provider");
 
         assert_eq!(provider.username, "user@tenant.onmicrosoft.com");
         assert_eq!(provider.scope, DEFAULT_AZURE_SCOPE);
@@ -239,9 +238,10 @@ mod tests {
 
     #[test]
     fn test_default_credentials_with_custom_scope() {
-        let provider = AzureIdentityProvider::with_default_credentials("user@tenant.onmicrosoft.com")
-            .expect("Failed to create provider")
-            .with_scope("https://custom.scope/.default");
+        let provider =
+            AzureIdentityProvider::with_default_credentials("user@tenant.onmicrosoft.com")
+                .expect("Failed to create provider")
+                .with_scope("https://custom.scope/.default");
 
         assert_eq!(provider.scope, "https://custom.scope/.default");
     }
@@ -280,8 +280,8 @@ mod tests {
         ];
 
         for username in formats {
-            let provider = AzureIdentityProvider::with_managed_identity(username, "client-id")
-                .unwrap();
+            let provider =
+                AzureIdentityProvider::with_managed_identity(username, "client-id").unwrap();
             assert_eq!(provider.username, username);
         }
     }
@@ -327,10 +327,9 @@ mod integration_tests {
         let provider = AzureIdentityProvider::new("user@tenant.onmicrosoft.com")
             .expect("Failed to create managed identity provider");
 
-        let credentials = provider
-            .get_credentials()
-            .await
-            .expect("Failed to get credentials. This test only works in Azure with managed identity.");
+        let credentials = provider.get_credentials().await.expect(
+            "Failed to get credentials. This test only works in Azure with managed identity.",
+        );
 
         match credentials {
             Credentials::Token { username, token } => {
@@ -347,8 +346,9 @@ mod integration_tests {
     #[tokio::test]
     #[ignore]
     async fn test_default_credentials_authentication_real() {
-        let provider = AzureIdentityProvider::with_default_credentials("user@tenant.onmicrosoft.com")
-            .expect("Failed to create default credentials provider");
+        let provider =
+            AzureIdentityProvider::with_default_credentials("user@tenant.onmicrosoft.com")
+                .expect("Failed to create default credentials provider");
 
         let credentials = provider
             .get_credentials()

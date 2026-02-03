@@ -133,7 +133,7 @@ impl std::fmt::Debug for PostgresStoredProcReactionConfig {
             .field("hostname", &self.hostname)
             .field("port", &self.port)
             .field("user", &self.user)
-            .field("password", &"***")  // Don't expose password in debug output
+            .field("password", &"***") // Don't expose password in debug output
             .field("database", &self.database)
             .field("ssl", &self.ssl)
             .field("identity_provider", &self.identity_provider.is_some())

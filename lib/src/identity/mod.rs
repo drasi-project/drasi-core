@@ -90,9 +90,6 @@ mod tests {
         let cloned = provider.clone();
 
         let credentials = cloned.get_credentials().await.unwrap();
-        assert!(matches!(
-            credentials,
-            Credentials::UsernamePassword { .. }
-        ));
+        assert!(matches!(credentials, Credentials::UsernamePassword { .. }));
     }
 }

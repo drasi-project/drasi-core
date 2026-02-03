@@ -149,9 +149,9 @@ impl AwsIdentityProvider {
             .clone();
 
         // Get the base credentials provider
-        let base_credentials = base_config
-            .credentials_provider()
-            .ok_or_else(|| anyhow!("No AWS credentials found. Run 'aws configure' to set up credentials."))?;
+        let base_credentials = base_config.credentials_provider().ok_or_else(|| {
+            anyhow!("No AWS credentials found. Run 'aws configure' to set up credentials.")
+        })?;
 
         // Set up the role assumption provider with base credentials
         let session = session_name.unwrap_or_else(|| "drasi-rds-session".to_string());
@@ -254,13 +254,8 @@ mod tests {
     #[test]
     fn test_provider_is_cloneable() {
         let config = SdkConfig::builder().build();
-        let provider = AwsIdentityProvider::with_config(
-            config,
-            "user",
-            "db.amazonaws.com",
-            5432,
-            "us-east-1",
-        );
+        let provider =
+            AwsIdentityProvider::with_config(config, "user", "db.amazonaws.com", 5432, "us-east-1");
 
         let cloned = provider.clone();
         assert_eq!(cloned.username, provider.username);
@@ -431,7 +426,10 @@ mod integration_tests {
             .expect("Failed to get credentials. Make sure AWS credentials are valid and RDS instance exists.");
 
         match credentials {
-            Credentials::Token { username: user, token } => {
+            Credentials::Token {
+                username: user,
+                token,
+            } => {
                 assert_eq!(user, username);
                 assert!(!token.is_empty());
                 assert!(token.contains(&hostname)); // Token should contain the hostname
@@ -470,4 +468,3 @@ mod integration_tests {
         }
     }
 }
-
