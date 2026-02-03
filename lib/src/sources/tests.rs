@@ -833,4 +833,82 @@ mod manager_tests {
             }
         }
     }
+
+    // ============================================================================
+    // Cleanup Tests
+    // ============================================================================
+
+    /// Test that deleting a source cleans up its event history
+    #[tokio::test]
+    async fn test_delete_source_cleans_up_event_history() {
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        // Add a source
+        let source = LoggingTestSource::new("cleanup-events-source").unwrap();
+        manager.add_source(source).await.unwrap();
+
+        // Record an event manually to simulate lifecycle
+        manager
+            .record_event(ComponentEvent {
+                component_id: "cleanup-events-source".to_string(),
+                component_type: crate::ComponentType::Source,
+                status: ComponentStatus::Running,
+                timestamp: chrono::Utc::now(),
+                message: Some("Test event".to_string()),
+            })
+            .await;
+
+        // Verify events exist
+        let events = manager.get_source_events("cleanup-events-source").await;
+        assert!(!events.is_empty(), "Expected events after recording");
+
+        // Delete the source
+        manager
+            .delete_source("cleanup-events-source".to_string())
+            .await
+            .unwrap();
+
+        // Verify events are cleaned up
+        let events_after = manager.get_source_events("cleanup-events-source").await;
+        assert!(events_after.is_empty(), "Expected no events after deletion");
+    }
+
+    /// Test that deleting a source cleans up its log history
+    #[tokio::test]
+    async fn test_delete_source_cleans_up_log_history() {
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        // Add a source
+        let source = LoggingTestSource::new("cleanup-logs-source").unwrap();
+        manager.add_source(source).await.unwrap();
+
+        // Generate some logs using the source's emit_log method
+        // First get the source and call emit_log
+        let source_arc = manager
+            .get_source_instance("cleanup-logs-source")
+            .await
+            .unwrap();
+        if let Some(logging_source) = source_arc.as_any().downcast_ref::<LoggingTestSource>() {
+            logging_source.emit_log("test log message").await;
+        }
+
+        // Wait for log to be recorded
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Verify logs exist
+        let result = manager.subscribe_logs("cleanup-logs-source").await;
+        assert!(result.is_some(), "Expected to subscribe to source logs");
+        let (logs, _) = result.unwrap();
+        assert!(!logs.is_empty(), "Expected logs after emitting");
+
+        // Delete the source
+        manager
+            .delete_source("cleanup-logs-source".to_string())
+            .await
+            .unwrap();
+
+        // Verify logs are cleaned up (subscribe should fail for non-existent source)
+        let result = manager.subscribe_logs("cleanup-logs-source").await;
+        assert!(result.is_none(), "Expected None for deleted source logs");
+    }
 }

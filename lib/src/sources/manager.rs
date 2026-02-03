@@ -286,6 +286,8 @@ impl SourceManager {
             self.sources.write().await.remove(&id);
             // Clean up event history for this source
             self.event_history.write().await.remove_component(&id);
+            // Clean up log history for this source
+            self.log_registry.remove_component(&id).await;
             info!("Deleted source: {id}");
 
             Ok(())

@@ -551,6 +551,70 @@ mod manager_tests {
             "Retrieved config should preserve auto_start=true"
         );
     }
+
+    // ============================================================================
+    // Cleanup Tests
+    // ============================================================================
+
+    /// Test that deleting a query cleans up its event history
+    #[tokio::test]
+    async fn test_delete_query_cleans_up_event_history() {
+        let (manager, _event_rx, _event_tx, _source_manager) = create_test_manager().await;
+
+        // Add a query
+        let config = create_test_query_config("cleanup-events-query", vec![]);
+        manager.add_query(config).await.unwrap();
+
+        // Record an event manually to simulate lifecycle
+        manager
+            .record_event(ComponentEvent {
+                component_id: "cleanup-events-query".to_string(),
+                component_type: ComponentType::Query,
+                status: ComponentStatus::Running,
+                timestamp: chrono::Utc::now(),
+                message: Some("Test event".to_string()),
+            })
+            .await;
+
+        // Verify events exist
+        let events = manager.get_query_events("cleanup-events-query").await;
+        assert!(!events.is_empty(), "Expected events after recording");
+
+        // Delete the query
+        manager
+            .delete_query("cleanup-events-query".to_string())
+            .await
+            .unwrap();
+
+        // Verify events are cleaned up
+        let events_after = manager.get_query_events("cleanup-events-query").await;
+        assert!(events_after.is_empty(), "Expected no events after deletion");
+    }
+
+    /// Test that deleting a query cleans up its log history
+    #[tokio::test]
+    async fn test_delete_query_cleans_up_log_history() {
+        let (manager, _event_rx, _event_tx, _source_manager) = create_test_manager().await;
+
+        // Add a query
+        let config = create_test_query_config("cleanup-logs-query", vec![]);
+        manager.add_query(config).await.unwrap();
+
+        // Generate a log via subscribe (which creates the channel) then check
+        // First subscribe to create the channel
+        let result = manager.subscribe_logs("cleanup-logs-query").await;
+        assert!(result.is_some(), "Expected to subscribe to query logs");
+
+        // Delete the query
+        manager
+            .delete_query("cleanup-logs-query".to_string())
+            .await
+            .unwrap();
+
+        // Verify logs are cleaned up (subscribe should fail for non-existent query)
+        let result = manager.subscribe_logs("cleanup-logs-query").await;
+        assert!(result.is_none(), "Expected None for deleted query logs");
+    }
 }
 
 #[cfg(test)]
