@@ -1270,6 +1270,8 @@ impl QueryManager {
             self.queries.write().await.remove(&id);
             // Clean up event history for this query
             self.event_history.write().await.remove_component(&id);
+            // Clean up log resources for this query
+            self.log_registry.remove_component(&id).await;
             info!("Deleted query: {id}");
 
             Ok(())
