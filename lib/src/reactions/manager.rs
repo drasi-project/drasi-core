@@ -246,6 +246,8 @@ impl ReactionManager {
             self.reactions.write().await.remove(&id);
             // Clean up event history for this reaction
             self.event_history.write().await.remove_component(&id);
+            // Clean up log registry for this reaction
+            self.log_registry.remove_component(&id).await;
             info!("Deleted reaction: {id}");
 
             Ok(())
