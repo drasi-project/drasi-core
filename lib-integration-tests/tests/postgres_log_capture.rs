@@ -51,9 +51,8 @@ async fn test_postgres_source_logs_captured_on_success() {
         .expect("Failed to get port");
 
     // Set up the database with a publication
-    let conn_str = format!(
-        "host={host} port={port} user=postgres password=postgres dbname=postgres"
-    );
+    let conn_str =
+        format!("host={host} port={port} user=postgres password=postgres dbname=postgres");
     let (client, connection) = tokio_postgres::connect(&conn_str, tokio_postgres::NoTls)
         .await
         .expect("Failed to connect to PostgreSQL");
@@ -74,10 +73,7 @@ async fn test_postgres_source_logs_captured_on_success() {
         .expect("Failed to create table");
 
     client
-        .execute(
-            "CREATE PUBLICATION drasi_pub FOR TABLE test_items",
-            &[],
-        )
+        .execute("CREATE PUBLICATION drasi_pub FOR TABLE test_items", &[])
         .await
         .expect("Failed to create publication");
 

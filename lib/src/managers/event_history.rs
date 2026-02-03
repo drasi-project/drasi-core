@@ -159,9 +159,12 @@ impl ComponentEventHistory {
         &mut self,
         component_id: &str,
     ) -> (Vec<ComponentEvent>, broadcast::Receiver<ComponentEvent>) {
-        let channel = self.channels.entry(component_id.to_string()).or_insert_with(|| {
-            ComponentEventChannel::new(self.max_events_per_component, self.channel_capacity)
-        });
+        let channel = self
+            .channels
+            .entry(component_id.to_string())
+            .or_insert_with(|| {
+                ComponentEventChannel::new(self.max_events_per_component, self.channel_capacity)
+            });
 
         let history = channel.get_history();
         let receiver = channel.subscribe();

@@ -24,7 +24,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use drasi_lib::channels::*;
-use drasi_lib::managers::{log_component_start, log_component_stop, with_component_context, ComponentContext};
+use drasi_lib::managers::{
+    log_component_start, log_component_stop, with_component_context, ComponentContext,
+};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
 
@@ -175,178 +177,180 @@ impl Source for MockSource {
                         break;
                     }
 
-                seq += 1;
+                    seq += 1;
 
-                // Generate data based on type
-                let source_change = match data_type.as_str() {
-                    "counter" => {
-                        let element_id = format!("counter_{seq}");
-                        let reference = ElementReference::new(&source_name, &element_id);
+                    // Generate data based on type
+                    let source_change = match data_type.as_str() {
+                        "counter" => {
+                            let element_id = format!("counter_{seq}");
+                            let reference = ElementReference::new(&source_name, &element_id);
 
-                        let mut property_map = ElementPropertyMap::new();
-                        property_map.insert(
-                            "value",
-                            crate::conversion::json_to_element_value_or_default(
-                                &Value::Number(seq.into()),
-                                drasi_core::models::ElementValue::Null,
-                            ),
-                        );
-                        property_map.insert(
-                            "timestamp",
-                            crate::conversion::json_to_element_value_or_default(
-                                &Value::String(chrono::Utc::now().to_rfc3339()),
-                                drasi_core::models::ElementValue::Null,
-                            ),
-                        );
-
-                        let metadata = ElementMetadata {
-                            reference,
-                            labels: Arc::from(vec![Arc::from("Counter")]),
-                            effective_from: crate::time::get_system_time_millis().unwrap_or_else(
-                                |e| {
-                                    log::warn!("Failed to get timestamp for mock counter: {e}");
-                                    chrono::Utc::now().timestamp_millis() as u64
-                                },
-                            ),
-                        };
-
-                        let element = Element::Node {
-                            metadata,
-                            properties: property_map,
-                        };
-
-                        SourceChange::Insert { element }
-                    }
-                    "sensor" => {
-                        let sensor_id = rand::random::<u32>() % 5;
-                        let element_id = format!("reading_{sensor_id}_{seq}");
-                        let reference = ElementReference::new(&source_name, &element_id);
-
-                        let mut property_map = ElementPropertyMap::new();
-                        property_map.insert(
-                            "sensor_id",
-                            crate::conversion::json_to_element_value_or_default(
-                                &Value::String(format!("sensor_{sensor_id}")),
-                                drasi_core::models::ElementValue::Null,
-                            ),
-                        );
-                        property_map.insert(
-                            "temperature",
-                            crate::conversion::json_to_element_value_or_default(
-                                &Value::Number(
-                                    serde_json::Number::from_f64(
-                                        20.0 + rand::random::<f64>() * 10.0,
-                                    )
-                                    .unwrap_or(serde_json::Number::from(25)),
+                            let mut property_map = ElementPropertyMap::new();
+                            property_map.insert(
+                                "value",
+                                crate::conversion::json_to_element_value_or_default(
+                                    &Value::Number(seq.into()),
+                                    drasi_core::models::ElementValue::Null,
                                 ),
-                                drasi_core::models::ElementValue::Null,
-                            ),
-                        );
-                        property_map.insert(
-                            "humidity",
-                            crate::conversion::json_to_element_value_or_default(
-                                &Value::Number(
-                                    serde_json::Number::from_f64(
-                                        40.0 + rand::random::<f64>() * 20.0,
-                                    )
-                                    .unwrap_or(serde_json::Number::from(50)),
+                            );
+                            property_map.insert(
+                                "timestamp",
+                                crate::conversion::json_to_element_value_or_default(
+                                    &Value::String(chrono::Utc::now().to_rfc3339()),
+                                    drasi_core::models::ElementValue::Null,
                                 ),
-                                drasi_core::models::ElementValue::Null,
-                            ),
-                        );
-                        property_map.insert(
-                            "timestamp",
-                            crate::conversion::json_to_element_value_or_default(
-                                &Value::String(chrono::Utc::now().to_rfc3339()),
-                                drasi_core::models::ElementValue::Null,
-                            ),
-                        );
+                            );
 
-                        let metadata = ElementMetadata {
-                            reference,
-                            labels: Arc::from(vec![Arc::from("SensorReading")]),
-                            effective_from: crate::time::get_system_time_millis().unwrap_or_else(
-                                |e| {
-                                    log::warn!("Failed to get timestamp for mock sensor: {e}");
-                                    chrono::Utc::now().timestamp_millis() as u64
-                                },
-                            ),
-                        };
+                            let metadata = ElementMetadata {
+                                reference,
+                                labels: Arc::from(vec![Arc::from("Counter")]),
+                                effective_from: crate::time::get_system_time_millis()
+                                    .unwrap_or_else(|e| {
+                                        log::warn!("Failed to get timestamp for mock counter: {e}");
+                                        chrono::Utc::now().timestamp_millis() as u64
+                                    }),
+                            };
 
-                        let element = Element::Node {
-                            metadata,
-                            properties: property_map,
-                        };
+                            let element = Element::Node {
+                                metadata,
+                                properties: property_map,
+                            };
 
-                        SourceChange::Insert { element }
+                            SourceChange::Insert { element }
+                        }
+                        "sensor" => {
+                            let sensor_id = rand::random::<u32>() % 5;
+                            let element_id = format!("reading_{sensor_id}_{seq}");
+                            let reference = ElementReference::new(&source_name, &element_id);
+
+                            let mut property_map = ElementPropertyMap::new();
+                            property_map.insert(
+                                "sensor_id",
+                                crate::conversion::json_to_element_value_or_default(
+                                    &Value::String(format!("sensor_{sensor_id}")),
+                                    drasi_core::models::ElementValue::Null,
+                                ),
+                            );
+                            property_map.insert(
+                                "temperature",
+                                crate::conversion::json_to_element_value_or_default(
+                                    &Value::Number(
+                                        serde_json::Number::from_f64(
+                                            20.0 + rand::random::<f64>() * 10.0,
+                                        )
+                                        .unwrap_or(serde_json::Number::from(25)),
+                                    ),
+                                    drasi_core::models::ElementValue::Null,
+                                ),
+                            );
+                            property_map.insert(
+                                "humidity",
+                                crate::conversion::json_to_element_value_or_default(
+                                    &Value::Number(
+                                        serde_json::Number::from_f64(
+                                            40.0 + rand::random::<f64>() * 20.0,
+                                        )
+                                        .unwrap_or(serde_json::Number::from(50)),
+                                    ),
+                                    drasi_core::models::ElementValue::Null,
+                                ),
+                            );
+                            property_map.insert(
+                                "timestamp",
+                                crate::conversion::json_to_element_value_or_default(
+                                    &Value::String(chrono::Utc::now().to_rfc3339()),
+                                    drasi_core::models::ElementValue::Null,
+                                ),
+                            );
+
+                            let metadata = ElementMetadata {
+                                reference,
+                                labels: Arc::from(vec![Arc::from("SensorReading")]),
+                                effective_from: crate::time::get_system_time_millis()
+                                    .unwrap_or_else(|e| {
+                                        log::warn!("Failed to get timestamp for mock sensor: {e}");
+                                        chrono::Utc::now().timestamp_millis() as u64
+                                    }),
+                            };
+
+                            let element = Element::Node {
+                                metadata,
+                                properties: property_map,
+                            };
+
+                            SourceChange::Insert { element }
+                        }
+                        _ => {
+                            // Generic data
+                            let element_id = format!("generic_{seq}");
+                            let reference = ElementReference::new(&source_name, &element_id);
+
+                            let mut property_map = ElementPropertyMap::new();
+                            property_map.insert(
+                                "value",
+                                crate::conversion::json_to_element_value_or_default(
+                                    &Value::Number(rand::random::<i32>().into()),
+                                    drasi_core::models::ElementValue::Null,
+                                ),
+                            );
+                            property_map.insert(
+                                "message",
+                                crate::conversion::json_to_element_value_or_default(
+                                    &Value::String("Generic mock data".to_string()),
+                                    drasi_core::models::ElementValue::Null,
+                                ),
+                            );
+                            property_map.insert(
+                                "timestamp",
+                                crate::conversion::json_to_element_value_or_default(
+                                    &Value::String(chrono::Utc::now().to_rfc3339()),
+                                    drasi_core::models::ElementValue::Null,
+                                ),
+                            );
+
+                            let metadata = ElementMetadata {
+                                reference,
+                                labels: Arc::from(vec![Arc::from("Generic")]),
+                                effective_from: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .expect("System time is before UNIX epoch")
+                                    .as_nanos()
+                                    as u64,
+                            };
+
+                            let element = Element::Node {
+                                metadata,
+                                properties: property_map,
+                            };
+
+                            SourceChange::Insert { element }
+                        }
+                    };
+
+                    // Create profiling metadata with timestamps
+                    let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
+                    profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
+
+                    let wrapper = SourceEventWrapper::with_profiling(
+                        source_id.clone(),
+                        SourceEvent::Change(source_change),
+                        chrono::Utc::now(),
+                        profiling,
+                    );
+
+                    // Dispatch to all subscribers via helper
+                    if let Err(e) = SourceBase::dispatch_from_task(
+                        base_dispatchers.clone(),
+                        wrapper,
+                        &source_id,
+                    )
+                    .await
+                    {
+                        debug!("Failed to dispatch change: {e}");
                     }
-                    _ => {
-                        // Generic data
-                        let element_id = format!("generic_{seq}");
-                        let reference = ElementReference::new(&source_name, &element_id);
-
-                        let mut property_map = ElementPropertyMap::new();
-                        property_map.insert(
-                            "value",
-                            crate::conversion::json_to_element_value_or_default(
-                                &Value::Number(rand::random::<i32>().into()),
-                                drasi_core::models::ElementValue::Null,
-                            ),
-                        );
-                        property_map.insert(
-                            "message",
-                            crate::conversion::json_to_element_value_or_default(
-                                &Value::String("Generic mock data".to_string()),
-                                drasi_core::models::ElementValue::Null,
-                            ),
-                        );
-                        property_map.insert(
-                            "timestamp",
-                            crate::conversion::json_to_element_value_or_default(
-                                &Value::String(chrono::Utc::now().to_rfc3339()),
-                                drasi_core::models::ElementValue::Null,
-                            ),
-                        );
-
-                        let metadata = ElementMetadata {
-                            reference,
-                            labels: Arc::from(vec![Arc::from("Generic")]),
-                            effective_from: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .expect("System time is before UNIX epoch")
-                                .as_nanos() as u64,
-                        };
-
-                        let element = Element::Node {
-                            metadata,
-                            properties: property_map,
-                        };
-
-                        SourceChange::Insert { element }
-                    }
-                };
-
-                // Create profiling metadata with timestamps
-                let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
-                profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
-
-                let wrapper = SourceEventWrapper::with_profiling(
-                    source_id.clone(),
-                    SourceEvent::Change(source_change),
-                    chrono::Utc::now(),
-                    profiling,
-                );
-
-                // Dispatch to all subscribers via helper
-                if let Err(e) =
-                    SourceBase::dispatch_from_task(base_dispatchers.clone(), wrapper, &source_id)
-                        .await
-                {
-                    debug!("Failed to dispatch change: {e}");
                 }
-            }
 
-            info!("Mock source task completed");
+                info!("Mock source task completed");
             })
             .await
         });

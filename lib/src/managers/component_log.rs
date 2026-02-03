@@ -153,7 +153,10 @@ pub fn current_component_context() -> Option<ComponentContext> {
 /// # Panics
 ///
 /// Panics if another logger has already been installed.
-pub fn init_logging_with_logger<L: log::Log + 'static>(inner_logger: L, max_level: log::LevelFilter) {
+pub fn init_logging_with_logger<L: log::Log + 'static>(
+    inner_logger: L,
+    max_level: log::LevelFilter,
+) {
     let registry = global_log_registry();
     let logger = ComponentAwareLogger::wrapping(registry, Box::new(inner_logger), max_level);
 
@@ -981,8 +984,11 @@ mod tests {
         };
 
         let registry = Arc::new(ComponentLogRegistry::new());
-        let logger =
-            ComponentAwareLogger::wrapping(registry, Box::new(counting_logger), log::LevelFilter::Info);
+        let logger = ComponentAwareLogger::wrapping(
+            registry,
+            Box::new(counting_logger),
+            log::LevelFilter::Info,
+        );
 
         assert!(logger.inner_logger.is_some());
         assert_eq!(logger.max_level, log::LevelFilter::Info);

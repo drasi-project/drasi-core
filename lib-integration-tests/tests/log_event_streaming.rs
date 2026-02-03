@@ -508,10 +508,7 @@ async fn test_reaction_log_streaming() {
         .query("MATCH (n) RETURN n")
         .build();
 
-    let reaction = TestReaction::new(
-        "test-reaction-logs",
-        vec!["reaction-log-query".to_string()],
-    );
+    let reaction = TestReaction::new("test-reaction-logs", vec!["reaction-log-query".to_string()]);
 
     let drasi = DrasiLib::builder()
         .with_source(source)
@@ -625,9 +622,15 @@ async fn test_full_lifecycle_streaming() {
             }
 
             // Check if all components reached Running
-            let source_running = source_events.iter().any(|e| e.status == ComponentStatus::Running);
-            let query_running = query_events.iter().any(|e| e.status == ComponentStatus::Running);
-            let reaction_running = reaction_events.iter().any(|e| e.status == ComponentStatus::Running);
+            let source_running = source_events
+                .iter()
+                .any(|e| e.status == ComponentStatus::Running);
+            let query_running = query_events
+                .iter()
+                .any(|e| e.status == ComponentStatus::Running);
+            let reaction_running = reaction_events
+                .iter()
+                .any(|e| e.status == ComponentStatus::Running);
 
             if source_running && query_running && reaction_running {
                 break;
@@ -636,21 +639,39 @@ async fn test_full_lifecycle_streaming() {
     })
     .await;
 
-    println!("Source events: {:?}", source_events.iter().map(|e| &e.status).collect::<Vec<_>>());
-    println!("Query events: {:?}", query_events.iter().map(|e| &e.status).collect::<Vec<_>>());
-    println!("Reaction events: {:?}", reaction_events.iter().map(|e| &e.status).collect::<Vec<_>>());
+    println!(
+        "Source events: {:?}",
+        source_events.iter().map(|e| &e.status).collect::<Vec<_>>()
+    );
+    println!(
+        "Query events: {:?}",
+        query_events.iter().map(|e| &e.status).collect::<Vec<_>>()
+    );
+    println!(
+        "Reaction events: {:?}",
+        reaction_events
+            .iter()
+            .map(|e| &e.status)
+            .collect::<Vec<_>>()
+    );
 
     // Verify all components reached Running state
     assert!(
-        source_events.iter().any(|e| e.status == ComponentStatus::Running),
+        source_events
+            .iter()
+            .any(|e| e.status == ComponentStatus::Running),
         "Source should have reached Running state"
     );
     assert!(
-        query_events.iter().any(|e| e.status == ComponentStatus::Running),
+        query_events
+            .iter()
+            .any(|e| e.status == ComponentStatus::Running),
         "Query should have reached Running state"
     );
     assert!(
-        reaction_events.iter().any(|e| e.status == ComponentStatus::Running),
+        reaction_events
+            .iter()
+            .any(|e| e.status == ComponentStatus::Running),
         "Reaction should have reached Running state"
     );
 
@@ -675,13 +696,22 @@ async fn test_subscribe_nonexistent_component() {
     assert!(result.is_err(), "Expected error for non-existent source");
 
     let result = drasi.subscribe_source_events("nonexistent").await;
-    assert!(result.is_err(), "Expected error for non-existent source events");
+    assert!(
+        result.is_err(),
+        "Expected error for non-existent source events"
+    );
 
     let result = drasi.subscribe_query_events("nonexistent").await;
-    assert!(result.is_err(), "Expected error for non-existent query events");
+    assert!(
+        result.is_err(),
+        "Expected error for non-existent query events"
+    );
 
     let result = drasi.subscribe_reaction_events("nonexistent").await;
-    assert!(result.is_err(), "Expected error for non-existent reaction events");
+    assert!(
+        result.is_err(),
+        "Expected error for non-existent reaction events"
+    );
 }
 
 /// Test that log levels are correctly captured.
