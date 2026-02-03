@@ -76,7 +76,10 @@ pub mod stream;
 pub mod types;
 
 // Re-export main types
-pub use config::{AuthMode, EncryptionMode, MsSqlSourceConfig, StartPosition, TableKeyConfig};
+pub use config::{
+    validate_sql_identifier, AuthMode, EncryptionMode, MsSqlSourceConfig, StartPosition,
+    TableKeyConfig,
+};
 pub use connection::MsSqlConnection;
 pub use decoder::CdcOperation;
 pub use keys::PrimaryKeyCache;

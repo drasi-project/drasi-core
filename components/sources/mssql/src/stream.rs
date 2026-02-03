@@ -14,7 +14,7 @@
 
 //! CDC polling stream implementation
 
-use crate::config::{MsSqlSourceConfig, StartPosition};
+use crate::config::{validate_sql_identifier, MsSqlSourceConfig, StartPosition};
 use crate::connection::MsSqlConnection;
 use crate::decoder::{cdc_columns, CdcOperation};
 use crate::keys::PrimaryKeyCache;
@@ -297,6 +297,9 @@ async fn query_table_changes(
     from_lsn: &Lsn,
     to_lsn: &Lsn,
 ) -> Result<Vec<tiberius::Row>> {
+    // Validate table name to prevent SQL injection
+    validate_sql_identifier(table)?;
+
     // MS SQL CDC function name: cdc.fn_cdc_get_all_changes_{capture_instance}
     // Capture instance is usually: {schema}_{table}
     // If table already contains schema (e.g., "dbo.Orders"), replace dot with underscore
@@ -355,6 +358,9 @@ async fn get_min_lsn(
     client: &mut tiberius::Client<tokio_util::compat::Compat<tokio::net::TcpStream>>,
     table: &str,
 ) -> Result<Lsn> {
+    // Validate table name to prevent SQL injection
+    validate_sql_identifier(table)?;
+
     let capture_instance = table.replace('.', "_");
 
     // Use string formatting instead of parameters since sys.fn_cdc_get_min_lsn expects a string literal
@@ -380,6 +386,9 @@ async fn is_valid_lsn(
     lsn: &Lsn,
     table: &str,
 ) -> Result<bool> {
+    // Validate table name to prevent SQL injection
+    validate_sql_identifier(table)?;
+
     let capture_instance = table.replace('.', "_");
     let query = format!("SELECT sys.fn_cdc_get_min_lsn('{capture_instance}') AS min_lsn");
 

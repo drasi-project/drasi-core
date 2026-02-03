@@ -22,7 +22,9 @@ use drasi_core::models::{
 use drasi_lib::bootstrap::BootstrapProvider;
 use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest};
 use drasi_lib::channels::{BootstrapEvent, SourceChangeEvent};
-use drasi_source_mssql::{MsSqlConnection, MsSqlSourceConfig, PrimaryKeyCache};
+use drasi_source_mssql::{
+    validate_sql_identifier, MsSqlConnection, MsSqlSourceConfig, PrimaryKeyCache,
+};
 use log::{debug, info, warn};
 use ordered_float::OrderedFloat;
 use std::sync::Arc;
@@ -303,6 +305,9 @@ impl MsSqlBootstrapHandler {
         event_tx: &tokio::sync::mpsc::Sender<BootstrapEvent>,
     ) -> Result<usize> {
         debug!("Starting bootstrap of table '{table_name}' with label '{label}'");
+
+        // Validate table name to prevent SQL injection
+        validate_sql_identifier(table_name)?;
 
         // Query all rows from the table
         let query = format!("SELECT * FROM {table_name}");

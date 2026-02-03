@@ -14,7 +14,68 @@
 
 //! Configuration for MS SQL CDC source
 
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
+
+/// Maximum length for SQL identifiers (SQL Server limit is 128)
+const MAX_IDENTIFIER_LENGTH: usize = 128;
+
+/// Validate a SQL identifier to prevent SQL injection
+///
+/// Valid identifiers contain only:
+/// - Alphanumeric characters (a-z, A-Z, 0-9)
+/// - Underscores (_)
+/// - Dots (.) for schema.table notation
+///
+/// # Arguments
+/// * `name` - The identifier to validate
+///
+/// # Returns
+/// * `Ok(())` if the identifier is valid
+/// * `Err` if the identifier contains invalid characters or is empty
+///
+/// # Example
+/// ```
+/// use drasi_source_mssql::validate_sql_identifier;
+///
+/// assert!(validate_sql_identifier("orders").is_ok());
+/// assert!(validate_sql_identifier("dbo.orders").is_ok());
+/// assert!(validate_sql_identifier("order_items").is_ok());
+/// assert!(validate_sql_identifier("orders; DROP TABLE users--").is_err());
+/// ```
+pub fn validate_sql_identifier(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(anyhow!("SQL identifier cannot be empty"));
+    }
+
+    if name.len() > MAX_IDENTIFIER_LENGTH {
+        return Err(anyhow!(
+            "SQL identifier exceeds maximum length of {MAX_IDENTIFIER_LENGTH} characters"
+        ));
+    }
+
+    // Check that all characters are valid SQL identifier characters
+    for (i, c) in name.chars().enumerate() {
+        if !c.is_ascii_alphanumeric() && c != '_' && c != '.' {
+            return Err(anyhow!(
+                "Invalid character '{c}' at position {i} in SQL identifier '{name}'. \
+                 Only alphanumeric characters, underscores, and dots are allowed."
+            ));
+        }
+    }
+
+    // Identifier cannot start with a digit
+    if name.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        return Err(anyhow!("SQL identifier '{name}' cannot start with a digit"));
+    }
+
+    // Check for consecutive dots or leading/trailing dots
+    if name.starts_with('.') || name.ends_with('.') || name.contains("..") {
+        return Err(anyhow!("SQL identifier '{name}' has invalid dot placement"));
+    }
+
+    Ok(())
+}
 
 /// Authentication mode for MS SQL Server
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -255,5 +316,56 @@ mod tests {
 
         let json = serde_json::to_string(&StartPosition::Current).unwrap();
         assert_eq!(json, "\"current\"");
+    }
+
+    #[test]
+    fn test_validate_sql_identifier_valid() {
+        // Simple table names
+        assert!(validate_sql_identifier("orders").is_ok());
+        assert!(validate_sql_identifier("Orders").is_ok());
+        assert!(validate_sql_identifier("order_items").is_ok());
+        assert!(validate_sql_identifier("Order_Items_2024").is_ok());
+
+        // Schema-qualified names
+        assert!(validate_sql_identifier("dbo.orders").is_ok());
+        assert!(validate_sql_identifier("sales.order_items").is_ok());
+        assert!(validate_sql_identifier("MySchema.MyTable").is_ok());
+    }
+
+    #[test]
+    fn test_validate_sql_identifier_sql_injection() {
+        // SQL injection attempts
+        assert!(validate_sql_identifier("orders; DROP TABLE users--").is_err());
+        assert!(validate_sql_identifier("orders'; DELETE FROM users;--").is_err());
+        assert!(validate_sql_identifier("orders OR 1=1").is_err());
+        assert!(validate_sql_identifier("orders/**/UNION/**/SELECT").is_err());
+        assert!(validate_sql_identifier("orders\n; DROP TABLE").is_err());
+    }
+
+    #[test]
+    fn test_validate_sql_identifier_empty() {
+        assert!(validate_sql_identifier("").is_err());
+    }
+
+    #[test]
+    fn test_validate_sql_identifier_too_long() {
+        let long_name = "a".repeat(129);
+        assert!(validate_sql_identifier(&long_name).is_err());
+
+        let valid_long_name = "a".repeat(128);
+        assert!(validate_sql_identifier(&valid_long_name).is_ok());
+    }
+
+    #[test]
+    fn test_validate_sql_identifier_invalid_start() {
+        assert!(validate_sql_identifier("123table").is_err());
+        assert!(validate_sql_identifier("1orders").is_err());
+    }
+
+    #[test]
+    fn test_validate_sql_identifier_invalid_dots() {
+        assert!(validate_sql_identifier(".orders").is_err());
+        assert!(validate_sql_identifier("orders.").is_err());
+        assert!(validate_sql_identifier("dbo..orders").is_err());
     }
 }
