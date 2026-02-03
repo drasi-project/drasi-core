@@ -70,6 +70,7 @@
 pub mod config;
 pub mod connection;
 pub mod decoder;
+pub mod error;
 pub mod keys;
 pub mod lsn;
 pub mod stream;
@@ -82,6 +83,7 @@ pub use config::{
 };
 pub use connection::MsSqlConnection;
 pub use decoder::CdcOperation;
+pub use error::{ConnectionError, LsnError, MsSqlError, MsSqlErrorKind, PrimaryKeyError};
 pub use keys::PrimaryKeyCache;
 pub use lsn::Lsn;
 

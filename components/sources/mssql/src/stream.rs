@@ -17,6 +17,7 @@
 use crate::config::{validate_sql_identifier, MsSqlSourceConfig, StartPosition};
 use crate::connection::MsSqlConnection;
 use crate::decoder::{cdc_columns, CdcOperation};
+use crate::error::{ConnectionError, MsSqlError, MsSqlErrorKind};
 use crate::keys::PrimaryKeyCache;
 use crate::lsn::Lsn;
 use crate::types::extract_properties_from_cdc_row;
@@ -35,21 +36,9 @@ const INITIAL_RECONNECT_DELAY_MS: u64 = 1000; // 1 second
 const MAX_RECONNECT_DELAY_MS: u64 = 60000; // 60 seconds
 const RECONNECT_BACKOFF_MULTIPLIER: f64 = 2.0;
 
-/// Check if an error indicates a connection problem that warrants reconnection
-fn is_connection_error(error: &anyhow::Error) -> bool {
-    let error_str = error.to_string().to_lowercase();
-
-    // Common connection-related error patterns
-    error_str.contains("connection")
-        || error_str.contains("broken pipe")
-        || error_str.contains("reset by peer")
-        || error_str.contains("timed out")
-        || error_str.contains("network")
-        || error_str.contains("socket")
-        || error_str.contains("eof")
-        || error_str.contains("closed")
-        || error_str.contains("refused")
-        || error_str.contains("unreachable")
+/// Classify an error to determine how to handle it
+fn classify_error(error: &anyhow::Error) -> MsSqlErrorKind {
+    MsSqlError::classify(error).unwrap_or(MsSqlErrorKind::Other)
 }
 
 /// Run the CDC polling loop with automatic reconnection
@@ -97,39 +86,43 @@ pub async fn run_cdc_stream(
                     return Ok(());
                 }
 
-                if is_connection_error(&e) {
-                    error!(
-                        "Connection error in CDC stream for source '{source_id}': {e}. \
-                         Reconnecting in {reconnect_delay:?}..."
-                    );
+                match classify_error(&e) {
+                    MsSqlErrorKind::Connection => {
+                        error!(
+                            "Connection error in CDC stream for source '{source_id}': {e}. \
+                             Reconnecting in {reconnect_delay:?}..."
+                        );
 
-                    // Wait before reconnecting, but check for shutdown
-                    tokio::select! {
-                        _ = sleep(reconnect_delay) => {}
-                        _ = shutdown_rx.changed() => {
-                            info!("CDC stream for source '{source_id}' shutdown during reconnect wait");
-                            return Ok(());
+                        // Wait before reconnecting, but check for shutdown
+                        tokio::select! {
+                            _ = sleep(reconnect_delay) => {}
+                            _ = shutdown_rx.changed() => {
+                                info!("CDC stream for source '{source_id}' shutdown during reconnect wait");
+                                return Ok(());
+                            }
                         }
+
+                        // Increase delay for next attempt (exponential backoff)
+                        reconnect_delay = Duration::from_millis(
+                            ((reconnect_delay.as_millis() as f64) * RECONNECT_BACKOFF_MULTIPLIER)
+                                .min(MAX_RECONNECT_DELAY_MS as f64)
+                                as u64,
+                        );
                     }
+                    MsSqlErrorKind::RecoverableLsn | MsSqlErrorKind::Other => {
+                        // Non-connection error - log and continue with normal delay
+                        error!("Error in CDC stream for source '{source_id}': {e}");
 
-                    // Increase delay for next attempt (exponential backoff)
-                    reconnect_delay = Duration::from_millis(
-                        ((reconnect_delay.as_millis() as f64) * RECONNECT_BACKOFF_MULTIPLIER)
-                            .min(MAX_RECONNECT_DELAY_MS as f64) as u64,
-                    );
-                } else {
-                    // Non-connection error - log and continue with normal delay
-                    error!("Error in CDC stream for source '{source_id}': {e}");
+                        // Reset backoff delay on non-connection errors
+                        reconnect_delay = Duration::from_millis(INITIAL_RECONNECT_DELAY_MS);
 
-                    // Reset backoff delay on non-connection errors
-                    reconnect_delay = Duration::from_millis(INITIAL_RECONNECT_DELAY_MS);
-
-                    // Brief pause before retry, but check for shutdown
-                    tokio::select! {
-                        _ = sleep(Duration::from_secs(1)) => {}
-                        _ = shutdown_rx.changed() => {
-                            info!("CDC stream for source '{source_id}' shutdown during error recovery");
-                            return Ok(());
+                        // Brief pause before retry, but check for shutdown
+                        tokio::select! {
+                            _ = sleep(Duration::from_secs(1)) => {}
+                            _ = shutdown_rx.changed() => {
+                                info!("CDC stream for source '{source_id}' shutdown during error recovery");
+                                return Ok(());
+                            }
                         }
                     }
                 }
@@ -214,30 +207,33 @@ async fn run_cdc_polling_loop(
             Err(e) => {
                 consecutive_errors += 1;
 
-                // Check if this is a connection error
-                if is_connection_error(&e) {
-                    error!("Connection error during CDC polling: {e}");
-                    return Err(e);
-                }
+                // Classify the error using typed error handling
+                match classify_error(&e) {
+                    MsSqlErrorKind::Connection => {
+                        error!("Connection error during CDC polling: {e}");
+                        return Err(e);
+                    }
+                    MsSqlErrorKind::RecoverableLsn => {
+                        warn!("LSN error detected, clearing checkpoint and restarting from current position");
+                        clear_checkpoint(source_id, state_store).await?;
+                        current_lsn = None;
+                        consecutive_errors = 0; // Reset since we handled this
+                    }
+                    MsSqlErrorKind::Other => {
+                        error!("Error polling CDC changes: {e}");
 
-                // Check if LSN is invalid and needs reset
-                if e.to_string().contains("invalid LSN") || e.to_string().contains("out of range") {
-                    warn!("LSN appears invalid, clearing checkpoint and restarting from current");
-                    clear_checkpoint(source_id, state_store).await?;
-                    current_lsn = None;
-                    consecutive_errors = 0; // Reset since we handled this
-                } else {
-                    error!("Error polling CDC changes: {e}");
-
-                    // If we've had too many consecutive errors, assume connection is bad
-                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                        error!(
-                            "Too many consecutive errors ({consecutive_errors}), \
-                             assuming connection is unhealthy"
-                        );
-                        return Err(anyhow!(
-                            "Connection appears unhealthy after {consecutive_errors} consecutive errors: {e}"
-                        ));
+                        // If we've had too many consecutive errors, assume connection is bad
+                        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                            error!(
+                                "Too many consecutive errors ({consecutive_errors}), \
+                                 assuming connection is unhealthy"
+                            );
+                            return Err(MsSqlError::Connection(ConnectionError::Unhealthy {
+                                consecutive_errors,
+                                last_error: e.to_string(),
+                            })
+                            .into());
+                        }
                     }
                 }
             }
@@ -653,25 +649,75 @@ mod tests {
     }
 
     #[test]
-    fn test_is_connection_error_detects_connection_issues() {
+    fn test_classify_error_detects_connection_issues() {
+        use anyhow::anyhow;
+
         // Connection-related errors should be detected
-        assert!(is_connection_error(&anyhow!("connection reset by peer")));
-        assert!(is_connection_error(&anyhow!("Connection refused")));
-        assert!(is_connection_error(&anyhow!("broken pipe")));
-        assert!(is_connection_error(&anyhow!("network unreachable")));
-        assert!(is_connection_error(&anyhow!("socket closed")));
-        assert!(is_connection_error(&anyhow!("operation timed out")));
-        assert!(is_connection_error(&anyhow!("unexpected eof")));
-        assert!(is_connection_error(&anyhow!("host unreachable")));
+        assert_eq!(
+            classify_error(&anyhow!("connection reset by peer")),
+            MsSqlErrorKind::Connection
+        );
+        assert_eq!(
+            classify_error(&anyhow!("Connection refused")),
+            MsSqlErrorKind::Connection
+        );
+        assert_eq!(
+            classify_error(&anyhow!("broken pipe")),
+            MsSqlErrorKind::Connection
+        );
+        assert_eq!(
+            classify_error(&anyhow!("network unreachable")),
+            MsSqlErrorKind::Connection
+        );
+        assert_eq!(
+            classify_error(&anyhow!("socket closed")),
+            MsSqlErrorKind::Connection
+        );
+        assert_eq!(
+            classify_error(&anyhow!("operation timed out")),
+            MsSqlErrorKind::Connection
+        );
+        assert_eq!(
+            classify_error(&anyhow!("unexpected eof")),
+            MsSqlErrorKind::Connection
+        );
+        assert_eq!(
+            classify_error(&anyhow!("host unreachable")),
+            MsSqlErrorKind::Connection
+        );
     }
 
     #[test]
-    fn test_is_connection_error_ignores_non_connection_issues() {
-        // Non-connection errors should not be detected as connection errors
-        assert!(!is_connection_error(&anyhow!("invalid LSN")));
-        assert!(!is_connection_error(&anyhow!("syntax error in query")));
-        assert!(!is_connection_error(&anyhow!("permission denied")));
-        assert!(!is_connection_error(&anyhow!("table not found")));
-        assert!(!is_connection_error(&anyhow!("out of range")));
+    fn test_classify_error_detects_lsn_issues() {
+        use anyhow::anyhow;
+
+        // LSN-related errors should be detected as recoverable
+        assert_eq!(
+            classify_error(&anyhow!("The specified LSN is invalid")),
+            MsSqlErrorKind::RecoverableLsn
+        );
+        assert_eq!(
+            classify_error(&anyhow!("LSN out of range")),
+            MsSqlErrorKind::RecoverableLsn
+        );
+    }
+
+    #[test]
+    fn test_classify_error_other_errors() {
+        use anyhow::anyhow;
+
+        // Non-connection, non-LSN errors should be classified as Other
+        assert_eq!(
+            classify_error(&anyhow!("syntax error in query")),
+            MsSqlErrorKind::Other
+        );
+        assert_eq!(
+            classify_error(&anyhow!("permission denied")),
+            MsSqlErrorKind::Other
+        );
+        assert_eq!(
+            classify_error(&anyhow!("table not found")),
+            MsSqlErrorKind::Other
+        );
     }
 }

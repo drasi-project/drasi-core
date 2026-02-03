@@ -15,6 +15,7 @@
 //! Primary key discovery and element ID generation
 
 use crate::config::{MsSqlSourceConfig, TableKeyConfig};
+use crate::error::{MsSqlError, PrimaryKeyError};
 use crate::types::{extract_column_value, value_to_string};
 use anyhow::{anyhow, Result};
 use drasi_core::models::ElementValue;
@@ -126,11 +127,10 @@ impl PrimaryKeyCache {
         let keys = match self.get(table) {
             Some(keys) => keys,
             None => {
-                return Err(anyhow!(
-                    "No primary key configured for table '{table}'. \
-                     Add a 'table_keys' configuration entry to specify the primary key columns. \
-                     Without a primary key, UPDATE and DELETE operations cannot be tracked correctly."
-                ));
+                return Err(MsSqlError::PrimaryKey(PrimaryKeyError::NotConfigured {
+                    table: table.to_string(),
+                })
+                .into());
             }
         };
 
@@ -148,10 +148,11 @@ impl PrimaryKeyCache {
                     null_columns.push(pk_col.clone());
                 }
             } else {
-                return Err(anyhow!(
-                    "Primary key column '{pk_col}' not found in row for table '{table}'. \
-                     Check that the column name in 'table_keys' matches the actual column name."
-                ));
+                return Err(MsSqlError::PrimaryKey(PrimaryKeyError::ColumnNotFound {
+                    table: table.to_string(),
+                    column: pk_col.clone(),
+                })
+                .into());
             }
         }
 
@@ -167,10 +168,11 @@ impl PrimaryKeyCache {
             Ok(format!("{}:{}", table, key_values.join("_")))
         } else {
             // All primary key values are NULL - this is an error
-            Err(anyhow!(
-                "All primary key values are NULL for table '{table}' (columns: {keys:?}). \
-                 Cannot generate a stable element ID. This row cannot be tracked for changes."
-            ))
+            Err(MsSqlError::PrimaryKey(PrimaryKeyError::AllNull {
+                table: table.to_string(),
+                columns: keys.clone(),
+            })
+            .into())
         }
     }
 }
