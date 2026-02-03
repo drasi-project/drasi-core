@@ -620,4 +620,77 @@ impl InspectionAPI {
             .await
             .ok_or_else(|| DrasiError::component_not_found("reaction", id))
     }
+
+    /// Subscribe to live events for a source.
+    ///
+    /// Returns the event history and a broadcast receiver for new events.
+    /// The receiver will receive new lifecycle events as they occur (e.g., status changes).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// # async fn example(core: &DrasiLib) -> anyhow::Result<()> {
+    /// let (history, mut receiver) = core.subscribe_source_events("my-source").await?;
+    ///
+    /// // Print historical events
+    /// for event in history {
+    ///     println!("[{:?}] {:?}: {:?}", event.timestamp, event.status, event.message);
+    /// }
+    ///
+    /// // Listen for new events
+    /// while let Ok(event) = receiver.recv().await {
+    ///     println!("[{:?}] {:?}: {:?}", event.timestamp, event.status, event.message);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn subscribe_source_events(
+        &self,
+        id: &str,
+    ) -> crate::error::Result<(
+        Vec<ComponentEvent>,
+        tokio::sync::broadcast::Receiver<ComponentEvent>,
+    )> {
+        self.state_guard.require_initialized().await?;
+        self.source_manager
+            .subscribe_events(id)
+            .await
+            .ok_or_else(|| DrasiError::component_not_found("source", id))
+    }
+
+    /// Subscribe to live events for a query.
+    ///
+    /// Returns the event history and a broadcast receiver for new events.
+    /// The receiver will receive new lifecycle events as they occur (e.g., status changes).
+    pub async fn subscribe_query_events(
+        &self,
+        id: &str,
+    ) -> crate::error::Result<(
+        Vec<ComponentEvent>,
+        tokio::sync::broadcast::Receiver<ComponentEvent>,
+    )> {
+        self.state_guard.require_initialized().await?;
+        self.query_manager
+            .subscribe_events(id)
+            .await
+            .ok_or_else(|| DrasiError::component_not_found("query", id))
+    }
+
+    /// Subscribe to live events for a reaction.
+    ///
+    /// Returns the event history and a broadcast receiver for new events.
+    /// The receiver will receive new lifecycle events as they occur (e.g., status changes).
+    pub async fn subscribe_reaction_events(
+        &self,
+        id: &str,
+    ) -> crate::error::Result<(
+        Vec<ComponentEvent>,
+        tokio::sync::broadcast::Receiver<ComponentEvent>,
+    )> {
+        self.state_guard.require_initialized().await?;
+        self.reaction_manager
+            .subscribe_events(id)
+            .await
+            .ok_or_else(|| DrasiError::component_not_found("reaction", id))
+    }
 }

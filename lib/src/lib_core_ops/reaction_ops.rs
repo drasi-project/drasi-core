@@ -298,4 +298,19 @@ impl DrasiLib {
     )> {
         self.inspection.subscribe_reaction_logs(id).await
     }
+
+    /// Subscribe to live events for a reaction.
+    ///
+    /// Returns the event history (oldest first) and a broadcast receiver for new events
+    /// as they occur. Events include lifecycle status changes such as Starting, Running,
+    /// Error, Stopped.
+    pub async fn subscribe_reaction_events(
+        &self,
+        id: &str,
+    ) -> Result<(
+        Vec<ComponentEvent>,
+        tokio::sync::broadcast::Receiver<ComponentEvent>,
+    )> {
+        self.inspection.subscribe_reaction_events(id).await
+    }
 }

@@ -374,4 +374,26 @@ impl ReactionManager {
 
         Some(self.log_registry.subscribe(id).await)
     }
+
+    /// Subscribe to live events for a reaction.
+    ///
+    /// Returns the event history and a broadcast receiver for new events.
+    /// Returns None if the reaction doesn't exist.
+    pub async fn subscribe_events(
+        &self,
+        id: &str,
+    ) -> Option<(
+        Vec<ComponentEvent>,
+        tokio::sync::broadcast::Receiver<ComponentEvent>,
+    )> {
+        // Verify the reaction exists
+        {
+            let reactions = self.reactions.read().await;
+            if !reactions.contains_key(id) {
+                return None;
+            }
+        }
+
+        Some(self.event_history.write().await.subscribe(id))
+    }
 }

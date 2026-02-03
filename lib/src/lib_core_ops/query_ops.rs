@@ -300,6 +300,21 @@ impl DrasiLib {
         self.inspection.subscribe_query_logs(id).await
     }
 
+    /// Subscribe to live events for a query.
+    ///
+    /// Returns the event history (oldest first) and a broadcast receiver for new events
+    /// as they occur. Events include lifecycle status changes such as Starting, Running,
+    /// Error, Stopped.
+    pub async fn subscribe_query_events(
+        &self,
+        id: &str,
+    ) -> Result<(
+        Vec<ComponentEvent>,
+        tokio::sync::broadcast::Receiver<ComponentEvent>,
+    )> {
+        self.inspection.subscribe_query_events(id).await
+    }
+
     /// Internal helper for creating queries with auto-start control
     pub(crate) async fn add_query_with_options(
         &self,

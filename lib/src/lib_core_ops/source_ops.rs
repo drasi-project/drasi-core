@@ -269,4 +269,38 @@ impl DrasiLib {
     )> {
         self.inspection.subscribe_source_logs(id).await
     }
+
+    /// Subscribe to live events for a source.
+    ///
+    /// Returns the event history (oldest first) and a broadcast receiver for new events
+    /// as they occur. Events include lifecycle status changes such as Starting, Running,
+    /// Error, Stopped.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// # async fn example(core: &DrasiLib) -> anyhow::Result<()> {
+    /// let (history, mut receiver) = core.subscribe_source_events("my-source").await?;
+    ///
+    /// // Print historical events
+    /// for event in history {
+    ///     println!("[{:?}] {:?}: {:?}", event.timestamp, event.status, event.message);
+    /// }
+    ///
+    /// // Listen for new events
+    /// while let Ok(event) = receiver.recv().await {
+    ///     println!("[{:?}] {:?}: {:?}", event.timestamp, event.status, event.message);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn subscribe_source_events(
+        &self,
+        id: &str,
+    ) -> Result<(
+        Vec<ComponentEvent>,
+        tokio::sync::broadcast::Receiver<ComponentEvent>,
+    )> {
+        self.inspection.subscribe_source_events(id).await
+    }
 }

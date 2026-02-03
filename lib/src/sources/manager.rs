@@ -394,4 +394,26 @@ impl SourceManager {
 
         Some(self.log_registry.subscribe(id).await)
     }
+
+    /// Subscribe to live events for a source.
+    ///
+    /// Returns the event history and a broadcast receiver for new events.
+    /// Returns None if the source doesn't exist.
+    pub async fn subscribe_events(
+        &self,
+        id: &str,
+    ) -> Option<(
+        Vec<ComponentEvent>,
+        tokio::sync::broadcast::Receiver<ComponentEvent>,
+    )> {
+        // Verify the source exists
+        {
+            let sources = self.sources.read().await;
+            if !sources.contains_key(id) {
+                return None;
+            }
+        }
+
+        Some(self.event_history.write().await.subscribe(id))
+    }
 }
