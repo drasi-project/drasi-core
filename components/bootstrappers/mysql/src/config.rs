@@ -72,6 +72,13 @@ fn default_batch_size() -> usize {
     1000
 }
 
+pub(crate) fn is_valid_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
 impl MySqlBootstrapConfig {
     /// Validate the configuration and return an error if invalid.
     ///
@@ -81,6 +88,8 @@ impl MySqlBootstrapConfig {
     /// - Database name is empty
     /// - User is empty
     /// - Port is 0
+    /// - Tables list is empty
+    /// - Tables contain invalid identifiers
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.database.is_empty() {
             return Err(anyhow::anyhow!(
@@ -101,6 +110,22 @@ impl MySqlBootstrapConfig {
                 "Validation error: port cannot be 0. \
                  Please specify a valid port number (1-65535)"
             ));
+        }
+
+        if self.tables.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Validation error: tables cannot be empty. \
+                 Please configure at least one table to bootstrap"
+            ));
+        }
+
+        for table in &self.tables {
+            if !is_valid_identifier(table) {
+                return Err(anyhow::anyhow!(
+                    "Validation error: table '{table}' contains invalid characters. \
+                     Only letters, numbers, and underscores are allowed"
+                ));
+            }
         }
 
         Ok(())

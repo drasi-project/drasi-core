@@ -14,7 +14,7 @@
 
 //! MySQL bootstrap handler implementation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -30,7 +30,7 @@ use drasi_core::models::{
 use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest};
 use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
 
-use crate::config::MySqlBootstrapConfig;
+use crate::config::{is_valid_identifier, MySqlBootstrapConfig};
 
 pub struct MySqlBootstrapHandler {
     config: MySqlBootstrapConfig,
@@ -65,6 +65,10 @@ impl MySqlBootstrapHandler {
 
         let mut conn = self.connect().await?;
         let tables = self.determine_tables(&request).await?;
+        if tables.is_empty() {
+            warn!("No tables selected for bootstrap; check configured allowlist and query labels");
+            return Ok(0);
+        }
 
         let mut total = 0usize;
         for (label, table_name) in tables {
@@ -90,17 +94,28 @@ impl MySqlBootstrapHandler {
 
     async fn determine_tables(&self, request: &BootstrapRequest) -> Result<Vec<(String, String)>> {
         let mut tables = Vec::new();
+        let allowed: HashSet<String> = self.config.tables.iter().cloned().collect();
 
-        let requested_labels: Vec<String> = request.node_labels.clone();
-        if !requested_labels.is_empty() {
-            for label in requested_labels {
-                tables.push((label.clone(), label));
+        if !request.node_labels.is_empty() {
+            for label in &request.node_labels {
+                if !allowed.contains(label) {
+                    warn!("Requested table '{label}' is not in configured allowlist, skipping");
+                    continue;
+                }
+                if !is_valid_identifier(label) {
+                    warn!("Requested table '{label}' has invalid characters, skipping");
+                    continue;
+                }
+                tables.push((label.clone(), label.clone()));
             }
-            return Ok(tables);
-        }
-
-        for table in &self.config.tables {
-            tables.push((table.clone(), table.clone()));
+        } else {
+            for table in &self.config.tables {
+                if !is_valid_identifier(table) {
+                    warn!("Configured table '{table}' has invalid characters, skipping");
+                    continue;
+                }
+                tables.push((table.clone(), table.clone()));
+            }
         }
 
         Ok(tables)
@@ -114,7 +129,7 @@ impl MySqlBootstrapHandler {
         context: &BootstrapContext,
         event_tx: &BootstrapEventSender,
     ) -> Result<usize> {
-        let query = format!("SELECT * FROM `{}`", table_name);
+        let query = format!("SELECT * FROM {}", quote_identifier(table_name));
         let mut result = conn.query_iter(query).await?;
         let _batch_size = self.config.batch_size;
         let mut total = 0usize;
@@ -159,17 +174,13 @@ impl MySqlBootstrapHandler {
                     ElementValue::Float(OrderedFloat(*val as f64))
                 }
                 Some(mysql_async::Value::Double(val)) => ElementValue::Float(OrderedFloat(*val)),
-                Some(mysql_async::Value::Date(y, m, d, h, min, s, _)) => {
-                    ElementValue::String(Arc::from(format!(
-                        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-                        y, m, d, h, min, s
-                    )))
-                }
+                Some(mysql_async::Value::Date(y, m, d, h, min, s, _)) => ElementValue::String(
+                    Arc::from(format!("{y:04}-{m:02}-{d:02} {h:02}:{min:02}:{s:02}")),
+                ),
                 Some(mysql_async::Value::Time(_, days, hours, minutes, seconds, micros)) => {
                     let total_hours = days * 24 + u32::from(*hours);
                     ElementValue::String(Arc::from(format!(
-                        "{:03}:{:02}:{:02}.{:06}",
-                        total_hours, minutes, seconds, micros
+                        "{total_hours:03}:{minutes:02}:{seconds:02}.{micros:06}"
                     )))
                 }
                 None => ElementValue::Null,
@@ -207,6 +218,14 @@ impl MySqlBootstrapHandler {
 
         Ok(SourceChange::Insert { element })
     }
+}
+
+pub(crate) fn escape_identifier(value: &str) -> String {
+    value.replace('`', "``")
+}
+
+pub(crate) fn quote_identifier(value: &str) -> String {
+    format!("`{}`", escape_identifier(value))
 }
 
 fn format_value_for_key(value: &ElementValue) -> String {

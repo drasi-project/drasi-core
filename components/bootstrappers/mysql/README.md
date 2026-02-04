@@ -21,3 +21,9 @@ let bootstrap = MySqlBootstrapProvider::builder()
 ```bash
 cargo test -p drasi-bootstrap-mysql
 ```
+
+## Security
+
+- Configure tables explicitly with `with_tables`; this allowlist is required.
+- Table names must use only letters, numbers, and underscores.
+- Requested labels not in the allowlist are ignored.

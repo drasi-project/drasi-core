@@ -215,7 +215,7 @@ impl ReplicationStream {
                 }
             }
             _ => {
-                debug!("Ignoring binlog event type: {:?}", event);
+                debug!("Ignoring binlog event type: {event:?}");
             }
         }
 
