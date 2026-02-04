@@ -13,40 +13,29 @@
 # limitations under the License.
 
 [package]
-name = "drasi-reaction-storedproc-mssql"
-version = "0.2.1"
+name = "drasi-bootstrap-mysql"
+version = "0.1.0"
 edition = "2021"
 authors = ["Drasi Project"]
-description = "MS SQL Server Stored Procedure reaction plugin for Drasi"
+description = "MySQL bootstrap provider for Drasi"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
-keywords = ["drasi", "plugin", "reaction", "mssql", "storedproc"]
+keywords = ["drasi", "bootstrap", "mysql"]
 categories = ["database"]
-
-[dependencies]
-drasi-lib.workspace = true
-
-# Async runtime
-tokio = { version = "1.0", features = ["full"] }
-async-trait = "0.1"
-
-# MS SQL Server
-tiberius = { version = "0.12", default-features = false, features = ["tds73", "chrono"] }
-tokio-util = { version = "0.7", features = ["compat"] }
-
-# Utilities
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-regex = "1.10"
-log = "0.4"
-anyhow = "1.0"
-
-[dev-dependencies]
-tokio-test = "0.4"
-env_logger = "0.10.0"
-serial_test = "3.0"
-testcontainers = "0.26.3"
-testcontainers-modules = { version = "0.14", features = ["mssql_server"] }
 
 [lints]
 workspace = true
+
+[dependencies]
+drasi-lib.workspace = true
+drasi-core.workspace = true
+anyhow = "1.0"
+async-trait = "0.1"
+log = "0.4"
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+ordered-float = "3.0"
+mysql_async = "0.34"
+uuid = { version = "1.0", features = ["v4", "serde"] }

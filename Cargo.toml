@@ -17,6 +17,7 @@ members = [
   "components/sources/platform",
   "components/sources/application",
   "components/sources/mock",
+  "components/sources/mysql",
 
   # Bootstrap Plugins
   "components/bootstrappers/postgres",
@@ -24,6 +25,7 @@ members = [
   "components/bootstrappers/scriptfile",
   "components/bootstrappers/application",
   "components/bootstrappers/noop",
+  "components/bootstrappers/mysql",
 
   # Reaction Plugins
   "components/reactions/http",
@@ -50,6 +52,7 @@ members = [
   "shared-tests",
   "query-perf",
   "examples/query",
+  "examples/lib/mysql-getting-started",
   ]
 
 # Exclude internal crates from workspace packaging
@@ -57,6 +60,7 @@ exclude = [
   "shared-tests",
   "query-perf",
   "examples/query",
+  "examples/lib/mysql-getting-started",
 ]
 
 resolver = "2"
@@ -84,6 +88,8 @@ drasi-lib = { version = "0.3.2", path = "lib" }
 drasi-source-postgres = { version = "0.1.2", path = "components/sources/postgres" }
 drasi-source-application = { version = "0.1.2", path = "components/sources/application" }
 drasi-bootstrap-application = { version = "0.1.2", path = "components/bootstrappers/application" }
+drasi-source-mysql = { version = "0.1.0", path = "components/sources/mysql" }
+drasi-bootstrap-mysql = { version = "0.1.0", path = "components/bootstrappers/mysql" }
 drasi-reaction-http = { version = "0.1.3", path = "components/reactions/http" }
 drasi-reaction-grpc = { version = "0.2.1", path = "components/reactions/grpc" }
 drasi-index-rocksdb = { version = "0.2.1", path = "components/indexes/rocksdb" }

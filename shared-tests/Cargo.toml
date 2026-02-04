@@ -29,8 +29,8 @@ uuid = { version = "1.0", features = ["v4"] }
 
 # Redis testing utilities
 redis = { version = "0.27", features = ["tokio-comp"] }
-testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["redis" ] }
+testcontainers = "0.26.3"
+testcontainers-modules = { version = "0.14", features = ["redis" ] }
 # For test utilities that need to create test sources/queries
 drasi-lib.workspace = true
 
