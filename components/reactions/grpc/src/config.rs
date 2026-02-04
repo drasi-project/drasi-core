@@ -13,7 +13,69 @@
 // limitations under the License.
 
 //! Configuration types for gRPC reactions.
+//! This reaction implements gRPC communication for Drasi.
+//! Supports fixed and adaptive batching.
+//!
+//! Fixed batching example:
+//!
+//! ```rust,ignore
+//! use drasi_lib::config::{ReactionConfig, ReactionSpecificConfig};
+//! use drasi_lib::reactions::grpc::GrpcReactionConfig;
+//! use drasi_lib::reactions::common::AdaptiveBatchConfig;
+//! use std::collections::HashMap;
+//!
+//! let grpc_config = GrpcReactionConfig {
+//!     endpoint: "grpc://localhost:50052".to_string(),
+//!     timeout_ms: 5000,
+//!     batch_size: 100,
+//!     batch_flush_timeout_ms: 1000,
+//!     max_retries: 3,
+//!     connection_retry_attempts: 5,
+//!     initial_connection_timeout_ms: 10000,
+//!     metadata: HashMap::new(),
+//!     adaptive_enable: false,
+//!     adaptive: Default::default(),
+//! };
+//! let reaction_config = ReactionConfig {
+//!     id: "my-grpc-reaction".to_string(),
+//!     queries: vec!["query1".to_string()],
+//!     auto_start: true,
+//!     config: ReactionSpecificConfig::Grpc(grpc_config),
+//!     priority_queue_capacity: Some(500),
+//! };
+//! ```
+//! Adaptive batching example:
+//!
+//! ```rust,ignore
+//! use drasi_lib::config::{ReactionConfig, ReactionSpecificConfig};
+//! use drasi_lib::reactions::grpc::GrpcReactionConfig;
+//! use drasi_lib::reactions::common::AdaptiveBatchConfig;
+//! use std::collections::HashMap;
+//!
+//! let reaction_config = ReactionConfig {
+//!     id: "high-throughput".to_string(),
+//!     queries: vec!["event-stream".to_string()],
+//!     auto_start: true,
+//!     config: ReactionSpecificConfig::Grpc(GrpcReactionConfig {
+//!         endpoint: "grpc://event-processor:9090".to_string(),
+//!         timeout_ms: 15000,
+//!         max_retries: 5,
+//!         connection_retry_attempts: 5,
+//!         initial_connection_timeout_ms: 10000,
+//!         metadata: HashMap::new(),
+//!         adaptive_enable: true,
+//!         adaptive: AdaptiveBatchConfig {
+//!             adaptive_min_batch_size: 50,
+//!             adaptive_max_batch_size: 2000,
+//!             adaptive_window_size: 100,  // 10 seconds
+//!             adaptive_batch_timeout_ms: 500,
+//!         },
+//!     }),
+//!     priority_queue_capacity: None,
+//! };
+//! ```
 
+use drasi_lib::reactions::common::AdaptiveBatchConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -43,6 +105,10 @@ fn default_connection_retry_attempts() -> u32 {
 
 fn default_initial_connection_timeout_ms() -> u64 {
     10000
+}
+
+fn default_adaptive_enable() -> bool {
+    false
 }
 
 /// gRPC reaction configuration
@@ -79,6 +145,14 @@ pub struct GrpcReactionConfig {
     /// Metadata headers to include in requests
     #[serde(default)]
     pub metadata: HashMap<String, String>,
+
+    /// Adaptive batching enable option
+    #[serde(default)]
+    pub adaptive_enable: bool,
+
+    /// Adaptive batching configuration (flattened into parent config)
+    #[serde(flatten)]
+    pub adaptive: AdaptiveBatchConfig,
 }
 
 impl Default for GrpcReactionConfig {
@@ -92,6 +166,8 @@ impl Default for GrpcReactionConfig {
             connection_retry_attempts: default_connection_retry_attempts(),
             initial_connection_timeout_ms: default_initial_connection_timeout_ms(),
             metadata: HashMap::new(),
+            adaptive_enable: default_adaptive_enable(),
+            adaptive: AdaptiveBatchConfig::default(),
         }
     }
 }
