@@ -1,6 +1,6 @@
 # HTTP Source
 
-A Drasi source plugin that exposes HTTP endpoints for receiving data change events. It provides both single-event and batch submission modes with adaptive batching for optimized throughput.
+A Drasi source plugin that exposes HTTP endpoints for receiving data change events. It supports two mutually exclusive modes: **Standard Mode** for structured events and **Webhook Mode** for receiving arbitrary payloads from external services like GitHub, Shopify, or custom applications.
 
 ## Overview
 
@@ -9,9 +9,23 @@ The HTTP Source is a plugin for the Drasi continuous query system that allows ap
 - **REST API Endpoints**: Simple HTTP POST interface for submitting events
 - **Adaptive Batching**: Automatically adjusts batch size and timing based on throughput patterns
 - **Dual Submission Modes**: Single-event and batch endpoints for different use cases
+- **Webhook Mode**: Configurable routes with template-based payload transformation for external services
+- **Authentication**: HMAC signature verification and Bearer token support
+- **Multi-Format Payloads**: JSON, XML, YAML, and plain text content types
 - **Universal Bootstrap**: Supports any bootstrap provider (PostgreSQL, ScriptFile, Platform, etc.)
 - **Graph Data Model**: Native support for nodes and relations with labels and properties
 - **Flexible Configuration**: Builder pattern or configuration struct approaches
+
+## Modes
+
+The HTTP source operates in one of two mutually exclusive modes:
+
+| Mode | When Active | Endpoints Available |
+|------|-------------|---------------------|
+| **Standard Mode** | No `webhooks` config present | `/sources/{id}/events`, `/sources/{id}/events/batch`, `/health` |
+| **Webhook Mode** | `webhooks` config present | Custom routes defined in config + `/health` |
+
+> **Note**: When webhook mode is active, standard endpoints return 404. The modes cannot be combined.
 
 ### Key Capabilities
 
@@ -26,7 +40,7 @@ The HTTP Source is a plugin for the Drasi continuous query system that allows ap
 
 - **Real-time Event Streaming**: External systems push change events to Drasi
 - **Hybrid Data Loading**: Bootstrap from database, then stream changes via HTTP
-- **Webhook Integration**: Receive webhook notifications as graph events
+- **Webhook Integration**: Receive webhooks from GitHub, Shopify, Stripe, or any external service
 - **Manual Testing**: Submit test data via curl during development
 - **API Integration**: Connect third-party services to Drasi continuous queries
 
@@ -152,7 +166,343 @@ sources:
 |------|-------------|-----------|--------------|---------|
 | `bootstrap_provider` | Bootstrap provider for initial data | Box<dyn BootstrapProvider> | Any provider implementation | None |
 
-## Input Schema
+## Webhook Mode
+
+Webhook mode enables the HTTP source to receive arbitrary payloads from external services and transform them into graph events using Handlebars templates.
+
+### Webhook Configuration
+
+```yaml
+sources:
+  - id: "webhook-source"
+    source_type: "http"
+    host: "0.0.0.0"
+    port: 8080
+    webhooks:
+      error_behavior: accept_and_log  # Global default
+      routes:
+        - path: "/github/events"
+          methods: ["POST"]
+          auth:
+            signature:
+              type: hmac-sha256
+              secret_env: GITHUB_WEBHOOK_SECRET
+              header: X-Hub-Signature-256
+              prefix: "sha256="
+          error_behavior: reject  # Override for this route
+          mappings:
+            - when:
+                header: X-GitHub-Event
+                equals: push
+              operation: insert
+              element_type: node
+              effective_from: "{{payload.head_commit.timestamp}}"
+              template:
+                id: "commit-{{payload.head_commit.id}}"
+                labels: ["Commit", "GitHubPush"]
+                properties:
+                  message: "{{payload.head_commit.message}}"
+                  author: "{{payload.head_commit.author.name}}"
+                  branch: "{{payload.ref}}"
+```
+
+### Webhook Configuration Options
+
+#### Top-Level Webhook Settings
+
+| Name | Description | Values | Default |
+|------|-------------|--------|---------|
+| `error_behavior` | How to handle mapping errors | `reject`, `accept_and_log`, `accept_silent` | `reject` |
+| `routes` | Array of route configurations | Array | **Required** |
+
+#### Route Settings
+
+| Name | Description | Required |
+|------|-------------|----------|
+| `path` | URL path pattern (supports `:param` syntax) | Yes |
+| `methods` | HTTP methods to accept | No (defaults to all) |
+| `auth` | Authentication configuration | No |
+| `error_behavior` | Override global error behavior | No |
+| `mappings` | Array of payload-to-event mappings | Yes |
+
+#### Authentication Options
+
+**HMAC Signature Verification** (GitHub, Shopify):
+
+```yaml
+auth:
+  signature:
+    type: hmac-sha256    # or hmac-sha1
+    secret_env: SECRET_VAR  # Environment variable name
+    header: X-Hub-Signature-256
+    prefix: "sha256="    # Optional prefix to strip
+    encoding: hex        # hex (default) or base64
+```
+
+**Bearer Token**:
+
+```yaml
+auth:
+  bearer:
+    token_env: API_TOKEN  # Environment variable name
+```
+
+> **Note**: When both signature and bearer auth are configured, both must pass.
+
+#### Mapping Settings
+
+| Name | Description | Required |
+|------|-------------|----------|
+| `when` | Condition for this mapping to apply | No |
+| `operation` | Graph operation: `insert`, `update`, `delete` | No (can derive from payload) |
+| `operation_field` | Path to operation value in payload | No |
+| `element_type` | `node` or `relation` | Yes |
+| `effective_from` | Handlebars template for timestamp | No |
+| `template` | Element template (see below) | Yes |
+
+#### Condition Syntax (`when`)
+
+```yaml
+# Match header value
+when:
+  header: X-GitHub-Event
+  equals: push
+
+# Match path parameter
+when:
+  path_param: resource_type
+  equals: orders
+
+# Match query parameter
+when:
+  query_param: action
+  equals: create
+
+# Match payload field
+when:
+  payload_field: event.type
+  equals: order.created
+```
+
+#### Template Structure
+
+**Node Template**:
+```yaml
+template:
+  id: "{{payload.id}}"
+  labels: ["Order", "{{payload.type}}"]
+  properties:
+    customer: "{{payload.customer.name}}"
+    total: "{{payload.total}}"
+    items: "{{payload.line_items}}"  # Preserves arrays/objects
+```
+
+**Relation Template**:
+```yaml
+template:
+  id: "rel-{{payload.id}}"
+  labels: ["PURCHASED"]
+  start_id: "customer-{{payload.customer_id}}"
+  end_id: "product-{{payload.product_id}}"
+  properties:
+    quantity: "{{payload.quantity}}"
+```
+
+**Spread Entire Payload as Properties**:
+
+To use all fields from the incoming payload as node/relation properties, use a template string instead of an object:
+
+```yaml
+template:
+  id: "event-{{payload.id}}"
+  labels: ["Event"]
+  properties: "{{payload}}"  # Spreads all payload fields as properties
+```
+
+With this configuration, an incoming payload like:
+```json
+{
+  "id": "123",
+  "name": "Test",
+  "status": "active",
+  "metadata": { "source": "webhook" }
+}
+```
+
+Creates a node with properties: `id`, `name`, `status`, and `metadata` (as nested object).
+
+**Spread Nested Object**:
+```yaml
+template:
+  id: "{{payload.id}}"
+  labels: ["Event"]
+  properties: "{{payload.data}}"  # Spread only the 'data' sub-object
+```
+
+### Template Context Variables
+
+Templates have access to these variables:
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `payload` | Parsed request body | `{{payload.user.name}}` |
+| `headers` | HTTP headers (lowercase keys) | `{{headers.x-request-id}}` |
+| `path_params` | Path parameters from route | `{{path_params.id}}` |
+| `query_params` | Query string parameters | `{{query_params.filter}}` |
+| `method` | HTTP method | `{{method}}` |
+| `path` | Request path | `{{path}}` |
+| `content_type` | Content-Type header | `{{content_type}}` |
+
+### Template Helpers
+
+| Helper | Description | Example |
+|--------|-------------|---------|
+| `lowercase` | Convert to lowercase | `{{lowercase payload.name}}` |
+| `uppercase` | Convert to uppercase | `{{uppercase payload.status}}` |
+| `now` | Current timestamp (ns) | `{{now}}` |
+| `concat` | Concatenate strings | `{{concat "prefix-" payload.id}}` |
+| `default` | Fallback value | `{{default payload.name "Unknown"}}` |
+| `json` | Serialize to JSON string | `{{json payload.metadata}}` |
+
+### Property Value Types
+
+Template values preserve their original types from the payload:
+
+| Payload Type | Result Type |
+|--------------|-------------|
+| String | `ElementValue::String` |
+| Number | `ElementValue::Integer` or `Float` |
+| Boolean | `ElementValue::Bool` |
+| Array | `ElementValue::List` |
+| Object | `ElementValue::Object` |
+| Null | `ElementValue::Null` |
+
+To force a value to a JSON string, use the `json` helper:
+```yaml
+metadata: "{{json payload.complex_object}}"  # Becomes a string
+```
+
+### Timestamp Handling (`effective_from`)
+
+The `effective_from` field sets the element's effective timestamp. It auto-detects format:
+
+| Input | Detection | Conversion |
+|-------|-----------|------------|
+| `1699900000` | Unix seconds | × 1,000,000,000 |
+| `1699900000000` | Unix milliseconds | × 1,000,000 |
+| `1699900000000000000` | Unix nanoseconds | Used directly |
+| `2024-01-15T10:30:00Z` | ISO 8601 | Parsed to nanoseconds |
+| `2024-01-15T10:30:00.123Z` | ISO 8601 with ms | Parsed to nanoseconds |
+
+### Error Behavior
+
+| Value | Behavior |
+|-------|----------|
+| `reject` | Return HTTP 400/500 error |
+| `accept_and_log` | Return HTTP 200, log error |
+| `accept_silent` | Return HTTP 200, ignore silently |
+
+### Example: GitHub Webhooks
+
+```yaml
+webhooks:
+  routes:
+    - path: "/github/events"
+      methods: ["POST"]
+      auth:
+        signature:
+          type: hmac-sha256
+          secret_env: GITHUB_WEBHOOK_SECRET
+          header: X-Hub-Signature-256
+          prefix: "sha256="
+      mappings:
+        # Push events
+        - when:
+            header: X-GitHub-Event
+            equals: push
+          operation: insert
+          element_type: node
+          effective_from: "{{payload.head_commit.timestamp}}"
+          template:
+            id: "commit-{{payload.head_commit.id}}"
+            labels: ["Commit"]
+            properties:
+              message: "{{payload.head_commit.message}}"
+              author: "{{payload.head_commit.author.name}}"
+              repo: "{{payload.repository.full_name}}"
+              branch: "{{payload.ref}}"
+
+        # Issue events
+        - when:
+            header: X-GitHub-Event
+            equals: issues
+          operation_field: payload.action  # opened, closed, etc.
+          element_type: node
+          template:
+            id: "issue-{{payload.issue.id}}"
+            labels: ["Issue"]
+            properties:
+              title: "{{payload.issue.title}}"
+              state: "{{payload.issue.state}}"
+              author: "{{payload.issue.user.login}}"
+```
+
+### Example: Shopify Webhooks
+
+```yaml
+webhooks:
+  routes:
+    - path: "/shopify/orders"
+      methods: ["POST"]
+      auth:
+        signature:
+          type: hmac-sha256
+          secret_env: SHOPIFY_WEBHOOK_SECRET
+          header: X-Shopify-Hmac-SHA256
+          encoding: base64
+      mappings:
+        - when:
+            header: X-Shopify-Topic
+            equals: orders/create
+          operation: insert
+          element_type: node
+          template:
+            id: "order-{{payload.id}}"
+            labels: ["Order"]
+            properties:
+              order_number: "{{payload.order_number}}"
+              total: "{{payload.total_price}}"
+              currency: "{{payload.currency}}"
+              customer_email: "{{payload.email}}"
+              line_items: "{{payload.line_items}}"
+```
+
+### Example: Generic REST API
+
+```yaml
+webhooks:
+  routes:
+    - path: "/api/:resource/:id"
+      methods: ["POST", "PUT", "DELETE"]
+      auth:
+        bearer:
+          token_env: API_SECRET_TOKEN
+      mappings:
+        # Create
+        - when:
+            path_param: resource
+            equals: users
+          operation_field: method  # Uses HTTP method
+          element_type: node
+          template:
+            id: "user-{{path_params.id}}"
+            labels: ["User"]
+            properties:
+              name: "{{payload.name}}"
+              email: "{{payload.email}}"
+```
+
+## Input Schema (Standard Mode)
 
 The HTTP source accepts JSON data in the `HttpSourceChange` format. All events use a tagged union structure with an `operation` field.
 
@@ -623,14 +973,31 @@ The internal batch channel capacity is automatically calculated as `max_batch_si
 - **AdaptiveBatcher**: Batching logic (adaptive_batcher.rs)
 - **Time utilities**: Timestamp handling (time.rs)
 
+#### Webhook Modules
+
+- **auth.rs**: HMAC signature and Bearer token verification
+- **content_parser.rs**: JSON, XML, YAML, and text payload parsing
+- **template_engine.rs**: Handlebars template processing with custom helpers
+- **route_matcher.rs**: Route pattern matching and condition evaluation
+
 ### Data Flow
 
+**Standard Mode:**
 1. HTTP POST request arrives at Axum endpoint
 2. JSON deserialized to `HttpSourceChange`
 3. Converted to `drasi_core::models::SourceChange`
 4. Sent to adaptive batcher via mpsc channel
 5. Batcher accumulates events based on throughput
 6. Batch forwarded to dispatchers
+7. Dispatchers route to subscribed queries
+
+**Webhook Mode:**
+1. HTTP request arrives at configured route
+2. Authentication verified (signature/bearer token)
+3. Payload parsed based on Content-Type
+4. Route matched and conditions evaluated
+5. Template engine renders element from payload
+6. Converted to `SourceChange` and dispatched
 7. Dispatchers route to subscribed queries
 
 ### Thread Safety

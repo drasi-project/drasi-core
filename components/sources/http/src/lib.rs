@@ -14,23 +14,26 @@
 
 //! HTTP Source Plugin for Drasi
 //!
-//! This plugin exposes HTTP endpoints for receiving data change events. It includes
-//! adaptive batching for optimized throughput and supports both single-event and
-//! batch submission modes.
+//! This plugin exposes HTTP endpoints for receiving data change events. It supports
+//! two mutually exclusive modes:
 //!
-//! # Endpoints
+//! - **Standard Mode**: Fixed-format `HttpSourceChange` endpoints with adaptive batching
+//! - **Webhook Mode**: Configurable routes with template-based payload transformation
 //!
-//! The HTTP source exposes the following endpoints:
+//! # Standard Mode
+//!
+//! When no `webhooks` configuration is present, the source operates in standard mode
+//! with the following endpoints:
 //!
 //! - **`POST /sources/{source_id}/events`** - Submit a single event
 //! - **`POST /sources/{source_id}/events/batch`** - Submit multiple events
 //! - **`GET /health`** - Health check endpoint
 //!
-//! # Data Format
+//! ## Data Format
 //!
 //! Events are submitted as JSON using the `HttpSourceChange` format:
 //!
-//! ## Insert Operation
+//! ### Insert Operation
 //!
 //! ```json
 //! {
@@ -48,7 +51,7 @@
 //! }
 //! ```
 //!
-//! ## Update Operation
+//! ### Update Operation
 //!
 //! ```json
 //! {
@@ -64,7 +67,7 @@
 //! }
 //! ```
 //!
-//! ## Delete Operation
+//! ### Delete Operation
 //!
 //! ```json
 //! {
@@ -72,6 +75,48 @@
 //!     "id": "user-123",
 //!     "labels": ["User"]
 //! }
+//! ```
+//!
+//! # Webhook Mode
+//!
+//! When a `webhooks` section is present in the configuration, the source operates
+//! in webhook mode. This enables:
+//!
+//! - Custom routes with path parameters (e.g., `/github/events`, `/users/:id/hooks`)
+//! - Multiple HTTP methods per route (POST, PUT, PATCH, DELETE, GET)
+//! - Handlebars template-based payload transformation
+//! - HMAC signature verification (GitHub, Shopify style)
+//! - Bearer token authentication
+//! - Support for JSON, XML, YAML, and plain text payloads
+//!
+//! ## Webhook Configuration Example
+//!
+//! ```yaml
+//! webhooks:
+//!   error_behavior: accept_and_log
+//!   routes:
+//!     - path: "/github/events"
+//!       methods: ["POST"]
+//!       auth:
+//!         signature:
+//!           type: hmac-sha256
+//!           secret_env: GITHUB_WEBHOOK_SECRET
+//!           header: X-Hub-Signature-256
+//!           prefix: "sha256="
+//!       error_behavior: reject
+//!       mappings:
+//!         - when:
+//!             header: X-GitHub-Event
+//!             equals: push
+//!           operation: insert
+//!           element_type: node
+//!           effective_from: "{{payload.head_commit.timestamp}}"
+//!           template:
+//!             id: "commit-{{payload.head_commit.id}}"
+//!             labels: ["Commit"]
+//!             properties:
+//!               message: "{{payload.head_commit.message}}"
+//!               author: "{{payload.head_commit.author.name}}"
 //! ```
 //!
 //! ## Relation Element
@@ -175,19 +220,26 @@ mod adaptive_batcher;
 mod models;
 mod time;
 
+// Webhook support modules
+pub mod auth;
+pub mod content_parser;
+pub mod route_matcher;
+pub mod template_engine;
+
 // Export HTTP source models and conversion
 pub use models::{convert_http_to_source_change, HttpElement, HttpSourceChange};
 
 use anyhow::Result;
 use async_trait::async_trait;
 use axum::{
+    body::Bytes,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post, put},
     Json, Router,
 };
-use log::{debug, error, info, trace};
+use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -200,6 +252,11 @@ use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
 
 use crate::adaptive_batcher::{AdaptiveBatchConfig, AdaptiveBatcher};
+use crate::auth::{verify_auth, AuthResult};
+use crate::config::{ErrorBehavior, WebhookConfig};
+use crate::content_parser::{parse_content, ContentType};
+use crate::route_matcher::{convert_method, find_matching_mappings, headers_to_map, RouteMatcher};
+use crate::template_engine::{TemplateContext, TemplateEngine};
 
 /// Response for event submission
 #[derive(Debug, Serialize, Deserialize)]
@@ -245,6 +302,18 @@ struct HttpAppState {
     source_id: String,
     /// Channel for sending events to the adaptive batcher
     batch_tx: mpsc::Sender<SourceChangeEvent>,
+    /// Webhook configuration (if in webhook mode)
+    webhook_config: Option<Arc<WebhookState>>,
+}
+
+/// State for webhook mode processing
+struct WebhookState {
+    /// Webhook configuration
+    config: WebhookConfig,
+    /// Route matcher for incoming requests
+    route_matcher: RouteMatcher,
+    /// Template engine for payload transformation
+    template_engine: TemplateEngine,
 }
 
 impl HttpSource {
@@ -513,8 +582,206 @@ impl HttpSource {
         Json(serde_json::json!({
             "status": "healthy",
             "service": "http-source",
-            "features": ["adaptive-batching", "batch-endpoint"]
+            "features": ["adaptive-batching", "batch-endpoint", "webhooks"]
         }))
+    }
+
+    /// Handle webhook requests
+    ///
+    /// This handler processes requests in webhook mode, matching against
+    /// configured routes and transforming payloads using templates.
+    async fn handle_webhook(
+        method: axum::http::Method,
+        uri: axum::http::Uri,
+        headers: axum::http::HeaderMap,
+        State(state): State<HttpAppState>,
+        body: Bytes,
+    ) -> impl IntoResponse {
+        let path = uri.path();
+        let source_id = &state.source_id;
+
+        debug!("[{source_id}] Webhook received: {method} {path}");
+
+        // Get webhook state - should always be present in webhook mode
+        let webhook_state = match &state.webhook_config {
+            Some(ws) => ws,
+            None => {
+                error!("[{source_id}] Webhook handler called but no webhook config present");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(EventResponse {
+                        success: false,
+                        message: "Internal configuration error".to_string(),
+                        error: Some("Webhook mode not properly configured".to_string()),
+                    }),
+                );
+            }
+        };
+
+        // Convert method
+        let http_method = match convert_method(&method) {
+            Some(m) => m,
+            None => {
+                return handle_error(
+                    &webhook_state.config.error_behavior,
+                    source_id,
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "Method not supported",
+                    None,
+                );
+            }
+        };
+
+        // Match route
+        let route_match = match webhook_state.route_matcher.match_route(
+            path,
+            &http_method,
+            &webhook_state.config.routes,
+        ) {
+            Some(rm) => rm,
+            None => {
+                debug!("[{source_id}] No matching route for {method} {path}");
+                return handle_error(
+                    &webhook_state.config.error_behavior,
+                    source_id,
+                    StatusCode::NOT_FOUND,
+                    "No matching route",
+                    None,
+                );
+            }
+        };
+
+        let route = route_match.route;
+        let error_behavior = route
+            .error_behavior
+            .as_ref()
+            .unwrap_or(&webhook_state.config.error_behavior);
+
+        // Verify authentication
+        let auth_result = verify_auth(route.auth.as_ref(), &headers, &body);
+        if let AuthResult::Failed(reason) = auth_result {
+            warn!("[{source_id}] Authentication failed for {path}: {reason}");
+            return handle_error(
+                error_behavior,
+                source_id,
+                StatusCode::UNAUTHORIZED,
+                "Authentication failed",
+                Some(&reason),
+            );
+        }
+
+        // Parse content
+        let content_type = ContentType::from_header(
+            headers
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+        );
+
+        let payload = match parse_content(&body, content_type) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("[{source_id}] Failed to parse payload: {e}");
+                return handle_error(
+                    error_behavior,
+                    source_id,
+                    StatusCode::BAD_REQUEST,
+                    "Failed to parse payload",
+                    Some(&e.to_string()),
+                );
+            }
+        };
+
+        // Build template context
+        let headers_map = headers_to_map(&headers);
+        let query_map = parse_query_string(uri.query());
+
+        let context = TemplateContext {
+            payload: payload.clone(),
+            route: route_match.path_params,
+            query: query_map,
+            headers: headers_map.clone(),
+            method: method.to_string(),
+            path: path.to_string(),
+            source_id: source_id.clone(),
+        };
+
+        // Find matching mappings
+        let matching_mappings = find_matching_mappings(&route.mappings, &headers_map, &payload);
+
+        if matching_mappings.is_empty() {
+            debug!("[{source_id}] No matching mappings for request");
+            return handle_error(
+                error_behavior,
+                source_id,
+                StatusCode::BAD_REQUEST,
+                "No matching mapping for request",
+                None,
+            );
+        }
+
+        // Process each matching mapping
+        let mut success_count = 0;
+        let mut error_count = 0;
+        let mut last_error = None;
+
+        for mapping in matching_mappings {
+            match webhook_state
+                .template_engine
+                .process_mapping(mapping, &context, source_id)
+            {
+                Ok(source_change) => {
+                    let event = SourceChangeEvent {
+                        source_id: source_id.clone(),
+                        change: source_change,
+                        timestamp: chrono::Utc::now(),
+                    };
+
+                    if let Err(e) = state.batch_tx.send(event).await {
+                        error!("[{source_id}] Failed to send event to batcher: {e}");
+                        error_count += 1;
+                        last_error = Some(format!("Failed to queue event: {e}"));
+                    } else {
+                        success_count += 1;
+                    }
+                }
+                Err(e) => {
+                    warn!("[{source_id}] Failed to process mapping: {e}");
+                    error_count += 1;
+                    last_error = Some(e.to_string());
+                }
+            }
+        }
+
+        debug!("[{source_id}] Webhook processing complete: {success_count} succeeded, {error_count} failed");
+
+        if error_count > 0 && success_count == 0 {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(EventResponse {
+                    success: false,
+                    message: format!("All {error_count} mappings failed"),
+                    error: last_error,
+                }),
+            )
+        } else if error_count > 0 {
+            (
+                StatusCode::OK,
+                Json(EventResponse {
+                    success: true,
+                    message: format!("Processed {success_count} events, {error_count} failed"),
+                    error: last_error,
+                }),
+            )
+        } else {
+            (
+                StatusCode::OK,
+                Json(EventResponse {
+                    success: true,
+                    message: format!("Processed {success_count} events successfully"),
+                    error: None,
+                }),
+            )
+        }
     }
 
     async fn run_adaptive_batcher(
@@ -686,23 +953,49 @@ impl Source for HttpSource {
         ));
 
         // Create app state
+        let webhook_state = if let Some(ref webhook_config) = self.config.webhooks {
+            info!(
+                "[{}] Webhook mode enabled with {} routes",
+                self.base.id,
+                webhook_config.routes.len()
+            );
+            Some(Arc::new(WebhookState {
+                config: webhook_config.clone(),
+                route_matcher: RouteMatcher::new(&webhook_config.routes),
+                template_engine: TemplateEngine::new(),
+            }))
+        } else {
+            info!("[{}] Standard mode enabled", self.base.id);
+            None
+        };
+
         let state = HttpAppState {
             source_id: self.base.id.clone(),
             batch_tx,
+            webhook_config: webhook_state,
         };
 
-        // Build router
-        let app = Router::new()
-            .route("/health", get(Self::health_check))
-            .route(
-                "/sources/:source_id/events",
-                post(Self::handle_single_event),
-            )
-            .route(
-                "/sources/:source_id/events/batch",
-                post(Self::handle_batch_events),
-            )
-            .with_state(state);
+        // Build router based on mode
+        let app = if self.config.is_webhook_mode() {
+            // Webhook mode: only health check + catch-all webhook handler
+            Router::new()
+                .route("/health", get(Self::health_check))
+                .fallback(Self::handle_webhook)
+                .with_state(state)
+        } else {
+            // Standard mode: original endpoints
+            Router::new()
+                .route("/health", get(Self::health_check))
+                .route(
+                    "/sources/:source_id/events",
+                    post(Self::handle_single_event),
+                )
+                .route(
+                    "/sources/:source_id/events/batch",
+                    post(Self::handle_batch_events),
+                )
+                .with_state(state)
+        };
 
         // Create shutdown channel
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -852,6 +1145,7 @@ pub struct HttpSourceBuilder {
     adaptive_min_wait_ms: Option<u64>,
     adaptive_window_secs: Option<u64>,
     adaptive_enabled: Option<bool>,
+    webhooks: Option<WebhookConfig>,
     dispatch_mode: Option<DispatchMode>,
     dispatch_buffer_capacity: Option<usize>,
     bootstrap_provider: Option<Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>>,
@@ -877,6 +1171,7 @@ impl HttpSourceBuilder {
             adaptive_min_wait_ms: None,
             adaptive_window_secs: None,
             adaptive_enabled: None,
+            webhooks: None,
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
             bootstrap_provider: None,
@@ -974,6 +1269,15 @@ impl HttpSourceBuilder {
         self
     }
 
+    /// Set the webhook configuration to enable webhook mode.
+    ///
+    /// When webhook mode is enabled, the standard `HttpSourceChange` endpoints
+    /// are disabled and custom webhook routes are used instead.
+    pub fn with_webhooks(mut self, webhooks: WebhookConfig) -> Self {
+        self.webhooks = Some(webhooks);
+        self
+    }
+
     /// Set the full configuration at once
     pub fn with_config(mut self, config: HttpSourceConfig) -> Self {
         self.host = config.host;
@@ -986,6 +1290,7 @@ impl HttpSourceBuilder {
         self.adaptive_min_wait_ms = config.adaptive_min_wait_ms;
         self.adaptive_window_secs = config.adaptive_window_secs;
         self.adaptive_enabled = config.adaptive_enabled;
+        self.webhooks = config.webhooks;
         self
     }
 
@@ -1006,6 +1311,7 @@ impl HttpSourceBuilder {
             adaptive_min_wait_ms: self.adaptive_min_wait_ms,
             adaptive_window_secs: self.adaptive_window_secs,
             adaptive_enabled: self.adaptive_enabled,
+            webhooks: self.webhooks,
         };
 
         // Build SourceBaseParams with all settings
@@ -1072,6 +1378,93 @@ impl HttpSource {
     }
 }
 
+/// Handle errors according to configured error behavior
+fn handle_error(
+    behavior: &ErrorBehavior,
+    source_id: &str,
+    status: StatusCode,
+    message: &str,
+    detail: Option<&str>,
+) -> (StatusCode, Json<EventResponse>) {
+    match behavior {
+        ErrorBehavior::Reject => {
+            debug!("[{source_id}] Rejecting request: {message}");
+            (
+                status,
+                Json(EventResponse {
+                    success: false,
+                    message: message.to_string(),
+                    error: detail.map(String::from),
+                }),
+            )
+        }
+        ErrorBehavior::AcceptAndLog => {
+            warn!("[{source_id}] Accepting with error (logged): {message}");
+            (
+                StatusCode::OK,
+                Json(EventResponse {
+                    success: true,
+                    message: format!("Accepted with warning: {message}"),
+                    error: detail.map(String::from),
+                }),
+            )
+        }
+        ErrorBehavior::AcceptAndSkip => {
+            trace!("[{source_id}] Accepting silently: {message}");
+            (
+                StatusCode::OK,
+                Json(EventResponse {
+                    success: true,
+                    message: "Accepted".to_string(),
+                    error: None,
+                }),
+            )
+        }
+    }
+}
+
+/// Parse query string into a HashMap
+fn parse_query_string(query: Option<&str>) -> HashMap<String, String> {
+    query
+        .map(|q| {
+            q.split('&')
+                .filter_map(|pair| {
+                    let mut parts = pair.splitn(2, '=');
+                    let key = parts.next()?;
+                    let value = parts.next().unwrap_or("");
+                    Some((urlencoding_decode(key), urlencoding_decode(value)))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Simple URL decoding (handles %XX sequences)
+fn urlencoding_decode(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let hex: String = chars.by_ref().take(2).collect();
+            if hex.len() == 2 {
+                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                    result.push(byte as char);
+                    continue;
+                }
+            }
+            result.push('%');
+            result.push_str(&hex);
+        } else if c == '+' {
+            result.push(' ');
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1112,6 +1505,7 @@ mod tests {
                 adaptive_min_wait_ms: None,
                 adaptive_window_secs: None,
                 adaptive_enabled: None,
+                webhooks: None,
             };
             let source = HttpSource::with_dispatch(
                 "dispatch-source",
