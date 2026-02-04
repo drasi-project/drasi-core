@@ -71,6 +71,12 @@ pub struct MySqlBootstrapBuilder {
     batch_size: usize,
 }
 
+impl Default for MySqlBootstrapBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MySqlBootstrapBuilder {
     pub fn new() -> Self {
         Self {

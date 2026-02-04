@@ -52,7 +52,6 @@ members = [
   "shared-tests",
   "query-perf",
   "examples/query",
-  "examples/lib/mysql-getting-started",
   ]
 
 # Exclude internal crates from workspace packaging
