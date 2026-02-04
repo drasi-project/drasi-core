@@ -56,7 +56,9 @@ fn quote_identifier(identifier: &str) -> Result<String> {
         }
 
         // Validate: must start with a letter or underscore
-        let first_char = part.chars().next().unwrap();
+        let Some(first_char) = part.chars().next() else {
+            return Err(anyhow!("Identifier part is empty"));
+        };
         if !first_char.is_ascii_alphabetic() && first_char != '_' {
             return Err(anyhow!(
                 "Identifier part must start with a letter or underscore: '{part}'"
@@ -74,7 +76,8 @@ fn quote_identifier(identifier: &str) -> Result<String> {
         }
 
         // Double-quote the identifier part (PostgreSQL standard for identifiers)
-        quoted_parts.push(format!("\"{}\"", part));
+        // Escape any internal double quotes by doubling them (defense-in-depth)
+        quoted_parts.push(format!("\"{}\"", part.replace('\"', "\"\"")));
     }
 
     Ok(quoted_parts.join("."))
@@ -444,6 +447,11 @@ impl PostgresBootstrapHandler {
         for label in all_labels {
             // Default mapping: uppercase label to lowercase table name
             let table_name = label.to_lowercase();
+
+            // Validate identifier characters early
+            if !table_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.') {
+                return Err(anyhow!("Label '{}' contains invalid characters for table name", label));
+            }
 
             // Check if table exists
             let exists = self.table_exists(transaction, &table_name).await?;
