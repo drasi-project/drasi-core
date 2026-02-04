@@ -12,6 +12,7 @@ The HTTP Reaction component monitors continuous query results and automatically 
 - **Authentication**: Built-in Bearer token authentication support
 - **Operation-Specific Handling**: Separate configurations for ADD, UPDATE, and DELETE operations
 - **Priority Queue Processing**: Processes changes in timestamp order to ensure correct sequencing
+- **Adaptive Batching**: Intelligent batching based on throughput patterns for high-volume scenarios
 
 ## Use Cases
 
@@ -93,6 +94,7 @@ let reaction = HttpReaction::new(
 | `token` | Bearer token for authentication. Automatically adds `Authorization: Bearer <token>` header. | Option\<String\> | None | No |
 | `timeout_ms` | Request timeout in milliseconds. | u64 | 5000 | No |
 | `routes` | Query-specific routing configurations. Keys are query IDs. | HashMap\<String, QueryConfig\> | Empty | No |
+| `adaptive` | Optional adaptive batching configuration. When set, enables intelligent batching. | Option\<AdaptiveBatchConfig\> | None | No |
 
 ### QueryConfig
 
@@ -128,6 +130,11 @@ Specification for an individual HTTP call.
 | `with_route(id, config)` | Add a route configuration | `id: impl Into<String>`, `config: QueryConfig` |
 | `with_priority_queue_capacity(capacity)` | Set priority queue capacity | `capacity: usize` |
 | `with_auto_start(auto_start)` | Enable/disable auto-start | `auto_start: bool` |
+| `with_adaptive_enabled(enabled)` | Enable/disable adaptive batching | `enabled: bool` |
+| `with_min_batch_size(size)` | Set minimum batch size (default: 1) | `size: usize` |
+| `with_max_batch_size(size)` | Set maximum batch size (default: 100) | `size: usize` |
+| `with_window_size(size)` | Set throughput window size in 100ms units (default: 10 = 1 sec) | `size: usize` |
+| `with_batch_timeout_ms(timeout)` | Set batch timeout in milliseconds (default: 1000) | `timeout: u64` |
 | `build()` | Build the HttpReaction instance | Returns `anyhow::Result<HttpReaction>` |
 
 ## Output Schema
@@ -353,6 +360,96 @@ drasi.add_reaction(reaction).await?;
 // Start the reaction
 drasi.start_reaction("webhook").await?;
 ```
+
+## Adaptive Batching
+
+For high-throughput scenarios, the HTTP Reaction supports adaptive batching. When enabled, the reaction intelligently groups results into batches based on current throughput patterns, reducing network overhead and improving efficiency.
+
+### Enabling Adaptive Batching
+
+```rust
+use drasi_reaction_http::HttpReaction;
+
+let reaction = HttpReaction::builder("high-throughput-webhook")
+    .with_base_url("https://api.example.com")
+    .with_query("high-volume-query")
+    .with_adaptive_enabled(true)
+    .with_min_batch_size(10)
+    .with_max_batch_size(500)
+    .with_window_size(50)  // 5 seconds
+    .with_batch_timeout_ms(1000)
+    .build()?;
+```
+
+### Adaptive Batching Configuration
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `adaptive_min_batch_size` | Minimum batch size used during idle/low traffic | 1 |
+| `adaptive_max_batch_size` | Maximum batch size used during burst traffic | 100 |
+| `adaptive_window_size` | Throughput monitoring window (in 100ms units) | 10 (1 second) |
+| `adaptive_batch_timeout_ms` | Maximum time to wait before flushing a partial batch | 1000 (1 second) |
+
+### Throughput Levels
+
+The adaptive batcher adjusts batch size and timing based on detected throughput:
+
+| Level | Messages/Sec | Batch Size | Wait Time |
+|-------|--------------|------------|-----------|
+| Idle | < 1 | min_batch_size | 1ms |
+| Low | 1-100 | 2 × min | 1ms |
+| Medium | 100-1K | 25% of max | 10ms |
+| High | 1K-10K | 50% of max | 25ms |
+| Burst | > 10K | max_batch_size | 50ms |
+
+### Batch Endpoint
+
+When adaptive batching is enabled, batches are sent to `{base_url}/batch` as a JSON array of `BatchResult` objects:
+
+```json
+[
+  {
+    "query_id": "my-query",
+    "results": [
+      { "type": "add", "data": {...} },
+      { "type": "update", "data": {...}, "before": {...}, "after": {...} }
+    ],
+    "timestamp": "2025-01-24T12:34:56.789Z",
+    "count": 2
+  }
+]
+```
+
+### BatchResult Schema
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `query_id` | String | The ID of the query that produced these results |
+| `results` | Array\<ResultDiff\> | Array of result diffs (add, update, delete) |
+| `timestamp` | String | ISO 8601 timestamp when the batch was created |
+| `count` | Number | Number of results in this batch |
+
+### When to Use Adaptive Batching
+
+Adaptive batching is recommended when:
+- You have high-volume data changes (>100 events/sec)
+- Your receiving endpoint can handle batch processing
+- Network latency is a concern
+- You want to optimize for throughput over latency
+
+Standard mode (no batching) is better when:
+- You need real-time, per-event delivery
+- Your event volume is low to moderate
+- Your endpoint doesn't support batch processing
+- Latency is critical
+
+### HTTP/2 Connection Pooling
+
+When adaptive batching is enabled, the HTTP client automatically uses HTTP/2 with connection pooling:
+- Pool idle timeout: 90 seconds
+- Max idle connections per host: 10
+
+This provides better performance for high-throughput scenarios.
 
 ## Advanced Features
 
