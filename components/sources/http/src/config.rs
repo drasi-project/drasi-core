@@ -88,8 +88,89 @@ pub struct WebhookConfig {
     #[serde(default)]
     pub error_behavior: ErrorBehavior,
 
+    /// CORS (Cross-Origin Resource Sharing) configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cors: Option<CorsConfig>,
+
     /// List of webhook route configurations
     pub routes: Vec<WebhookRoute>,
+}
+
+/// CORS configuration for webhook endpoints
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CorsConfig {
+    /// Whether CORS is enabled (default: true when cors section is present)
+    #[serde(default = "default_cors_enabled")]
+    pub enabled: bool,
+
+    /// Allowed origins. Use ["*"] for any origin, or specific origins like ["https://example.com"]
+    #[serde(default = "default_cors_origins")]
+    pub allow_origins: Vec<String>,
+
+    /// Allowed HTTP methods
+    #[serde(default = "default_cors_methods")]
+    pub allow_methods: Vec<String>,
+
+    /// Allowed headers. Use ["*"] for any header.
+    #[serde(default = "default_cors_headers")]
+    pub allow_headers: Vec<String>,
+
+    /// Headers to expose to the browser
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expose_headers: Vec<String>,
+
+    /// Whether to allow credentials (cookies, authorization headers)
+    #[serde(default)]
+    pub allow_credentials: bool,
+
+    /// Max age in seconds for preflight request caching
+    #[serde(default = "default_cors_max_age")]
+    pub max_age: u64,
+}
+
+fn default_cors_enabled() -> bool {
+    true
+}
+
+fn default_cors_origins() -> Vec<String> {
+    vec!["*".to_string()]
+}
+
+fn default_cors_methods() -> Vec<String> {
+    vec![
+        "GET".to_string(),
+        "POST".to_string(),
+        "PUT".to_string(),
+        "PATCH".to_string(),
+        "DELETE".to_string(),
+        "OPTIONS".to_string(),
+    ]
+}
+
+fn default_cors_headers() -> Vec<String> {
+    vec![
+        "Content-Type".to_string(),
+        "Authorization".to_string(),
+        "X-Requested-With".to_string(),
+    ]
+}
+
+fn default_cors_max_age() -> u64 {
+    3600
+}
+
+impl Default for CorsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            allow_origins: default_cors_origins(),
+            allow_methods: default_cors_methods(),
+            allow_headers: default_cors_headers(),
+            expose_headers: Vec::new(),
+            allow_credentials: false,
+            max_age: default_cors_max_age(),
+        }
+    }
 }
 
 /// Error handling behavior for webhook requests

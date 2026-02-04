@@ -44,6 +44,7 @@ async fn find_available_port() -> u16 {
 fn create_github_webhook_config() -> WebhookConfig {
     WebhookConfig {
         error_behavior: ErrorBehavior::Reject,
+        cors: None,
         routes: vec![WebhookRoute {
             path: "/github/events".to_string(),
             methods: vec![HttpMethod::Post],
@@ -132,6 +133,7 @@ async fn test_webhook_mode_health_check() {
 
     let webhook_config = WebhookConfig {
         error_behavior: ErrorBehavior::AcceptAndLog,
+        cors: None,
         routes: vec![WebhookRoute {
             path: "/events".to_string(),
             methods: vec![HttpMethod::Post],
@@ -194,6 +196,7 @@ async fn test_webhook_mode_disables_standard_endpoints() {
 
     let webhook_config = WebhookConfig {
         error_behavior: ErrorBehavior::Reject,
+        cors: None,
         routes: vec![WebhookRoute {
             path: "/custom/events".to_string(),
             methods: vec![HttpMethod::Post],
@@ -251,6 +254,7 @@ async fn test_webhook_simple_payload_processing() {
 
     let webhook_config = WebhookConfig {
         error_behavior: ErrorBehavior::Reject,
+        cors: None,
         routes: vec![WebhookRoute {
             path: "/events".to_string(),
             methods: vec![HttpMethod::Post],
@@ -321,6 +325,7 @@ async fn test_webhook_with_path_parameters() {
 
     let webhook_config = WebhookConfig {
         error_behavior: ErrorBehavior::Reject,
+        cors: None,
         routes: vec![WebhookRoute {
             path: "/users/:user_id/events/:event_type".to_string(),
             methods: vec![HttpMethod::Post],
@@ -458,6 +463,7 @@ async fn test_webhook_with_bearer_token() {
 
     let webhook_config = WebhookConfig {
         error_behavior: ErrorBehavior::Reject,
+        cors: None,
         routes: vec![WebhookRoute {
             path: "/api/events".to_string(),
             methods: vec![HttpMethod::Post],
@@ -550,6 +556,7 @@ async fn test_webhook_condition_matching() {
     // Create config inline with the correct env var name
     let webhook_config = WebhookConfig {
         error_behavior: ErrorBehavior::Reject,
+        cors: None,
         routes: vec![WebhookRoute {
             path: "/github/events".to_string(),
             methods: vec![HttpMethod::Post],
@@ -706,6 +713,7 @@ async fn test_webhook_unmatched_route_returns_404() {
 
     let webhook_config = WebhookConfig {
         error_behavior: ErrorBehavior::Reject,
+        cors: None,
         routes: vec![WebhookRoute {
             path: "/specific/route".to_string(),
             methods: vec![HttpMethod::Post],
@@ -802,6 +810,7 @@ async fn test_webhook_yaml_content_type() {
 
     let webhook_config = WebhookConfig {
         error_behavior: ErrorBehavior::Reject,
+        cors: None,
         routes: vec![WebhookRoute {
             path: "/events".to_string(),
             methods: vec![HttpMethod::Post],
@@ -866,6 +875,7 @@ async fn test_webhook_method_filtering() {
 
     let webhook_config = WebhookConfig {
         error_behavior: ErrorBehavior::Reject,
+        cors: None,
         routes: vec![WebhookRoute {
             path: "/events".to_string(),
             methods: vec![HttpMethod::Post, HttpMethod::Put],
@@ -933,6 +943,166 @@ async fn test_webhook_method_filtering() {
         .await
         .unwrap();
     assert_eq!(response.status(), 404);
+
+    source.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_webhook_cors_preflight() {
+    let port = find_available_port().await;
+
+    let webhook_config = WebhookConfig {
+        error_behavior: ErrorBehavior::Reject,
+        cors: Some(CorsConfig {
+            enabled: true,
+            allow_origins: vec!["https://example.com".to_string()],
+            allow_methods: vec!["GET".to_string(), "POST".to_string(), "OPTIONS".to_string()],
+            allow_headers: vec!["Content-Type".to_string(), "Authorization".to_string()],
+            expose_headers: vec![],
+            allow_credentials: false,
+            max_age: 3600,
+        }),
+        routes: vec![WebhookRoute {
+            path: "/events".to_string(),
+            methods: vec![HttpMethod::Post],
+            auth: None,
+            error_behavior: None,
+            mappings: vec![WebhookMapping {
+                when: None,
+                operation: Some(OperationType::Insert),
+                operation_from: None,
+                operation_map: None,
+                element_type: ElementType::Node,
+                effective_from: None,
+                template: ElementTemplate {
+                    id: "{{payload.id}}".to_string(),
+                    labels: vec!["Event".to_string()],
+                    properties: None,
+                    from: None,
+                    to: None,
+                },
+            }],
+        }],
+    };
+
+    let source = HttpSourceBuilder::new("cors-source")
+        .with_host("127.0.0.1")
+        .with_port(port)
+        .with_webhooks(webhook_config)
+        .with_auto_start(false)
+        .build()
+        .unwrap();
+
+    let source = Arc::new(source);
+    source.start().await.unwrap();
+    sleep(Duration::from_millis(100)).await;
+
+    let client = Client::new();
+
+    // Test CORS preflight request (OPTIONS)
+    let response = client
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("http://127.0.0.1:{port}/events"),
+        )
+        .header("Origin", "https://example.com")
+        .header("Access-Control-Request-Method", "POST")
+        .header("Access-Control-Request-Headers", "Content-Type")
+        .send()
+        .await
+        .unwrap();
+
+    // Should return 200 with CORS headers
+    assert_eq!(response.status(), 200);
+    assert!(response
+        .headers()
+        .contains_key("access-control-allow-origin"));
+    assert!(response
+        .headers()
+        .contains_key("access-control-allow-methods"));
+
+    // Test actual POST request with CORS origin
+    let response = client
+        .post(format!("http://127.0.0.1:{port}/events"))
+        .header("Origin", "https://example.com")
+        .header("Content-Type", "application/json")
+        .body(r#"{"id": "test-1"}"#)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    // CORS header should be present in response
+    let cors_origin = response
+        .headers()
+        .get("access-control-allow-origin")
+        .and_then(|v| v.to_str().ok());
+    assert_eq!(cors_origin, Some("https://example.com"));
+
+    source.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_webhook_cors_wildcard_origin() {
+    let port = find_available_port().await;
+
+    let webhook_config = WebhookConfig {
+        error_behavior: ErrorBehavior::Reject,
+        cors: Some(CorsConfig::default()), // Default uses "*" for origins
+        routes: vec![WebhookRoute {
+            path: "/events".to_string(),
+            methods: vec![HttpMethod::Post],
+            auth: None,
+            error_behavior: None,
+            mappings: vec![WebhookMapping {
+                when: None,
+                operation: Some(OperationType::Insert),
+                operation_from: None,
+                operation_map: None,
+                element_type: ElementType::Node,
+                effective_from: None,
+                template: ElementTemplate {
+                    id: "{{payload.id}}".to_string(),
+                    labels: vec!["Event".to_string()],
+                    properties: None,
+                    from: None,
+                    to: None,
+                },
+            }],
+        }],
+    };
+
+    let source = HttpSourceBuilder::new("cors-wildcard-source")
+        .with_host("127.0.0.1")
+        .with_port(port)
+        .with_webhooks(webhook_config)
+        .with_auto_start(false)
+        .build()
+        .unwrap();
+
+    let source = Arc::new(source);
+    source.start().await.unwrap();
+    sleep(Duration::from_millis(100)).await;
+
+    let client = Client::new();
+
+    // Test request from any origin
+    let response = client
+        .post(format!("http://127.0.0.1:{port}/events"))
+        .header("Origin", "https://any-domain.com")
+        .header("Content-Type", "application/json")
+        .body(r#"{"id": "test-1"}"#)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    // Wildcard origin should allow any
+    let cors_origin = response
+        .headers()
+        .get("access-control-allow-origin")
+        .and_then(|v| v.to_str().ok());
+    assert_eq!(cors_origin, Some("*"));
 
     source.stop().await.unwrap();
 }

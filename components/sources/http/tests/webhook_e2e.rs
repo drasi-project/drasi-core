@@ -58,6 +58,7 @@ async fn test_webhook_event_flows_to_reaction() {
     // Create webhook config
     let webhook_config = WebhookConfig {
         error_behavior: ErrorBehavior::Reject,
+        cors: None,
         routes: vec![WebhookRoute {
             path: "/events".to_string(),
             methods: vec![HttpMethod::Post],
@@ -182,6 +183,7 @@ async fn test_webhook_path_params_flow_to_reaction() {
 
     let webhook_config = WebhookConfig {
         error_behavior: ErrorBehavior::Reject,
+        cors: None,
         routes: vec![WebhookRoute {
             path: "/users/:user_id/events".to_string(),
             methods: vec![HttpMethod::Post],
@@ -284,6 +286,7 @@ async fn test_webhook_hmac_auth_flows_correctly() {
 
     let webhook_config = WebhookConfig {
         error_behavior: ErrorBehavior::Reject,
+        cors: None,
         routes: vec![WebhookRoute {
             path: "/secure/events".to_string(),
             methods: vec![HttpMethod::Post],
@@ -410,6 +413,7 @@ async fn test_webhook_bearer_auth_flows_correctly() {
 
     let webhook_config = WebhookConfig {
         error_behavior: ErrorBehavior::Reject,
+        cors: None,
         routes: vec![WebhookRoute {
             path: "/api/data".to_string(),
             methods: vec![HttpMethod::Post],
@@ -530,6 +534,7 @@ async fn test_webhook_condition_routing_flows_correctly() {
 
     let webhook_config = WebhookConfig {
         error_behavior: ErrorBehavior::Reject,
+        cors: None,
         routes: vec![WebhookRoute {
             path: "/events".to_string(),
             methods: vec![HttpMethod::Post],
@@ -683,6 +688,7 @@ async fn test_webhook_yaml_content_flows_correctly() {
 
     let webhook_config = WebhookConfig {
         error_behavior: ErrorBehavior::Reject,
+        cors: None,
         routes: vec![WebhookRoute {
             path: "/yaml-events".to_string(),
             methods: vec![HttpMethod::Post],
@@ -786,6 +792,7 @@ async fn test_webhook_update_operation_flows_correctly() {
 
     let webhook_config = WebhookConfig {
         error_behavior: ErrorBehavior::Reject,
+        cors: None,
         routes: vec![WebhookRoute {
             path: "/items".to_string(),
             methods: vec![HttpMethod::Post],
@@ -1039,6 +1046,7 @@ async fn test_webhook_relation_accepted_successfully() {
 
     let webhook_config = WebhookConfig {
         error_behavior: ErrorBehavior::Reject,
+        cors: None,
         routes: vec![WebhookRoute {
             path: "/relationships".to_string(),
             methods: vec![HttpMethod::Post],
@@ -1133,6 +1141,7 @@ async fn test_webhook_payload_spread_as_properties() {
 
     let webhook_config = WebhookConfig {
         error_behavior: ErrorBehavior::Reject,
+        cors: None,
         routes: vec![WebhookRoute {
             path: "/events".to_string(),
             methods: vec![HttpMethod::Post],

@@ -213,7 +213,36 @@ sources:
 | Name | Description | Values | Default |
 |------|-------------|--------|---------|
 | `error_behavior` | How to handle mapping errors | `reject`, `accept_and_log`, `accept_silent` | `reject` |
+| `cors` | CORS configuration | Object (see below) | None (CORS disabled) |
 | `routes` | Array of route configurations | Array | **Required** |
+
+#### CORS Configuration
+
+Enable CORS (Cross-Origin Resource Sharing) for browser-based clients:
+
+```yaml
+webhooks:
+  cors:
+    enabled: true
+    allow_origins: ["*"]  # or specific origins
+    allow_methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+    allow_headers: ["Content-Type", "Authorization"]
+    expose_headers: []
+    allow_credentials: false
+    max_age: 3600
+  routes:
+    # ...
+```
+
+| Name | Description | Default |
+|------|-------------|---------|
+| `enabled` | Enable/disable CORS | `true` |
+| `allow_origins` | Allowed origins (`["*"]` for any) | `["*"]` |
+| `allow_methods` | Allowed HTTP methods | `["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]` |
+| `allow_headers` | Allowed request headers | `["Content-Type", "Authorization", "X-Requested-With"]` |
+| `expose_headers` | Headers to expose to browser | `[]` |
+| `allow_credentials` | Allow cookies/auth headers | `false` |
+| `max_age` | Preflight cache duration (seconds) | `3600` |
 
 #### Route Settings
 

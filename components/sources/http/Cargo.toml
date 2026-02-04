@@ -38,7 +38,7 @@ serde_json = "1.0"
 serde_yaml = "0.9"
 axum = "0.7"
 tower = "0.4"
-tower-http = "0.5"
+tower-http = { version = "0.5", features = ["cors"] }
 reqwest = { version = "0.11", features = ["json"] }
 tower-service = "0.3"
 hyper = "1.0"

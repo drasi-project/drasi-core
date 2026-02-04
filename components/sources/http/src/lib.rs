@@ -234,7 +234,7 @@ use async_trait::async_trait;
 use axum::{
     body::Bytes,
     extract::{Path, State},
-    http::StatusCode,
+    http::{header, Method, StatusCode},
     response::IntoResponse,
     routing::{delete, get, post, put},
     Json, Router,
@@ -246,6 +246,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
+use tower_http::cors::{Any, CorsLayer};
 
 use drasi_lib::channels::*;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
@@ -253,7 +254,7 @@ use drasi_lib::Source;
 
 use crate::adaptive_batcher::{AdaptiveBatchConfig, AdaptiveBatcher};
 use crate::auth::{verify_auth, AuthResult};
-use crate::config::{ErrorBehavior, WebhookConfig};
+use crate::config::{CorsConfig, ErrorBehavior, WebhookConfig};
 use crate::content_parser::{parse_content, ContentType};
 use crate::route_matcher::{convert_method, find_matching_mappings, headers_to_map, RouteMatcher};
 use crate::template_engine::{TemplateContext, TemplateEngine};
@@ -978,10 +979,26 @@ impl Source for HttpSource {
         // Build router based on mode
         let app = if self.config.is_webhook_mode() {
             // Webhook mode: only health check + catch-all webhook handler
-            Router::new()
+            let router = Router::new()
                 .route("/health", get(Self::health_check))
                 .fallback(Self::handle_webhook)
-                .with_state(state)
+                .with_state(state);
+
+            // Apply CORS if configured
+            if let Some(ref webhooks) = self.config.webhooks {
+                if let Some(ref cors_config) = webhooks.cors {
+                    if cors_config.enabled {
+                        info!("[{source_id}] CORS enabled for webhook endpoints");
+                        router.layer(build_cors_layer(cors_config))
+                    } else {
+                        router
+                    }
+                } else {
+                    router
+                }
+            } else {
+                router
+            }
         } else {
             // Standard mode: original endpoints
             Router::new()
@@ -1463,6 +1480,63 @@ fn urlencoding_decode(s: &str) -> String {
     }
 
     result
+}
+
+/// Build a CORS layer from configuration
+fn build_cors_layer(cors_config: &CorsConfig) -> CorsLayer {
+    let mut cors = CorsLayer::new();
+
+    // Configure allowed origins
+    if cors_config.allow_origins.len() == 1 && cors_config.allow_origins[0] == "*" {
+        cors = cors.allow_origin(Any);
+    } else {
+        let origins: Vec<_> = cors_config
+            .allow_origins
+            .iter()
+            .filter_map(|o| o.parse().ok())
+            .collect();
+        cors = cors.allow_origin(origins);
+    }
+
+    // Configure allowed methods
+    let methods: Vec<Method> = cors_config
+        .allow_methods
+        .iter()
+        .filter_map(|m| m.parse().ok())
+        .collect();
+    cors = cors.allow_methods(methods);
+
+    // Configure allowed headers
+    if cors_config.allow_headers.len() == 1 && cors_config.allow_headers[0] == "*" {
+        cors = cors.allow_headers(Any);
+    } else {
+        let headers: Vec<header::HeaderName> = cors_config
+            .allow_headers
+            .iter()
+            .filter_map(|h| h.parse().ok())
+            .collect();
+        cors = cors.allow_headers(headers);
+    }
+
+    // Configure exposed headers
+    if !cors_config.expose_headers.is_empty() {
+        let exposed: Vec<header::HeaderName> = cors_config
+            .expose_headers
+            .iter()
+            .filter_map(|h| h.parse().ok())
+            .collect();
+        cors = cors.expose_headers(exposed);
+    }
+
+    // Configure credentials
+    if cors_config.allow_credentials {
+        cors = cors.allow_credentials(true);
+    }
+
+    // Configure max age
+    cors = cors.max_age(Duration::from_secs(cors_config.max_age));
+
+    cors
 }
 
 #[cfg(test)]
