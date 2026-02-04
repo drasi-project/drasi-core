@@ -241,7 +241,7 @@ impl LogReactionBuilder {
     /// let default_template = QueryConfig {
     ///     added: Some(TemplateSpec::new("[ADD] {{after.id}}")),
     ///     updated: Some(TemplateSpec::new("[UPD] {{after.id}}")),
-    ///     deleted: Some(TemplateSpec::new("[DEL] {{before.id}}"),
+    ///     deleted: Some(TemplateSpec::new("[DEL] {{before.id}}")),
     /// };
     ///
     /// let reaction = LogReaction::builder("my-logger")

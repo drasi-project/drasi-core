@@ -45,8 +45,8 @@ pub use common::{QueryConfig, TemplateSpec};
 /// let default_template = QueryConfig {
 ///     added: Some(TemplateSpec::new("[NEW] {{after.id}}")),
 ///     updated: Some(TemplateSpec::new("[CHG] {{after.id}}")),
-///     deleted: Some(TemplateSpec::new("[DEL] {{before.id}}"),
-///     };
+///     deleted: Some(TemplateSpec::new("[DEL] {{before.id}}")),
+/// };
 ///
 /// let config = LogReactionConfig {
 ///     routes: HashMap::new(),
@@ -63,7 +63,7 @@ pub use common::{QueryConfig, TemplateSpec};
 /// routes.insert("sensor-query".to_string(), QueryConfig {
 ///     added: Some(TemplateSpec {
 ///         template: "[SENSOR] New: {{after.id}}".to_string(),
-///         extension: ()
+///         extension: (),
 ///     }),
 ///     updated: None,  // Falls back to default
 ///     deleted: None,  // Falls back to default

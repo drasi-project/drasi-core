@@ -209,7 +209,7 @@ async fn main() -> Result<()> {
         deleted: Some(TemplateSpec::new("[-] {{before.symbol}} removed".to_string())),
     });
     let log_config = LogReactionConfig {
-        routes: HashMap::new(),
+        routes,
         default_template: None,
     };
 
