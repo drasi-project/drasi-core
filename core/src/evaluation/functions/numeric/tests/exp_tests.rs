@@ -15,31 +15,12 @@
 use std::sync::Arc;
 
 use crate::evaluation::context::QueryVariables;
-use crate::evaluation::functions::numeric::{Exp, E};
+use crate::evaluation::functions::numeric::Exp;
 use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::variable_value::float::Float;
 use crate::evaluation::variable_value::VariableValue;
 use crate::evaluation::{ExpressionEvaluationContext, FunctionEvaluationError, InstantQueryClock};
 use drasi_query_ast::ast;
-
-#[tokio::test]
-async fn test_e() {
-    let func = E {};
-    let binding = QueryVariables::new();
-    let context =
-        ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
-    let expression = ast::FunctionExpression {
-        name: Arc::from("e"),
-        args: vec![],
-        position_in_query: 0,
-    };
-
-    let result = func.call(&context, &expression, vec![]).await.unwrap();
-    assert_eq!(
-        result,
-        VariableValue::Float(Float::from_f64(std::f64::consts::E).unwrap())
-    );
-}
 
 #[tokio::test]
 async fn test_exp() {
@@ -157,32 +138,7 @@ async fn test_exp_overflow() {
     assert!(matches!(err.error, FunctionEvaluationError::OverflowError));
 }
 
-#[tokio::test]
-async fn test_e_arg_count() {
-    let func = E {};
-    let binding = QueryVariables::new();
-    let context =
-        ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
-    let expression = ast::FunctionExpression {
-        name: Arc::from("e"),
-        args: vec![],
-        position_in_query: 0,
-    };
 
-    // Test with 1 argument (should be 0)
-    let result = func
-        .call(
-            &context, 
-            &expression, 
-            vec![VariableValue::Integer(1.into())]
-        )
-        .await;
-    
-    match result {
-        Err(crate::evaluation::FunctionError { error: crate::evaluation::FunctionEvaluationError::InvalidArgumentCount, .. }) => (),
-        _ => panic!("Expected InvalidArgumentCount error for e() with arguments"),
-    }
-}
 
 #[tokio::test]
 async fn test_exp_arg_count() {
@@ -200,10 +156,14 @@ async fn test_exp_arg_count() {
     let result = func
         .call(&context, &expression, vec![])
         .await;
-    match result {
-        Err(crate::evaluation::FunctionError { error: crate::evaluation::FunctionEvaluationError::InvalidArgumentCount, .. }) => (),
-        _ => panic!("Expected InvalidArgumentCount error for exp() with 0 arguments"),
-    }
+    use crate::evaluation::{FunctionError, FunctionEvaluationError};
+    assert!(matches!(
+        result.unwrap_err(),
+        FunctionError {
+            function_name: _,
+            error: FunctionEvaluationError::InvalidArgumentCount
+        }
+    ));
 
     // Test with 2 arguments (should be 1)
     let result = func
@@ -213,8 +173,11 @@ async fn test_exp_arg_count() {
             vec![VariableValue::Integer(1.into()), VariableValue::Integer(2.into())]
         )
         .await;
-    match result {
-        Err(crate::evaluation::FunctionError { error: crate::evaluation::FunctionEvaluationError::InvalidArgumentCount, .. }) => (),
-        _ => panic!("Expected InvalidArgumentCount error for exp() with 2 arguments"),
-    }
+    assert!(matches!(
+        result.unwrap_err(),
+        FunctionError {
+            function_name: _,
+            error: FunctionEvaluationError::InvalidArgumentCount
+        }
+    ));
 }

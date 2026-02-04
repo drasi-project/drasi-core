@@ -14,6 +14,7 @@
 
 mod abs;
 mod ceil;
+mod e;
 mod exp;
 mod floor;
 mod numeric_round;
@@ -25,7 +26,8 @@ mod tests;
 
 pub use abs::Abs;
 pub use ceil::Ceil;
-pub use exp::{Exp, E};
+pub use e::E;
+pub use exp::Exp;
 pub use floor::Floor;
 pub use numeric_round::Round;
 pub use random::Rand;

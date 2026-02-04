@@ -21,28 +21,6 @@ use crate::evaluation::variable_value::VariableValue;
 use crate::evaluation::{ExpressionEvaluationContext, FunctionError, FunctionEvaluationError};
 
 #[derive(Debug)]
-pub struct E {}
-
-#[async_trait]
-impl ScalarFunction for E {
-    async fn call(
-        &self,
-        _context: &ExpressionEvaluationContext,
-        expression: &ast::FunctionExpression,
-        args: Vec<VariableValue>,
-    ) -> Result<VariableValue, FunctionError> {
-        if !args.is_empty() {
-            return Err(FunctionError {
-                function_name: expression.name.to_string(),
-                error: FunctionEvaluationError::InvalidArgumentCount,
-            });
-        }
-        
-        Ok(VariableValue::Float(Float::from_f64(std::f64::consts::E).unwrap()))
-    }
-}
-
-#[derive(Debug)]
 pub struct Exp {}
 
 #[async_trait]
@@ -61,53 +39,37 @@ impl ScalarFunction for Exp {
         }
         match &args[0] {
             VariableValue::Null => Ok(VariableValue::Null),
-            VariableValue::Integer(n) => {
-                 match n.as_i64() {
-                    Some(i) => {
-                        let result = (i as f64).exp();
-                        if result.is_infinite() || result.is_nan() {
-                            return Err(FunctionError {
-                                function_name: expression.name.to_string(),
-                                error: FunctionEvaluationError::OverflowError,
-                            });
-                        }
-                        match Float::from_f64(result) {
-                            Some(f) => Ok(VariableValue::Float(f)),
-                            None => Err(FunctionError {
-                                function_name: expression.name.to_string(),
-                                error: FunctionEvaluationError::OverflowError,
-                            }),
-                        }
+            VariableValue::Integer(n) => match n.as_i64() {
+                Some(i) => {
+                    let result = (i as f64).exp();
+                    match Float::from_f64(result) {
+                        Some(f) => Ok(VariableValue::Float(f)),
+                        None => Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        }),
                     }
-                    None => Err(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::OverflowError,
-                    }),
                 }
+                None => Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::OverflowError,
+                }),
             },
-            VariableValue::Float(n) => {
-                match n.as_f64() {
-                    Some(f) => {
-                        let result = f.exp();
-                        if result.is_infinite() || result.is_nan() {
-                            return Err(FunctionError {
-                                function_name: expression.name.to_string(),
-                                error: FunctionEvaluationError::OverflowError,
-                            });
-                        }
-                        match Float::from_f64(result) {
-                            Some(f) => Ok(VariableValue::Float(f)),
-                            None => Err(FunctionError {
-                                function_name: expression.name.to_string(),
-                                error: FunctionEvaluationError::OverflowError,
-                            }),
-                        }
+            VariableValue::Float(n) => match n.as_f64() {
+                Some(f) => {
+                    let result = f.exp();
+                    match Float::from_f64(result) {
+                        Some(f) => Ok(VariableValue::Float(f)),
+                        None => Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        }),
                     }
-                    None => Err(FunctionError {
-                        function_name: expression.name.to_string(),
-                        error: FunctionEvaluationError::OverflowError,
-                    }),
                 }
+                None => Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::OverflowError,
+                }),
             },
             _ => Err(FunctionError {
                 function_name: expression.name.to_string(),
