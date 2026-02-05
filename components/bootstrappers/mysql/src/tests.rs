@@ -24,7 +24,6 @@ mod tests {
             password: String::new(),
             tables: vec!["users".to_string()],
             table_keys: vec![],
-            batch_size: 1000,
         };
         assert!(config.validate().is_err());
     }
@@ -39,7 +38,6 @@ mod tests {
             password: String::new(),
             tables: vec![],
             table_keys: vec![],
-            batch_size: 1000,
         };
         assert!(config.validate().is_err());
     }
@@ -54,7 +52,6 @@ mod tests {
             password: String::new(),
             tables: vec!["users;drop".to_string()],
             table_keys: vec![],
-            batch_size: 1000,
         };
         assert!(config.validate().is_err());
     }

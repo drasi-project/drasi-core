@@ -28,7 +28,9 @@ let source = MySqlReplicationSource::builder("mysql-source")
 
 ## Limitations
 
-- `mysql_cdc` runtime does not support SSL (ssl_mode must be Disabled)
+- `mysql_cdc` runtime does not support SSL (ssl_mode must be Disabled). This means connections from this source to MySQL are **not encrypted**.
+  - **Do not** use this source over untrusted networks or the public internet.
+  - In production, run it only on trusted, isolated networks and ensure encryption in transit via infrastructure such as a VPN, service mesh, or a TLS-terminating proxy (for example, stunnel, HAProxy, or a cloud load balancer that terminates MySQL TLS and forwards plain traffic on a private network).
 - Packets >16MB are not supported
 
 ## Testing
@@ -36,5 +38,5 @@ let source = MySqlReplicationSource::builder("mysql-source")
 Integration test uses testcontainers:
 
 ```bash
-cargo test -p drasi-source-mysql --ignored --nocapture
+cargo test -p drasi-source-mysql -- --ignored --nocapture
 ```
