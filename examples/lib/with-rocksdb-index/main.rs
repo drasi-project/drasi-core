@@ -87,8 +87,6 @@ async fn main() -> Result<()> {
     // =========================================================================
 
     let bootstrap_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent().unwrap()
-        .join("builder")
         .join("bootstrap_data.jsonl");
 
     println!("Loading bootstrap data from: {}", bootstrap_path.display());
