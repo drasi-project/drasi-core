@@ -54,7 +54,7 @@ impl MySqlBootstrapHandler {
         request: BootstrapRequest,
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
-        __settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
+        _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
     ) -> Result<usize> {
         info!(
             "Starting MySQL bootstrap for source {} and query {}",
@@ -131,7 +131,6 @@ impl MySqlBootstrapHandler {
     ) -> Result<usize> {
         let query = format!("SELECT * FROM {}", quote_identifier(table_name));
         let mut result = conn.query_iter(query).await?;
-        let _batch_size = self.config.batch_size;
         let mut total = 0usize;
 
         while let Some(row) = result.next().await? {

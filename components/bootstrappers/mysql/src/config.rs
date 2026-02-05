@@ -54,10 +54,6 @@ pub struct MySqlBootstrapConfig {
     /// Table key configurations
     #[serde(default)]
     pub table_keys: Vec<TableKeyConfig>,
-
-    /// Batch size for streaming rows
-    #[serde(default = "default_batch_size")]
-    pub batch_size: usize,
 }
 
 fn default_mysql_host() -> String {
@@ -66,10 +62,6 @@ fn default_mysql_host() -> String {
 
 fn default_mysql_port() -> u16 {
     3306
-}
-
-fn default_batch_size() -> usize {
-    1000
 }
 
 pub(crate) fn is_valid_identifier(value: &str) -> bool {

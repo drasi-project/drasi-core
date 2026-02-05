@@ -100,10 +100,6 @@ impl Source for MySqlReplicationSource {
         );
         props.insert(
             "database".to_string(),
-            serde_json::Value::String("MySQL".to_string()),
-        );
-        props.insert(
-            "database_name".to_string(),
             serde_json::Value::String(self.config.database.clone()),
         );
         props.insert(
