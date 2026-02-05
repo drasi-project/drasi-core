@@ -59,7 +59,6 @@ exclude = [
   "shared-tests",
   "query-perf",
   "examples/query",
-  "examples/lib/mysql-getting-started",
 ]
 
 resolver = "2"
