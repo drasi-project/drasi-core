@@ -331,8 +331,8 @@ template:
 template:
   id: "rel-{{payload.id}}"
   labels: ["PURCHASED"]
-  start_id: "customer-{{payload.customer_id}}"
-  end_id: "product-{{payload.product_id}}"
+  from: "customer-{{payload.customer_id}}"
+  to: "product-{{payload.product_id}}"
   properties:
     quantity: "{{payload.quantity}}"
 ```
