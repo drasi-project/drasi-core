@@ -1456,30 +1456,44 @@ fn parse_query_string(query: Option<&str>) -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
-/// Simple URL decoding (handles %XX sequences)
+/// Simple URL decoding (handles %XX sequences) with proper UTF-8 handling
 fn urlencoding_decode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
+    // Collect decoded bytes first, then convert to String to properly handle UTF-8
+    let mut decoded: Vec<u8> = Vec::with_capacity(s.len());
+    let mut chars = s.chars();
 
     while let Some(c) = chars.next() {
         if c == '%' {
-            let hex: String = chars.by_ref().take(2).collect();
+            let mut hex = String::new();
+            if let Some(c1) = chars.next() {
+                hex.push(c1);
+            }
+            if let Some(c2) = chars.next() {
+                hex.push(c2);
+            }
+
             if hex.len() == 2 {
                 if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                    result.push(byte as char);
+                    decoded.push(byte);
                     continue;
                 }
             }
-            result.push('%');
-            result.push_str(&hex);
+
+            // If we couldn't decode a valid %XX sequence, keep the original text
+            decoded.extend_from_slice(b"%");
+            decoded.extend_from_slice(hex.as_bytes());
         } else if c == '+' {
-            result.push(' ');
+            decoded.push(b' ');
         } else {
-            result.push(c);
+            // Encode the character as UTF-8 and append its bytes
+            let mut buf = [0u8; 4];
+            let encoded = c.encode_utf8(&mut buf);
+            decoded.extend_from_slice(encoded.as_bytes());
         }
     }
 
-    result
+    // Convert bytes to string, replacing invalid UTF-8 sequences
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 /// Build a CORS layer from configuration

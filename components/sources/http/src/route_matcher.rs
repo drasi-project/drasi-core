@@ -22,6 +22,37 @@ use crate::config::{HttpMethod, MappingCondition, WebhookMapping, WebhookRoute};
 use regex::Regex;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
+use std::sync::{OnceLock, RwLock};
+
+/// Global cache for compiled regex patterns used in conditions
+static REGEX_CACHE: OnceLock<RwLock<HashMap<String, Regex>>> = OnceLock::new();
+
+/// Get or compile a regex pattern from the cache
+fn get_cached_regex(pattern: &str) -> Option<Regex> {
+    let cache = REGEX_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+
+    // Try to read from cache first
+    {
+        let read_guard = cache.read().ok()?;
+        if let Some(re) = read_guard.get(pattern) {
+            return Some(re.clone());
+        }
+    }
+
+    // Not in cache, compile and store
+    match Regex::new(pattern) {
+        Ok(re) => {
+            if let Ok(mut write_guard) = cache.write() {
+                write_guard.insert(pattern.to_string(), re.clone());
+            }
+            Some(re)
+        }
+        Err(e) => {
+            log::warn!("Invalid regex pattern '{pattern}': {e}");
+            None
+        }
+    }
+}
 
 /// Result of route matching
 #[derive(Debug, Clone)]
@@ -197,14 +228,14 @@ fn evaluate_condition(
     }
 
     if let Some(ref regex_pattern) = cond.regex {
-        match Regex::new(regex_pattern) {
-            Ok(re) => {
+        match get_cached_regex(regex_pattern) {
+            Some(re) => {
                 if !re.is_match(value_str) {
                     return false;
                 }
             }
-            Err(e) => {
-                log::warn!("Invalid regex pattern '{regex_pattern}': {e}");
+            None => {
+                // Regex compilation failed (already logged in get_cached_regex)
                 return false;
             }
         }

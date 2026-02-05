@@ -284,7 +284,7 @@ auth:
 |------|-------------|----------|
 | `when` | Condition for this mapping to apply | No |
 | `operation` | Graph operation: `insert`, `update`, `delete` | No (can derive from payload) |
-| `operation_field` | Path to operation value in payload | No |
+| `operation_from` | Path to operation value in payload | No |
 | `element_type` | `node` or `relation` | Yes |
 | `effective_from` | Handlebars template for timestamp | No |
 | `template` | Element template (see below) | Yes |
@@ -297,21 +297,24 @@ when:
   header: X-GitHub-Event
   equals: push
 
-# Match path parameter
+# Match payload field (dot notation for nested fields)
 when:
-  path_param: resource_type
-  equals: orders
-
-# Match query parameter
-when:
-  query_param: action
-  equals: create
-
-# Match payload field
-when:
-  payload_field: event.type
+  field: event.type
   equals: order.created
+
+# Match with contains
+when:
+  header: Content-Type
+  contains: json
+
+# Match with regex
+when:
+  field: action
+  regex: "^(created|updated)$"
 ```
+
+> **Note**: Conditions currently support `header` (HTTP headers) and `field` (payload fields). 
+> Path parameters and query parameters are available in templates via `{{route.param}}` and `{{query.param}}`.
 
 #### Template Structure
 
@@ -376,11 +379,12 @@ Templates have access to these variables:
 |----------|-------------|---------|
 | `payload` | Parsed request body | `{{payload.user.name}}` |
 | `headers` | HTTP headers (lowercase keys) | `{{headers.x-request-id}}` |
-| `path_params` | Path parameters from route | `{{path_params.id}}` |
-| `query_params` | Query string parameters | `{{query_params.filter}}` |
+| `route` | Path parameters from route | `{{route.id}}` |
+| `query` | Query string parameters | `{{query.filter}}` |
 | `method` | HTTP method | `{{method}}` |
 | `path` | Request path | `{{path}}` |
-| `content_type` | Content-Type header | `{{content_type}}` |
+
+> **Note**: Access Content-Type via headers: `{{headers.content-type}}`
 
 ### Template Helpers
 
@@ -388,7 +392,7 @@ Templates have access to these variables:
 |--------|-------------|---------|
 | `lowercase` | Convert to lowercase | `{{lowercase payload.name}}` |
 | `uppercase` | Convert to uppercase | `{{uppercase payload.status}}` |
-| `now` | Current timestamp (ns) | `{{now}}` |
+| `now` | Current timestamp (ms) | `{{now}}` |
 | `concat` | Concatenate strings | `{{concat "prefix-" payload.id}}` |
 | `default` | Fallback value | `{{default payload.name "Unknown"}}` |
 | `json` | Serialize to JSON string | `{{json payload.metadata}}` |
@@ -413,15 +417,15 @@ metadata: "{{json payload.complex_object}}"  # Becomes a string
 
 ### Timestamp Handling (`effective_from`)
 
-The `effective_from` field sets the element's effective timestamp. It auto-detects format:
+The `effective_from` field sets the element's effective timestamp in **milliseconds since Unix epoch**. It auto-detects format:
 
 | Input | Detection | Conversion |
 |-------|-----------|------------|
-| `1699900000` | Unix seconds | × 1,000,000,000 |
-| `1699900000000` | Unix milliseconds | × 1,000,000 |
-| `1699900000000000000` | Unix nanoseconds | Used directly |
-| `2024-01-15T10:30:00Z` | ISO 8601 | Parsed to nanoseconds |
-| `2024-01-15T10:30:00.123Z` | ISO 8601 with ms | Parsed to nanoseconds |
+| `1699900000` | Unix seconds | × 1,000 (to milliseconds) |
+| `1699900000000` | Unix milliseconds | Used directly |
+| `1699900000000000000` | Unix nanoseconds | ÷ 1,000,000 (to milliseconds) |
+| `2024-01-15T10:30:00Z` | ISO 8601 | Parsed to milliseconds |
+| `2024-01-15T10:30:00.123Z` | ISO 8601 with ms | Parsed to milliseconds |
 
 ### Error Behavior
 
@@ -465,7 +469,7 @@ webhooks:
         - when:
             header: X-GitHub-Event
             equals: issues
-          operation_field: payload.action  # opened, closed, etc.
+          operation_from: payload.action  # opened, closed, etc.
           element_type: node
           template:
             id: "issue-{{payload.issue.id}}"
@@ -517,14 +521,14 @@ webhooks:
         bearer:
           token_env: API_SECRET_TOKEN
       mappings:
-        # Create
+        # Match users resource via payload field (since conditions support header/field)
         - when:
-            path_param: resource
+            field: resource_type
             equals: users
-          operation_field: method  # Uses HTTP method
+          operation: insert
           element_type: node
           template:
-            id: "user-{{path_params.id}}"
+            id: "user-{{route.id}}"
             labels: ["User"]
             properties:
               name: "{{payload.name}}"
