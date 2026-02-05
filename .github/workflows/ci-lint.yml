@@ -50,6 +50,13 @@ jobs:
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-clippy-
+      
+      # Add this step to fix the lexer.c missing error
+      - name: Prepare bundled jq source
+        run: |
+          cargo fetch
+          find ~/.cargo/registry/src -name "lexer.c" -exec touch {} +
+          find ~/.cargo/registry/src -name "parser.c" -exec touch {} +
 
       - name: Run Cargo Clippy
         run: cargo clippy --all-targets --all-features
