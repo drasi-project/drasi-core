@@ -1,7 +1,7 @@
 name: Automerge Renovate PRs
 
 on:
-  schedule:
+  # schedule:
       # Disable AutoRun for now: Runs at 12:00 PM Pacific Time on Wednesdays.
       #    - cron: '0 19 * * 3'
   workflow_dispatch: # Allows manual triggering
