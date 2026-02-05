@@ -122,7 +122,7 @@ drasi-reaction-application = { path = "../../../components/reactions/application
 
 Mark test with `#[ignore]` and run with:
 ```bash
-cargo test -p drasi-source-[name] --ignored --nocapture
+cargo test -p drasi-source-[name] -- --ignored --nocapture
 ```
 
 **Required**: INSERT, UPDATE, DELETE all detected and asserted
@@ -239,7 +239,7 @@ mod integration_tests {
 
 Mark test with `#[ignore]` and run with:
 ```bash
-cargo test -p drasi-source-[name] --ignored --nocapture
+cargo test -p drasi-source-[name] -- --ignored --nocapture
 ```
 
 **Required**: CREATE, UPDATE, DELETE all detected and asserted via client harness
@@ -285,7 +285,7 @@ Create `tests/integration_test.rs` that:
 
 After writing the integration tests, review them to make sure they meet the requirements above.
 
-Mark test with `#[ignore]` and run with: `cargo test --ignored --nocapture`
+Mark test with `#[ignore]` and run with: `cargo test -- --ignored --nocapture`
 
 **Dependencies for Integration Tests**:
 
@@ -320,7 +320,7 @@ mod integration_tests {
     use std::time::Duration;
     
     #[tokio::test]
-    #[ignore] // Run with: cargo test --ignored
+    #[ignore] // Run with: cargo test -- --ignored
     async fn test_change_detection_end_to_end() {
         // 1. Start source system container
         let container = /* start container (e.g., MySourceContainer::new()) */;
@@ -665,7 +665,7 @@ Run before marking complete:
 cargo clippy --all-targets -- -D warnings
 cargo fmt
 cargo test
-cargo test --ignored
+cargo test -- --ignored
 ```
 
 Create Makefile in each crate with: build, test, integration-test, lint targets
