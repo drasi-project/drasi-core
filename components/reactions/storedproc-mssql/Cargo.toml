@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-reaction-storedproc-mssql"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "MS SQL Server Stored Procedure reaction plugin for Drasi"
