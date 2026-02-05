@@ -68,7 +68,6 @@ pub struct MySqlBootstrapBuilder {
     password: String,
     tables: Vec<String>,
     table_keys: Vec<TableKeyConfig>,
-    batch_size: usize,
 }
 
 impl Default for MySqlBootstrapBuilder {
@@ -87,7 +86,6 @@ impl MySqlBootstrapBuilder {
             password: String::new(),
             tables: Vec::new(),
             table_keys: Vec::new(),
-            batch_size: 1000,
         }
     }
 
@@ -136,11 +134,6 @@ impl MySqlBootstrapBuilder {
         self
     }
 
-    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
-        self.batch_size = batch_size;
-        self
-    }
-
     pub fn build(self) -> anyhow::Result<MySqlBootstrapProvider> {
         let config = MySqlBootstrapConfig {
             host: self.host,
@@ -150,7 +143,6 @@ impl MySqlBootstrapBuilder {
             password: self.password,
             tables: self.tables,
             table_keys: self.table_keys,
-            batch_size: self.batch_size,
         };
         config.validate()?;
         Ok(MySqlBootstrapProvider::new(config))
