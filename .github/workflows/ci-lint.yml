@@ -25,7 +25,7 @@ jobs:
       - name: Install libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y protobuf-compiler autoconf automake libtool flex bison
+          sudo apt-get install -y protobuf-compiler build-essential autoconf automake libtool flex bison
 
       - name: Cache Cargo registry
         uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
