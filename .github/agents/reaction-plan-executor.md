@@ -118,7 +118,7 @@ mod integration_tests {
   use std::time::Duration;
   
   #[tokio::test]
-  #[ignore] // Run with: cargo test --ignored
+  #[ignore] // Run with: cargo test -- --ignored
   async fn test_reaction_end_to_end() {
     // 1. Start target system container (e.g., database, message queue, etc.)
     let container = /* start container (e.g., MyTargetContainer::new()) */;
@@ -201,7 +201,7 @@ mod integration_tests {
   use tokio::sync::Mutex;
   
   #[tokio::test]
-  #[ignore] // Run with: cargo test --ignored
+  #[ignore] // Run with: cargo test -- --ignored
   async fn test_reaction_end_to_end() {
     // 1. Create a client harness to receive messages
     let received_messages: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -304,7 +304,7 @@ mod integration_tests {
 
 Mark test with `#[ignore]` and run with:
 ```bash
-cargo test -p drasi-reaction-[name] --ignored --nocapture
+cargo test -p drasi-reaction-[name] -- --ignored --nocapture
 ```
 
 **Required**: INSERT, UPDATE, DELETE all detected and asserted
@@ -334,7 +334,7 @@ Run before marking complete:
 cargo clippy --all-targets -- -D warnings
 cargo fmt
 cargo test
-cargo test --ignored
+cargo test -- --ignored
 ```
 
 Create Makefile in each crate with: build, test, integration-test, lint targets
