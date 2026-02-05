@@ -143,6 +143,7 @@ impl MySqlSourceConfig {
     /// - Database name is empty
     /// - User is empty
     /// - Port is 0
+    /// - SSL mode is not Disabled (mysql_cdc does not support SSL at runtime)
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.database.is_empty() {
             return Err(anyhow::anyhow!(
@@ -162,6 +163,13 @@ impl MySqlSourceConfig {
             return Err(anyhow::anyhow!(
                 "Validation error: port cannot be 0. \
                  Please specify a valid port number (1-65535)"
+            ));
+        }
+
+        if self.ssl_mode != SslMode::Disabled {
+            return Err(anyhow::anyhow!(
+                "Validation error: mysql_cdc does not support SSL at runtime. \
+                 Please set ssl_mode to Disabled"
             ));
         }
 
