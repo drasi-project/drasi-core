@@ -104,8 +104,8 @@ drasi-source-application = { path = "../../../components/sources/application" }
 3. Define **simple query** that uses the source
 4. Create implemented reaction to capture query results
 5. Perform **INSERT**, **UPDATE**, **DELETE** operations
-6. **ASSERT** each change is detected and flows through to target system by inspecting reaction logs
-7. If possible, **QUERY** target system to verify changes applied
+6. **ASSERT** each change is detected and correctly applied in the target system by **QUERYING the target system state** (e.g., reading rows, calling APIs, or using a deterministic in-process harness)
+7. Only when the target system does **not** expose queryable state, fall back to asserting via **reaction logs**, and document why log-based verification is required
 
 **Template for System-Target**:
 
