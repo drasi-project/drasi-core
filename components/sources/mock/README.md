@@ -6,7 +6,9 @@ The Mock Source is a synthetic data generator plugin designed for testing, devel
 
 ### Key Capabilities
 
-- **Three Built-in Data Generation Modes**: Counter, Sensor, and Generic data types
+- **Three Built-in Data Generation Modes**: Counter, SensorReading, and Generic data types
+- **Configurable Sensor Count**: Control how many simulated sensors generate readings
+- **Realistic Sensor Behavior**: First reading sends INSERT, subsequent readings send UPDATE events
 - **Configurable Generation Intervals**: Control data emission rate from milliseconds to seconds
 - **Zero External Dependencies**: No databases, APIs, or external services required
 - **Async Task-Based Generation**: Runs as a Tokio task with precise interval timing
@@ -44,7 +46,7 @@ The Mock Source is a synthetic data generator plugin designed for testing, devel
 The builder pattern provides a fluent API for constructing MockSource instances with compile-time validation:
 
 ```rust
-use drasi_source_mock::MockSource;
+use drasi_source_mock::{MockSource, DataType};
 use drasi_lib::channels::DispatchMode;
 
 // Basic construction with defaults
@@ -53,7 +55,7 @@ let source = MockSource::builder("my-source")
 
 // Full configuration with all options
 let source = MockSource::builder("sensor-source")
-    .with_data_type("sensor")
+    .with_data_type(DataType::sensor_reading(10))
     .with_interval_ms(1000)
     .with_dispatch_mode(DispatchMode::Channel)
     .with_dispatch_buffer_capacity(2000)
@@ -63,8 +65,13 @@ let source = MockSource::builder("sensor-source")
 
 // Counter source for testing
 let counter = MockSource::builder("counter")
-    .with_data_type("counter")
+    .with_data_type(DataType::Counter)
     .with_interval_ms(500)
+    .build()?;
+
+// String data types also work for convenience (defaults to 5 sensors)
+let sensor = MockSource::builder("sensor")
+    .with_data_type("sensor_reading")
     .build()?;
 ```
 
@@ -73,11 +80,11 @@ let counter = MockSource::builder("counter")
 For programmatic or configuration-file-driven scenarios:
 
 ```rust
-use drasi_source_mock::{MockSource, MockSourceConfig};
+use drasi_source_mock::{MockSource, MockSourceConfig, DataType};
 
-// Using MockSourceConfig
+// Using MockSourceConfig with SensorReading (sensor_count is embedded in DataType)
 let config = MockSourceConfig {
-    data_type: "sensor".to_string(),
+    data_type: DataType::sensor_reading(10),
     interval_ms: 1000,
 };
 
@@ -97,24 +104,26 @@ let source = MockSource::with_dispatch(
 | Name | Description | Data Type | Valid Values | Default |
 |------|-------------|-----------|--------------|---------|
 | `id` | Unique identifier for the source instance | `String` | Any non-empty string | **(Required)** |
-| `data_type` | Type of synthetic data to generate | `String` | `"counter"`, `"sensor"`, `"generic"` | `"generic"` |
+| `data_type` | Type of synthetic data to generate | `DataType` | `Counter`, `SensorReading { sensor_count }`, `Generic` | `Generic` |
 | `interval_ms` | Interval between data generation events in milliseconds | `u64` | Any positive integer (minimum 1) | `5000` |
 | `dispatch_mode` | Event dispatch mode for subscribers | `DispatchMode` | `Channel` (isolated with backpressure), `Broadcast` (shared, no backpressure) | `Channel` |
 | `dispatch_buffer_capacity` | Buffer size for dispatch channels | `usize` | Any positive integer | `1000` |
 | `bootstrap_provider` | Bootstrap provider for initial data delivery | `Box<dyn BootstrapProvider>` | Any bootstrap provider implementation | `None` |
 | `auto_start` | Whether to start automatically when added to DrasiLib | `bool` | `true`, `false` | `true` |
 
+**Note**: The `sensor_count` setting is only available for `SensorReading` mode and is embedded in the `DataType` enum (default: 5).
+
 **Configuration Validation:**
 
 The `MockSourceConfig::validate()` method checks:
-- `data_type` is one of the valid types: `"counter"`, `"sensor"`, or `"generic"`
 - `interval_ms` is greater than 0 (non-zero interval required)
+- For `SensorReading` mode: `sensor_count` is greater than 0 (must have at least one sensor)
 
 ## Input Schema
 
 The MockSource generates data internally and does not consume external input. However, it produces graph nodes with the following schemas based on the configured `data_type`:
 
-### Counter Mode (`data_type: "counter"`)
+### Counter Mode (`data_type: DataType::Counter`)
 
 **Generated Node Schema:**
 ```
@@ -142,15 +151,16 @@ Properties:
 - Increments by 1 on each generation
 - Predictable, deterministic sequence
 - Useful for testing ordering and sequential processing
+- Always generates INSERT events
 
-### Sensor Mode (`data_type: "sensor"`)
+### Sensor Reading Mode (`data_type: DataType::SensorReading { sensor_count }`)
 
 **Generated Node Schema:**
 ```
 Label: SensorReading
-Element ID Format: reading_{sensor_id}_{sequence}
+Element ID Format: sensor_{sensor_id}
 Properties:
-  - sensor_id: String (randomly selected: "sensor_0" to "sensor_4")
+  - sensor_id: String (e.g., "sensor_0" to "sensor_{sensor_count-1}")
   - temperature: Float (random value between 20.0 and 30.0)
   - humidity: Float (random value between 40.0 and 60.0)
   - timestamp: String (RFC3339 formatted UTC timestamp)
@@ -159,7 +169,7 @@ Properties:
 **Example Node:**
 ```json
 {
-  "id": "reading_2_42",
+  "id": "sensor_2",
   "labels": ["SensorReading"],
   "properties": {
     "sensor_id": "sensor_2",
@@ -171,13 +181,15 @@ Properties:
 ```
 
 **Characteristics:**
-- Simulates 5 different IoT sensors (sensor_0 through sensor_4)
-- Randomized sensor selection on each generation
+- Simulates a configurable number of IoT sensors (default: 5, controlled by `sensor_count`)
+- Sensor IDs range from `sensor_0` to `sensor_{sensor_count-1}`
+- Randomized sensor selection on each generation, constrained to configured sensor count
 - Temperature range: 20.0°C to 30.0°C
 - Humidity range: 40% to 60%
-- Useful for testing IoT scenarios, aggregations, and filtering
+- **INSERT vs UPDATE behavior**: First reading for each sensor generates an INSERT event; subsequent readings for the same sensor generate UPDATE events
+- Useful for testing IoT scenarios, aggregations, filtering, and update handling
 
-### Generic Mode (`data_type: "generic"`)
+### Generic Mode (`data_type: DataType::Generic`)
 
 **Generated Node Schema:**
 ```
@@ -207,13 +219,14 @@ Properties:
 - Fixed message string for consistency
 - Default mode when data_type is not specified
 - General-purpose testing and development
+- Always generates INSERT events
 
 ## Usage Examples
 
 ### Basic Usage
 
 ```rust
-use drasi_source_mock::MockSource;
+use drasi_source_mock::{MockSource, DataType};
 use drasi_lib::Source;
 use std::sync::Arc;
 
@@ -222,7 +235,7 @@ async fn main() -> anyhow::Result<()> {
     // Create a counter source
     let counter_source = Arc::new(
         MockSource::builder("counter-source")
-            .with_data_type("counter")
+            .with_data_type(DataType::Counter)
             .with_interval_ms(1000)
             .build()?
     );
@@ -243,7 +256,7 @@ async fn main() -> anyhow::Result<()> {
 ### Integration with DrasiLib
 
 ```rust
-use drasi_source_mock::MockSource;
+use drasi_source_mock::{MockSource, DataType};
 use drasi_lib::DrasiLib;
 use std::sync::Arc;
 
@@ -254,10 +267,10 @@ async fn main() -> anyhow::Result<()> {
         .build()
         .await?;
 
-    // Create and add mock source
+    // Create and add mock source with 10 sensors
     let sensor_source = Arc::new(
         MockSource::builder("sensors")
-            .with_data_type("sensor")
+            .with_data_type(DataType::sensor_reading(10))
             .with_interval_ms(2000)
             .build()?
     );
@@ -282,15 +295,15 @@ async fn main() -> anyhow::Result<()> {
 ### Testing with Mock Source
 
 ```rust
-use drasi_source_mock::{MockSource, MockSourceConfig};
+use drasi_source_mock::{MockSource, MockSourceConfig, DataType};
 use drasi_lib::channels::SourceEvent;
 use drasi_lib::Source;
 
 #[tokio::test]
 async fn test_sensor_data_generation() {
-    // Create sensor source
+    // Create sensor source with 5 sensors
     let config = MockSourceConfig {
-        data_type: "sensor".to_string(),
+        data_type: DataType::sensor_reading(5),
         interval_ms: 100,
     };
     let source = MockSource::new("test-sensor", config).unwrap();
@@ -320,7 +333,7 @@ async fn test_sensor_data_generation() {
 ### Manual Event Injection (Testing)
 
 ```rust
-use drasi_source_mock::MockSource;
+use drasi_source_mock::{MockSource, DataType};
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap,
     ElementReference, SourceChange, ElementValue
@@ -330,7 +343,7 @@ use std::sync::Arc;
 #[tokio::test]
 async fn test_event_injection() {
     let source = MockSource::builder("test-source")
-        .with_data_type("counter")
+        .with_data_type(DataType::Counter)
         .build()
         .unwrap();
 
@@ -364,7 +377,7 @@ async fn test_event_injection() {
 ### With Bootstrap Provider
 
 ```rust
-use drasi_source_mock::MockSource;
+use drasi_source_mock::{MockSource, DataType};
 use drasi_lib::bootstrap::{BootstrapProvider, BootstrapRequest};
 use async_trait::async_trait;
 
@@ -385,7 +398,7 @@ impl BootstrapProvider for MyBootstrapProvider {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let source = MockSource::builder("sensor-source")
-        .with_data_type("sensor")
+        .with_data_type(DataType::sensor_reading(10))
         .with_interval_ms(1000)
         .with_bootstrap_provider(MyBootstrapProvider)
         .build()?;
@@ -400,12 +413,12 @@ async fn main() -> anyhow::Result<()> {
 ### Different Dispatch Modes
 
 ```rust
-use drasi_source_mock::MockSource;
+use drasi_source_mock::{MockSource, DataType};
 use drasi_lib::channels::DispatchMode;
 
 // Channel mode - isolated channels per subscriber with backpressure
 let channel_source = MockSource::builder("channel-source")
-    .with_data_type("sensor")
+    .with_data_type(DataType::sensor_reading(20))
     .with_dispatch_mode(DispatchMode::Channel)
     .with_dispatch_buffer_capacity(5000)
     .build()?;
@@ -413,7 +426,7 @@ let channel_source = MockSource::builder("channel-source")
 // Broadcast mode - shared channel, no backpressure
 // Events may be dropped if subscribers can't keep up
 let broadcast_source = MockSource::builder("broadcast-source")
-    .with_data_type("counter")
+    .with_data_type(DataType::Counter)
     .with_dispatch_mode(DispatchMode::Broadcast)
     .with_dispatch_buffer_capacity(100)
     .build()?;
@@ -431,6 +444,7 @@ The MockSource runs an internal Tokio task that:
 4. **Data Generation**: Creates nodes based on `data_type` configuration
 5. **Event Dispatch**: Publishes via SourceBase dispatcher system
 6. **Profiling Metadata**: Includes timestamps for performance tracking
+7. **Sensor Tracking**: For SensorReading mode, tracks which sensors have been seen to determine INSERT vs UPDATE
 
 **Generation Loop:**
 ```
@@ -443,10 +457,19 @@ Dispatch Event → Increment Sequence → Tick → ...
 All generated nodes have predictable element IDs:
 
 - **Counter**: `counter_{sequence}` (e.g., `counter_1`, `counter_2`, ...)
-- **Sensor**: `reading_{sensor_id}_{sequence}` (e.g., `reading_2_42`)
+- **SensorReading**: `sensor_{sensor_id}` (e.g., `sensor_0`, `sensor_3`) - stable ID per sensor
 - **Generic**: `generic_{sequence}` (e.g., `generic_1`, `generic_2`, ...)
 
-The sequence number increments with each generation cycle, providing traceability and ordering.
+For Counter and Generic modes, the sequence number increments with each generation cycle. For SensorReading mode, the element ID is based solely on the sensor_id for stable identity across readings.
+
+### Sensor Reading INSERT vs UPDATE Behavior
+
+For the SensorReading mode, the source tracks which sensors have already been seen:
+
+1. **First reading for a sensor**: Generates `SourceChange::Insert { element }` event
+2. **Subsequent readings for the same sensor**: Generates `SourceChange::Update { element }` event
+
+This simulates realistic sensor behavior where sensors are registered once and then continuously update their readings.
 
 ### Timestamp Generation
 
@@ -463,10 +486,10 @@ All modes include an RFC3339 formatted timestamp:
 
 ### Randomization Details
 
-**Sensor Mode:**
+**SensorReading Mode:**
 - Temperature: `20.0 + rand::random::<f64>() * 10.0` → [20.0, 30.0)
 - Humidity: `40.0 + rand::random::<f64>() * 20.0` → [40.0, 60.0)
-- Sensor ID: `rand::random::<u32>() % 5` → {0, 1, 2, 3, 4}
+- Sensor ID: `rand::random::<u32>() % sensor_count` → {0, 1, ..., sensor_count-1}
 
 **Generic Mode:**
 - Value: `rand::random::<i32>()` → Full i32 range
@@ -600,14 +623,14 @@ let event = rx.recv().await?;
 
 ## Known Limitations
 
-1. **Insert-Only Operations**: Only generates insert events, never updates or deletes
-2. **Node-Only Data**: Only generates nodes, not graph relationships/edges
-3. **Fixed Schemas**: Each mode has a predefined schema that cannot be customized
-4. **No Custom Properties**: Cannot add additional properties beyond the schema
-5. **Predictable Randomness**: Not cryptographically secure (uses standard `rand` crate)
-6. **Single Label Per Mode**: Each mode generates nodes with exactly one label
-7. **No State Persistence**: Sequence counter resets on restart
-8. **No Relationship Generation**: Cannot generate edges between nodes
+1. **Node-Only Data**: Only generates nodes, not graph relationships/edges
+2. **Fixed Schemas**: Each mode has a predefined schema that cannot be customized
+3. **No Custom Properties**: Cannot add additional properties beyond the schema
+4. **Predictable Randomness**: Not cryptographically secure (uses standard `rand` crate)
+5. **Single Label Per Mode**: Each mode generates nodes with exactly one label
+6. **No State Persistence**: Sequence counter and seen_sensors set reset on restart
+7. **No Relationship Generation**: Cannot generate edges between nodes
+8. **SensorReading Only Mode with Updates**: Only SensorReading mode supports UPDATE events; Counter and Generic always INSERT
 
 ## Troubleshooting
 
@@ -634,6 +657,7 @@ println!("Source status: {:?}", status);
 let props = source.properties();
 println!("Data type: {:?}", props.get("data_type"));
 println!("Interval: {:?}", props.get("interval_ms"));
+println!("Sensor count: {:?}", props.get("sensor_count"));
 ```
 
 ### Wrong Data Type Generated
@@ -643,17 +667,18 @@ println!("Interval: {:?}", props.get("interval_ms"));
 - Missing expected properties
 
 **Checks:**
-1. Verify `data_type` spelling is exact (case-sensitive)
-2. Valid values: `"counter"`, `"sensor"`, `"generic"`
-3. Invalid/missing values default to `"generic"`
-4. Check configuration was applied correctly
+1. Verify `data_type` is using the correct enum variant or string
+2. Valid enum values: `DataType::Counter`, `DataType::SensorReading { sensor_count }`, `DataType::Generic`
+3. Valid string values: `"counter"`, `"sensor_reading"` (or `"sensor"` for backwards compatibility), `"generic"`
+4. Invalid string values default to `DataType::Generic`
+5. Check configuration was applied correctly
 
 **Verification:**
 ```rust
 let props = source.properties();
 assert_eq!(
     props.get("data_type"),
-    Some(&serde_json::Value::String("sensor".to_string()))
+    Some(&serde_json::Value::String("sensor_reading".to_string()))
 );
 ```
 
@@ -693,13 +718,12 @@ MATCH (s:SensorReading) WHERE s.temperature > 25 RETURN s
 
 ### Configuration Validation Errors
 
-**Invalid Data Type:**
+**Invalid Data Type (string):**
 ```
-Error: Validation error: data_type 'sensors' is not valid.
-Valid options are: counter, sensor, generic
+Error: Invalid data_type 'sensors'. Valid options are: counter, sensor_reading, generic
 ```
 
-**Solution**: Use exact spelling: `"counter"`, `"sensor"`, or `"generic"`
+**Solution**: Use exact spelling: `"counter"`, `"sensor_reading"` (or `"sensor"`), or `"generic"`. Or use the `DataType` enum directly.
 
 **Zero Interval:**
 ```
@@ -708,6 +732,14 @@ Please specify a positive interval in milliseconds (minimum 1)
 ```
 
 **Solution**: Use positive interval (minimum 1ms)
+
+**Zero Sensor Count:**
+```
+Error: Validation error: sensor_count cannot be 0.
+Please specify at least 1 sensor
+```
+
+**Solution**: Use positive sensor count (minimum 1)
 
 ### High CPU Usage
 
@@ -761,6 +793,16 @@ See the test suite in `src/tests.rs` for comprehensive usage examples including:
 - Configuration serialization
 
 ## Changelog
+
+### Version 0.3.0
+- **Breaking Change**: `data_type` is now a `DataType` enum instead of a String
+- **Breaking Change**: `sensor` data type renamed to `sensor_reading` (legacy `"sensor"` string still works for backwards compatibility)
+- `sensor_count` is now embedded in `DataType::SensorReading { sensor_count }` rather than a separate config field
+- SensorReading mode now generates INSERT for first reading of each sensor, UPDATE for subsequent readings
+- SensorReading element IDs changed from `reading_{sensor_id}_{sequence}` to `sensor_{sensor_id}` for stable identity
+- Added `DataType` enum with `Counter`, `SensorReading { sensor_count }`, and `Generic` variants
+- Added `DataType::sensor_reading(count)` helper method
+- Builder `with_data_type()` now accepts both `DataType` enum and strings
 
 ### Version 0.2.0
 - Initial release as separate plugin crate

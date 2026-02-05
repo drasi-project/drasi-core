@@ -22,7 +22,7 @@
 //!
 //! The mock source supports three data generation modes:
 //!
-//! ## Counter Mode (`data_type: "counter"`)
+//! ## Counter Mode (`data_type: DataType::Counter`)
 //!
 //! Generates sequentially numbered nodes with the label `Counter`:
 //!
@@ -37,14 +37,17 @@
 //! }
 //! ```
 //!
-//! ## Sensor Mode (`data_type: "sensor"`)
+//! ## Sensor Reading Mode (`data_type: DataType::SensorReading { sensor_count }`)
 //!
 //! Generates simulated IoT sensor readings with randomized temperature and humidity
-//! values from 5 different sensors. Each node has the label `SensorReading`:
+//! values from a configurable number of sensors (default: 5). Each node has the label `SensorReading`.
+//!
+//! **Key Behavior**: The first reading for each sensor generates an INSERT event,
+//! subsequent readings for the same sensor generate UPDATE events.
 //!
 //! ```json
 //! {
-//!     "id": "reading_2_42",
+//!     "id": "sensor_2",
 //!     "labels": ["SensorReading"],
 //!     "properties": {
 //!         "sensor_id": "sensor_2",
@@ -55,7 +58,7 @@
 //! }
 //! ```
 //!
-//! ## Generic Mode (`data_type: "generic"`) - Default
+//! ## Generic Mode (`data_type: DataType::Generic`) - Default
 //!
 //! Generates generic nodes with random values and the label `Generic`:
 //!
@@ -75,7 +78,7 @@
 //!
 //! | Field | Type | Default | Description |
 //! |-------|------|---------|-------------|
-//! | `data_type` | string | `"generic"` | Type of data to generate: `counter`, `sensor`, or `generic` |
+//! | `data_type` | `DataType` | `Generic` | Type of data: `Counter`, `SensorReading { sensor_count }`, or `Generic` |
 //! | `interval_ms` | u64 | `5000` | Interval between data generation in milliseconds |
 //!
 //! # Example Configuration (YAML)
@@ -83,19 +86,21 @@
 //! ```yaml
 //! source_type: mock
 //! properties:
-//!   data_type: sensor
+//!   data_type:
+//!     type: sensor_reading
+//!     sensor_count: 10
 //!   interval_ms: 1000
 //! ```
 //!
 //! # Usage Example
 //!
 //! ```rust,ignore
-//! use drasi_source_mock::{MockSource, MockSourceConfig};
+//! use drasi_source_mock::{MockSource, MockSourceConfig, DataType};
 //! use std::sync::Arc;
 //!
 //! // Create configuration for sensor data at 1-second intervals
 //! let config = MockSourceConfig {
-//!     data_type: "sensor".to_string(),
+//!     data_type: DataType::sensor_reading(10),
 //!     interval_ms: 1000,
 //! };
 //!
@@ -119,5 +124,5 @@ mod time;
 #[cfg(test)]
 mod tests;
 
-pub use config::MockSourceConfig;
-pub use mock::{MockSource, MockSourceBuilder};
+pub use config::{DataType, MockSourceConfig};
+pub use mock::{DataTypeInput, MockSource, MockSourceBuilder};

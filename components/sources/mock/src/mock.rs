@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::config::MockSourceConfig;
+use super::config::{DataType, MockSourceConfig};
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_core::models::{
@@ -20,8 +20,9 @@ use drasi_core::models::{
 };
 use log::{debug, info};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use drasi_lib::channels::*;
 use drasi_lib::managers::{log_component_start, log_component_stop};
@@ -31,18 +32,21 @@ use drasi_lib::Source;
 /// Mock source that generates synthetic data for testing and development.
 ///
 /// This source runs an internal tokio task that generates data at configurable
-/// intervals. It supports different data types (counter, sensor, generic) to
+/// intervals. It supports different data types (counter, sensor_reading, generic) to
 /// simulate various real-world scenarios.
 ///
 /// # Fields
 ///
 /// - `base`: Common source functionality (dispatchers, status, lifecycle)
-/// - `config`: Mock-specific configuration (data_type, interval_ms)
+/// - `config`: Mock-specific configuration (data_type, interval_ms, sensor_count)
+/// - `seen_sensors`: Tracks which sensors have been seen for ADD vs UPDATE logic
 pub struct MockSource {
     /// Base source implementation providing common functionality
     base: SourceBase,
     /// Mock source configuration
     config: MockSourceConfig,
+    /// Tracks which sensor IDs have already been sent (for ADD vs UPDATE logic)
+    seen_sensors: Arc<RwLock<HashSet<u32>>>,
 }
 
 impl MockSource {
@@ -70,7 +74,7 @@ impl MockSource {
     /// use drasi_source_mock::{MockSource, MockSourceBuilder};
     ///
     /// let config = MockSourceBuilder::new()
-    ///     .with_data_type("sensor")
+    ///     .with_data_type("sensor_reading")
     ///     .with_interval_ms(1000)
     ///     .build();
     ///
@@ -82,6 +86,7 @@ impl MockSource {
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
+            seen_sensors: Arc::new(RwLock::new(HashSet::new())),
         })
     }
 
@@ -106,6 +111,7 @@ impl MockSource {
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
+            seen_sensors: Arc::new(RwLock::new(HashSet::new())),
         })
     }
 }
@@ -125,12 +131,18 @@ impl Source for MockSource {
         let mut props = HashMap::new();
         props.insert(
             "data_type".to_string(),
-            serde_json::Value::String(self.config.data_type.clone()),
+            serde_json::Value::String(self.config.data_type.to_string()),
         );
         props.insert(
             "interval_ms".to_string(),
             serde_json::Value::Number(self.config.interval_ms.into()),
         );
+        if let Some(sensor_count) = self.config.data_type.sensor_count() {
+            props.insert(
+                "sensor_count".to_string(),
+                serde_json::Value::Number(sensor_count.into()),
+            );
+        }
         props
     }
 
@@ -157,6 +169,9 @@ impl Source for MockSource {
         let data_type = self.config.data_type.clone();
         let interval_ms = self.config.interval_ms;
 
+        // Clone seen_sensors for the task
+        let seen_sensors = Arc::clone(&self.seen_sensors);
+
         // Start the data generation task
         let status = Arc::clone(&self.base.status);
         let source_name = self.base.id.clone();
@@ -176,8 +191,8 @@ impl Source for MockSource {
                 seq += 1;
 
                 // Generate data based on type
-                let source_change = match data_type.as_str() {
-                    "counter" => {
+                let source_change = match data_type {
+                    DataType::Counter => {
                         let element_id = format!("counter_{seq}");
                         let reference = ElementReference::new(&source_name, &element_id);
 
@@ -215,9 +230,11 @@ impl Source for MockSource {
 
                         SourceChange::Insert { element }
                     }
-                    "sensor" => {
-                        let sensor_id = rand::random::<u32>() % 5;
-                        let element_id = format!("reading_{sensor_id}_{seq}");
+                    DataType::SensorReading { sensor_count } => {
+                        // Constrain sensor_id to the configured number of sensors
+                        let sensor_id = rand::random::<u32>() % sensor_count;
+                        // Use sensor_id as the element_id for stable identity
+                        let element_id = format!("sensor_{sensor_id}");
                         let reference = ElementReference::new(&source_name, &element_id);
 
                         let mut property_map = ElementPropertyMap::new();
@@ -276,9 +293,19 @@ impl Source for MockSource {
                             properties: property_map,
                         };
 
-                        SourceChange::Insert { element }
+                        // Determine if this is a new sensor (Insert) or an update (Update)
+                        let is_new = {
+                            let mut seen = seen_sensors.write().await;
+                            seen.insert(sensor_id)
+                        };
+
+                        if is_new {
+                            SourceChange::Insert { element }
+                        } else {
+                            SourceChange::Update { element }
+                        }
                     }
-                    _ => {
+                    DataType::Generic => {
                         // Generic data
                         let element_id = format!("generic_{seq}");
                         let reference = ElementReference::new(&source_name, &element_id);
@@ -455,17 +482,17 @@ impl MockSource {
 /// # Example
 ///
 /// ```rust,ignore
-/// use drasi_source_mock::MockSource;
+/// use drasi_source_mock::{MockSource, DataType};
 ///
 /// let source = MockSource::builder("my-source")
-///     .with_data_type("sensor")
+///     .with_data_type(DataType::sensor_reading(10))
 ///     .with_interval_ms(1000)
 ///     .with_bootstrap_provider(my_provider)
 ///     .build()?;
 /// ```
 pub struct MockSourceBuilder {
     id: String,
-    data_type: String,
+    data_type: DataType,
     interval_ms: u64,
     dispatch_mode: Option<DispatchMode>,
     dispatch_buffer_capacity: Option<usize>,
@@ -482,7 +509,7 @@ impl MockSourceBuilder {
     pub fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
-            data_type: "generic".to_string(),
+            data_type: DataType::Generic,
             interval_ms: 5000,
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
@@ -495,9 +522,13 @@ impl MockSourceBuilder {
     ///
     /// # Arguments
     ///
-    /// * `data_type` - One of: `"counter"`, `"sensor"`, or `"generic"` (default)
-    pub fn with_data_type(mut self, data_type: impl Into<String>) -> Self {
-        self.data_type = data_type.into();
+    /// * `data_type` - One of: `DataType::Counter`, `DataType::SensorReading { sensor_count }`, or `DataType::Generic` (default)
+    ///
+    /// For SensorReading, use `DataType::sensor_reading(count)` helper method.
+    /// For convenience, string values are also accepted: "counter", "sensor_reading" (or "sensor"), "generic"
+    /// When using string values for sensor_reading, it defaults to 5 sensors.
+    pub fn with_data_type(mut self, data_type: impl Into<DataTypeInput>) -> Self {
+        self.data_type = data_type.into().0;
         self
     }
 
@@ -579,7 +610,29 @@ impl MockSourceBuilder {
         Ok(MockSource {
             base: SourceBase::new(params)?,
             config,
+            seen_sensors: Arc::new(RwLock::new(HashSet::new())),
         })
+    }
+}
+
+/// Helper type for accepting both DataType enum and string values in with_data_type
+pub struct DataTypeInput(DataType);
+
+impl From<DataType> for DataTypeInput {
+    fn from(dt: DataType) -> Self {
+        DataTypeInput(dt)
+    }
+}
+
+impl From<&str> for DataTypeInput {
+    fn from(s: &str) -> Self {
+        DataTypeInput(s.parse().unwrap_or(DataType::Generic))
+    }
+}
+
+impl From<String> for DataTypeInput {
+    fn from(s: String) -> Self {
+        DataTypeInput(s.parse().unwrap_or(DataType::Generic))
     }
 }
 

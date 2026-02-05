@@ -17,21 +17,82 @@
 //! The mock source generates synthetic data for testing and development purposes.
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
+
+fn default_sensor_count() -> u32 {
+    5
+}
+
+/// Type of data to generate from the mock source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DataType {
+    /// Sequential counter values
+    Counter,
+    /// Simulated sensor readings with temperature and humidity
+    SensorReading {
+        /// Number of sensors to simulate
+        #[serde(default = "default_sensor_count")]
+        sensor_count: u32,
+    },
+    /// Generic random data (default)
+    #[default]
+    Generic,
+}
+
+impl DataType {
+    /// Create a SensorReading data type with the specified number of sensors.
+    pub fn sensor_reading(sensor_count: u32) -> Self {
+        DataType::SensorReading { sensor_count }
+    }
+
+    /// Get the sensor count if this is a SensorReading data type.
+    pub fn sensor_count(&self) -> Option<u32> {
+        match self {
+            DataType::SensorReading { sensor_count } => Some(*sensor_count),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for DataType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DataType::Counter => write!(f, "counter"),
+            DataType::SensorReading { .. } => write!(f, "sensor_reading"),
+            DataType::Generic => write!(f, "generic"),
+        }
+    }
+}
+
+impl FromStr for DataType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "counter" => Ok(DataType::Counter),
+            "sensor_reading" | "sensor" => Ok(DataType::SensorReading {
+                sensor_count: default_sensor_count(),
+            }),
+            "generic" => Ok(DataType::Generic),
+            _ => Err(anyhow::anyhow!(
+                "Invalid data_type '{s}'. Valid options are: counter, sensor_reading, generic"
+            )),
+        }
+    }
+}
 
 /// Mock source configuration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MockSourceConfig {
-    /// Type of data to generate: "counter", "sensor", or "generic"
-    #[serde(default = "default_data_type")]
-    pub data_type: String,
+    /// Type of data to generate
+    #[serde(default)]
+    pub data_type: DataType,
 
     /// Interval between data generation in milliseconds
     #[serde(default = "default_interval_ms")]
     pub interval_ms: u64,
-}
-
-fn default_data_type() -> String {
-    "generic".to_string()
 }
 
 fn default_interval_ms() -> u64 {
@@ -41,37 +102,35 @@ fn default_interval_ms() -> u64 {
 impl Default for MockSourceConfig {
     fn default() -> Self {
         Self {
-            data_type: default_data_type(),
+            data_type: DataType::default(),
             interval_ms: default_interval_ms(),
         }
     }
 }
 
 impl MockSourceConfig {
-    /// Valid data types for mock source.
-    pub const VALID_DATA_TYPES: [&'static str; 3] = ["counter", "sensor", "generic"];
-
     /// Validate the configuration and return an error if invalid.
     ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - Data type is not one of "counter", "sensor", or "generic"
     /// - Interval is 0 (would cause continuous generation without pause)
+    /// - Sensor count is 0 (must have at least one sensor) for SensorReading mode
     pub fn validate(&self) -> anyhow::Result<()> {
-        if !Self::VALID_DATA_TYPES.contains(&self.data_type.as_str()) {
-            return Err(anyhow::anyhow!(
-                "Validation error: data_type '{}' is not valid. \
-                 Valid options are: counter, sensor, generic",
-                self.data_type
-            ));
-        }
-
         if self.interval_ms == 0 {
             return Err(anyhow::anyhow!(
                 "Validation error: interval_ms cannot be 0. \
                  Please specify a positive interval in milliseconds (minimum 1)"
             ));
+        }
+
+        if let DataType::SensorReading { sensor_count } = &self.data_type {
+            if *sensor_count == 0 {
+                return Err(anyhow::anyhow!(
+                    "Validation error: sensor_count cannot be 0. \
+                     Please specify at least 1 sensor"
+                ));
+            }
         }
 
         Ok(())

@@ -26,13 +26,13 @@
 // ============================================================================
 
 mod construction {
-    use crate::{MockSource, MockSourceBuilder, MockSourceConfig};
+    use crate::{DataType, MockSource, MockSourceBuilder, MockSourceConfig};
     use drasi_lib::Source;
 
     #[test]
     fn test_builder_with_valid_config() {
         let source = MockSourceBuilder::new("test-source")
-            .with_data_type("counter")
+            .with_data_type(DataType::Counter)
             .with_interval_ms(1000)
             .build();
 
@@ -42,7 +42,7 @@ mod construction {
     #[test]
     fn test_new_with_custom_config() {
         let config = MockSourceConfig {
-            data_type: "sensor".to_string(),
+            data_type: DataType::sensor_reading(10),
             interval_ms: 500,
         };
 
@@ -69,7 +69,7 @@ mod construction {
 // ============================================================================
 
 mod properties {
-    use crate::MockSourceBuilder;
+    use crate::{DataType, MockSourceBuilder};
     use drasi_lib::Source;
 
     #[test]
@@ -87,14 +87,14 @@ mod properties {
     #[test]
     fn test_properties_contains_data_type() {
         let source = MockSourceBuilder::new("test")
-            .with_data_type("sensor")
+            .with_data_type(DataType::sensor_reading(5))
             .build()
             .unwrap();
         let props = source.properties();
 
         assert_eq!(
             props.get("data_type"),
-            Some(&serde_json::Value::String("sensor".to_string()))
+            Some(&serde_json::Value::String("sensor_reading".to_string()))
         );
     }
 
@@ -111,6 +111,42 @@ mod properties {
             Some(&serde_json::Value::Number(2000.into()))
         );
     }
+
+    #[test]
+    fn test_properties_contains_sensor_count_for_sensor_reading() {
+        let source = MockSourceBuilder::new("test")
+            .with_data_type(DataType::sensor_reading(10))
+            .build()
+            .unwrap();
+        let props = source.properties();
+
+        assert_eq!(
+            props.get("sensor_count"),
+            Some(&serde_json::Value::Number(10.into()))
+        );
+    }
+
+    #[test]
+    fn test_properties_no_sensor_count_for_counter() {
+        let source = MockSourceBuilder::new("test")
+            .with_data_type(DataType::Counter)
+            .build()
+            .unwrap();
+        let props = source.properties();
+
+        assert_eq!(props.get("sensor_count"), None);
+    }
+
+    #[test]
+    fn test_properties_no_sensor_count_for_generic() {
+        let source = MockSourceBuilder::new("test")
+            .with_data_type(DataType::Generic)
+            .build()
+            .unwrap();
+        let props = source.properties();
+
+        assert_eq!(props.get("sensor_count"), None);
+    }
 }
 
 // ============================================================================
@@ -118,14 +154,14 @@ mod properties {
 // ============================================================================
 
 mod lifecycle {
-    use crate::{MockSource, MockSourceConfig};
+    use crate::{DataType, MockSource, MockSourceConfig};
     use drasi_lib::channels::ComponentStatus;
     use drasi_lib::Source;
 
     #[tokio::test]
     async fn test_initial_status_is_stopped() {
         let config = MockSourceConfig {
-            data_type: "counter".to_string(),
+            data_type: DataType::Counter,
             interval_ms: 1000,
         };
 
@@ -136,7 +172,7 @@ mod lifecycle {
     #[tokio::test]
     async fn test_status_transitions() {
         let config = MockSourceConfig {
-            data_type: "counter".to_string(),
+            data_type: DataType::Counter,
             interval_ms: 1000,
         };
 
@@ -161,7 +197,7 @@ mod lifecycle {
 // ============================================================================
 
 mod builder {
-    use crate::MockSourceBuilder;
+    use crate::{DataType, MockSourceBuilder};
     use drasi_lib::Source;
 
     #[test]
@@ -177,12 +213,14 @@ mod builder {
             props.get("interval_ms"),
             Some(&serde_json::Value::Number(5000.into()))
         );
+        // sensor_count should not be present for generic
+        assert_eq!(props.get("sensor_count"), None);
     }
 
     #[test]
     fn test_builder_with_all_options() {
         let source = MockSourceBuilder::new("test")
-            .with_data_type("sensor")
+            .with_data_type(DataType::sensor_reading(10))
             .with_interval_ms(1000)
             .build()
             .unwrap();
@@ -190,33 +228,72 @@ mod builder {
 
         assert_eq!(
             props.get("data_type"),
-            Some(&serde_json::Value::String("sensor".to_string()))
+            Some(&serde_json::Value::String("sensor_reading".to_string()))
         );
         assert_eq!(
             props.get("interval_ms"),
             Some(&serde_json::Value::Number(1000.into()))
+        );
+        assert_eq!(
+            props.get("sensor_count"),
+            Some(&serde_json::Value::Number(10.into()))
         );
     }
 
     #[test]
     fn test_builder_chaining() {
         let source = MockSourceBuilder::new("test")
-            .with_data_type("counter")
-            .with_data_type("sensor") // Override
+            .with_data_type(DataType::Counter)
+            .with_data_type(DataType::sensor_reading(5)) // Override
             .build()
             .unwrap();
         let props = source.properties();
 
         assert_eq!(
             props.get("data_type"),
-            Some(&serde_json::Value::String("sensor".to_string()))
+            Some(&serde_json::Value::String("sensor_reading".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_builder_with_string_data_type() {
+        // Test that string data types still work for backwards compatibility
+        let source = MockSourceBuilder::new("test")
+            .with_data_type("sensor_reading")
+            .build()
+            .unwrap();
+        let props = source.properties();
+
+        assert_eq!(
+            props.get("data_type"),
+            Some(&serde_json::Value::String("sensor_reading".to_string()))
+        );
+        // String defaults to 5 sensors
+        assert_eq!(
+            props.get("sensor_count"),
+            Some(&serde_json::Value::Number(5.into()))
+        );
+    }
+
+    #[test]
+    fn test_builder_with_legacy_sensor_string() {
+        // Test that "sensor" still works and maps to sensor_reading
+        let source = MockSourceBuilder::new("test")
+            .with_data_type("sensor")
+            .build()
+            .unwrap();
+        let props = source.properties();
+
+        assert_eq!(
+            props.get("data_type"),
+            Some(&serde_json::Value::String("sensor_reading".to_string()))
         );
     }
 
     #[test]
     fn test_builder_id() {
         let source = MockSourceBuilder::new("my-mock-source")
-            .with_data_type("counter")
+            .with_data_type(DataType::Counter)
             .build()
             .unwrap();
 
@@ -229,13 +306,13 @@ mod builder {
 // ============================================================================
 
 mod event_generation {
-    use crate::{MockSource, MockSourceConfig};
+    use crate::{DataType, MockSource, MockSourceConfig};
     use drasi_lib::Source;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_counter_data_generation() {
         let config = MockSourceConfig {
-            data_type: "counter".to_string(),
+            data_type: DataType::Counter,
             interval_ms: 100,
         };
 
@@ -269,7 +346,7 @@ mod event_generation {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_sensor_data_generation() {
         let config = MockSourceConfig {
-            data_type: "sensor".to_string(),
+            data_type: DataType::sensor_reading(5),
             interval_ms: 100,
         };
 
@@ -301,7 +378,7 @@ mod event_generation {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_generic_data_generation() {
         let config = MockSourceConfig {
-            data_type: "generic".to_string(),
+            data_type: DataType::Generic,
             interval_ms: 100,
         };
 
@@ -336,12 +413,12 @@ mod event_generation {
 // ============================================================================
 
 mod config {
-    use crate::MockSourceConfig;
+    use crate::{DataType, MockSourceConfig};
 
     #[test]
     fn test_config_serialization() {
         let config = MockSourceConfig {
-            data_type: "sensor".to_string(),
+            data_type: DataType::sensor_reading(10),
             interval_ms: 1000,
         };
 
@@ -357,16 +434,63 @@ mod config {
         let json = r#"{}"#;
         let config: MockSourceConfig = serde_json::from_str(json).unwrap();
 
-        assert_eq!(config.data_type, "generic"); // default
+        assert_eq!(config.data_type, DataType::Generic); // default
         assert_eq!(config.interval_ms, 5000); // default
     }
 
     #[test]
     fn test_config_deserialization_partial() {
-        let json = r#"{"data_type": "counter"}"#;
+        let json = r#"{"data_type": {"type": "counter"}}"#;
         let config: MockSourceConfig = serde_json::from_str(json).unwrap();
 
-        assert_eq!(config.data_type, "counter");
+        assert_eq!(config.data_type, DataType::Counter);
         assert_eq!(config.interval_ms, 5000); // default
+    }
+
+    #[test]
+    fn test_config_sensor_reading_with_custom_count() {
+        let json = r#"{"data_type": {"type": "sensor_reading", "sensor_count": 20}}"#;
+        let config: MockSourceConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(config.data_type, DataType::sensor_reading(20));
+        assert_eq!(config.data_type.sensor_count(), Some(20));
+    }
+
+    #[test]
+    fn test_config_sensor_reading_with_default_count() {
+        let json = r#"{"data_type": {"type": "sensor_reading"}}"#;
+        let config: MockSourceConfig = serde_json::from_str(json).unwrap();
+
+        // sensor_count defaults to 5
+        assert_eq!(config.data_type.sensor_count(), Some(5));
+    }
+
+    #[test]
+    fn test_data_type_display() {
+        assert_eq!(DataType::Counter.to_string(), "counter");
+        assert_eq!(DataType::sensor_reading(5).to_string(), "sensor_reading");
+        assert_eq!(DataType::Generic.to_string(), "generic");
+    }
+
+    #[test]
+    fn test_data_type_from_str() {
+        assert_eq!("counter".parse::<DataType>().unwrap(), DataType::Counter);
+        assert_eq!(
+            "sensor_reading".parse::<DataType>().unwrap(),
+            DataType::sensor_reading(5)
+        );
+        assert_eq!(
+            "sensor".parse::<DataType>().unwrap(),
+            DataType::sensor_reading(5)
+        ); // legacy
+        assert_eq!("generic".parse::<DataType>().unwrap(), DataType::Generic);
+        assert!("invalid".parse::<DataType>().is_err());
+    }
+
+    #[test]
+    fn test_data_type_sensor_count_helper() {
+        assert_eq!(DataType::Counter.sensor_count(), None);
+        assert_eq!(DataType::Generic.sensor_count(), None);
+        assert_eq!(DataType::sensor_reading(10).sensor_count(), Some(10));
     }
 }
