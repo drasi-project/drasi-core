@@ -20,6 +20,7 @@
 //! - `builder`: Tests for the `MockSourceBuilder`
 //! - `lifecycle`: Tests for start/stop behavior
 //! - `event_generation`: Tests for data generation modes
+//! - `validation`: Tests for configuration validation
 
 // ============================================================================
 // Construction Tests
@@ -256,41 +257,6 @@ mod builder {
     }
 
     #[test]
-    fn test_builder_with_string_data_type() {
-        // Test that string data types still work for backwards compatibility
-        let source = MockSourceBuilder::new("test")
-            .with_data_type("sensor_reading")
-            .build()
-            .unwrap();
-        let props = source.properties();
-
-        assert_eq!(
-            props.get("data_type"),
-            Some(&serde_json::Value::String("sensor_reading".to_string()))
-        );
-        // String defaults to 5 sensors
-        assert_eq!(
-            props.get("sensor_count"),
-            Some(&serde_json::Value::Number(5.into()))
-        );
-    }
-
-    #[test]
-    fn test_builder_with_legacy_sensor_string() {
-        // Test that "sensor" still works and maps to sensor_reading
-        let source = MockSourceBuilder::new("test")
-            .with_data_type("sensor")
-            .build()
-            .unwrap();
-        let props = source.properties();
-
-        assert_eq!(
-            props.get("data_type"),
-            Some(&serde_json::Value::String("sensor_reading".to_string()))
-        );
-    }
-
-    #[test]
     fn test_builder_id() {
         let source = MockSourceBuilder::new("my-mock-source")
             .with_data_type(DataType::Counter)
@@ -473,24 +439,88 @@ mod config {
     }
 
     #[test]
-    fn test_data_type_from_str() {
-        assert_eq!("counter".parse::<DataType>().unwrap(), DataType::Counter);
-        assert_eq!(
-            "sensor_reading".parse::<DataType>().unwrap(),
-            DataType::sensor_reading(5)
-        );
-        assert_eq!(
-            "sensor".parse::<DataType>().unwrap(),
-            DataType::sensor_reading(5)
-        ); // legacy
-        assert_eq!("generic".parse::<DataType>().unwrap(), DataType::Generic);
-        assert!("invalid".parse::<DataType>().is_err());
-    }
-
-    #[test]
     fn test_data_type_sensor_count_helper() {
         assert_eq!(DataType::Counter.sensor_count(), None);
         assert_eq!(DataType::Generic.sensor_count(), None);
         assert_eq!(DataType::sensor_reading(10).sensor_count(), Some(10));
+    }
+}
+
+// ============================================================================
+// Validation Tests
+// ============================================================================
+
+mod validation {
+    use crate::{DataType, MockSource, MockSourceBuilder, MockSourceConfig};
+
+    #[test]
+    fn test_validation_rejects_zero_interval() {
+        let config = MockSourceConfig {
+            data_type: DataType::Counter,
+            interval_ms: 0,
+        };
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validation_rejects_zero_sensor_count() {
+        let config = MockSourceConfig {
+            data_type: DataType::sensor_reading(0),
+            interval_ms: 1000,
+        };
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validation_accepts_valid_config() {
+        let config = MockSourceConfig {
+            data_type: DataType::sensor_reading(5),
+            interval_ms: 1000,
+        };
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_new_rejects_invalid_config() {
+        let config = MockSourceConfig {
+            data_type: DataType::sensor_reading(0),
+            interval_ms: 1000,
+        };
+
+        assert!(MockSource::new("test", config).is_err());
+    }
+
+    #[test]
+    fn test_builder_rejects_zero_interval() {
+        let result = MockSourceBuilder::new("test")
+            .with_data_type(DataType::Counter)
+            .with_interval_ms(0)
+            .build();
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_builder_rejects_zero_sensor_count() {
+        let result = MockSourceBuilder::new("test")
+            .with_data_type(DataType::sensor_reading(0))
+            .with_interval_ms(1000)
+            .build();
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_with_dispatch_rejects_invalid_config() {
+        let config = MockSourceConfig {
+            data_type: DataType::Counter,
+            interval_ms: 0,
+        };
+
+        let result = MockSource::with_dispatch("test", config, None, None);
+        assert!(result.is_err());
     }
 }

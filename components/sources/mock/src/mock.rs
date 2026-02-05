@@ -38,7 +38,7 @@ use drasi_lib::Source;
 /// # Fields
 ///
 /// - `base`: Common source functionality (dispatchers, status, lifecycle)
-/// - `config`: Mock-specific configuration (data_type, interval_ms, sensor_count)
+/// - `config`: Mock-specific configuration (data_type with optional embedded sensor_count, interval_ms)
 /// - `seen_sensors`: Tracks which sensors have been seen for ADD vs UPDATE logic
 pub struct MockSource {
     /// Base source implementation providing common functionality
@@ -66,21 +66,24 @@ impl MockSource {
     ///
     /// # Errors
     ///
-    /// Returns an error if the base source cannot be initialized.
+    /// Returns an error if:
+    /// - The base source cannot be initialized
+    /// - The configuration is invalid (e.g., interval_ms is 0, sensor_count is 0)
     ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// use drasi_source_mock::{MockSource, MockSourceBuilder};
+    /// use drasi_source_mock::{MockSource, MockSourceConfig, DataType};
     ///
-    /// let config = MockSourceBuilder::new()
-    ///     .with_data_type("sensor_reading")
-    ///     .with_interval_ms(1000)
-    ///     .build();
+    /// let config = MockSourceConfig {
+    ///     data_type: DataType::sensor_reading(10),
+    ///     interval_ms: 1000,
+    /// };
     ///
     /// let source = MockSource::new("my-mock-source", config)?;
     /// ```
     pub fn new(id: impl Into<String>, config: MockSourceConfig) -> Result<Self> {
+        config.validate()?;
         let id = id.into();
         let params = SourceBaseParams::new(id);
         Ok(Self {
@@ -94,12 +97,19 @@ impl MockSource {
     ///
     /// The event channel is automatically injected when the source is added
     /// to DrasiLib via `add_source()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The base source cannot be initialized
+    /// - The configuration is invalid (e.g., interval_ms is 0, sensor_count is 0)
     pub fn with_dispatch(
         id: impl Into<String>,
         config: MockSourceConfig,
         dispatch_mode: Option<DispatchMode>,
         dispatch_buffer_capacity: Option<usize>,
     ) -> Result<Self> {
+        config.validate()?;
         let id = id.into();
         let mut params = SourceBaseParams::new(id);
         if let Some(mode) = dispatch_mode {
@@ -525,10 +535,8 @@ impl MockSourceBuilder {
     /// * `data_type` - One of: `DataType::Counter`, `DataType::SensorReading { sensor_count }`, or `DataType::Generic` (default)
     ///
     /// For SensorReading, use `DataType::sensor_reading(count)` helper method.
-    /// For convenience, string values are also accepted: "counter", "sensor_reading" (or "sensor"), "generic"
-    /// When using string values for sensor_reading, it defaults to 5 sensors.
-    pub fn with_data_type(mut self, data_type: impl Into<DataTypeInput>) -> Self {
-        self.data_type = data_type.into().0;
+    pub fn with_data_type(mut self, data_type: DataType) -> Self {
+        self.data_type = data_type;
         self
     }
 
@@ -589,11 +597,19 @@ impl MockSourceBuilder {
     /// # Returns
     ///
     /// A fully constructed `MockSource`, or an error if construction fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The base source cannot be initialized
+    /// - The configuration is invalid (e.g., interval_ms is 0, sensor_count is 0)
     pub fn build(self) -> Result<MockSource> {
         let config = MockSourceConfig {
             data_type: self.data_type,
             interval_ms: self.interval_ms,
         };
+
+        config.validate()?;
 
         // Build SourceBaseParams with all settings
         let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
@@ -612,27 +628,6 @@ impl MockSourceBuilder {
             config,
             seen_sensors: Arc::new(RwLock::new(HashSet::new())),
         })
-    }
-}
-
-/// Helper type for accepting both DataType enum and string values in with_data_type
-pub struct DataTypeInput(DataType);
-
-impl From<DataType> for DataTypeInput {
-    fn from(dt: DataType) -> Self {
-        DataTypeInput(dt)
-    }
-}
-
-impl From<&str> for DataTypeInput {
-    fn from(s: &str) -> Self {
-        DataTypeInput(s.parse().unwrap_or(DataType::Generic))
-    }
-}
-
-impl From<String> for DataTypeInput {
-    fn from(s: String) -> Self {
-        DataTypeInput(s.parse().unwrap_or(DataType::Generic))
     }
 }
 

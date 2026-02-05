@@ -68,11 +68,6 @@ let counter = MockSource::builder("counter")
     .with_data_type(DataType::Counter)
     .with_interval_ms(500)
     .build()?;
-
-// String data types also work for convenience (defaults to 5 sensors)
-let sensor = MockSource::builder("sensor")
-    .with_data_type("sensor_reading")
-    .build()?;
 ```
 
 ### Config Struct Approach
@@ -667,11 +662,9 @@ println!("Sensor count: {:?}", props.get("sensor_count"));
 - Missing expected properties
 
 **Checks:**
-1. Verify `data_type` is using the correct enum variant or string
+1. Verify `data_type` is using the correct enum variant
 2. Valid enum values: `DataType::Counter`, `DataType::SensorReading { sensor_count }`, `DataType::Generic`
-3. Valid string values: `"counter"`, `"sensor_reading"` (or `"sensor"` for backwards compatibility), `"generic"`
-4. Invalid string values default to `DataType::Generic`
-5. Check configuration was applied correctly
+3. Check configuration was applied correctly
 
 **Verification:**
 ```rust
@@ -791,18 +784,17 @@ See the test suite in `src/tests.rs` for comprehensive usage examples including:
 - Event generation verification
 - Builder API usage
 - Configuration serialization
+- Validation error handling
 
 ## Changelog
 
 ### Version 0.3.0
-- **Breaking Change**: `data_type` is now a `DataType` enum instead of a String
-- **Breaking Change**: `sensor` data type renamed to `sensor_reading` (legacy `"sensor"` string still works for backwards compatibility)
-- `sensor_count` is now embedded in `DataType::SensorReading { sensor_count }` rather than a separate config field
+- `data_type` is now a `DataType` enum with `Counter`, `SensorReading { sensor_count }`, and `Generic` variants
+- `sensor_count` is embedded in `DataType::SensorReading { sensor_count }` (default: 5)
 - SensorReading mode now generates INSERT for first reading of each sensor, UPDATE for subsequent readings
-- SensorReading element IDs changed from `reading_{sensor_id}_{sequence}` to `sensor_{sensor_id}` for stable identity
-- Added `DataType` enum with `Counter`, `SensorReading { sensor_count }`, and `Generic` variants
+- SensorReading element IDs use `sensor_{sensor_id}` format for stable identity
 - Added `DataType::sensor_reading(count)` helper method
-- Builder `with_data_type()` now accepts both `DataType` enum and strings
+- Configuration validation is now enforced in constructors (rejects interval_ms=0, sensor_count=0)
 
 ### Version 0.2.0
 - Initial release as separate plugin crate

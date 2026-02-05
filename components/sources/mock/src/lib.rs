@@ -125,4 +125,4 @@ mod time;
 mod tests;
 
 pub use config::{DataType, MockSourceConfig};
-pub use mock::{DataTypeInput, MockSource, MockSourceBuilder};
+pub use mock::{MockSource, MockSourceBuilder};

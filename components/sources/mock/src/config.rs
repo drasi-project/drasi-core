@@ -18,7 +18,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::str::FromStr;
 
 fn default_sensor_count() -> u32 {
     5
@@ -62,23 +61,6 @@ impl fmt::Display for DataType {
             DataType::Counter => write!(f, "counter"),
             DataType::SensorReading { .. } => write!(f, "sensor_reading"),
             DataType::Generic => write!(f, "generic"),
-        }
-    }
-}
-
-impl FromStr for DataType {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "counter" => Ok(DataType::Counter),
-            "sensor_reading" | "sensor" => Ok(DataType::SensorReading {
-                sensor_count: default_sensor_count(),
-            }),
-            "generic" => Ok(DataType::Generic),
-            _ => Err(anyhow::anyhow!(
-                "Invalid data_type '{s}'. Valid options are: counter, sensor_reading, generic"
-            )),
         }
     }
 }
