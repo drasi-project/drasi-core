@@ -203,19 +203,34 @@ impl DrasiLib {
 
         // Initialize middleware registry and register all standard middleware factories
         let mut middleware_registry = MiddlewareTypeRegistry::new();
+
+        #[cfg(feature = "middleware-jq")]
         middleware_registry.register(Arc::new(drasi_middleware::jq::JQFactory::new()));
+
+        #[cfg(feature = "middleware-map")]
         middleware_registry.register(Arc::new(drasi_middleware::map::MapFactory::new()));
+
+        #[cfg(feature = "middleware-unwind")]
         middleware_registry.register(Arc::new(drasi_middleware::unwind::UnwindFactory::new()));
+
+        #[cfg(feature = "middleware-relabel")]
         middleware_registry.register(Arc::new(
             drasi_middleware::relabel::RelabelMiddlewareFactory::new(),
         ));
+
+        #[cfg(feature = "middleware-decoder")]
         middleware_registry.register(Arc::new(drasi_middleware::decoder::DecoderFactory::new()));
+
+        #[cfg(feature = "middleware-parse-json")]
         middleware_registry.register(Arc::new(
             drasi_middleware::parse_json::ParseJsonFactory::new(),
         ));
+
+        #[cfg(feature = "middleware-promote")]
         middleware_registry.register(Arc::new(
             drasi_middleware::promote::PromoteMiddlewareFactory::new(),
         ));
+
         let middleware_registry = Arc::new(middleware_registry);
 
         let query_manager = Arc::new(QueryManager::new(

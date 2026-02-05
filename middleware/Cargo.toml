@@ -14,21 +14,37 @@ workspace = true
 
 [features]
 default = []
-bundled-jq = ["jq-rs/bundled"]
+
+# Individual middleware features
+jq = ["dep:jq-rs"]
+decoder = []
+map = []
+parse_json = []
+promote = []
+relabel = []
+unwind = []
+
+# Convenience feature to enable all middleware
+all = ["jq", "decoder", "map", "parse_json", "promote", "relabel", "unwind"]
 
 [package.metadata.docs.rs]
-features = ["bundled-jq"]
+features = ["all"]
 
 [dependencies]
+# Core dependencies (always needed)
 async-trait = "0.1.68"
 drasi-core.workspace = true
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-jsonpath-rust = "0.5.0"
-base64 = "0.22.0"
-ordered-float = "3.7.0"
-hex = "0.4.3"
-urlencoding = "2.1.2"
-jq-rs = "0.4.1"
 tokio = { version = "1.29.1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+
+# Dependencies used by specific middleware
+jsonpath-rust = "0.5.0"  # Used by map/unwind
+base64 = "0.22.0"        # Used by decoder
+ordered-float = "3.7.0"  # Used by jq
+hex = "0.4.3"            # Used by decoder
+urlencoding = "2.1.2"    # Used by decoder
+
+# Optional: only compiled when jq feature is enabled (always uses bundled)
+jq-rs = { version = "0.4.1", optional = true, features = ["bundled"] }
