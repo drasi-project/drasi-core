@@ -338,12 +338,6 @@ impl ReplicationStream {
             }
         };
 
-        if options.ssl_mode != MySqlCdcSslMode::Disabled {
-            return Err(anyhow!(
-                "mysql_cdc does not support SSL at runtime; use ssl_mode=disabled"
-            ));
-        }
-
         Ok(options)
     }
 
