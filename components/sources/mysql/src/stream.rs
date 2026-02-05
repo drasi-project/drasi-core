@@ -307,17 +307,7 @@ impl ReplicationStream {
     }
 
     fn build_replica_options(&self, start_position: StartPosition) -> Result<ReplicaOptions> {
-        let mut options = ReplicaOptions::default();
-        options.hostname = self.config.host.clone();
-        options.port = self.config.port;
-        options.username = self.config.user.clone();
-        options.password = self.config.password.clone();
-        options.database = Some(self.config.database.clone());
-        options.server_id = self.config.server_id;
-        options.blocking = true;
-        options.heartbeat_interval = Duration::from_secs(self.config.heartbeat_interval_seconds);
-
-        options.ssl_mode = match self.config.ssl_mode {
+        let ssl_mode = match self.config.ssl_mode {
             SslMode::Disabled => MySqlCdcSslMode::Disabled,
             SslMode::IfAvailable => MySqlCdcSslMode::IfAvailable,
             SslMode::Require => MySqlCdcSslMode::Require,
@@ -325,7 +315,7 @@ impl ReplicationStream {
             SslMode::RequireVerifyFull => MySqlCdcSslMode::RequireVerifyFull,
         };
 
-        options.binlog = match start_position {
+        let binlog = match start_position {
             StartPosition::FromStart => BinlogOptions::from_start(),
             StartPosition::FromEnd => BinlogOptions::from_end(),
             StartPosition::FromPosition { file, position } => {
@@ -338,7 +328,18 @@ impl ReplicationStream {
             }
         };
 
-        Ok(options)
+        Ok(ReplicaOptions {
+            hostname: self.config.host.clone(),
+            port: self.config.port,
+            username: self.config.user.clone(),
+            password: self.config.password.clone(),
+            database: Some(self.config.database.clone()),
+            server_id: self.config.server_id,
+            blocking: true,
+            heartbeat_interval: Duration::from_secs(self.config.heartbeat_interval_seconds),
+            ssl_mode,
+            binlog,
+        })
     }
 
     async fn persist_state(
