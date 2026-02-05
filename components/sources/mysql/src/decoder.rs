@@ -128,7 +128,6 @@ impl MySqlDecoder {
             format!("{}:{}", table_name, uuid::Uuid::new_v4())
         };
 
-        let mut properties = properties;
         properties.insert(
             "_element_id",
             ElementValue::String(Arc::from(element_id.as_str())),
