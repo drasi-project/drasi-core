@@ -39,13 +39,13 @@ use crate::config::SourceSubscriptionSettings;
 use crate::config::{QueryConfig, QueryLanguage, QueryRuntime};
 use crate::managers::{
     is_operation_valid, log_component_error, log_component_start, log_component_stop,
-    with_component_context, ComponentContext, ComponentEventHistory, ComponentLogRegistry,
-    Operation,
+    ComponentEventHistory, ComponentLogKey, ComponentLogRegistry, Operation,
 };
 use crate::queries::PriorityQueue;
 use crate::queries::QueryBase;
 use crate::sources::Source;
 use crate::sources::{FutureQueueSource, SourceManager, FUTURE_QUEUE_SOURCE_ID};
+use tracing::Instrument;
 
 /// Default query configuration
 struct DefaultQueryConfig;
@@ -126,6 +126,8 @@ enum BootstrapPhase {
 }
 
 pub struct DrasiQuery {
+    // DrasiLib instance ID for log routing isolation
+    instance_id: String,
     // Use QueryBase for common functionality
     base: QueryBase,
     #[allow(dead_code)]
@@ -149,6 +151,7 @@ pub struct DrasiQuery {
 
 impl DrasiQuery {
     pub fn new(
+        instance_id: impl Into<String>,
         config: QueryConfig,
         event_tx: ComponentEventSender,
         source_manager: Arc<SourceManager>,
@@ -163,6 +166,7 @@ impl DrasiQuery {
         let base = QueryBase::new(config, event_tx).context("Failed to create QueryBase")?;
 
         Ok(Self {
+            instance_id: instance_id.into(),
             base,
             continuous_query: None,
             current_results: Arc::new(RwLock::new(Vec::new())),
@@ -504,50 +508,59 @@ impl Query for DrasiQuery {
             let priority_queue = self.priority_queue.clone();
             let query_id = self.base.config.id.clone();
             let source_id_clone = source_id.clone();
+            let instance_id = self.instance_id.clone();
 
             // Get source dispatch mode to determine enqueue strategy
             let dispatch_mode = source.dispatch_mode();
             let use_blocking_enqueue =
                 matches!(dispatch_mode, crate::channels::DispatchMode::Channel);
 
-            let ctx = ComponentContext::new(query_id.clone(), ComponentType::Query);
-            let task = tokio::spawn(with_component_context(ctx, async move {
-                debug!(
-                    "Query '{query_id}' started event forwarder for source '{source_id_clone}' (dispatch_mode: {dispatch_mode:?}, blocking_enqueue: {use_blocking_enqueue})"
-                );
+            let span = tracing::info_span!(
+                "query_source_forwarder",
+                instance_id = %instance_id,
+                component_id = %query_id,
+                component_type = "query"
+            );
+            let task = tokio::spawn(
+                async move {
+                    debug!(
+                        "Query '{query_id}' started event forwarder for source '{source_id_clone}' (dispatch_mode: {dispatch_mode:?}, blocking_enqueue: {use_blocking_enqueue})"
+                    );
 
-                loop {
-                    match receiver.recv().await {
-                        Ok(arc_event) => {
-                            // Use appropriate enqueue method based on dispatch mode
-                            if use_blocking_enqueue {
-                                // Channel mode: Use blocking enqueue to prevent message loss
-                                // This creates backpressure when the priority queue is full
-                                priority_queue.enqueue_wait(arc_event).await;
-                            } else {
-                                // Broadcast mode: Use non-blocking enqueue to prevent deadlock
-                                // Messages may be dropped when priority queue is full
-                                if !priority_queue.enqueue(arc_event).await {
-                                    warn!(
-                                        "Query '{query_id}' priority queue at capacity, dropping event from source '{source_id_clone}' (broadcast mode)"
-                                    );
+                    loop {
+                        match receiver.recv().await {
+                            Ok(arc_event) => {
+                                // Use appropriate enqueue method based on dispatch mode
+                                if use_blocking_enqueue {
+                                    // Channel mode: Use blocking enqueue to prevent message loss
+                                    // This creates backpressure when the priority queue is full
+                                    priority_queue.enqueue_wait(arc_event).await;
+                                } else {
+                                    // Broadcast mode: Use non-blocking enqueue to prevent deadlock
+                                    // Messages may be dropped when priority queue is full
+                                    if !priority_queue.enqueue(arc_event).await {
+                                        warn!(
+                                            "Query '{query_id}' priority queue at capacity, dropping event from source '{source_id_clone}' (broadcast mode)"
+                                        );
+                                    }
                                 }
                             }
-                        }
-                        Err(e) => {
-                            error!(
-                                "Query '{query_id}' receiver error for source '{source_id_clone}': {e}"
-                            );
-                            info!(
-                                "Query '{query_id}' channel closed for source '{source_id_clone}'"
-                            );
-                            break;
+                            Err(e) => {
+                                error!(
+                                    "Query '{query_id}' receiver error for source '{source_id_clone}': {e}"
+                                );
+                                info!(
+                                    "Query '{query_id}' channel closed for source '{source_id_clone}'"
+                                );
+                                break;
+                            }
                         }
                     }
-                }
 
-                debug!("Query '{query_id}' event forwarder exited for source '{source_id_clone}'");
-            }));
+                    debug!("Query '{query_id}' event forwarder exited for source '{source_id_clone}'");
+                }
+                .instrument(span),
+            );
 
             subscription_tasks.push(task);
         }
@@ -596,6 +609,7 @@ impl Query for DrasiQuery {
             let base_dispatchers = self.base.dispatchers.clone();
             let query_id = self.base.config.id.clone();
             let bootstrap_state = self.bootstrap_state.clone();
+            let instance_id = self.instance_id.clone();
 
             for (source_id, mut bootstrap_rx) in bootstrap_channels {
                 // Mark source bootstrap as in progress
@@ -613,95 +627,104 @@ impl Query for DrasiQuery {
                 let source_id_clone = source_id.clone();
                 let bootstrap_state_clone = bootstrap_state.clone();
                 let base_dispatchers_clone = base_dispatchers.clone();
+                let instance_id_clone = instance_id.clone();
 
-                let ctx = ComponentContext::new(query_id.clone(), ComponentType::Query);
-                tokio::spawn(with_component_context(ctx, async move {
-                    let mut count = 0u64;
+                let span = tracing::info_span!(
+                    "query_bootstrap",
+                    instance_id = %instance_id_clone,
+                    component_id = %query_id,
+                    component_type = "query"
+                );
+                tokio::spawn(
+                    async move {
+                        let mut count = 0u64;
 
-                    while let Some(bootstrap_event) = bootstrap_rx.recv().await {
-                        count += 1;
+                        while let Some(bootstrap_event) = bootstrap_rx.recv().await {
+                            count += 1;
 
-                        // Process bootstrap change through ContinuousQuery
-                        match continuous_query_ref
-                            .process_source_change(bootstrap_event.change)
-                            .await
-                        {
-                            Ok(results) => {
-                                if !results.is_empty() {
-                                    debug!(
-                                        "[BOOTSTRAP] Query '{}' received {} results from bootstrap event {}",
-                                        query_id_clone, results.len(), count
+                            // Process bootstrap change through ContinuousQuery
+                            match continuous_query_ref
+                                .process_source_change(bootstrap_event.change)
+                                .await
+                            {
+                                Ok(results) => {
+                                    if !results.is_empty() {
+                                        debug!(
+                                            "[BOOTSTRAP] Query '{}' received {} results from bootstrap event {}",
+                                            query_id_clone, results.len(), count
+                                        );
+                                        // Bootstrap results are processed silently - not sent to reactions
+                                    }
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "[BOOTSTRAP] Query '{query_id_clone}' failed to process bootstrap event from source '{source_id_clone}': {e}"
                                     );
-                                    // Bootstrap results are processed silently - not sent to reactions
                                 }
                             }
-                            Err(e) => {
-                                error!(
-                                    "[BOOTSTRAP] Query '{query_id_clone}' failed to process bootstrap event from source '{source_id_clone}': {e}"
+                        }
+
+                        info!(
+                            "[BOOTSTRAP] Query '{query_id_clone}' completed bootstrap from source '{source_id_clone}' ({count} events)"
+                        );
+
+                        // Mark source bootstrap as completed
+                        bootstrap_state_clone
+                            .write()
+                            .await
+                            .insert(source_id_clone.to_string(), BootstrapPhase::Completed);
+
+                        // Check if all sources have completed bootstrap
+                        let all_completed = {
+                            let state = bootstrap_state_clone.read().await;
+                            state
+                                .values()
+                                .all(|phase| *phase == BootstrapPhase::Completed)
+                        };
+
+                        if all_completed {
+                            info!(
+                                "[BOOTSTRAP] Query '{query_id_clone}' all sources completed bootstrap"
+                            );
+
+                            // Emit bootstrapCompleted control signal
+                            let mut metadata = HashMap::new();
+                            metadata.insert(
+                                "control_signal".to_string(),
+                                serde_json::json!("bootstrapCompleted"),
+                            );
+
+                            let control_result = QueryResult::new(
+                                query_id_clone.clone(),
+                                chrono::Utc::now(),
+                                vec![],
+                                metadata,
+                            );
+
+                            let arc_result = Arc::new(control_result);
+
+                            // Dispatch bootstrapCompleted signal to all reactions
+                            let dispatchers = base_dispatchers_clone.read().await;
+                            let mut dispatched = false;
+                            for dispatcher in dispatchers.iter() {
+                                if dispatcher.dispatch_change(arc_result.clone()).await.is_ok() {
+                                    dispatched = true;
+                                }
+                            }
+
+                            if !dispatched {
+                                debug!(
+                                    "No reactions subscribed to query '{query_id_clone}' for bootstrapCompleted signal"
+                                );
+                            } else {
+                                info!(
+                                    "[BOOTSTRAP] Emitted bootstrapCompleted signal for query '{query_id_clone}'"
                                 );
                             }
                         }
                     }
-
-                    info!(
-                        "[BOOTSTRAP] Query '{query_id_clone}' completed bootstrap from source '{source_id_clone}' ({count} events)"
-                    );
-
-                    // Mark source bootstrap as completed
-                    bootstrap_state_clone
-                        .write()
-                        .await
-                        .insert(source_id_clone.to_string(), BootstrapPhase::Completed);
-
-                    // Check if all sources have completed bootstrap
-                    let all_completed = {
-                        let state = bootstrap_state_clone.read().await;
-                        state
-                            .values()
-                            .all(|phase| *phase == BootstrapPhase::Completed)
-                    };
-
-                    if all_completed {
-                        info!(
-                            "[BOOTSTRAP] Query '{query_id_clone}' all sources completed bootstrap"
-                        );
-
-                        // Emit bootstrapCompleted control signal
-                        let mut metadata = HashMap::new();
-                        metadata.insert(
-                            "control_signal".to_string(),
-                            serde_json::json!("bootstrapCompleted"),
-                        );
-
-                        let control_result = QueryResult::new(
-                            query_id_clone.clone(),
-                            chrono::Utc::now(),
-                            vec![],
-                            metadata,
-                        );
-
-                        let arc_result = Arc::new(control_result);
-
-                        // Dispatch bootstrapCompleted signal to all reactions
-                        let dispatchers = base_dispatchers_clone.read().await;
-                        let mut dispatched = false;
-                        for dispatcher in dispatchers.iter() {
-                            if dispatcher.dispatch_change(arc_result.clone()).await.is_ok() {
-                                dispatched = true;
-                            }
-                        }
-
-                        if !dispatched {
-                            debug!(
-                                "No reactions subscribed to query '{query_id_clone}' for bootstrapCompleted signal"
-                            );
-                        } else {
-                            info!(
-                                "[BOOTSTRAP] Emitted bootstrapCompleted signal for query '{query_id_clone}'"
-                            );
-                        }
-                    }
-                }));
+                    .instrument(span),
+                );
             }
         } else {
             info!(
@@ -733,107 +756,114 @@ impl Query for DrasiQuery {
         let task_handle_clone = self.base.task_handle.clone();
         let priority_queue = self.priority_queue.clone();
         let status = self.base.status.clone();
+        let instance_id = self.instance_id.clone();
 
         // Create shutdown channel for graceful termination
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         self.base.set_shutdown_tx(shutdown_tx).await;
 
-        let ctx = ComponentContext::new(query_id.clone(), ComponentType::Query);
-        let handle = tokio::spawn(with_component_context(ctx, async move {
-            info!("Query '{query_id}' starting priority queue event processor");
+        let span = tracing::info_span!(
+            "query_processor",
+            instance_id = %instance_id,
+            component_id = %query_id,
+            component_type = "query"
+        );
+        let handle = tokio::spawn(
+            async move {
+                info!("Query '{query_id}' starting priority queue event processor");
 
-            loop {
-                // Check if query is still running
-                if !matches!(*status.read().await, ComponentStatus::Running) {
-                    info!(
-                        "Query '{query_id}' status changed to non-running, exiting processing loop"
-                    );
-                    break;
-                }
-
-                // Use select to wait for either an event OR shutdown signal
-                let arc_event = tokio::select! {
-                    // Check for shutdown signal first (biased)
-                    biased;
-
-                    _ = &mut shutdown_rx => {
+                loop {
+                    // Check if query is still running
+                    if !matches!(*status.read().await, ComponentStatus::Running) {
                         info!(
-                            "Query '{query_id}' received shutdown signal, exiting processing loop"
+                            "Query '{query_id}' status changed to non-running, exiting processing loop"
                         );
                         break;
                     }
 
-                    // Dequeue events from priority queue (blocks until available)
-                    event = priority_queue.dequeue() => event,
-                };
+                    // Use select to wait for either an event OR shutdown signal
+                    let arc_event = tokio::select! {
+                        // Check for shutdown signal first (biased)
+                        biased;
 
-                // Try to extract without cloning if we have sole ownership (zero-copy path).
-                // This succeeds in Channel dispatch mode where each query has its own event copy.
-                // Falls back to cloning in Broadcast mode where events are shared.
-                let (source_id, event, _timestamp, profiling_opt) =
-                    match SourceEventWrapper::try_unwrap_arc(arc_event) {
-                        Ok(parts) => parts,
-                        Err(arc) => {
-                            // Shared reference - must clone the data we need
-                            (
-                                arc.source_id.clone(),
-                                arc.event.clone(),
-                                arc.timestamp,
-                                arc.profiling.clone(),
-                            )
+                        _ = &mut shutdown_rx => {
+                            info!(
+                                "Query '{query_id}' received shutdown signal, exiting processing loop"
+                            );
+                            break;
+                        }
+
+                        // Dequeue events from priority queue (blocks until available)
+                        event = priority_queue.dequeue() => event,
+                    };
+
+                    // Try to extract without cloning if we have sole ownership (zero-copy path).
+                    // This succeeds in Channel dispatch mode where each query has its own event copy.
+                    // Falls back to cloning in Broadcast mode where events are shared.
+                    let (source_id, event, _timestamp, profiling_opt) =
+                        match SourceEventWrapper::try_unwrap_arc(arc_event) {
+                            Ok(parts) => parts,
+                            Err(arc) => {
+                                // Shared reference - must clone the data we need
+                                (
+                                    arc.source_id.clone(),
+                                    arc.event.clone(),
+                                    arc.timestamp,
+                                    arc.profiling.clone(),
+                                )
+                            }
+                        };
+
+                    debug!("Query '{query_id}' processing event from source '{source_id}'");
+
+                    // Extract the SourceChange from the SourceEvent (now owned, no clone needed)
+                    let source_change = match event {
+                        SourceEvent::Change(change) => change,
+                        SourceEvent::Control(_) => {
+                            debug!(
+                                "Query '{query_id}' ignoring control event from source '{source_id}'"
+                            );
+                            continue;
+                        }
+                        SourceEvent::BootstrapStart { .. } | SourceEvent::BootstrapEnd { .. } => {
+                            debug!("Query '{query_id}' ignoring bootstrap marker event (deprecated)");
+                            continue;
                         }
                     };
 
-                debug!("Query '{query_id}' processing event from source '{source_id}'");
+                    // Use profiling metadata from source event or create new
+                    let mut profiling =
+                        profiling_opt.unwrap_or_else(crate::profiling::ProfilingMetadata::new);
 
-                // Extract the SourceChange from the SourceEvent (now owned, no clone needed)
-                let source_change = match event {
-                    SourceEvent::Change(change) => change,
-                    SourceEvent::Control(_) => {
-                        debug!(
-                            "Query '{query_id}' ignoring control event from source '{source_id}'"
-                        );
-                        continue;
-                    }
-                    SourceEvent::BootstrapStart { .. } | SourceEvent::BootstrapEnd { .. } => {
-                        debug!("Query '{query_id}' ignoring bootstrap marker event (deprecated)");
-                        continue;
-                    }
-                };
+                    // Capture query_receive_ns timestamp
+                    profiling.query_receive_ns = Some(crate::profiling::timestamp_ns());
 
-                // Use profiling metadata from source event or create new
-                let mut profiling =
-                    profiling_opt.unwrap_or_else(crate::profiling::ProfilingMetadata::new);
+                    // Process the change through the actual Drasi continuous query
+                    profiling.query_core_call_ns = Some(crate::profiling::timestamp_ns());
 
-                // Capture query_receive_ns timestamp
-                profiling.query_receive_ns = Some(crate::profiling::timestamp_ns());
+                    match continuous_query_for_processor
+                        .process_source_change(source_change)
+                        .await
+                    {
+                        Ok(results) => {
+                            profiling.query_core_return_ns = Some(crate::profiling::timestamp_ns());
+                            if !results.is_empty() {
+                                debug!(
+                                    "Query '{}' received {} results from drasi-core",
+                                    query_id,
+                                    results.len()
+                                );
 
-                // Process the change through the actual Drasi continuous query
-                profiling.query_core_call_ns = Some(crate::profiling::timestamp_ns());
-
-                match continuous_query_for_processor
-                    .process_source_change(source_change)
-                    .await
-                {
-                    Ok(results) => {
-                        profiling.query_core_return_ns = Some(crate::profiling::timestamp_ns());
-                        if !results.is_empty() {
-                            debug!(
-                                "Query '{}' received {} results from drasi-core",
-                                query_id,
-                                results.len()
-                            );
-
-                            // Convert Drasi results to our QueryResult format
-                            let converted_results: Vec<ResultDiff> = results
-                                .iter()
-                                .map(|ctx| match ctx {
-                                    QueryPartEvaluationContext::Adding { after } => {
-                                        debug!("Query '{query_id}' got Adding context");
-                                        ResultDiff::Add {
-                                            data: convert_query_variables_to_json(after),
+                                // Convert Drasi results to our QueryResult format
+                                let converted_results: Vec<ResultDiff> = results
+                                    .iter()
+                                    .map(|ctx| match ctx {
+                                        QueryPartEvaluationContext::Adding { after } => {
+                                            debug!("Query '{query_id}' got Adding context");
+                                            ResultDiff::Add {
+                                                data: convert_query_variables_to_json(after),
+                                            }
                                         }
-                                    }
                                     QueryPartEvaluationContext::Removing { before } => {
                                         warn!(
                                             "Query '{query_id}' got Removing context for UPDATE source event"
@@ -940,7 +970,9 @@ impl Query for DrasiQuery {
             }
 
             info!("Query '{query_id}' processing task exited");
-        }));
+        }
+        .instrument(span),
+    );
 
         // Store the task handle
         *task_handle_clone.write().await = Some(handle);
@@ -1014,6 +1046,7 @@ impl Query for DrasiQuery {
 }
 
 pub struct QueryManager {
+    instance_id: String,
     queries: Arc<RwLock<HashMap<String, Arc<dyn Query>>>>,
     event_tx: ComponentEventSender,
     source_manager: Arc<SourceManager>,
@@ -1025,6 +1058,7 @@ pub struct QueryManager {
 
 impl QueryManager {
     pub fn new(
+        instance_id: impl Into<String>,
         event_tx: ComponentEventSender,
         source_manager: Arc<SourceManager>,
         index_factory: Arc<crate::indexes::IndexFactory>,
@@ -1032,6 +1066,7 @@ impl QueryManager {
         log_registry: Arc<ComponentLogRegistry>,
     ) -> Self {
         Self {
+            instance_id: instance_id.into(),
             queries: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
             source_manager,
@@ -1067,18 +1102,13 @@ impl QueryManager {
     async fn add_query_internal(&self, config: QueryConfig) -> Result<()> {
         // Create the query instance first (before acquiring lock)
         let query = DrasiQuery::new(
+            &self.instance_id,
             config.clone(),
             self.event_tx.clone(),
             self.source_manager.clone(),
             self.index_factory.clone(),
             self.middleware_registry.clone(),
         )?;
-
-        // Create a component logger for this query and set it
-        let logger = self
-            .log_registry
-            .create_logger(&config.id, ComponentType::Query);
-        query.base.set_logger(logger).await;
 
         let query: Arc<dyn Query> = Arc::new(query);
 
@@ -1271,7 +1301,8 @@ impl QueryManager {
             // Clean up event history for this query
             self.event_history.write().await.remove_component(&id);
             // Clean up log resources for this query
-            self.log_registry.remove_component(&id).await;
+            let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Query, &id);
+            self.log_registry.remove_component_by_key(&log_key).await;
             info!("Deleted query: {id}");
 
             Ok(())
@@ -1418,7 +1449,8 @@ impl QueryManager {
             }
         }
 
-        Some(self.log_registry.subscribe(id).await)
+        let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Query, id);
+        Some(self.log_registry.subscribe_by_key(&log_key).await)
     }
 
     /// Subscribe to live events for a query.

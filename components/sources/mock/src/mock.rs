@@ -24,11 +24,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use drasi_lib::channels::*;
-use drasi_lib::managers::{
-    log_component_start, log_component_stop, with_component_context, ComponentContext,
-};
+use drasi_lib::managers::{log_component_start, log_component_stop};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
+use tracing::Instrument;
 
 /// Mock source that generates synthetic data for testing and development.
 ///
@@ -159,12 +158,26 @@ impl Source for MockSource {
         let data_type = self.config.data_type.clone();
         let interval_ms = self.config.interval_ms;
 
-        // Start the data generation task with component context for proper log routing
+        // Get instance_id from context for log routing isolation
+        let instance_id = self
+            .base
+            .context()
+            .await
+            .map(|c| c.instance_id)
+            .unwrap_or_default();
+
+        // Start the data generation task with component span for proper log routing
         let status = Arc::clone(&self.base.status);
         let source_name = self.base.id.clone();
-        let ctx = ComponentContext::new(source_id.clone(), ComponentType::Source);
-        let task = tokio::spawn(async move {
-            with_component_context(ctx, async move {
+        let source_id_for_span = source_id.clone();
+        let span = tracing::info_span!(
+            "mock_source_task",
+            instance_id = %instance_id,
+            component_id = %source_id_for_span,
+            component_type = "source"
+        );
+        let task = tokio::spawn(
+            async move {
                 let mut interval =
                     tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
                 let mut seq = 0u64;
@@ -351,9 +364,9 @@ impl Source for MockSource {
                 }
 
                 info!("Mock source task completed");
-            })
-            .await
-        });
+            }
+            .instrument(span),
+        );
 
         *self.base.task_handle.write().await = Some(task);
         self.base.set_status(ComponentStatus::Running).await;

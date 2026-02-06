@@ -33,13 +33,13 @@ use anyhow::Result;
 use log::{debug, error, info, warn};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::Instrument;
 
 use crate::channels::priority_queue::PriorityQueue;
 use crate::channels::{
     ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, QueryResult,
 };
 use crate::context::ReactionRuntimeContext;
-use crate::managers::{with_component_context, ComponentContext, ComponentLogger};
 use crate::reactions::QueryProvider;
 use crate::state_store::StateStoreProvider;
 
@@ -113,8 +113,6 @@ pub struct ReactionBase {
     query_provider: Arc<RwLock<Option<Arc<dyn QueryProvider>>>>,
     /// State store provider (extracted from context for convenience)
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
-    /// Component logger (extracted from context for convenience)
-    logger: Arc<RwLock<Option<ComponentLogger>>>,
     /// Priority queue for timestamp-ordered result processing
     pub priority_queue: PriorityQueue<QueryResult>,
     /// Handles to subscription forwarder tasks
@@ -141,7 +139,6 @@ impl ReactionBase {
             status_tx: Arc::new(RwLock::new(None)), // Extracted from context
             query_provider: Arc::new(RwLock::new(None)), // Extracted from context
             state_store: Arc::new(RwLock::new(None)), // Extracted from context
-            logger: Arc::new(RwLock::new(None)),  // Extracted from context
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
             processing_task: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
@@ -158,7 +155,6 @@ impl ReactionBase {
     /// - `status_tx`: Channel for reporting component status events
     /// - `state_store`: Optional persistent state storage
     /// - `query_provider`: Access to query instances for subscription
-    /// - `logger`: Component logger for emitting structured logs
     pub async fn initialize(&self, context: ReactionRuntimeContext) {
         // Store context for later use
         *self.context.write().await = Some(context.clone());
@@ -169,10 +165,6 @@ impl ReactionBase {
 
         if let Some(state_store) = context.state_store.as_ref() {
             *self.state_store.write().await = Some(state_store.clone());
-        }
-
-        if let Some(logger) = context.logger.as_ref() {
-            *self.logger.write().await = Some(logger.clone());
         }
     }
 
@@ -188,13 +180,6 @@ impl ReactionBase {
     /// Returns `None` if no state store was provided in the context.
     pub async fn state_store(&self) -> Option<Arc<dyn StateStoreProvider>> {
         self.state_store.read().await.clone()
-    }
-
-    /// Get the component logger if configured.
-    ///
-    /// Returns `None` if no logger was provided in the context.
-    pub async fn logger(&self) -> Option<ComponentLogger> {
-        self.logger.read().await.clone()
     }
 
     /// Get whether this reaction should auto-start
@@ -226,7 +211,6 @@ impl ReactionBase {
             status_tx: self.status_tx.clone(),
             query_provider: self.query_provider.clone(),
             state_store: self.state_store.clone(),
-            logger: self.logger.clone(),
             priority_queue: self.priority_queue.clone(),
             subscription_tasks: self.subscription_tasks.clone(),
             processing_task: self.processing_task.clone(),
@@ -340,6 +324,13 @@ impl ReactionBase {
             let query_id_clone = query_id.clone();
             let reaction_id = self.id.clone();
 
+            // Get instance_id from context for log routing isolation
+            let instance_id = self
+                .context()
+                .await
+                .map(|c| c.instance_id.clone())
+                .unwrap_or_default();
+
             // Get query dispatch mode to determine enqueue strategy
             let query_config = query.get_config();
             let dispatch_mode = query_config
@@ -348,10 +339,15 @@ impl ReactionBase {
             let use_blocking_enqueue =
                 matches!(dispatch_mode, crate::channels::DispatchMode::Channel);
 
-            // Spawn forwarder task to read from receiver and enqueue to priority queue
-            let ctx = ComponentContext::new(reaction_id.clone(), ComponentType::Reaction);
-            let forwarder_task = tokio::spawn(async move {
-                with_component_context(ctx, async move {
+            // Spawn forwarder task with tracing span for proper log routing
+            let span = tracing::info_span!(
+                "reaction_forwarder",
+                instance_id = %instance_id,
+                component_id = %reaction_id,
+                component_type = "reaction"
+            );
+            let forwarder_task = tokio::spawn(
+                async move {
                     debug!(
                         "[{reaction_id}] Started result forwarder for query '{query_id_clone}' (dispatch_mode: {dispatch_mode:?}, blocking_enqueue: {use_blocking_enqueue})"
                     );
@@ -391,8 +387,9 @@ impl ReactionBase {
                             }
                         }
                     }
-                }).await
-            });
+                }
+                .instrument(span),
+            );
 
             // Store the forwarder task handle
             self.subscription_tasks.write().await.push(forwarder_task);
@@ -508,6 +505,7 @@ mod tests {
 
         // Create context and initialize
         let context = ReactionRuntimeContext::new(
+            "test-instance",
             "test-reaction",
             status_tx,
             None,

@@ -28,7 +28,8 @@ use crate::channels::*;
 use crate::config::SourceRuntime;
 use crate::context::SourceRuntimeContext;
 use crate::managers::{
-    is_operation_valid, log_component_error, ComponentEventHistory, ComponentLogRegistry, Operation,
+    is_operation_valid, log_component_error, ComponentEventHistory, ComponentLogKey,
+    ComponentLogRegistry, Operation,
 };
 use crate::sources::Source;
 use crate::state_store::StateStoreProvider;
@@ -75,6 +76,7 @@ pub fn convert_json_to_element_properties(
 }
 
 pub struct SourceManager {
+    instance_id: String,
     sources: Arc<RwLock<HashMap<String, Arc<dyn Source>>>>,
     event_tx: ComponentEventSender,
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
@@ -84,8 +86,13 @@ pub struct SourceManager {
 
 impl SourceManager {
     /// Create a new SourceManager
-    pub fn new(event_tx: ComponentEventSender, log_registry: Arc<ComponentLogRegistry>) -> Self {
+    pub fn new(
+        instance_id: impl Into<String>,
+        event_tx: ComponentEventSender,
+        log_registry: Arc<ComponentLogRegistry>,
+    ) -> Self {
         Self {
+            instance_id: instance_id.into(),
             sources: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
             state_store: Arc::new(RwLock::new(None)),
@@ -130,17 +137,12 @@ impl SourceManager {
         let source: Arc<dyn Source> = Arc::new(source);
         let source_id = source.id().to_string();
 
-        // Create a component logger for this source
-        let logger = self
-            .log_registry
-            .create_logger(&source_id, ComponentType::Source);
-
         // Construct runtime context for this source
-        let context = SourceRuntimeContext::with_logger(
+        let context = SourceRuntimeContext::new(
+            &self.instance_id,
             &source_id,
             self.event_tx.clone(),
             self.state_store.read().await.clone(),
-            logger,
         );
 
         // Initialize the source with its runtime context
@@ -287,7 +289,8 @@ impl SourceManager {
             // Clean up event history for this source
             self.event_history.write().await.remove_component(&id);
             // Clean up log history for this source
-            self.log_registry.remove_component(&id).await;
+            let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Source, &id);
+            self.log_registry.remove_component_by_key(&log_key).await;
             info!("Deleted source: {id}");
 
             Ok(())
@@ -394,7 +397,8 @@ impl SourceManager {
             }
         }
 
-        Some(self.log_registry.subscribe(id).await)
+        let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Source, id);
+        Some(self.log_registry.subscribe_by_key(&log_key).await)
     }
 
     /// Subscribe to live events for a source.

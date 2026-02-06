@@ -203,15 +203,17 @@ impl DrasiLib {
     pub(crate) fn new(config: Arc<RuntimeConfig>) -> Self {
         let (channels, receivers) = EventChannels::new();
 
-        // Use global log registry for component logging
-        let log_registry = crate::managers::global_log_registry();
+        // Use the shared global log registry.
+        // Since tracing uses a single global subscriber, all DrasiLib instances
+        // share the same log registry. This ensures logs are properly routed
+        // regardless of how many DrasiLib instances are created.
+        let log_registry = crate::managers::get_or_init_global_registry();
 
-        // Optionally try to install global component-aware logger
-        // This allows log::info!() etc. to also route to component streams
-        // but is not required - the component_info!() macros work independently
-        let _ = crate::managers::init_global_component_logger();
+        // Get the instance ID from config for log routing
+        let instance_id = config.id.clone();
 
         let source_manager = Arc::new(SourceManager::new(
+            &instance_id,
             channels.component_event_tx.clone(),
             log_registry.clone(),
         ));
@@ -234,6 +236,7 @@ impl DrasiLib {
         let middleware_registry = Arc::new(middleware_registry);
 
         let query_manager = Arc::new(QueryManager::new(
+            &instance_id,
             channels.component_event_tx.clone(),
             source_manager.clone(),
             config.index_factory.clone(),
@@ -242,6 +245,7 @@ impl DrasiLib {
         ));
 
         let reaction_manager = Arc::new(ReactionManager::new(
+            &instance_id,
             channels.component_event_tx.clone(),
             log_registry.clone(),
         ));

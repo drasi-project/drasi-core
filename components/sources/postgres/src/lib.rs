@@ -185,9 +185,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use drasi_lib::channels::{DispatchMode, *};
-use drasi_lib::managers::{with_component_context, ComponentContext};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
+use tracing::Instrument;
 
 /// PostgreSQL replication source that captures changes via logical replication.
 ///
@@ -351,11 +351,25 @@ impl Source for PostgresReplicationSource {
         let status_tx = self.base.status_tx();
         let status_clone = self.base.status.clone();
 
-        // Create context for spawned task so log::info!, log::error! etc are routed
-        let ctx = ComponentContext::new(source_id.clone(), ComponentType::Source);
+        // Get instance_id from context for log routing isolation
+        let instance_id = self
+            .base
+            .context()
+            .await
+            .map(|c| c.instance_id)
+            .unwrap_or_default();
 
-        let task = tokio::spawn(async move {
-            with_component_context(ctx, async move {
+        // Create span for spawned task so log::info!, log::error! etc are routed
+        let source_id_for_span = source_id.clone();
+        let span = tracing::info_span!(
+            "postgres_replication_task",
+            instance_id = %instance_id,
+            component_id = %source_id_for_span,
+            component_type = "source"
+        );
+
+        let task = tokio::spawn(
+            async move {
                 if let Err(e) = run_replication(
                     source_id.clone(),
                     config,
@@ -379,9 +393,9 @@ impl Source for PostgresReplicationSource {
                             .await;
                     }
                 }
-            })
-            .await
-        });
+            }
+            .instrument(span),
+        );
 
         *self.base.task_handle.write().await = Some(task);
         self.base.set_status(ComponentStatus::Running).await;

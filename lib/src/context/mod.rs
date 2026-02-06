@@ -61,7 +61,6 @@
 use std::sync::Arc;
 
 use crate::channels::ComponentEventSender;
-use crate::managers::ComponentLogger;
 use crate::reactions::QueryProvider;
 use crate::state_store::StateStoreProvider;
 
@@ -72,10 +71,10 @@ use crate::state_store::StateStoreProvider;
 ///
 /// # Available Services
 ///
+/// - `instance_id`: The DrasiLib instance ID (for log routing isolation)
 /// - `source_id`: The unique identifier for this source instance
 /// - `status_tx`: Channel for reporting component status/lifecycle events
 /// - `state_store`: Optional persistent state storage (if configured)
-/// - `logger`: Component logger for emitting structured logs that can be streamed
 ///
 /// # Clone
 ///
@@ -83,6 +82,9 @@ use crate::state_store::StateStoreProvider;
 /// making cloning cheap (just reference count increments).
 #[derive(Clone)]
 pub struct SourceRuntimeContext {
+    /// DrasiLib instance ID (for log routing isolation)
+    pub instance_id: String,
+
     /// Unique identifier for this source instance
     pub source_id: String,
 
@@ -97,13 +99,6 @@ pub struct SourceRuntimeContext {
     /// This is `Some` if a state store provider was configured on DrasiLib,
     /// otherwise `None`. Sources can use this to persist state across restarts.
     pub state_store: Option<Arc<dyn StateStoreProvider>>,
-
-    /// Component logger for emitting structured logs.
-    ///
-    /// Use this to emit logs that can be streamed by subscribers.
-    /// This is optional during construction but will always be present
-    /// when the context is provided by DrasiLib.
-    pub logger: Option<ComponentLogger>,
 }
 
 impl SourceRuntimeContext {
@@ -114,38 +109,27 @@ impl SourceRuntimeContext {
     ///
     /// # Arguments
     ///
+    /// * `instance_id` - The DrasiLib instance ID
     /// * `source_id` - The unique identifier for this source
     /// * `status_tx` - Channel for reporting component status/lifecycle events
     /// * `state_store` - Optional persistent state storage
     pub fn new(
+        instance_id: impl Into<String>,
         source_id: impl Into<String>,
         status_tx: ComponentEventSender,
         state_store: Option<Arc<dyn StateStoreProvider>>,
     ) -> Self {
         Self {
+            instance_id: instance_id.into(),
             source_id: source_id.into(),
             status_tx,
             state_store,
-            logger: None,
         }
     }
 
-    /// Create a new source runtime context with a logger.
-    ///
-    /// This is typically called by `SourceManager` when adding a source to DrasiLib.
-    /// Plugin developers do not need to call this directly.
-    pub fn with_logger(
-        source_id: impl Into<String>,
-        status_tx: ComponentEventSender,
-        state_store: Option<Arc<dyn StateStoreProvider>>,
-        logger: ComponentLogger,
-    ) -> Self {
-        Self {
-            source_id: source_id.into(),
-            status_tx,
-            state_store,
-            logger: Some(logger),
-        }
+    /// Get the DrasiLib instance ID.
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
     }
 
     /// Get the source's unique identifier.
@@ -168,26 +152,18 @@ impl SourceRuntimeContext {
     pub fn state_store(&self) -> Option<&Arc<dyn StateStoreProvider>> {
         self.state_store.as_ref()
     }
-
-    /// Get a reference to the logger if configured.
-    ///
-    /// Returns `Some(&ComponentLogger)` if a logger was provided,
-    /// otherwise `None`.
-    pub fn logger(&self) -> Option<&ComponentLogger> {
-        self.logger.as_ref()
-    }
 }
 
 impl std::fmt::Debug for SourceRuntimeContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SourceRuntimeContext")
+            .field("instance_id", &self.instance_id)
             .field("source_id", &self.source_id)
             .field("status_tx", &"<ComponentEventSender>")
             .field(
                 "state_store",
                 &self.state_store.as_ref().map(|_| "<StateStoreProvider>"),
             )
-            .field("logger", &self.logger.as_ref().map(|_| "<ComponentLogger>"))
             .finish()
     }
 }
@@ -199,11 +175,11 @@ impl std::fmt::Debug for SourceRuntimeContext {
 ///
 /// # Available Services
 ///
+/// - `instance_id`: The DrasiLib instance ID (for log routing isolation)
 /// - `reaction_id`: The unique identifier for this reaction instance
 /// - `status_tx`: Channel for reporting component status/lifecycle events
 /// - `state_store`: Optional persistent state storage (if configured)
 /// - `query_provider`: Access to query instances for subscription
-/// - `logger`: Component logger for emitting structured logs that can be streamed
 ///
 /// # Clone
 ///
@@ -211,6 +187,9 @@ impl std::fmt::Debug for SourceRuntimeContext {
 /// making cloning cheap (just reference count increments).
 #[derive(Clone)]
 pub struct ReactionRuntimeContext {
+    /// DrasiLib instance ID (for log routing isolation)
+    pub instance_id: String,
+
     /// Unique identifier for this reaction instance
     pub reaction_id: String,
 
@@ -231,13 +210,6 @@ pub struct ReactionRuntimeContext {
     /// Reactions use this to get query instances and subscribe to their results.
     /// This is always available (not optional) since reactions require queries.
     pub query_provider: Arc<dyn QueryProvider>,
-
-    /// Component logger for emitting structured logs.
-    ///
-    /// Use this to emit logs that can be streamed by subscribers.
-    /// This is optional during construction but will always be present
-    /// when the context is provided by DrasiLib.
-    pub logger: Option<ComponentLogger>,
 }
 
 impl ReactionRuntimeContext {
@@ -248,43 +220,30 @@ impl ReactionRuntimeContext {
     ///
     /// # Arguments
     ///
+    /// * `instance_id` - The DrasiLib instance ID
     /// * `reaction_id` - The unique identifier for this reaction
     /// * `status_tx` - Channel for reporting component status/lifecycle events
     /// * `state_store` - Optional persistent state storage
     /// * `query_provider` - Access to query instances for subscription
     pub fn new(
+        instance_id: impl Into<String>,
         reaction_id: impl Into<String>,
         status_tx: ComponentEventSender,
         state_store: Option<Arc<dyn StateStoreProvider>>,
         query_provider: Arc<dyn QueryProvider>,
     ) -> Self {
         Self {
+            instance_id: instance_id.into(),
             reaction_id: reaction_id.into(),
             status_tx,
             state_store,
             query_provider,
-            logger: None,
         }
     }
 
-    /// Create a new reaction runtime context with a logger.
-    ///
-    /// This is typically called by `ReactionManager` when adding a reaction to DrasiLib.
-    /// Plugin developers do not need to call this directly.
-    pub fn with_logger(
-        reaction_id: impl Into<String>,
-        status_tx: ComponentEventSender,
-        state_store: Option<Arc<dyn StateStoreProvider>>,
-        query_provider: Arc<dyn QueryProvider>,
-        logger: ComponentLogger,
-    ) -> Self {
-        Self {
-            reaction_id: reaction_id.into(),
-            status_tx,
-            state_store,
-            query_provider,
-            logger: Some(logger),
-        }
+    /// Get the DrasiLib instance ID.
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
     }
 
     /// Get the reaction's unique identifier.
@@ -314,19 +273,12 @@ impl ReactionRuntimeContext {
     pub fn query_provider(&self) -> &Arc<dyn QueryProvider> {
         &self.query_provider
     }
-
-    /// Get a reference to the logger if configured.
-    ///
-    /// Returns `Some(&ComponentLogger)` if a logger was provided,
-    /// otherwise `None`.
-    pub fn logger(&self) -> Option<&ComponentLogger> {
-        self.logger.as_ref()
-    }
 }
 
 impl std::fmt::Debug for ReactionRuntimeContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReactionRuntimeContext")
+            .field("instance_id", &self.instance_id)
             .field("reaction_id", &self.reaction_id)
             .field("status_tx", &"<ComponentEventSender>")
             .field(
@@ -334,7 +286,6 @@ impl std::fmt::Debug for ReactionRuntimeContext {
                 &self.state_store.as_ref().map(|_| "<StateStoreProvider>"),
             )
             .field("query_provider", &"<QueryProvider>")
-            .field("logger", &self.logger.as_ref().map(|_| "<ComponentLogger>"))
             .finish()
     }
 }
@@ -364,8 +315,10 @@ mod tests {
         let (status_tx, _rx) = mpsc::channel(100);
         let state_store = Arc::new(MemoryStateStoreProvider::new());
 
-        let context = SourceRuntimeContext::new("test-source", status_tx, Some(state_store));
+        let context =
+            SourceRuntimeContext::new("test-instance", "test-source", status_tx, Some(state_store));
 
+        assert_eq!(context.instance_id(), "test-instance");
         assert_eq!(context.source_id(), "test-source");
         assert!(context.state_store().is_some());
     }
@@ -374,7 +327,7 @@ mod tests {
     async fn test_source_runtime_context_without_state_store() {
         let (status_tx, _rx) = mpsc::channel(100);
 
-        let context = SourceRuntimeContext::new("test-source", status_tx, None);
+        let context = SourceRuntimeContext::new("test-instance", "test-source", status_tx, None);
 
         assert_eq!(context.source_id(), "test-source");
         assert!(context.state_store().is_none());
@@ -385,7 +338,8 @@ mod tests {
         let (status_tx, _rx) = mpsc::channel(100);
         let state_store = Arc::new(MemoryStateStoreProvider::new());
 
-        let context = SourceRuntimeContext::new("test-source", status_tx, Some(state_store));
+        let context =
+            SourceRuntimeContext::new("test-instance", "test-source", status_tx, Some(state_store));
 
         let cloned = context.clone();
         assert_eq!(cloned.source_id(), context.source_id());
@@ -398,12 +352,14 @@ mod tests {
         let query_provider = Arc::new(MockQueryProvider);
 
         let context = ReactionRuntimeContext::new(
+            "test-instance",
             "test-reaction",
             status_tx,
             Some(state_store),
             query_provider,
         );
 
+        assert_eq!(context.instance_id(), "test-instance");
         assert_eq!(context.reaction_id(), "test-reaction");
         assert!(context.state_store().is_some());
     }
@@ -413,7 +369,8 @@ mod tests {
         let (status_tx, _rx) = mpsc::channel(100);
         let query_provider = Arc::new(MockQueryProvider);
 
-        let context = ReactionRuntimeContext::new("test-reaction", status_tx, None, query_provider);
+        let context =
+            ReactionRuntimeContext::new("test-instance", "test-reaction", status_tx, None, query_provider);
 
         assert_eq!(context.reaction_id(), "test-reaction");
         assert!(context.state_store().is_none());
@@ -426,6 +383,7 @@ mod tests {
         let query_provider = Arc::new(MockQueryProvider);
 
         let context = ReactionRuntimeContext::new(
+            "test-instance",
             "test-reaction",
             status_tx,
             Some(state_store),
@@ -439,7 +397,7 @@ mod tests {
     #[test]
     fn test_source_runtime_context_debug() {
         let (status_tx, _rx) = mpsc::channel::<crate::channels::ComponentEvent>(100);
-        let context = SourceRuntimeContext::new("test", status_tx, None);
+        let context = SourceRuntimeContext::new("test-instance", "test", status_tx, None);
         let debug_str = format!("{context:?}");
         assert!(debug_str.contains("SourceRuntimeContext"));
         assert!(debug_str.contains("test"));
@@ -449,7 +407,8 @@ mod tests {
     fn test_reaction_runtime_context_debug() {
         let (status_tx, _rx) = mpsc::channel::<crate::channels::ComponentEvent>(100);
         let query_provider = Arc::new(MockQueryProvider);
-        let context = ReactionRuntimeContext::new("test", status_tx, None, query_provider);
+        let context =
+            ReactionRuntimeContext::new("test-instance", "test", status_tx, None, query_provider);
         let debug_str = format!("{context:?}");
         assert!(debug_str.contains("ReactionRuntimeContext"));
         assert!(debug_str.contains("test"));

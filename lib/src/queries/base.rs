@@ -55,7 +55,6 @@ use crate::channels::{
     QueryResult, QuerySubscriptionResponse,
 };
 use crate::config::QueryConfig;
-use crate::managers::ComponentLogger;
 // Profiling will be used when implementing performance tracking
 use chrono::Utc;
 
@@ -73,8 +72,6 @@ pub struct QueryBase {
     pub task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     /// Sender for shutdown signal
     pub shutdown_tx: Arc<RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
-    /// Component logger for emitting structured logs
-    logger: Arc<RwLock<Option<ComponentLogger>>>,
 }
 
 impl QueryBase {
@@ -101,23 +98,7 @@ impl QueryBase {
             event_tx,
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
-            logger: Arc::new(RwLock::new(None)),
         })
-    }
-
-    /// Set the component logger.
-    ///
-    /// This is called by `QueryManager` when adding a query to DrasiLib.
-    /// Query plugin developers do not need to call this directly.
-    pub async fn set_logger(&self, logger: ComponentLogger) {
-        *self.logger.write().await = Some(logger);
-    }
-
-    /// Get the component logger if configured.
-    ///
-    /// Returns `None` if no logger has been set.
-    pub async fn logger(&self) -> Option<ComponentLogger> {
-        self.logger.read().await.clone()
     }
 
     /// Subscribe to this query's results

@@ -110,14 +110,8 @@ pub use channels::DispatchMode;
 /// Log level and log message types for component log streaming
 pub use managers::{LogLevel, LogMessage};
 
-/// Component logger for emitting logs from components
-pub use managers::ComponentLogger;
-
-/// Logging initialization functions - call before any other logger setup
-pub use managers::{
-    init_logging, init_logging_with_level, init_logging_with_logger, try_init_logging,
-    try_init_logging_with_level, try_init_logging_with_logger,
-};
+/// Tracing initialization function - call to set up component log routing
+pub use managers::{get_or_init_global_registry, init_tracing, try_init_tracing};
 
 // ============================================================================
 // Configuration Types

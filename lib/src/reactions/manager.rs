@@ -22,12 +22,14 @@ use crate::channels::*;
 use crate::config::ReactionRuntime;
 use crate::context::ReactionRuntimeContext;
 use crate::managers::{
-    is_operation_valid, log_component_error, ComponentEventHistory, ComponentLogRegistry, Operation,
+    is_operation_valid, log_component_error, ComponentEventHistory, ComponentLogKey,
+    ComponentLogRegistry, Operation,
 };
 use crate::reactions::{QueryProvider, Reaction};
 use crate::state_store::StateStoreProvider;
 
 pub struct ReactionManager {
+    instance_id: String,
     reactions: Arc<RwLock<HashMap<String, Arc<dyn Reaction>>>>,
     event_tx: ComponentEventSender,
     /// Query provider for reactions to access queries (injected after DrasiLib is constructed)
@@ -42,8 +44,13 @@ pub struct ReactionManager {
 
 impl ReactionManager {
     /// Create a new ReactionManager
-    pub fn new(event_tx: ComponentEventSender, log_registry: Arc<ComponentLogRegistry>) -> Self {
+    pub fn new(
+        instance_id: impl Into<String>,
+        event_tx: ComponentEventSender,
+        log_registry: Arc<ComponentLogRegistry>,
+    ) -> Self {
         Self {
+            instance_id: instance_id.into(),
             reactions: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
             query_provider: Arc::new(RwLock::new(None)),
@@ -99,18 +106,13 @@ impl ReactionManager {
             )
         })?;
 
-        // Create a component logger for this reaction
-        let logger = self
-            .log_registry
-            .create_logger(&reaction_id, ComponentType::Reaction);
-
         // Construct runtime context for this reaction
-        let context = ReactionRuntimeContext::with_logger(
+        let context = ReactionRuntimeContext::new(
+            &self.instance_id,
             &reaction_id,
             self.event_tx.clone(),
             self.state_store.read().await.clone(),
             query_provider,
-            logger,
         );
 
         // Initialize the reaction with its runtime context
@@ -247,7 +249,8 @@ impl ReactionManager {
             // Clean up event history for this reaction
             self.event_history.write().await.remove_component(&id);
             // Clean up log registry for this reaction
-            self.log_registry.remove_component(&id).await;
+            let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Reaction, &id);
+            self.log_registry.remove_component_by_key(&log_key).await;
             info!("Deleted reaction: {id}");
 
             Ok(())
@@ -374,7 +377,8 @@ impl ReactionManager {
             }
         }
 
-        Some(self.log_registry.subscribe(id).await)
+        let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Reaction, id);
+        Some(self.log_registry.subscribe_by_key(&log_key).await)
     }
 
     /// Subscribe to live events for a reaction.

@@ -152,9 +152,9 @@ use tokio::sync::{mpsc, RwLock};
 
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ComponentType, *};
-use drasi_lib::managers::{with_component_context, ComponentContext};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
+use tracing::Instrument;
 
 /// Handle for programmatic event injection into an Application Source
 ///
@@ -400,47 +400,63 @@ impl ApplicationSource {
         let status = self.base.status.clone();
         let source_id = self.base.id.clone();
 
-        let ctx = ComponentContext::new(source_id, ComponentType::Source);
-        let handle = tokio::spawn(with_component_context(ctx, async move {
-            info!("ApplicationSource '{source_name}' event processor started");
+        // Get instance_id from context for log routing isolation
+        let instance_id = self
+            .base
+            .context()
+            .await
+            .map(|c| c.instance_id)
+            .unwrap_or_default();
 
-            if let Some(ref tx) = *status_tx.read().await {
-                let _ = tx
-                    .send(ComponentEvent {
-                        component_id: source_name.clone(),
-                        component_type: ComponentType::Source,
-                        status: ComponentStatus::Running,
-                        timestamp: chrono::Utc::now(),
-                        message: Some("Processing events".to_string()),
-                    })
-                    .await;
-            }
+        let span = tracing::info_span!(
+            "application_source_processor",
+            instance_id = %instance_id,
+            component_id = %source_id,
+            component_type = "source"
+        );
+        let handle = tokio::spawn(
+            async move {
+                info!("ApplicationSource '{source_name}' event processor started");
 
-            *status.write().await = ComponentStatus::Running;
-
-            while let Some(change) = rx.recv().await {
-                debug!("ApplicationSource '{source_name}' received event: {change:?}");
-
-                let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
-                profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
-
-                let wrapper = SourceEventWrapper::with_profiling(
-                    source_name.clone(),
-                    SourceEvent::Change(change),
-                    chrono::Utc::now(),
-                    profiling,
-                );
-
-                if let Err(e) =
-                    SourceBase::dispatch_from_task(base_dispatchers.clone(), wrapper, &source_name)
-                        .await
-                {
-                    debug!("Failed to dispatch change (no subscribers): {e}");
+                if let Some(ref tx) = *status_tx.read().await {
+                    let _ = tx
+                        .send(ComponentEvent {
+                            component_id: source_name.clone(),
+                            component_type: ComponentType::Source,
+                            status: ComponentStatus::Running,
+                            timestamp: chrono::Utc::now(),
+                            message: Some("Processing events".to_string()),
+                        })
+                        .await;
                 }
-            }
 
-            info!("ApplicationSource '{source_name}' event processor stopped");
-        }));
+                *status.write().await = ComponentStatus::Running;
+
+                while let Some(change) = rx.recv().await {
+                    debug!("ApplicationSource '{source_name}' received event: {change:?}");
+
+                    let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
+                    profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
+
+                    let wrapper = SourceEventWrapper::with_profiling(
+                        source_name.clone(),
+                        SourceEvent::Change(change),
+                        chrono::Utc::now(),
+                        profiling,
+                    );
+
+                    if let Err(e) =
+                        SourceBase::dispatch_from_task(base_dispatchers.clone(), wrapper, &source_name)
+                            .await
+                    {
+                        debug!("Failed to dispatch change (no subscribers): {e}");
+                    }
+                }
+
+                info!("ApplicationSource '{source_name}' event processor stopped");
+            }
+            .instrument(span),
+        );
 
         *self.base.task_handle.write().await = Some(handle);
         Ok(())

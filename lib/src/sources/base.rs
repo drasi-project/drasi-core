@@ -33,11 +33,11 @@ use anyhow::Result;
 use log::{debug, error, info};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::Instrument;
 
 use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 use crate::channels::*;
 use crate::context::SourceRuntimeContext;
-use crate::managers::{with_component_context, ComponentContext, ComponentLogger};
 use crate::profiling;
 use crate::state_store::StateStoreProvider;
 use drasi_core::models::SourceChange;
@@ -154,8 +154,6 @@ pub struct SourceBase {
     status_tx: Arc<RwLock<Option<ComponentEventSender>>>,
     /// State store provider (extracted from context for convenience)
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
-    /// Component logger (extracted from context for convenience)
-    logger: Arc<RwLock<Option<ComponentLogger>>>,
     /// Handle to the source's main task
     pub task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     /// Sender for shutdown signal
@@ -204,7 +202,6 @@ impl SourceBase {
             context: Arc::new(RwLock::new(None)), // Set by initialize()
             status_tx: Arc::new(RwLock::new(None)), // Extracted from context
             state_store: Arc::new(RwLock::new(None)), // Extracted from context
-            logger: Arc::new(RwLock::new(None)),  // Extracted from context
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
             bootstrap_provider: Arc::new(RwLock::new(bootstrap_provider)),
@@ -225,7 +222,6 @@ impl SourceBase {
     /// - `source_id`: The source's unique identifier
     /// - `status_tx`: Channel for reporting component status events
     /// - `state_store`: Optional persistent state storage
-    /// - `logger`: Component logger for emitting structured logs
     pub async fn initialize(&self, context: SourceRuntimeContext) {
         // Store context for later use
         *self.context.write().await = Some(context.clone());
@@ -235,10 +231,6 @@ impl SourceBase {
 
         if let Some(state_store) = context.state_store.as_ref() {
             *self.state_store.write().await = Some(state_store.clone());
-        }
-
-        if let Some(logger) = context.logger.as_ref() {
-            *self.logger.write().await = Some(logger.clone());
         }
     }
 
@@ -254,13 +246,6 @@ impl SourceBase {
     /// Returns `None` if no state store was provided in the context.
     pub async fn state_store(&self) -> Option<Arc<dyn StateStoreProvider>> {
         self.state_store.read().await.clone()
-    }
-
-    /// Get the component logger if configured.
-    ///
-    /// Returns `None` if no logger was provided in the context.
-    pub async fn logger(&self) -> Option<ComponentLogger> {
-        self.logger.read().await.clone()
     }
 
     /// Get the status channel Arc for internal use by spawned tasks
@@ -288,7 +273,6 @@ impl SourceBase {
             context: self.context.clone(),
             status_tx: self.status_tx.clone(),
             state_store: self.state_store.clone(),
-            logger: self.logger.clone(),
             task_handle: self.task_handle.clone(),
             shutdown_tx: self.shutdown_tx.clone(),
             bootstrap_provider: self.bootstrap_provider.clone(),
@@ -430,27 +414,42 @@ impl SourceBase {
             let settings_clone = settings.clone();
             let source_id = self.id.clone();
 
-            // Spawn bootstrap task with component context for proper log routing
-            let ctx = ComponentContext::new(source_id, ComponentType::Source);
-            tokio::spawn(with_component_context(ctx, async move {
-                match provider
-                    .bootstrap(request, &context, bootstrap_tx, Some(&settings_clone))
-                    .await
-                {
-                    Ok(count) => {
-                        info!(
-                            "Bootstrap completed successfully for query '{}', sent {count} events",
-                            settings_clone.query_id
-                        );
-                    }
-                    Err(e) => {
-                        error!(
-                            "Bootstrap failed for query '{}': {e}",
-                            settings_clone.query_id
-                        );
+            // Get instance_id from context for log routing isolation
+            let instance_id = self
+                .context()
+                .await
+                .map(|c| c.instance_id.clone())
+                .unwrap_or_default();
+
+            // Spawn bootstrap task with tracing span for proper log routing
+            let span = tracing::info_span!(
+                "source_bootstrap",
+                instance_id = %instance_id,
+                component_id = %source_id,
+                component_type = "source"
+            );
+            tokio::spawn(
+                async move {
+                    match provider
+                        .bootstrap(request, &context, bootstrap_tx, Some(&settings_clone))
+                        .await
+                    {
+                        Ok(count) => {
+                            info!(
+                                "Bootstrap completed successfully for query '{}', sent {count} events",
+                                settings_clone.query_id
+                            );
+                        }
+                        Err(e) => {
+                            error!(
+                                "Bootstrap failed for query '{}': {e}",
+                                settings_clone.query_id
+                            );
+                        }
                     }
                 }
-            }));
+                .instrument(span),
+            );
 
             Ok(Some(bootstrap_rx))
         } else {
