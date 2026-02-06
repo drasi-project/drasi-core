@@ -55,18 +55,22 @@ jobs:
       - name: Prepare bundled jq source
         run: |
           cargo fetch
-          JQ_SRC_DIR=$(ls -d ~/.cargo/registry/src/*/jq-src-* 2>/dev/null | head -n 1)
-          if [ -n "$JQ_SRC_DIR" ] && [ -d "$JQ_SRC_DIR/modules/jq" ]; then
-            cd "$JQ_SRC_DIR/modules/jq"
-            if [ ! -f src/lexer.c ]; then
-              flex -o src/lexer.c src/lexer.l
+          for JQ_SRC_DIR in ~/.cargo/registry/src/*/jq-src-*; do
+            if [ -d "$JQ_SRC_DIR/modules/jq" ]; then
+              cd "$JQ_SRC_DIR/modules/jq"
+              if [ ! -f src/lexer.c ]; then
+                flex -o src/lexer.c src/lexer.l
+              fi
+              if [ ! -f src/parser.c ]; then
+                bison -d -o src/parser.c src/parser.y
+              fi
             fi
-            if [ ! -f src/parser.c ]; then
-              bison -d -o src/parser.c src/parser.y
-            fi
-          fi
+          done
 
       - name: Run Cargo Clippy
+        env:
+          LEX: flex
+          YACC: "bison -y"
         run: cargo clippy --all-targets --all-features
 
   fmt_check:
