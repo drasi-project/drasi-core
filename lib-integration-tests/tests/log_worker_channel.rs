@@ -254,10 +254,7 @@ async fn test_logs_flow_through_channel() {
     .await
     .expect("Timeout waiting for logs");
 
-    assert!(
-        !received.is_empty(),
-        "Expected to receive at least one log"
-    );
+    assert!(!received.is_empty(), "Expected to receive at least one log");
     assert!(
         received.iter().any(|l| l.message.contains("starting")),
         "Expected 'starting' log message"
@@ -340,8 +337,7 @@ async fn test_high_volume_logging() {
 /// Test that the log worker works with multi-threaded runtime.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_multi_thread_runtime() {
-    let source =
-        SimpleLogSource::new("multi-thread-source").expect("Failed to create source");
+    let source = SimpleLogSource::new("multi-thread-source").expect("Failed to create source");
 
     let drasi = DrasiLib::builder()
         .with_source(source)
@@ -372,7 +368,10 @@ async fn test_multi_thread_runtime() {
     .await
     .expect("Timeout waiting for logs");
 
-    assert!(!received.is_empty(), "Expected logs in multi-thread runtime");
+    assert!(
+        !received.is_empty(),
+        "Expected logs in multi-thread runtime"
+    );
 
     drasi.stop().await.expect("Failed to stop DrasiLib");
 }
@@ -380,8 +379,7 @@ async fn test_multi_thread_runtime() {
 /// Test that the log worker works with current-thread runtime.
 #[tokio::test(flavor = "current_thread")]
 async fn test_current_thread_runtime() {
-    let source =
-        SimpleLogSource::new("current-thread-source").expect("Failed to create source");
+    let source = SimpleLogSource::new("current-thread-source").expect("Failed to create source");
 
     let drasi = DrasiLib::builder()
         .with_source(source)
@@ -423,8 +421,7 @@ async fn test_current_thread_runtime() {
 /// Test concurrent logging from multiple tasks.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_logging_from_multiple_tasks() {
-    let source =
-        SimpleLogSource::new("concurrent-log-source").expect("Failed to create source");
+    let source = SimpleLogSource::new("concurrent-log-source").expect("Failed to create source");
 
     let instance_id = "concurrent-test-instance";
     let drasi = DrasiLib::builder()
@@ -651,8 +648,7 @@ async fn test_rapid_start_stop_cycles() {
 /// Test that log level filtering works through the channel.
 #[tokio::test]
 async fn test_log_level_filtering_through_channel() {
-    let source =
-        SimpleLogSource::new("level-filter-source").expect("Failed to create source");
+    let source = SimpleLogSource::new("level-filter-source").expect("Failed to create source");
 
     let drasi = DrasiLib::builder()
         .with_source(source)
@@ -677,10 +673,7 @@ async fn test_log_level_filtering_through_channel() {
 
     // Verify log messages are complete (not truncated)
     for log in &history {
-        assert!(
-            !log.message.is_empty(),
-            "Log message should not be empty"
-        );
+        assert!(!log.message.is_empty(), "Log message should not be empty");
     }
 
     drasi.stop().await.expect("Failed to stop DrasiLib");

@@ -445,9 +445,12 @@ impl ApplicationSource {
                         profiling,
                     );
 
-                    if let Err(e) =
-                        SourceBase::dispatch_from_task(base_dispatchers.clone(), wrapper, &source_name)
-                            .await
+                    if let Err(e) = SourceBase::dispatch_from_task(
+                        base_dispatchers.clone(),
+                        wrapper,
+                        &source_name,
+                    )
+                    .await
                     {
                         debug!("Failed to dispatch change (no subscribers): {e}");
                     }

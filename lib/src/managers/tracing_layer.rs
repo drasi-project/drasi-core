@@ -249,7 +249,12 @@ impl<S> Layer<S> for ComponentLogLayer
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
-    fn on_new_span(&self, attrs: &tracing::span::Attributes<'_>, id: &tracing::span::Id, ctx: Context<'_, S>) {
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: Context<'_, S>,
+    ) {
         // Extract component info from span attributes and cache in extensions
         let mut visitor = ComponentInfoVisitor::default();
         attrs.record(&mut visitor);
@@ -312,7 +317,9 @@ struct ComponentInfo {
 }
 
 /// Extract component info from a span's cached extensions.
-fn extract_component_info<S>(span: &tracing_subscriber::registry::SpanRef<'_, S>) -> Option<ComponentInfo>
+fn extract_component_info<S>(
+    span: &tracing_subscriber::registry::SpanRef<'_, S>,
+) -> Option<ComponentInfo>
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
@@ -332,9 +339,15 @@ struct ComponentInfoVisitor {
 impl Visit for ComponentInfoVisitor {
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
         match field.name() {
-            "instance_id" => self.instance_id = Some(format!("{value:?}").trim_matches('"').to_string()),
-            "component_id" => self.component_id = Some(format!("{value:?}").trim_matches('"').to_string()),
-            "component_type" => self.component_type = Some(format!("{value:?}").trim_matches('"').to_string()),
+            "instance_id" => {
+                self.instance_id = Some(format!("{value:?}").trim_matches('"').to_string())
+            }
+            "component_id" => {
+                self.component_id = Some(format!("{value:?}").trim_matches('"').to_string())
+            }
+            "component_type" => {
+                self.component_type = Some(format!("{value:?}").trim_matches('"').to_string())
+            }
             _ => {}
         }
     }
@@ -352,7 +365,10 @@ impl Visit for ComponentInfoVisitor {
 impl ComponentInfoVisitor {
     fn into_component_info(self) -> Option<ComponentInfo> {
         let component_id = self.component_id?;
-        let component_type = self.component_type.as_deref().and_then(parse_component_type)?;
+        let component_type = self
+            .component_type
+            .as_deref()
+            .and_then(parse_component_type)?;
         Some(ComponentInfo {
             instance_id: self.instance_id.unwrap_or_default(),
             component_id,
@@ -383,8 +399,7 @@ impl Visit for MessageVisitor {
         if field.name() == "message" {
             self.message = Some(format!("{value:?}").trim_matches('"').to_string());
         } else {
-            self.fields
-                .push(format!("{}={value:?}", field.name()));
+            self.fields.push(format!("{}={value:?}", field.name()));
         }
     }
 
@@ -433,7 +448,10 @@ mod tests {
         assert_eq!(parse_component_type("Source"), Some(ComponentType::Source));
         assert_eq!(parse_component_type("SOURCE"), Some(ComponentType::Source));
         assert_eq!(parse_component_type("query"), Some(ComponentType::Query));
-        assert_eq!(parse_component_type("reaction"), Some(ComponentType::Reaction));
+        assert_eq!(
+            parse_component_type("reaction"),
+            Some(ComponentType::Reaction)
+        );
         assert_eq!(parse_component_type("unknown"), None);
     }
 

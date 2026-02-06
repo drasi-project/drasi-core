@@ -203,7 +203,7 @@ impl LoggingTestSource {
     }
 
     /// Log a message at info level (for testing)
-    /// Note: With tracing refactor, logs should be emitted via tracing::info!() 
+    /// Note: With tracing refactor, logs should be emitted via tracing::info!()
     /// within a span that has component_id and component_type attributes
     pub async fn emit_log(&self, _message: &str) {
         // Logging is now done via tracing spans, not ComponentLogger
@@ -788,7 +788,10 @@ mod manager_tests {
 
         // Should have log messages (note: trace/debug may be filtered by EnvFilter)
         // The tracing subscriber uses INFO as default level
-        assert!(history.len() >= 3, "Should have at least 3 log messages (info, warn, error)");
+        assert!(
+            history.len() >= 3,
+            "Should have at least 3 log messages (info, warn, error)"
+        );
     }
 
     #[tokio::test]

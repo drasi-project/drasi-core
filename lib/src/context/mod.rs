@@ -369,8 +369,13 @@ mod tests {
         let (status_tx, _rx) = mpsc::channel(100);
         let query_provider = Arc::new(MockQueryProvider);
 
-        let context =
-            ReactionRuntimeContext::new("test-instance", "test-reaction", status_tx, None, query_provider);
+        let context = ReactionRuntimeContext::new(
+            "test-instance",
+            "test-reaction",
+            status_tx,
+            None,
+            query_provider,
+        );
 
         assert_eq!(context.reaction_id(), "test-reaction");
         assert!(context.state_store().is_none());

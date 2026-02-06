@@ -337,12 +337,13 @@ impl Source for GrpcSource {
                 }
 
                 // Run the server with graceful shutdown
-                let server = Server::builder()
-                    .add_service(svc)
-                    .serve_with_shutdown(addr, async move {
-                        let _ = shutdown_rx.await;
-                        debug!("gRPC source received shutdown signal");
-                    });
+                let server =
+                    Server::builder()
+                        .add_service(svc)
+                        .serve_with_shutdown(addr, async move {
+                            let _ = shutdown_rx.await;
+                            debug!("gRPC source received shutdown signal");
+                        });
 
                 if let Err(e) = server.await {
                     error!("gRPC server error: {e}");
