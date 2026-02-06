@@ -51,12 +51,25 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-clippy-
       
-      # Add this step to fix the lexer.c missing error
+      # Generate lexer/parser files for bundled jq
       - name: Prepare bundled jq source
         run: |
           cargo fetch
-          find ~/.cargo/registry/src -name "lexer.c" -exec touch {} +
-          find ~/.cargo/registry/src -name "parser.c" -exec touch {} +
+          # Find the jq source directory and generate lexer/parser files
+          JQ_SRC=$(find ~/.cargo/registry/src -type d -path "*/jq-sys-*/jq" | head -1)
+          if [ -n "$JQ_SRC" ]; then
+            echo "Found jq source at: $JQ_SRC"
+            cd "$JQ_SRC"
+            # Run autoreconf to generate necessary build files
+            autoreconf -fi || true
+            # Generate lexer and parser if .l and .y files exist
+            if [ -f "src/lexer.l" ]; then
+              flex -o src/lexer.c src/lexer.l || touch src/lexer.c
+            fi
+            if [ -f "src/parser.y" ]; then
+              bison -o src/parser.c src/parser.y || touch src/parser.c
+            fi
+          fi
 
       - name: Run Cargo Clippy
         run: cargo clippy --all-targets --all-features
