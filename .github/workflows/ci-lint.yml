@@ -51,26 +51,28 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-clippy-
       
-      # Prepare jq bundled sources (ensure generated lexer/parser C files exist)
-      - name: Prepare bundled jq source
+      # Download pre-generated lexer/parser files from jq 1.6 release tarball
+      - name: Prepare jq pre-generated sources
         run: |
+          # Download jq 1.6 release tarball which contains pre-generated lexer.c and parser.c
+          wget -q https://github.com/jqlang/jq/releases/download/jq-1.6/jq-1.6.tar.gz -O /tmp/jq-1.6.tar.gz
+          tar -xzf /tmp/jq-1.6.tar.gz -C /tmp
+
+          # Fetch cargo dependencies
           cargo fetch
+
+          # Copy pre-generated files to the jq-src submodule
           for JQ_SRC_DIR in ~/.cargo/registry/src/*/jq-src-*; do
-            if [ -d "$JQ_SRC_DIR/modules/jq" ]; then
-              cd "$JQ_SRC_DIR/modules/jq"
-              if [ ! -f src/lexer.c ]; then
-                flex -o src/lexer.c src/lexer.l
-              fi
-              if [ ! -f src/parser.c ]; then
-                bison -d -o src/parser.c src/parser.y
-              fi
+            if [ -d "$JQ_SRC_DIR/modules/jq/src" ]; then
+              echo "Copying pre-generated files to $JQ_SRC_DIR/modules/jq/src/"
+              cp /tmp/jq-1.6/src/lexer.c "$JQ_SRC_DIR/modules/jq/src/"
+              cp /tmp/jq-1.6/src/lexer.h "$JQ_SRC_DIR/modules/jq/src/"
+              cp /tmp/jq-1.6/src/parser.c "$JQ_SRC_DIR/modules/jq/src/"
+              cp /tmp/jq-1.6/src/parser.h "$JQ_SRC_DIR/modules/jq/src/"
             fi
           done
 
       - name: Run Cargo Clippy
-        env:
-          LEX: flex
-          YACC: "bison -y"
         run: cargo clippy --all-targets --all-features
 
   fmt_check:
