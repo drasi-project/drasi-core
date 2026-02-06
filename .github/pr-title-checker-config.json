@@ -1,0 +1,11 @@
+{
+  "CHECKS": {
+    "regexp": "^(feat|fix|test|refactor|chore|style|doc|perf|build|ci|revert|deprecate)(\\(.*\\))?: .+",
+    "ignoreLabels": [
+      "ignore-title"
+    ]
+  },
+  "MESSAGES": {
+    "failure": "The PR title is invalid. Please refer to https://github.com/drasi-project/drasi-core/tree/main/docs/contributing/contributing-pull-requests#pull-request-title for the convention."
+  }
+}
