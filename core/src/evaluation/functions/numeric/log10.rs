@@ -49,11 +49,14 @@ impl ScalarFunction for Log10 {
                         })
                     }
                 };
-                if value <= 0.0 {
+                if value < 0.0 {
                     return Err(FunctionError {
                         function_name: expression.name.to_string(),
                         error: FunctionEvaluationError::DomainError,
                     });
+                }
+                if value == 0.0 {
+                    return Ok(VariableValue::Float(Float::from(f64::NEG_INFINITY)));
                 }
                 Ok(VariableValue::Float(match Float::from_f64(value.log10()) {
                     Some(n) => n,
@@ -75,11 +78,14 @@ impl ScalarFunction for Log10 {
                         })
                     }
                 };
-                if value <= 0.0 {
+                if value < 0.0 {
                     return Err(FunctionError {
                         function_name: expression.name.to_string(),
                         error: FunctionEvaluationError::DomainError,
                     });
+                }
+                if value == 0.0 {
+                    return Ok(VariableValue::Float(Float::from(f64::NEG_INFINITY)));
                 }
                 Ok(VariableValue::Float(match Float::from_f64(value.log10()) {
                     Some(n) => n,

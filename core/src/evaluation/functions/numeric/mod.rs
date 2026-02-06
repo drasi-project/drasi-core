@@ -15,7 +15,7 @@
 mod abs;
 mod ceil;
 mod floor;
-mod ln;
+mod log;
 mod log10;
 mod numeric_round;
 mod random;
@@ -27,7 +27,7 @@ mod tests;
 pub use abs::Abs;
 pub use ceil::Ceil;
 pub use floor::Floor;
-pub use ln::Ln;
+pub use log::Log;
 pub use log10::Log10;
 pub use numeric_round::Round;
 pub use random::Rand;

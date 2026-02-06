@@ -21,10 +21,10 @@ use crate::evaluation::variable_value::VariableValue;
 use crate::evaluation::{ExpressionEvaluationContext, FunctionError, FunctionEvaluationError};
 
 #[derive(Debug)]
-pub struct Ln {}
+pub struct Log {}
 
 #[async_trait]
-impl ScalarFunction for Ln {
+impl ScalarFunction for Log {
     async fn call(
         &self,
         _context: &ExpressionEvaluationContext,
@@ -49,7 +49,7 @@ impl ScalarFunction for Ln {
                         })
                     }
                 };
-                if value <= 0.0 {
+                if value < 0.0 {
                     return Err(FunctionError {
                         function_name: expression.name.to_string(),
                         error: FunctionEvaluationError::DomainError,
@@ -75,7 +75,7 @@ impl ScalarFunction for Ln {
                         })
                     }
                 };
-                if value <= 0.0 {
+                if value < 0.0 {
                     return Err(FunctionError {
                         function_name: expression.name.to_string(),
                         error: FunctionEvaluationError::DomainError,

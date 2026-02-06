@@ -17,7 +17,7 @@ use std::sync::Arc;
 use drasi_query_ast::ast;
 
 use crate::evaluation::context::QueryVariables;
-use crate::evaluation::functions::numeric::Ln;
+use crate::evaluation::functions::numeric::Log;
 use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::variable_value::float::Float;
 use crate::evaluation::variable_value::integer::Integer;
@@ -27,22 +27,22 @@ use crate::evaluation::{
 };
 
 #[tokio::test]
-async fn ln_too_few_args() {
-    let ln = Ln {};
+async fn log_too_few_args() {
+    let log = Log {};
     let binding = QueryVariables::new();
     let context =
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
     let args = vec![];
     let func_expr = ast::FunctionExpression {
-        name: Arc::from("ln"),
+        name: Arc::from("log"),
         args: vec![ast::Expression::UnaryExpression(
             ast::UnaryExpression::Literal(ast::Literal::Real(0.0)),
         )],
         position_in_query: 10,
     };
 
-    let result = ln.call(&context, &func_expr, args.clone()).await;
+    let result = log.call(&context, &func_expr, args.clone()).await;
     assert!(matches!(
         result.unwrap_err(),
         FunctionError {
@@ -53,8 +53,8 @@ async fn ln_too_few_args() {
 }
 
 #[tokio::test]
-async fn ln_too_many_args() {
-    let ln = Ln {};
+async fn log_too_many_args() {
+    let log = Log {};
     let binding = QueryVariables::new();
     let context =
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
@@ -65,14 +65,14 @@ async fn ln_too_many_args() {
     ];
 
     let func_expr = ast::FunctionExpression {
-        name: Arc::from("ln"),
+        name: Arc::from("log"),
         args: vec![ast::Expression::UnaryExpression(
             ast::UnaryExpression::Literal(ast::Literal::Real(0.0)),
         )],
         position_in_query: 10,
     };
 
-    let result = ln.call(&context, &func_expr, args.clone()).await;
+    let result = log.call(&context, &func_expr, args.clone()).await;
     assert!(matches!(
         result.unwrap_err(),
         FunctionError {
@@ -83,43 +83,43 @@ async fn ln_too_many_args() {
 }
 
 #[tokio::test]
-async fn ln_positive_int() {
-    let ln = Ln {};
+async fn log_positive_int() {
+    let log = Log {};
     let binding = QueryVariables::new();
     let context =
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
     let args = vec![VariableValue::Integer(Integer::from(1))];
     let func_expr = ast::FunctionExpression {
-        name: Arc::from("ln"),
+        name: Arc::from("log"),
         args: vec![ast::Expression::UnaryExpression(
             ast::UnaryExpression::Literal(ast::Literal::Null),
         )],
         position_in_query: 10,
     };
 
-    let result = ln.call(&context, &func_expr, args.clone()).await.unwrap();
+    let result = log.call(&context, &func_expr, args.clone()).await.unwrap();
 
     assert_eq!(result, VariableValue::Float(Float::from(0.0)));
 }
 
 #[tokio::test]
-async fn ln_positive_float() {
-    let ln = Ln {};
+async fn log_positive_float() {
+    let log = Log {};
     let binding = QueryVariables::new();
     let context =
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
     let args = vec![VariableValue::Float(Float::from_f64(1.000).unwrap())];
     let func_expr = ast::FunctionExpression {
-        name: Arc::from("ln"),
+        name: Arc::from("log    "),
         args: vec![ast::Expression::UnaryExpression(
             ast::UnaryExpression::Literal(ast::Literal::Null),
         )],
         position_in_query: 10,
     };
 
-    let result = ln.call(&context, &func_expr, args.clone()).await.unwrap();
+    let result = log.call(&context, &func_expr, args.clone()).await.unwrap();
     assert_eq!(
         result,
         VariableValue::Float(Float::from_f64(0.000).unwrap())
@@ -127,22 +127,22 @@ async fn ln_positive_float() {
 }
 
 #[tokio::test]
-async fn ln_negative_int() {
-    let ln = Ln {};
+async fn log_negative_int() {
+    let log = Log {};
     let binding = QueryVariables::new();
     let context =
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
     let args = vec![VariableValue::Integer(Integer::from(-1))];
     let func_expr = ast::FunctionExpression {
-        name: Arc::from("ln"),
+        name: Arc::from("log"),
         args: vec![ast::Expression::UnaryExpression(
             ast::UnaryExpression::Literal(ast::Literal::Null),
         )],
         position_in_query: 10,
     };
 
-    let result = ln.call(&context, &func_expr, args.clone()).await;
+    let result = log.call(&context, &func_expr, args.clone()).await;
     assert!(matches!(
         result.unwrap_err(),
         FunctionError {
@@ -153,22 +153,22 @@ async fn ln_negative_int() {
 }
 
 #[tokio::test]
-async fn ln_negative_float() {
-    let ln = Ln {};
+async fn log_negative_float() {
+    let log = Log {};
     let binding = QueryVariables::new();
     let context =
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
     let args = vec![VariableValue::Float(Float::from_f64(-0.001).unwrap())];
     let func_expr = ast::FunctionExpression {
-        name: Arc::from("ln"),
+        name: Arc::from("log"),
         args: vec![ast::Expression::UnaryExpression(
             ast::UnaryExpression::Literal(ast::Literal::Null),
         )],
         position_in_query: 10,
     };
 
-    let result = ln.call(&context, &func_expr, args.clone()).await;
+    let result = log.call(&context, &func_expr, args.clone()).await;
     assert!(matches!(
         result.unwrap_err(),
         FunctionError {
@@ -179,47 +179,44 @@ async fn ln_negative_float() {
 }
 
 #[tokio::test]
-async fn ln_zero() {
-    let ln = Ln {};
+async fn log_zero() {
+    let log = Log {};
     let binding = QueryVariables::new();
     let context =
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
     let args = vec![VariableValue::Float((0_f64).into())];
     let func_expr = ast::FunctionExpression {
-        name: Arc::from("ln"),
+        name: Arc::from("log"),
         args: vec![ast::Expression::UnaryExpression(
             ast::UnaryExpression::Literal(ast::Literal::Null),
         )],
         position_in_query: 10,
     };
 
-    let result = ln.call(&context, &func_expr, args.clone()).await;
-    assert!(matches!(
-        result.unwrap_err(),
-        FunctionError {
-            function_name: _,
-            error: FunctionEvaluationError::DomainError,
-        }
-    ));
+    let result = log.call(&context, &func_expr, args.clone()).await.unwrap();
+    assert_eq!(
+        result,
+        VariableValue::Float(Float::from_f64(f64::NEG_INFINITY).unwrap())
+    );
 }
 
 #[tokio::test]
-async fn ln_null() {
-    let ln = Ln {};
+async fn log_null() {
+    let log = Log {};
     let binding = QueryVariables::new();
     let context =
         ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
 
     let args = vec![VariableValue::Null];
     let func_expr = ast::FunctionExpression {
-        name: Arc::from("ln"),
+        name: Arc::from("log"),
         args: vec![ast::Expression::UnaryExpression(
             ast::UnaryExpression::Literal(ast::Literal::Null),
         )],
         position_in_query: 10,
     };
 
-    let result = ln.call(&context, &func_expr, args.clone()).await.unwrap();
+    let result = log.call(&context, &func_expr, args.clone()).await.unwrap();
     assert_eq!(result, VariableValue::Null);
 }

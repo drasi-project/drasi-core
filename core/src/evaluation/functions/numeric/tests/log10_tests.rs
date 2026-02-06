@@ -200,14 +200,11 @@ async fn log10_zero() {
         position_in_query: 10,
     };
 
-    let result = log10.call(&context, &func_expr, args.clone()).await;
-    assert!(matches!(
-        result.unwrap_err(),
-        FunctionError {
-            function_name: _,
-            error: FunctionEvaluationError::DomainError,
-        }
-    ));
+    let result = log10
+        .call(&context, &func_expr, args.clone())
+        .await
+        .unwrap();
+    assert_eq!(result, VariableValue::Float(Float::from(f64::NEG_INFINITY)));
 }
 
 #[tokio::test]
