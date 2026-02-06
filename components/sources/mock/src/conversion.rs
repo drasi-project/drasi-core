@@ -121,6 +121,25 @@ mod tests {
     }
 
     #[test]
+    fn test_safe_json_to_element_value_with_null() {
+        let null_val = json!(null);
+        let result = safe_json_to_element_value(&null_val);
+        assert!(result.is_ok());
+        assert!(matches!(
+            result.unwrap(),
+            drasi_core::models::ElementValue::Null
+        ));
+    }
+
+    #[test]
+    fn test_safe_json_to_element_value_with_array() {
+        let array = json!([1, 2, 3]);
+        let result = safe_json_to_element_value(&array);
+        // Arrays should convert successfully to a list
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn test_json_to_element_value_or_default() {
         let valid = json!(42);
         let default = drasi_core::models::ElementValue::Null;
@@ -133,10 +152,53 @@ mod tests {
     }
 
     #[test]
+    fn test_json_to_element_value_or_default_with_float() {
+        let float_val = json!(3.5);
+        let default = drasi_core::models::ElementValue::Integer(0);
+        let result = json_to_element_value_or_default(&float_val, default);
+        // Should convert to Float, not use default
+        assert!(matches!(result, drasi_core::models::ElementValue::Float(_)));
+    }
+
+    #[test]
+    fn test_json_to_element_value_or_default_with_string() {
+        let string_val = json!("hello");
+        let default = drasi_core::models::ElementValue::Null;
+        let result = json_to_element_value_or_default(&string_val, default);
+        assert!(matches!(
+            result,
+            drasi_core::models::ElementValue::String(_)
+        ));
+    }
+
+    #[test]
     fn test_batch_json_to_element_values() {
         let values = [json!(1), json!("test"), json!(true), json!(null)];
         let results = batch_json_to_element_values(values.iter());
         // Should have converted all valid values
         assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_batch_json_to_element_values_with_mixed_types() {
+        let values = [
+            json!(42),
+            json!("string"),
+            json!(true),
+            json!(3.5),
+            json!(null),
+            json!([1, 2, 3]),
+            json!({"key": "value"}),
+        ];
+        let results = batch_json_to_element_values(values.iter());
+        // All these JSON types should convert successfully
+        assert_eq!(results.len(), 7);
+    }
+
+    #[test]
+    fn test_batch_json_to_element_values_empty_iterator() {
+        let values: [serde_json::Value; 0] = [];
+        let results = batch_json_to_element_values(values.iter());
+        assert!(results.is_empty());
     }
 }

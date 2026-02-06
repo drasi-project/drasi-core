@@ -70,7 +70,7 @@ mod construction {
 // ============================================================================
 
 mod properties {
-    use crate::{DataType, MockSourceBuilder};
+    use crate::{DataType, MockSource, MockSourceBuilder};
     use drasi_lib::Source;
 
     #[test]
@@ -147,6 +147,31 @@ mod properties {
         let props = source.properties();
 
         assert_eq!(props.get("sensor_count"), None);
+    }
+
+    #[test]
+    fn test_auto_start_returns_configured_value_true() {
+        let source = MockSourceBuilder::new("test")
+            .with_auto_start(true)
+            .build()
+            .unwrap();
+        assert!(source.auto_start());
+    }
+
+    #[test]
+    fn test_auto_start_returns_configured_value_false() {
+        let source = MockSourceBuilder::new("test")
+            .with_auto_start(false)
+            .build()
+            .unwrap();
+        assert!(!source.auto_start());
+    }
+
+    #[test]
+    fn test_as_any_allows_downcast() {
+        let source = MockSourceBuilder::new("test").build().unwrap();
+        let any = source.as_any();
+        assert!(any.downcast_ref::<MockSource>().is_some());
     }
 }
 
@@ -824,6 +849,24 @@ mod config {
     }
 
     #[test]
+    fn test_config_deserialization_counter() {
+        let json = r#"{"data_type": {"type": "counter"}, "interval_ms": 100}"#;
+        let config: MockSourceConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(config.data_type, DataType::Counter);
+        assert_eq!(config.interval_ms, 100);
+    }
+
+    #[test]
+    fn test_config_deserialization_generic() {
+        let json = r#"{"data_type": {"type": "generic"}, "interval_ms": 200}"#;
+        let config: MockSourceConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(config.data_type, DataType::Generic);
+        assert_eq!(config.interval_ms, 200);
+    }
+
+    #[test]
     fn test_config_sensor_reading_with_custom_count() {
         let json = r#"{"data_type": {"type": "sensor_reading", "sensor_count": 20}}"#;
         let config: MockSourceConfig = serde_json::from_str(json).unwrap();
@@ -1328,5 +1371,112 @@ mod default_config {
     fn test_default_config_validates() {
         let config = MockSourceConfig::default();
         assert!(config.validate().is_ok());
+    }
+}
+
+// ============================================================================
+// Source Trait Methods Tests
+// ============================================================================
+
+mod source_trait {
+    use crate::{DataType, MockSource, MockSourceBuilder};
+    use async_trait::async_trait;
+    use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+    use drasi_lib::channels::BootstrapEventSender;
+    use drasi_lib::config::SourceSubscriptionSettings;
+    use drasi_lib::Source;
+    use std::collections::HashSet;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_subscribe_returns_subscription_response() {
+        let source = MockSourceBuilder::new("test-subscribe")
+            .with_data_type(DataType::Counter)
+            .with_interval_ms(10000)
+            .build()
+            .unwrap();
+
+        let settings = SourceSubscriptionSettings {
+            source_id: "test-subscribe".to_string(),
+            enable_bootstrap: false,
+            query_id: "test-query".to_string(),
+            nodes: HashSet::new(),
+            relations: HashSet::new(),
+        };
+
+        let result = source.subscribe(settings).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        // Verify we got a valid response with expected source_id
+        assert_eq!(response.source_id, "test-subscribe");
+    }
+
+    #[tokio::test]
+    async fn test_set_bootstrap_provider_after_construction() {
+        let source = MockSourceBuilder::new("test-bootstrap")
+            .with_data_type(DataType::Counter)
+            .with_interval_ms(10000)
+            .build()
+            .unwrap();
+
+        // Create a simple test bootstrap provider
+        struct TestBootstrapProvider {
+            was_called: Arc<AtomicBool>,
+        }
+
+        #[async_trait]
+        impl BootstrapProvider for TestBootstrapProvider {
+            async fn bootstrap(
+                &self,
+                _request: BootstrapRequest,
+                _context: &BootstrapContext,
+                _event_tx: BootstrapEventSender,
+                _settings: Option<&SourceSubscriptionSettings>,
+            ) -> anyhow::Result<usize> {
+                self.was_called.store(true, Ordering::SeqCst);
+                Ok(0)
+            }
+        }
+
+        let was_called = Arc::new(AtomicBool::new(false));
+        let provider = TestBootstrapProvider {
+            was_called: was_called.clone(),
+        };
+
+        // Set the bootstrap provider after construction
+        source.set_bootstrap_provider(Box::new(provider)).await;
+
+        // Verify the source still works
+        assert_eq!(source.id(), "test-bootstrap");
+    }
+
+    #[test]
+    fn test_builder_with_bootstrap_provider() {
+        struct SimpleBootstrapProvider;
+
+        #[async_trait]
+        impl BootstrapProvider for SimpleBootstrapProvider {
+            async fn bootstrap(
+                &self,
+                _request: BootstrapRequest,
+                _context: &BootstrapContext,
+                _event_tx: BootstrapEventSender,
+                _settings: Option<&SourceSubscriptionSettings>,
+            ) -> anyhow::Result<usize> {
+                Ok(0)
+            }
+        }
+
+        let source = MockSource::builder("test-with-bootstrap")
+            .with_data_type(DataType::Counter)
+            .with_interval_ms(1000)
+            .with_bootstrap_provider(SimpleBootstrapProvider)
+            .build();
+
+        assert!(source.is_ok());
+        let source = source.unwrap();
+        assert_eq!(source.id(), "test-with-bootstrap");
     }
 }
