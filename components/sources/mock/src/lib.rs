@@ -96,7 +96,6 @@
 //!
 //! ```rust,ignore
 //! use drasi_source_mock::{MockSource, MockSourceConfig, DataType};
-//! use std::sync::Arc;
 //!
 //! // Create configuration for sensor data at 1-second intervals
 //! let config = MockSourceConfig {
@@ -104,8 +103,10 @@
 //!     interval_ms: 1000,
 //! };
 //!
-//! // Create and add to DrasiLib
-//! let source = Arc::new(MockSource::new("my-mock", config)?);
+//! // Create the source
+//! let source = MockSource::new("my-mock", config)?;
+//!
+//! // Add to DrasiLib (ownership is transferred)
 //! drasi.add_source(source).await?;
 //! ```
 //!

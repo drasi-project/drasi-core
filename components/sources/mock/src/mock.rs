@@ -39,13 +39,13 @@ use drasi_lib::Source;
 ///
 /// - `base`: Common source functionality (dispatchers, status, lifecycle)
 /// - `config`: Mock-specific configuration (data_type with optional embedded sensor_count, interval_ms)
-/// - `seen_sensors`: Tracks which sensors have been seen for ADD vs UPDATE logic
+/// - `seen_sensors`: Tracks which sensors have been seen for INSERT vs UPDATE logic
 pub struct MockSource {
     /// Base source implementation providing common functionality
     base: SourceBase,
     /// Mock source configuration
     config: MockSourceConfig,
-    /// Tracks which sensor IDs have already been sent (for ADD vs UPDATE logic)
+    /// Tracks which sensor IDs have already been sent (for INSERT vs UPDATE logic)
     seen_sensors: Arc<RwLock<HashSet<u32>>>,
 }
 
@@ -644,7 +644,7 @@ impl MockSource {
     ///
     /// ```rust,ignore
     /// let source = MockSource::builder("my-source")
-    ///     .with_data_type("sensor")
+    ///     .with_data_type(DataType::sensor_reading(10))
     ///     .with_interval_ms(1000)
     ///     .build()?;
     /// ```

@@ -223,17 +223,14 @@ Properties:
 ```rust
 use drasi_source_mock::{MockSource, DataType};
 use drasi_lib::Source;
-use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Create a counter source
-    let counter_source = Arc::new(
-        MockSource::builder("counter-source")
-            .with_data_type(DataType::Counter)
-            .with_interval_ms(1000)
-            .build()?
-    );
+    let counter_source = MockSource::builder("counter-source")
+        .with_data_type(DataType::Counter)
+        .with_interval_ms(1000)
+        .build()?;
 
     // Start the source
     counter_source.start().await?;
@@ -252,28 +249,25 @@ async fn main() -> anyhow::Result<()> {
 
 ```rust
 use drasi_source_mock::{MockSource, DataType};
-use drasi_lib::DrasiLib;
-use std::sync::Arc;
+use drasi_lib::{DrasiLib, Query};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Create Drasi instance
-    let mut drasi = DrasiLib::builder("my-app")
+    // Create mock source with 10 sensors
+    let sensor_source = MockSource::builder("sensors")
+        .with_data_type(DataType::sensor_reading(10))
+        .with_interval_ms(2000)
+        .build()?;
+
+    // Create Drasi instance with source
+    let mut drasi = DrasiLib::builder()
+        .with_id("my-app")
+        .with_source(sensor_source)
         .build()
         .await?;
 
-    // Create and add mock source with 10 sensors
-    let sensor_source = Arc::new(
-        MockSource::builder("sensors")
-            .with_data_type(DataType::sensor_reading(10))
-            .with_interval_ms(2000)
-            .build()?
-    );
-
-    drasi.add_source(sensor_source).await?;
-
     // Add a continuous query
-    let query = drasi_lib::Query::cypher("high-temp")
+    let query = Query::cypher("high-temp")
         .query("MATCH (s:SensorReading) WHERE s.temperature > 25.0 RETURN s")
         .from_source("sensors")
         .build();
@@ -281,7 +275,7 @@ async fn main() -> anyhow::Result<()> {
     drasi.add_query(query).await?;
 
     // Run the system
-    drasi.run().await?;
+    drasi.start().await?;
 
     Ok(())
 }
@@ -291,7 +285,6 @@ async fn main() -> anyhow::Result<()> {
 
 ```rust
 use drasi_source_mock::{MockSource, MockSourceConfig, DataType};
-use drasi_lib::channels::SourceEvent;
 use drasi_lib::Source;
 
 #[tokio::test]
@@ -373,7 +366,9 @@ async fn test_event_injection() {
 
 ```rust
 use drasi_source_mock::{MockSource, DataType};
-use drasi_lib::bootstrap::{BootstrapProvider, BootstrapRequest};
+use drasi_lib::bootstrap::{BootstrapProvider, BootstrapRequest, BootstrapContext};
+use drasi_lib::channels::BootstrapEventSender;
+use drasi_lib::config::SourceSubscriptionSettings;
 use async_trait::async_trait;
 
 // Custom bootstrap provider
@@ -384,9 +379,13 @@ impl BootstrapProvider for MyBootstrapProvider {
     async fn bootstrap(
         &self,
         request: BootstrapRequest,
-    ) -> anyhow::Result<Vec<drasi_core::models::SourceChange>> {
-        // Return initial data based on request labels
-        Ok(vec![/* initial changes */])
+        context: &BootstrapContext,
+        event_tx: BootstrapEventSender,
+        _settings: Option<&SourceSubscriptionSettings>,
+    ) -> anyhow::Result<usize> {
+        // Send initial data through event_tx channel
+        // Return the number of elements sent
+        Ok(0)
     }
 }
 
@@ -476,8 +475,8 @@ All modes include an RFC3339 formatted timestamp:
 
 **Timestamp Strategy:**
 - Primary: `chrono::Utc::now().to_rfc3339()` for timestamp property
-- Metadata: Nanosecond precision using `SystemTime::duration_since(UNIX_EPOCH)`
-- Fallback: If nanosecond timestamp fails, uses millisecond precision × 1,000,000
+- Metadata: Millisecond precision for Counter and SensorReading modes, nanosecond precision for Generic mode
+- Fallback: If system time fails, uses `chrono::Utc::now().timestamp_millis()`
 
 ### Randomization Details
 
@@ -711,13 +710,6 @@ MATCH (s:SensorReading) WHERE s.temperature > 25 RETURN s
 
 ### Configuration Validation Errors
 
-**Invalid Data Type (string):**
-```
-Error: Invalid data_type 'sensors'. Valid options are: counter, sensor_reading, generic
-```
-
-**Solution**: Use exact spelling: `"counter"`, `"sensor_reading"` (or `"sensor"`), or `"generic"`. Or use the `DataType` enum directly.
-
 **Zero Interval:**
 ```
 Error: Validation error: interval_ms cannot be 0.
@@ -771,10 +763,10 @@ let source = MockSource::builder("sensor")
 
 ### Related Documentation
 
-- **Source Plugin Guide**: `/Users/allenjones/dev/agentofreality/drasi/drasi-server/drasi-core/lib/src/sources/README.md`
-- **Bootstrap Providers**: `/Users/allenjones/dev/agentofreality/drasi/drasi-server/drasi-core/lib/src/bootstrap/README.md`
-- **Channel System**: `/Users/allenjones/dev/agentofreality/drasi/drasi-server/drasi-core/lib/src/channels/README.md`
-- **SourceBase**: `/Users/allenjones/dev/agentofreality/drasi/drasi-server/drasi-core/lib/src/sources/base.rs`
+- **Source Plugins**: `components/sources/README.md`
+- **Bootstrap Providers**: `components/bootstrappers/README.md`
+- **SourceBase Implementation**: `lib/src/sources/base.rs`
+- **Channel Events**: `lib/src/channels/events.rs`
 
 ### Example Projects
 
@@ -786,20 +778,4 @@ See the test suite in `src/tests.rs` for comprehensive usage examples including:
 - Configuration serialization
 - Validation error handling
 
-## Changelog
 
-### Version 0.3.0
-- `data_type` is now a `DataType` enum with `Counter`, `SensorReading { sensor_count }`, and `Generic` variants
-- `sensor_count` is embedded in `DataType::SensorReading { sensor_count }` (default: 5)
-- SensorReading mode now generates INSERT for first reading of each sensor, UPDATE for subsequent readings
-- SensorReading element IDs use `sensor_{sensor_id}` format for stable identity
-- Added `DataType::sensor_reading(count)` helper method
-- Configuration validation is now enforced in constructors (rejects interval_ms=0, sensor_count=0)
-
-### Version 0.2.0
-- Initial release as separate plugin crate
-- Three data generation modes: counter, sensor, generic
-- Builder pattern support
-- Bootstrap provider integration
-- Test utilities (inject_event, test_subscribe)
-- Configurable dispatch modes and buffer capacity
