@@ -51,12 +51,23 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-clippy-
       
+      # Prepare jq bundled sources (ensure generated lexer/parser C files exist)
+      - name: Prepare bundled jq source
+        run: |
+          cargo fetch
+          JQ_SRC_DIR=$(ls -d ~/.cargo/registry/src/*/jq-src-* 2>/dev/null | head -n 1)
+          if [ -n "$JQ_SRC_DIR" ] && [ -d "$JQ_SRC_DIR/modules/jq" ]; then
+            cd "$JQ_SRC_DIR/modules/jq"
+            if [ ! -f src/lexer.c ]; then
+              flex -o src/lexer.c src/lexer.l
+            fi
+            if [ ! -f src/parser.c ]; then
+              bison -d -o src/parser.c src/parser.y
+            fi
+          fi
+
       - name: Run Cargo Clippy
         run: cargo clippy --all-targets --all-features
-        env:
-          # Pass configure flag to disable maintainer mode for jq build
-          # This uses pre-generated lexer.c/parser.c instead of requiring bison/flex
-          AUTOTOOLS_CONFIGURE: "--disable-maintainer-mode"
 
   fmt_check:
     name: Format check
