@@ -16,7 +16,7 @@ use anyhow::Result;
 use log::info;
 use std::sync::Arc;
 
-use crate::channels::{ComponentStatus, EventReceivers};
+use crate::channels::{ComponentStatus, ComponentType, EventReceivers};
 use crate::config::RuntimeConfig;
 use crate::queries::QueryManager;
 use crate::reactions::ReactionManager;
@@ -79,6 +79,11 @@ impl LifecycleManager {
     /// to process component events. Can only be called once.
     pub async fn start_event_processors(&mut self) {
         if let Some(receivers) = self.event_receivers.take() {
+            // Clone manager references for the event processor task
+            let source_manager = self.source_manager.clone();
+            let query_manager = self.query_manager.clone();
+            let reaction_manager = self.reaction_manager.clone();
+
             // Start component event processor
             let component_rx = receivers.component_event_rx;
             tokio::spawn(async move {
@@ -89,8 +94,21 @@ impl LifecycleManager {
                         event.component_type,
                         event.component_id,
                         event.status,
-                        event.message.unwrap_or_default()
+                        event.message.clone().unwrap_or_default()
                     );
+
+                    // Record the event in the appropriate manager's history
+                    match event.component_type {
+                        ComponentType::Source => {
+                            source_manager.record_event(event).await;
+                        }
+                        ComponentType::Query => {
+                            query_manager.record_event(event).await;
+                        }
+                        ComponentType::Reaction => {
+                            reaction_manager.record_event(event).await;
+                        }
+                    }
                 }
             });
 

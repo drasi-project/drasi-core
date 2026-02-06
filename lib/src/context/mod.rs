@@ -71,6 +71,7 @@ use crate::state_store::StateStoreProvider;
 ///
 /// # Available Services
 ///
+/// - `instance_id`: The DrasiLib instance ID (for log routing isolation)
 /// - `source_id`: The unique identifier for this source instance
 /// - `status_tx`: Channel for reporting component status/lifecycle events
 /// - `state_store`: Optional persistent state storage (if configured)
@@ -81,6 +82,9 @@ use crate::state_store::StateStoreProvider;
 /// making cloning cheap (just reference count increments).
 #[derive(Clone)]
 pub struct SourceRuntimeContext {
+    /// DrasiLib instance ID (for log routing isolation)
+    pub instance_id: String,
+
     /// Unique identifier for this source instance
     pub source_id: String,
 
@@ -105,19 +109,27 @@ impl SourceRuntimeContext {
     ///
     /// # Arguments
     ///
+    /// * `instance_id` - The DrasiLib instance ID
     /// * `source_id` - The unique identifier for this source
     /// * `status_tx` - Channel for reporting component status/lifecycle events
     /// * `state_store` - Optional persistent state storage
     pub fn new(
+        instance_id: impl Into<String>,
         source_id: impl Into<String>,
         status_tx: ComponentEventSender,
         state_store: Option<Arc<dyn StateStoreProvider>>,
     ) -> Self {
         Self {
+            instance_id: instance_id.into(),
             source_id: source_id.into(),
             status_tx,
             state_store,
         }
+    }
+
+    /// Get the DrasiLib instance ID.
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
     }
 
     /// Get the source's unique identifier.
@@ -145,6 +157,7 @@ impl SourceRuntimeContext {
 impl std::fmt::Debug for SourceRuntimeContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SourceRuntimeContext")
+            .field("instance_id", &self.instance_id)
             .field("source_id", &self.source_id)
             .field("status_tx", &"<ComponentEventSender>")
             .field(
@@ -162,6 +175,7 @@ impl std::fmt::Debug for SourceRuntimeContext {
 ///
 /// # Available Services
 ///
+/// - `instance_id`: The DrasiLib instance ID (for log routing isolation)
 /// - `reaction_id`: The unique identifier for this reaction instance
 /// - `status_tx`: Channel for reporting component status/lifecycle events
 /// - `state_store`: Optional persistent state storage (if configured)
@@ -173,6 +187,9 @@ impl std::fmt::Debug for SourceRuntimeContext {
 /// making cloning cheap (just reference count increments).
 #[derive(Clone)]
 pub struct ReactionRuntimeContext {
+    /// DrasiLib instance ID (for log routing isolation)
+    pub instance_id: String,
+
     /// Unique identifier for this reaction instance
     pub reaction_id: String,
 
@@ -203,22 +220,30 @@ impl ReactionRuntimeContext {
     ///
     /// # Arguments
     ///
+    /// * `instance_id` - The DrasiLib instance ID
     /// * `reaction_id` - The unique identifier for this reaction
     /// * `status_tx` - Channel for reporting component status/lifecycle events
     /// * `state_store` - Optional persistent state storage
     /// * `query_provider` - Access to query instances for subscription
     pub fn new(
+        instance_id: impl Into<String>,
         reaction_id: impl Into<String>,
         status_tx: ComponentEventSender,
         state_store: Option<Arc<dyn StateStoreProvider>>,
         query_provider: Arc<dyn QueryProvider>,
     ) -> Self {
         Self {
+            instance_id: instance_id.into(),
             reaction_id: reaction_id.into(),
             status_tx,
             state_store,
             query_provider,
         }
+    }
+
+    /// Get the DrasiLib instance ID.
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
     }
 
     /// Get the reaction's unique identifier.
@@ -253,6 +278,7 @@ impl ReactionRuntimeContext {
 impl std::fmt::Debug for ReactionRuntimeContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReactionRuntimeContext")
+            .field("instance_id", &self.instance_id)
             .field("reaction_id", &self.reaction_id)
             .field("status_tx", &"<ComponentEventSender>")
             .field(
@@ -289,8 +315,10 @@ mod tests {
         let (status_tx, _rx) = mpsc::channel(100);
         let state_store = Arc::new(MemoryStateStoreProvider::new());
 
-        let context = SourceRuntimeContext::new("test-source", status_tx, Some(state_store));
+        let context =
+            SourceRuntimeContext::new("test-instance", "test-source", status_tx, Some(state_store));
 
+        assert_eq!(context.instance_id(), "test-instance");
         assert_eq!(context.source_id(), "test-source");
         assert!(context.state_store().is_some());
     }
@@ -299,7 +327,7 @@ mod tests {
     async fn test_source_runtime_context_without_state_store() {
         let (status_tx, _rx) = mpsc::channel(100);
 
-        let context = SourceRuntimeContext::new("test-source", status_tx, None);
+        let context = SourceRuntimeContext::new("test-instance", "test-source", status_tx, None);
 
         assert_eq!(context.source_id(), "test-source");
         assert!(context.state_store().is_none());
@@ -310,7 +338,8 @@ mod tests {
         let (status_tx, _rx) = mpsc::channel(100);
         let state_store = Arc::new(MemoryStateStoreProvider::new());
 
-        let context = SourceRuntimeContext::new("test-source", status_tx, Some(state_store));
+        let context =
+            SourceRuntimeContext::new("test-instance", "test-source", status_tx, Some(state_store));
 
         let cloned = context.clone();
         assert_eq!(cloned.source_id(), context.source_id());
@@ -323,12 +352,14 @@ mod tests {
         let query_provider = Arc::new(MockQueryProvider);
 
         let context = ReactionRuntimeContext::new(
+            "test-instance",
             "test-reaction",
             status_tx,
             Some(state_store),
             query_provider,
         );
 
+        assert_eq!(context.instance_id(), "test-instance");
         assert_eq!(context.reaction_id(), "test-reaction");
         assert!(context.state_store().is_some());
     }
@@ -338,7 +369,13 @@ mod tests {
         let (status_tx, _rx) = mpsc::channel(100);
         let query_provider = Arc::new(MockQueryProvider);
 
-        let context = ReactionRuntimeContext::new("test-reaction", status_tx, None, query_provider);
+        let context = ReactionRuntimeContext::new(
+            "test-instance",
+            "test-reaction",
+            status_tx,
+            None,
+            query_provider,
+        );
 
         assert_eq!(context.reaction_id(), "test-reaction");
         assert!(context.state_store().is_none());
@@ -351,6 +388,7 @@ mod tests {
         let query_provider = Arc::new(MockQueryProvider);
 
         let context = ReactionRuntimeContext::new(
+            "test-instance",
             "test-reaction",
             status_tx,
             Some(state_store),
@@ -364,7 +402,7 @@ mod tests {
     #[test]
     fn test_source_runtime_context_debug() {
         let (status_tx, _rx) = mpsc::channel::<crate::channels::ComponentEvent>(100);
-        let context = SourceRuntimeContext::new("test", status_tx, None);
+        let context = SourceRuntimeContext::new("test-instance", "test", status_tx, None);
         let debug_str = format!("{context:?}");
         assert!(debug_str.contains("SourceRuntimeContext"));
         assert!(debug_str.contains("test"));
@@ -374,7 +412,8 @@ mod tests {
     fn test_reaction_runtime_context_debug() {
         let (status_tx, _rx) = mpsc::channel::<crate::channels::ComponentEvent>(100);
         let query_provider = Arc::new(MockQueryProvider);
-        let context = ReactionRuntimeContext::new("test", status_tx, None, query_provider);
+        let context =
+            ReactionRuntimeContext::new("test-instance", "test", status_tx, None, query_provider);
         let debug_str = format!("{context:?}");
         assert!(debug_str.contains("ReactionRuntimeContext"));
         assert!(debug_str.contains("test"));

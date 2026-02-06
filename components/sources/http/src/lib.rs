@@ -195,9 +195,10 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
-use drasi_lib::channels::*;
+use drasi_lib::channels::{ComponentType, *};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
+use tracing::Instrument;
 
 use crate::adaptive_batcher::{AdaptiveBatchConfig, AdaptiveBatcher};
 
@@ -676,14 +677,36 @@ impl Source for HttpSource {
         // Start adaptive batcher task
         let adaptive_config = self.adaptive_config.clone();
         let source_id = self.base.id.clone();
+        let dispatchers = self.base.dispatchers.clone();
+
+        // Get instance_id from context for log routing isolation
+        let instance_id = self
+            .base
+            .context()
+            .await
+            .map(|c| c.instance_id)
+            .unwrap_or_default();
 
         info!("[{source_id}] Starting adaptive batcher task");
-        tokio::spawn(Self::run_adaptive_batcher(
-            batch_rx,
-            self.base.dispatchers.clone(),
-            adaptive_config,
-            source_id.clone(),
-        ));
+        let source_id_for_span = source_id.clone();
+        let span = tracing::info_span!(
+            "http_adaptive_batcher",
+            instance_id = %instance_id,
+            component_id = %source_id_for_span,
+            component_type = "source"
+        );
+        tokio::spawn(
+            async move {
+                Self::run_adaptive_batcher(
+                    batch_rx,
+                    dispatchers,
+                    adaptive_config,
+                    source_id.clone(),
+                )
+                .await
+            }
+            .instrument(span),
+        );
 
         // Create app state
         let state = HttpAppState {
@@ -711,33 +734,44 @@ impl Source for HttpSource {
 
         // Start server
         let (error_tx, error_rx) = tokio::sync::oneshot::channel();
-        let server_handle = tokio::spawn(async move {
-            let addr = format!("{host}:{port}");
-            info!("[{source_id}] Adaptive HTTP source attempting to bind to {addr}");
+        let source_id = self.base.id.clone();
+        let source_id_for_span = source_id.clone();
+        let span = tracing::info_span!(
+            "http_source_server",
+            instance_id = %instance_id,
+            component_id = %source_id_for_span,
+            component_type = "source"
+        );
+        let server_handle = tokio::spawn(
+            async move {
+                let addr = format!("{host}:{port}");
+                info!("[{source_id}] Adaptive HTTP source attempting to bind to {addr}");
 
-            let listener = match tokio::net::TcpListener::bind(&addr).await {
-                Ok(listener) => {
-                    info!("[{source_id}] Adaptive HTTP source successfully listening on {addr}");
-                    listener
-                }
-                Err(e) => {
-                    error!("[{source_id}] Failed to bind HTTP server to {addr}: {e}");
-                    let _ = error_tx.send(format!(
+                let listener = match tokio::net::TcpListener::bind(&addr).await {
+                    Ok(listener) => {
+                        info!("[{source_id}] Adaptive HTTP source successfully listening on {addr}");
+                        listener
+                    }
+                    Err(e) => {
+                        error!("[{source_id}] Failed to bind HTTP server to {addr}: {e}");
+                        let _ = error_tx.send(format!(
                         "Failed to bind HTTP server to {addr}: {e}. Common causes: port already in use, insufficient permissions"
                     ));
                     return;
                 }
             };
 
-            if let Err(e) = axum::serve(listener, app)
-                .with_graceful_shutdown(async move {
-                    let _ = shutdown_rx.await;
-                })
-                .await
-            {
-                error!("[{source_id}] HTTP server error: {e}");
+                if let Err(e) = axum::serve(listener, app)
+                    .with_graceful_shutdown(async move {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+                {
+                    error!("[{source_id}] HTTP server error: {e}");
+                }
             }
-        });
+            .instrument(span),
+        );
 
         *self.base.task_handle.write().await = Some(server_handle);
         *self.base.shutdown_tx.write().await = Some(shutdown_tx);

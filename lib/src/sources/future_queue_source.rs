@@ -21,8 +21,11 @@ use std::time::SystemTime;
 use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
 
-use crate::channels::{ComponentEventSender, DispatchMode, SourceEvent, SourceEventWrapper};
+use crate::channels::{
+    ComponentEventSender, ComponentType, DispatchMode, SourceEvent, SourceEventWrapper,
+};
 use crate::ComponentStatus;
+use tracing::Instrument;
 
 /// Internal source ID for the future queue source (used for lifecycle management only)
 pub const FUTURE_QUEUE_SOURCE_ID: &str = "__future_queue__";
@@ -90,24 +93,31 @@ impl FutureQueueSource {
         let query_id = self.query_id.clone();
         let dispatcher_clone = self.dispatcher.clone();
 
-        let handle = tokio::spawn(async move {
-            debug!("FutureQueueSource polling task started for query '{query_id}'");
+        // Use tracing span to route logs to the query's log stream
+        let span = tracing::info_span!(
+            "future_queue_polling",
+            component_id = %query_id,
+            component_type = "query"
+        );
+        let handle = tokio::spawn(
+            async move {
+                debug!("FutureQueueSource polling task started for query '{query_id}'");
 
-            loop {
-                // Check if we should stop
-                {
-                    let status = status_clone.read().await;
-                    if *status != FutureQueueSourceStatus::Running {
-                        info!("FutureQueueSource polling task stopping for query '{query_id}'");
-                        break;
+                loop {
+                    // Check if we should stop
+                    {
+                        let status = status_clone.read().await;
+                        if *status != FutureQueueSourceStatus::Running {
+                            info!("FutureQueueSource polling task stopping for query '{query_id}'");
+                            break;
+                        }
                     }
-                }
 
-                // Peek at the next due time
-                let next_due_time = match future_queue.peek_due_time().await {
-                    Ok(Some(due_time)) => due_time,
-                    Ok(None) => {
-                        // No items in queue, sleep for a bit and check again
+                    // Peek at the next due time
+                    let next_due_time = match future_queue.peek_due_time().await {
+                        Ok(Some(due_time)) => due_time,
+                        Ok(None) => {
+                            // No items in queue, sleep for a bit and check again
                         sleep(Duration::from_millis(100)).await;
                         continue;
                     }
@@ -202,7 +212,9 @@ impl FutureQueueSource {
             }
 
             debug!("FutureQueueSource polling task exited for query '{query_id}'");
-        });
+        }
+        .instrument(span),
+    );
 
         *self.task_handle.write().await = Some(handle);
 
