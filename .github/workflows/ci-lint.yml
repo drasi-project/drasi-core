@@ -38,23 +38,30 @@ jobs:
             flex \
             bison
 
-      - name: Force generate lexer & parser for jq-src (workaround for bundled build)
+      - name: Prepare jq pre-generated sources (workaround for bundled build)
         run: |
+          # Download jq 1.6 release tarball which contains pre-generated lexer.c and parser.c
+          wget -q https://github.com/jqlang/jq/releases/download/jq-1.6/jq-1.6.tar.gz -O /tmp/jq-1.6.tar.gz
+          tar -xzf /tmp/jq-1.6.tar.gz -C /tmp
+
           cargo fetch
+
           # Find the exact jq-src dir (version can vary)
           JQ_SRC_DIR=$(find ~/.cargo/registry/src -type d -name "jq-src-*" | head -n 1)
           if [ -z "$JQ_SRC_DIR" ] || [ ! -d "$JQ_SRC_DIR/modules/jq" ]; then
             echo "jq-src not found after fetch — is bundled feature enabled?"
             exit 1
           fi
-          cd "$JQ_SRC_DIR/modules/jq"
-          # Run full autotools bootstrap to ensure Makefile knows how to build lexer/parser
-          autoreconf -i -f || { echo "autoreconf failed"; exit 1; }
-          # Optional: run configure here too (some versions need it)
-          ./configure --disable-maintainer-mode || true
-          # Now explicitly generate the files (in case implicit rules still fail)
-          make src/lexer.c src/parser.c || { echo "make lexer/parser failed"; ls -la src/; exit 1; }
-          ls -la src/lexer.c src/parser.c   # for debugging
+
+          # Copy pre-generated files from release tarball to jq-src git checkout
+          # and update modification times to prevent build system from trying to regenerate them
+          echo "Copying pre-generated parser/lexer files to $JQ_SRC_DIR/modules/jq/src/"
+          cp /tmp/jq-1.6/src/lexer.c "$JQ_SRC_DIR/modules/jq/src/"
+          cp /tmp/jq-1.6/src/lexer.h "$JQ_SRC_DIR/modules/jq/src/"
+          cp /tmp/jq-1.6/src/parser.c "$JQ_SRC_DIR/modules/jq/src/"
+          cp /tmp/jq-1.6/src/parser.h "$JQ_SRC_DIR/modules/jq/src/"
+          touch "$JQ_SRC_DIR/modules/jq/src/lexer.c" "$JQ_SRC_DIR/modules/jq/src/parser.c"
+          ls -la "$JQ_SRC_DIR/modules/jq/src/lexer.c" "$JQ_SRC_DIR/modules/jq/src/parser.c"
 
       - name: Run Cargo Clippy
         run: cargo clippy --all-targets --all-features
