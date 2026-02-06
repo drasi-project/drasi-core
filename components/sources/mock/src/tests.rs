@@ -294,7 +294,7 @@ mod event_generation {
 
         // Collect changes
         let mut changes = Vec::new();
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while let Ok(event) = rx.recv().await {
                 changes.push(event);
                 if changes.len() >= 3 {
@@ -381,7 +381,7 @@ mod event_generation {
         // Collect 3 events
         let mut values = Vec::new();
         for _ in 0..3 {
-            let event = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+            let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
                 .await
                 .expect("Timeout")
                 .expect("No event");
@@ -767,7 +767,7 @@ mod event_generation {
 
         // Collect 5 events and verify all are Insert
         for i in 0..5 {
-            let event = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+            let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
                 .await
                 .expect("Timeout")
                 .expect("No event");

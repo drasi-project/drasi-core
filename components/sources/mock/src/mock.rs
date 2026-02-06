@@ -32,43 +32,52 @@ use drasi_lib::Source;
 /// Mock source that generates synthetic data for testing and development.
 ///
 /// This source runs an internal tokio task that generates data at configurable
-/// intervals. It supports different data types (counter, sensor_reading, generic) to
-/// simulate various real-world scenarios.
+/// intervals. It supports different data types (Counter, SensorReading, Generic)
+/// to simulate various real-world scenarios.
 ///
-/// # Fields
+/// # Event Generation Behavior
 ///
-/// - `base`: Common source functionality (dispatchers, status, lifecycle)
-/// - `config`: Mock-specific configuration (data_type with optional embedded sensor_count, interval_ms)
-/// - `seen_sensors`: Tracks which sensors have been seen for INSERT vs UPDATE logic
+/// - **Counter**: Always emits INSERT events with sequential IDs
+/// - **SensorReading**: Emits INSERT for first reading per sensor, UPDATE thereafter
+/// - **Generic**: Always emits INSERT events with sequential IDs
+///
+/// # Thread Safety
+///
+/// This type is `Send + Sync` and can be safely shared across threads.
+/// Internal state is protected by `RwLock`.
 pub struct MockSource {
-    /// Base source implementation providing common functionality
+    /// Base source implementation providing dispatchers, status tracking, and lifecycle management.
     base: SourceBase,
-    /// Mock source configuration
+
+    /// Configuration specifying data type and generation interval.
     config: MockSourceConfig,
-    /// Tracks which sensor IDs have already been sent (for INSERT vs UPDATE logic)
+
+    /// Tracks sensor IDs that have been seen for INSERT vs UPDATE logic.
+    /// Only used when `config.data_type` is `SensorReading`.
     seen_sensors: Arc<RwLock<HashSet<u32>>>,
 }
 
 impl MockSource {
-    /// Create a new MockSource with the given ID and configuration.
+    /// Creates a new `MockSource` with the given ID and configuration.
     ///
-    /// The event channel is automatically injected when the source is added
-    /// to DrasiLib via `add_source()`.
+    /// The source is created in a stopped state. Call [`start()`](Self::start) to begin
+    /// generating events, or add it to DrasiLib which will start it automatically
+    /// (unless `auto_start` is disabled via the builder).
     ///
     /// # Arguments
     ///
-    /// * `id` - Unique identifier for this source instance
-    /// * `config` - Mock source configuration
+    /// * `id` - Unique identifier for this source instance. Must be unique within a DrasiLib instance.
+    /// * `config` - Configuration specifying data type and generation interval.
     ///
     /// # Returns
     ///
-    /// A new `MockSource` instance, or an error if construction fails.
+    /// A new `MockSource` instance, or an error if validation fails.
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// - The base source cannot be initialized
-    /// - The configuration is invalid (e.g., interval_ms is 0, sensor_count is 0)
+    /// Returns [`anyhow::Error`] if:
+    /// - `config.interval_ms` is 0 (would cause spin loop)
+    /// - `config.data_type` is `SensorReading` with `sensor_count` of 0
     ///
     /// # Example
     ///
@@ -93,16 +102,23 @@ impl MockSource {
         })
     }
 
-    /// Create a new MockSource with custom dispatch settings
+    /// Creates a new `MockSource` with custom dispatch settings.
     ///
-    /// The event channel is automatically injected when the source is added
-    /// to DrasiLib via `add_source()`.
+    /// This is a lower-level constructor for advanced use cases where you need
+    /// control over event dispatching. For most cases, prefer [`MockSource::builder()`].
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Unique identifier for this source instance.
+    /// * `config` - Configuration specifying data type and generation interval.
+    /// * `dispatch_mode` - Optional dispatch mode (`Channel` or `Broadcast`).
+    /// * `dispatch_buffer_capacity` - Optional buffer size for dispatch channels.
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// - The base source cannot be initialized
-    /// - The configuration is invalid (e.g., interval_ms is 0, sensor_count is 0)
+    /// Returns [`anyhow::Error`] if:
+    /// - `config.interval_ms` is 0
+    /// - `config.data_type` is `SensorReading` with `sensor_count` of 0
     pub fn with_dispatch(
         id: impl Into<String>,
         config: MockSourceConfig,
@@ -453,29 +469,47 @@ impl Source for MockSource {
 }
 
 impl MockSource {
-    /// Inject a test event into the mock source for testing purposes.
+    /// Injects a custom event into the source for testing purposes.
     ///
-    /// This allows tests to send specific events without relying on automatic generation.
+    /// This allows tests to send specific [`SourceChange`] events (INSERT, UPDATE, DELETE)
+    /// without waiting for automatic generation. Useful for deterministic testing scenarios.
+    ///
+    /// The source does not need to be started to inject events.
     ///
     /// # Arguments
     ///
-    /// * `change` - The source change to inject
+    /// * `change` - The [`SourceChange`] to inject (e.g., `SourceChange::Insert { element }`)
     ///
     /// # Errors
     ///
-    /// Returns an error if there are no subscribers to receive the event.
+    /// Returns [`anyhow::Error`] if dispatching fails (e.g., all receivers have been dropped).
     pub async fn inject_event(&self, change: SourceChange) -> Result<()> {
         self.base.dispatch_source_change(change).await
     }
 
-    /// Create a test subscription to this source.
+    /// Creates a test subscription to receive events from this source.
     ///
-    /// This method delegates to SourceBase and is provided for convenience in tests.
-    /// The returned receiver will receive all events generated by this source.
+    /// This bypasses DrasiLib's subscription mechanism and directly subscribes to
+    /// the source's event dispatcher. Useful for unit testing the source in isolation.
     ///
     /// # Returns
     ///
-    /// A boxed receiver that will receive source events.
+    /// A boxed receiver that yields [`SourceEventWrapper`](drasi_lib::channels::SourceEventWrapper)
+    /// for each event generated or injected.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let source = MockSource::new("test", config)?;
+    /// let mut rx = source.test_subscribe();
+    ///
+    /// source.start().await?;
+    ///
+    /// // Receive events
+    /// while let Some(event) = rx.recv().await {
+    ///     println!("Received: {:?}", event);
+    /// }
+    /// ```
     pub fn test_subscribe(
         &self,
     ) -> Box<dyn drasi_lib::channels::ChangeReceiver<drasi_lib::channels::SourceEventWrapper>> {
@@ -483,11 +517,20 @@ impl MockSource {
     }
 }
 
-/// Builder for MockSource instances.
+/// Builder for [`MockSource`] instances.
 ///
 /// Provides a fluent API for constructing mock sources with sensible defaults.
-/// The builder takes the source ID at construction and returns a fully
-/// constructed `MockSource` from `build()`.
+/// This is the recommended way to create a `MockSource`.
+///
+/// # Defaults
+///
+/// | Option | Default |
+/// |--------|---------|
+/// | `data_type` | [`DataType::Generic`] |
+/// | `interval_ms` | 5000 |
+/// | `dispatch_mode` | `Channel` |
+/// | `dispatch_buffer_capacity` | 1000 |
+/// | `auto_start` | `true` |
 ///
 /// # Example
 ///
@@ -497,7 +540,7 @@ impl MockSource {
 /// let source = MockSource::builder("my-source")
 ///     .with_data_type(DataType::sensor_reading(10))
 ///     .with_interval_ms(1000)
-///     .with_bootstrap_provider(my_provider)
+///     .with_auto_start(false)  // Don't start automatically
 ///     .build()?;
 /// ```
 pub struct MockSourceBuilder {

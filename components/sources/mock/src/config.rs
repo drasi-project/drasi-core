@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Configuration for the mock source.
+//! Configuration types for the mock source.
 //!
-//! The mock source generates synthetic data for testing and development purposes.
+//! This module defines the configuration options that control how the mock source
+//! generates synthetic data.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -23,30 +24,64 @@ fn default_sensor_count() -> u32 {
     5
 }
 
-/// Type of data to generate from the mock source.
+/// Specifies the type of synthetic data to generate.
+///
+/// Each variant produces elements with different schemas and behaviors.
+/// See the [crate-level documentation](crate) for detailed examples of each type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DataType {
-    /// Sequential counter values
+    /// Generates sequential counter values (1, 2, 3, ...).
+    ///
+    /// Each event is an INSERT with a unique element ID (`counter_1`, `counter_2`, etc.).
+    /// Properties include `value` (the counter) and `timestamp`.
     Counter,
-    /// Simulated sensor readings with temperature and humidity
+
+    /// Generates simulated IoT sensor readings.
+    ///
+    /// Produces temperature (20.0-30.0) and humidity (40.0-60.0) values from
+    /// a pool of simulated sensors. The first reading for each sensor is an INSERT;
+    /// subsequent readings for the same sensor are UPDATEs.
     SensorReading {
-        /// Number of sensors to simulate
+        /// Number of distinct sensors to simulate. Must be at least 1.
+        /// Sensor IDs will be in range `[0, sensor_count)`.
         #[serde(default = "default_sensor_count")]
         sensor_count: u32,
     },
-    /// Generic random data (default)
+
+    /// Generates generic data with random values (default).
+    ///
+    /// Each event is an INSERT with a unique element ID (`generic_1`, `generic_2`, etc.).
+    /// Properties include `value` (random i32), `message`, and `timestamp`.
     #[default]
     Generic,
 }
 
 impl DataType {
-    /// Create a SensorReading data type with the specified number of sensors.
+    /// Creates a [`SensorReading`](DataType::SensorReading) data type with the specified sensor count.
+    ///
+    /// # Arguments
+    ///
+    /// * `sensor_count` - Number of distinct sensors to simulate (must be ≥ 1)
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use drasi_source_mock::DataType;
+    ///
+    /// let data_type = DataType::sensor_reading(10);
+    /// assert_eq!(data_type.sensor_count(), Some(10));
+    /// ```
     pub fn sensor_reading(sensor_count: u32) -> Self {
         DataType::SensorReading { sensor_count }
     }
 
-    /// Get the sensor count if this is a SensorReading data type.
+    /// Returns the sensor count if this is a [`SensorReading`](DataType::SensorReading) variant.
+    ///
+    /// # Returns
+    ///
+    /// - `Some(count)` for `SensorReading` variants
+    /// - `None` for `Counter` and `Generic` variants
     pub fn sensor_count(&self) -> Option<u32> {
         match self {
             DataType::SensorReading { sensor_count } => Some(*sensor_count),
@@ -65,14 +100,42 @@ impl fmt::Display for DataType {
     }
 }
 
-/// Mock source configuration
+/// Configuration for a [`MockSource`](crate::MockSource) instance.
+///
+/// Controls what type of data is generated and how frequently.
+///
+/// # Example
+///
+/// ```rust
+/// use drasi_source_mock::{MockSourceConfig, DataType};
+///
+/// let config = MockSourceConfig {
+///     data_type: DataType::sensor_reading(10),
+///     interval_ms: 1000,
+/// };
+/// ```
+///
+/// # Serialization
+///
+/// This type supports serde serialization for configuration files:
+///
+/// ```yaml
+/// data_type:
+///   type: sensor_reading
+///   sensor_count: 10
+/// interval_ms: 1000
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MockSourceConfig {
-    /// Type of data to generate
+    /// The type of synthetic data to generate.
+    ///
+    /// Defaults to [`DataType::Generic`] if not specified.
     #[serde(default)]
     pub data_type: DataType,
 
-    /// Interval between data generation in milliseconds
+    /// Interval between generated events in milliseconds.
+    ///
+    /// Must be greater than 0. Defaults to 5000 (5 seconds) if not specified.
     #[serde(default = "default_interval_ms")]
     pub interval_ms: u64,
 }
@@ -91,13 +154,31 @@ impl Default for MockSourceConfig {
 }
 
 impl MockSourceConfig {
-    /// Validate the configuration and return an error if invalid.
+    /// Validates this configuration.
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// - Interval is 0 (would cause continuous generation without pause)
-    /// - Sensor count is 0 (must have at least one sensor) for SensorReading mode
+    /// Returns [`anyhow::Error`] if:
+    /// - `interval_ms` is 0 (would cause a spin loop with no delay between events)
+    /// - `data_type` is `SensorReading` with `sensor_count` of 0 (must have at least one sensor)
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use drasi_source_mock::{MockSourceConfig, DataType};
+    ///
+    /// let valid_config = MockSourceConfig {
+    ///     data_type: DataType::Counter,
+    ///     interval_ms: 1000,
+    /// };
+    /// assert!(valid_config.validate().is_ok());
+    ///
+    /// let invalid_config = MockSourceConfig {
+    ///     data_type: DataType::Counter,
+    ///     interval_ms: 0,  // Invalid!
+    /// };
+    /// assert!(invalid_config.validate().is_err());
+    /// ```
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.interval_ms == 0 {
             return Err(anyhow::anyhow!(
