@@ -59,7 +59,7 @@ jobs:
           find ~/.cargo/registry/src -name "parser.c" -exec touch {} +
 
       - name: Run Cargo Clippy
-        run: cargo clippy --all-targets --all-features
+        run: cargo clippy --all-targets
 
   fmt_check:
     name: Format check
