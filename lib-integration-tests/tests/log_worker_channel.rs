@@ -306,7 +306,7 @@ async fn test_high_volume_logging() {
                 Err(_timeout) => break,
             }
         }
-        println!("Lagged (missed) messages: {}", lagged_count);
+        println!("Lagged (missed) messages: {lagged_count}");
         logs
     })
     .await
@@ -479,7 +479,7 @@ async fn test_concurrent_logging_from_multiple_tasks() {
     }
 
     let total_logged = log_counter.load(Ordering::SeqCst);
-    println!("Total logs emitted: {}", total_logged);
+    println!("Total logs emitted: {total_logged}");
 
     // Give the log worker time to process
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -499,7 +499,7 @@ async fn test_concurrent_logging_from_multiple_tasks() {
                 Err(_timeout) => break,
             }
         }
-        println!("Lagged (missed) messages: {}", lagged_count);
+        println!("Lagged (missed) messages: {lagged_count}");
         logs
     })
     .await
@@ -613,7 +613,7 @@ async fn test_multiple_drasi_instances_logging() {
 #[tokio::test]
 async fn test_rapid_start_stop_cycles() {
     for i in 0..5 {
-        let source_id = format!("rapid-cycle-source-{}", i);
+        let source_id = format!("rapid-cycle-source-{i}");
         let source = SimpleLogSource::new(&source_id).expect("Failed to create source");
 
         let drasi = DrasiLib::builder()
