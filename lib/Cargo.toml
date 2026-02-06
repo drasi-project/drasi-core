@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-lib"
-version = "0.3.2"
+version = "0.3.3"
 edition.workspace = true
 authors = ["Drasi Project"]
 description = "Drasi Lib"
@@ -27,6 +27,24 @@ readme = "README.md"
 [lints]
 workspace = true
 
+[features]
+default = []
+
+# Middleware features (passed through to drasi-middleware)
+middleware-jq = ["drasi-middleware/jq"]
+middleware-decoder = ["drasi-middleware/decoder"]
+middleware-map = ["drasi-middleware/map"]
+middleware-parse-json = ["drasi-middleware/parse_json"]
+middleware-promote = ["drasi-middleware/promote"]
+middleware-relabel = ["drasi-middleware/relabel"]
+middleware-unwind = ["drasi-middleware/unwind"]
+
+# Convenience feature to enable all middleware
+middleware-all = ["drasi-middleware/all"]
+
+[package.metadata.docs.rs]
+features = ["middleware-all"]
+
 [lib]
 name = "drasi_lib"
 path = "src/lib.rs"
@@ -38,7 +56,7 @@ drasi-functions-gql.workspace = true
 drasi-query-ast.workspace = true
 drasi-query-cypher.workspace = true
 drasi-query-gql.workspace = true
-drasi-middleware.workspace = true
+drasi-middleware = { workspace = true, optional = true }
 
 # Note: Index backends (RocksDB, Garnet) are now plugins and NOT direct dependencies.
 # Users who need persistent storage should:
