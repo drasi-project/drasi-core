@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-extern crate alloc;
 use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime};
 use core::fmt::{self, Debug, Display};
 use drasi_query_ast::ast::Expression as AstExpression;

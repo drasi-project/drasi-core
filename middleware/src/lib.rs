@@ -13,10 +13,24 @@
 // limitations under the License.
 
 pub mod common;
+
+#[cfg(feature = "decoder")]
 pub mod decoder;
+
+#[cfg(feature = "jq")]
 pub mod jq;
+
+#[cfg(feature = "map")]
 pub mod map;
+
+#[cfg(feature = "parse_json")]
 pub mod parse_json;
+
+#[cfg(feature = "promote")]
 pub mod promote;
+
+#[cfg(feature = "relabel")]
 pub mod relabel;
+
+#[cfg(feature = "unwind")]
 pub mod unwind;
