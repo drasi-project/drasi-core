@@ -414,7 +414,7 @@ Error: sensor_count cannot be 0
 - Generates nodes only (no relationships/edges)
 - Fixed schemas per data type (not customizable)
 - Only SensorReading supports UPDATE events
-- State resets on restart (counter, seen sensors)
+- Counter resets on restart; seen sensors persist across stop/start cycles
 - Randomness is not cryptographically secure
 
 ## Related Documentation
