@@ -352,6 +352,27 @@ mod config {
         let result = config.validate();
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn test_parse_config_zero_max_retries() {
+        use std::collections::HashMap;
+
+        let mut properties = HashMap::new();
+        properties.insert("redis_url".to_string(), json!("redis://localhost:6379"));
+        properties.insert("stream_key".to_string(), json!("test-stream"));
+        properties.insert("consumer_group".to_string(), json!("test-group"));
+        properties.insert("consumer_name".to_string(), json!("test-consumer"));
+        properties.insert("max_retries".to_string(), json!(0));
+
+        let result = PlatformSource::parse_config(&properties);
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("max_retries must be greater than 0"),
+            "Expected error message about max_retries, got: {}",
+            error_msg
+        );
+    }
 }
 
 // ============================================================================
