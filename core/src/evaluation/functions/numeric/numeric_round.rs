@@ -22,7 +22,6 @@ use crate::evaluation::variable_value::VariableValue;
 use crate::evaluation::{ExpressionEvaluationContext, FunctionError, FunctionEvaluationError};
 use std::collections::HashSet;
 
-use round;
 use round::{round_down, round_up};
 
 #[derive(Debug)]
