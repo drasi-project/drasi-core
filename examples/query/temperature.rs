@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod process_monitor;
-
 use std::sync::Arc;
 
 use drasi_core::{

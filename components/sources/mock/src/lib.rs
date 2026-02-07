@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Mock Source Plugin for drasi-lib
+//! Mock Source Plugin for drasi-lib.
 //!
 //! This plugin provides a mock data generator for testing and development purposes.
 //! It generates synthetic data at configurable intervals, allowing you to test
@@ -22,52 +22,62 @@
 //!
 //! The mock source supports three data generation modes:
 //!
-//! ## Counter Mode (`data_type: "counter"`)
+//! ## Counter Mode (`data_type: DataType::Counter`)
 //!
-//! Generates sequentially numbered nodes with the label `Counter`:
+//! Generates sequentially numbered nodes with the label `Counter`. Each event
+//! is always an INSERT with a unique element ID (`counter_1`, `counter_2`, etc.):
 //!
-//! ```json
-//! {
-//!     "id": "counter_1",
-//!     "labels": ["Counter"],
-//!     "properties": {
-//!         "value": 1,
-//!         "timestamp": "2024-01-15T10:30:00Z"
-//!     }
+//! ```text
+//! Element {
+//!     id: "counter_1",
+//!     labels: ["Counter"],
+//!     properties: {
+//!         value: 1,              // Sequential integer starting at 1
+//!         timestamp: "2024-01-15T10:30:00.123Z"  // RFC 3339 string
+//!     },
+//!     effective_from: 1705318200123  // Milliseconds since Unix epoch
 //! }
 //! ```
 //!
-//! ## Sensor Mode (`data_type: "sensor"`)
+//! ## Sensor Reading Mode (`data_type: DataType::SensorReading { sensor_count }`)
 //!
 //! Generates simulated IoT sensor readings with randomized temperature and humidity
-//! values from 5 different sensors. Each node has the label `SensorReading`:
+//! values from a configurable number of sensors (default: 5). Each node has the
+//! label `SensorReading`.
 //!
-//! ```json
-//! {
-//!     "id": "reading_2_42",
-//!     "labels": ["SensorReading"],
-//!     "properties": {
-//!         "sensor_id": "sensor_2",
-//!         "temperature": 25.7,
-//!         "humidity": 48.3,
-//!         "timestamp": "2024-01-15T10:30:00Z"
-//!     }
+//! **Key Behavior**: The first reading for each sensor generates an INSERT event;
+//! subsequent readings for the same sensor generate UPDATE events. This simulates
+//! real sensor behavior where devices are discovered once then continuously report.
+//!
+//! ```text
+//! Element {
+//!     id: "sensor_2",
+//!     labels: ["SensorReading"],
+//!     properties: {
+//!         sensor_id: "sensor_2",
+//!         temperature: 25.7,     // Random in range [20.0, 30.0)
+//!         humidity: 48.3,        // Random in range [40.0, 60.0)
+//!         timestamp: "2024-01-15T10:30:00.123Z"
+//!     },
+//!     effective_from: 1705318200123
 //! }
 //! ```
 //!
-//! ## Generic Mode (`data_type: "generic"`) - Default
+//! ## Generic Mode (`data_type: DataType::Generic`) - Default
 //!
-//! Generates generic nodes with random values and the label `Generic`:
+//! Generates generic nodes with random values and the label `Generic`. Each event
+//! is always an INSERT with a unique element ID:
 //!
-//! ```json
-//! {
-//!     "id": "generic_1",
-//!     "labels": ["Generic"],
-//!     "properties": {
-//!         "value": 12345,
-//!         "message": "Generic mock data",
-//!         "timestamp": "2024-01-15T10:30:00Z"
-//!     }
+//! ```text
+//! Element {
+//!     id: "generic_1",
+//!     labels: ["Generic"],
+//!     properties: {
+//!         value: 12345,          // Random i32
+//!         message: "Generic mock data",
+//!         timestamp: "2024-01-15T10:30:00.123Z"
+//!     },
+//!     effective_from: 1705318200123456789  // Nanoseconds since Unix epoch
 //! }
 //! ```
 //!
@@ -75,41 +85,46 @@
 //!
 //! | Field | Type | Default | Description |
 //! |-------|------|---------|-------------|
-//! | `data_type` | string | `"generic"` | Type of data to generate: `counter`, `sensor`, or `generic` |
-//! | `interval_ms` | u64 | `5000` | Interval between data generation in milliseconds |
+//! | `data_type` | [`DataType`] | `Generic` | Type of data to generate |
+//! | `interval_ms` | `u64` | `5000` | Interval between events in milliseconds (must be > 0) |
 //!
 //! # Example Configuration (YAML)
 //!
 //! ```yaml
 //! source_type: mock
 //! properties:
-//!   data_type: sensor
+//!   data_type:
+//!     type: sensor_reading
+//!     sensor_count: 10
 //!   interval_ms: 1000
 //! ```
 //!
 //! # Usage Example
 //!
 //! ```rust,ignore
-//! use drasi_source_mock::{MockSource, MockSourceConfig};
-//! use std::sync::Arc;
+//! use drasi_source_mock::{MockSource, MockSourceConfig, DataType};
 //!
 //! // Create configuration for sensor data at 1-second intervals
 //! let config = MockSourceConfig {
-//!     data_type: "sensor".to_string(),
+//!     data_type: DataType::sensor_reading(10),
 //!     interval_ms: 1000,
 //! };
 //!
-//! // Create and add to DrasiLib
-//! let source = Arc::new(MockSource::new("my-mock", config)?);
+//! // Create the source
+//! let source = MockSource::new("my-mock", config)?;
+//!
+//! // Add to DrasiLib (ownership is transferred)
 //! drasi.add_source(source).await?;
 //! ```
 //!
 //! # Testing
 //!
-//! The mock source provides methods for testing:
+//! The mock source provides methods for unit testing without a full DrasiLib setup:
 //!
-//! - `inject_event()` - Manually inject specific events for testing
-//! - `test_subscribe()` - Create a test subscription to receive events
+//! - [`MockSource::inject_event()`] - Inject custom [`SourceChange`](drasi_core::models::SourceChange)
+//!   events (INSERT, UPDATE, DELETE) for deterministic testing scenarios
+//! - [`MockSource::test_subscribe()`] - Subscribe to receive events directly from the source,
+//!   bypassing DrasiLib's subscription mechanism
 
 mod config;
 mod conversion;
@@ -119,5 +134,5 @@ mod time;
 #[cfg(test)]
 mod tests;
 
-pub use config::MockSourceConfig;
+pub use config::{DataType, MockSourceConfig};
 pub use mock::{MockSource, MockSourceBuilder};

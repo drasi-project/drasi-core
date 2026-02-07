@@ -27,9 +27,47 @@ Data In    Change Detection    Actions Out
 
 ```toml
 [dependencies]
-drasi-lib = { path = "path/to/drasi-lib" }
+drasi-lib = "0.3"
 tokio = { version = "1", features = ["full"] }
 ```
+
+### Middleware Features (Optional)
+
+DrasiLib supports optional middleware for data transformation. **All middleware are disabled by default.**
+
+Enable only the middleware you need:
+
+```toml
+[dependencies]
+drasi-lib = { version = "0.3", features = ["middleware-jq", "middleware-decoder"] }
+```
+
+**Available Middleware Features:**
+
+- **`middleware-jq`** - JQ query language transformations (requires build tools, see below)
+- **`middleware-decoder`** - Decode encoded strings (base64, hex, URL encoding)
+- **`middleware-map`** - JSONPath-based property mapping
+- **`middleware-parse-json`** - Parse JSON strings into structured objects
+- **`middleware-promote`** - Promote nested properties to top level
+- **`middleware-relabel`** - Transform element labels
+- **`middleware-unwind`** - Unwind arrays into multiple elements
+- **`middleware-all`** - Enable all middleware (convenience feature)
+
+**JQ Middleware Build Requirements:**
+
+The `middleware-jq` feature compiles jq from source and requires build tools:
+
+**macOS:**
+```bash
+brew install autoconf automake libtool
+```
+
+**Ubuntu/Debian:**
+```bash
+sudo apt-get install autoconf automake libtool flex bison
+```
+
+**Note:** If you don't use middleware, or only use non-jq middleware, you don't need these build tools.
 
 ## Initialization Methods
 

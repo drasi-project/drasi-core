@@ -1,12 +1,52 @@
-# Drasi Middleware Development Guide
+# Drasi Middleware
 
 ## Introduction
 
-Middleware components are pluggable modules that process incoming changes before they are processed by a a continuous query. Middlewares can transform, enrich, filter, or route source-changes and they can be chained together in a pipeline.
+Middleware components are pluggable modules that process incoming changes before they are processed by a continuous query. Middlewares can transform, enrich, filter, or route source-changes and they can be chained together in a pipeline.
 
 Learn more about [middlewares in Drasi here](https://drasi.io/concepts/middleware/).
 
-This guide explains how to develop custom middleware in Drasi core.
+## Using Drasi Middleware
+
+### Feature Flags
+
+All middleware types are **optional** and disabled by default. Enable only the middleware you need:
+
+```toml
+[dependencies]
+drasi-middleware = { version = "0.3", features = ["jq", "decoder", "map"] }
+```
+
+### Available Middleware Features
+
+- **`jq`** - JQ query language transformations (requires autotools: `autoconf`, `automake`, `libtool`, `flex`, `bison`)
+- **`decoder`** - Decode encoded strings (base64, hex, URL encoding)
+- **`map`** - JSONPath-based property mapping
+- **`parse_json`** - Parse JSON strings into structured objects
+- **`promote`** - Promote nested properties to top level
+- **`relabel`** - Transform element labels
+- **`unwind`** - Unwind arrays into multiple elements
+- **`all`** - Enable all middleware (convenience feature)
+
+### JQ Middleware Requirements
+
+The `jq` middleware uses the bundled jq feature, which compiles jq from source. You need to install build tools:
+
+**macOS:**
+```bash
+brew install autoconf automake libtool
+```
+
+**Ubuntu/Debian:**
+```bash
+sudo apt-get install autoconf automake libtool flex bison
+```
+
+**Note:** If you don't need JQ middleware, you can use other middleware without installing these tools.
+
+## Middleware Development Guide
+
+This section explains how to develop custom middleware in Drasi core.
 
 ## Core Concepts
 

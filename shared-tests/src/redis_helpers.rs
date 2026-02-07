@@ -21,6 +21,7 @@ use anyhow::Result;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
+use testcontainers::ImageExt;
 use testcontainers_modules::redis::Redis;
 
 /// Setup a Redis testcontainer and return a guard that manages cleanup
@@ -52,7 +53,7 @@ async fn setup_redis_raw() -> (testcontainers::ContainerAsync<Redis>, String) {
     use testcontainers::runners::AsyncRunner;
 
     // Start Redis container
-    let container = Redis::default().start().await.unwrap();
+    let container = Redis::default().with_tag("7-alpine").start().await.unwrap();
     let redis_port = container.get_host_port_ipv4(6379).await.unwrap();
     let redis_url = format!("redis://127.0.0.1:{redis_port}");
 

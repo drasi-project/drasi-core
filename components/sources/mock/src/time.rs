@@ -15,11 +15,14 @@
 use anyhow::{Context, Result};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Get the current timestamp in milliseconds since Unix epoch.
+/// Returns the current timestamp in milliseconds since Unix epoch.
+///
+/// Uses chrono's [`Utc::now()`](chrono::Utc::now) which handles time zones correctly.
 ///
 /// # Returns
 ///
-/// Returns the timestamp in milliseconds, or an error if the system time is invalid.
+/// The timestamp in milliseconds as `u64`, or an error if the system clock
+/// produces a negative timestamp (set to before Unix epoch).
 pub fn get_current_timestamp_millis() -> Result<u64> {
     let millis = chrono::Utc::now().timestamp_millis();
     if millis < 0 {
@@ -28,14 +31,15 @@ pub fn get_current_timestamp_millis() -> Result<u64> {
     Ok(millis as u64)
 }
 
-/// Get the current timestamp in nanoseconds since Unix epoch.
+/// Returns the current timestamp in nanoseconds since Unix epoch.
 ///
-/// This function handles edge cases where nanosecond precision would overflow,
-/// falling back to millisecond precision when necessary.
+/// Uses chrono's [`Utc::now()`](chrono::Utc::now) with automatic fallback to
+/// millisecond precision if nanoseconds would overflow (dates outside 1677-2262).
 ///
 /// # Returns
 ///
-/// Returns the timestamp in nanoseconds, or an error if the system time is invalid.
+/// The timestamp in nanoseconds as `u64`, or an error if the system clock
+/// produces a negative timestamp.
 #[allow(dead_code)]
 pub fn get_current_timestamp_nanos() -> Result<u64> {
     // Try to get nanosecond precision first
@@ -61,13 +65,19 @@ pub fn get_current_timestamp_nanos() -> Result<u64> {
     }
 }
 
-/// Get the current SystemTime duration since Unix epoch in milliseconds.
+/// Returns the current system time as milliseconds since Unix epoch.
 ///
-/// This function properly handles the case where system time is before Unix epoch.
+/// Uses [`SystemTime`] directly rather than chrono for minimal overhead.
 ///
 /// # Returns
 ///
-/// Returns the duration in milliseconds, or an error if system time is before Unix epoch.
+/// The duration in milliseconds as `u64`, or an error if the system clock
+/// is set to before the Unix epoch (January 1, 1970).
+///
+/// # Note
+///
+/// The conversion from `u128` to `u64` is safe for all practical timestamps.
+/// Overflow would only occur ~584 million years after the Unix epoch.
 pub fn get_system_time_millis() -> Result<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -75,13 +85,20 @@ pub fn get_system_time_millis() -> Result<u64> {
         .map(|duration| duration.as_millis() as u64)
 }
 
-/// Get the current SystemTime duration since Unix epoch in nanoseconds.
+/// Returns the current system time as nanoseconds since Unix epoch.
 ///
-/// This function properly handles the case where system time is before Unix epoch.
+/// Uses [`SystemTime`] directly rather than chrono for minimal overhead.
 ///
 /// # Returns
 ///
-/// Returns the duration in nanoseconds, or an error if system time is before Unix epoch.
+/// The duration in nanoseconds as `u64`, or an error if the system clock
+/// is set to before the Unix epoch (January 1, 1970).
+///
+/// # Note
+///
+/// The conversion from `u128` to `u64` is safe until approximately year 2554.
+/// After that, nanosecond precision would overflow `u64`. This is unlikely
+/// to be a practical concern.
 #[allow(dead_code)]
 pub fn get_system_time_nanos() -> Result<u64> {
     SystemTime::now()
@@ -90,20 +107,24 @@ pub fn get_system_time_nanos() -> Result<u64> {
         .map(|duration| duration.as_nanos() as u64)
 }
 
-/// Get the current timestamp with automatic fallback strategy.
+/// Returns a timestamp using multiple fallback strategies.
 ///
-/// This function tries multiple methods to get a valid timestamp:
-/// 1. Chrono millisecond precision
-/// 2. SystemTime (if chrono fails)
-/// 3. Default value (if all else fails and default is provided)
+/// Tries the following methods in order:
+/// 1. Chrono millisecond precision (handles time zones correctly)
+/// 2. [`SystemTime`] (if chrono fails)
+/// 3. Provided default value (if all methods fail)
 ///
 /// # Arguments
 ///
-/// * `default_on_error` - Optional default value to use if all timestamp methods fail
+/// * `default_on_error` - Optional fallback value if all timestamp methods fail
 ///
 /// # Returns
 ///
-/// Returns a timestamp in milliseconds, using the first successful method.
+/// A timestamp in milliseconds using the first successful method.
+///
+/// # Errors
+///
+/// Returns an error only if all methods fail AND no default is provided.
 #[allow(dead_code)]
 pub fn get_timestamp_with_fallback(default_on_error: Option<u64>) -> Result<u64> {
     // Try chrono first (handles time zones correctly)
