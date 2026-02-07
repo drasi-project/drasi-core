@@ -26,7 +26,7 @@ use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::context::ReactionRuntimeContext;
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::OperationType;
-use drasi_lib::reactions::{QueryProvider, Reaction, ReactionBase, ReactionBaseParams};
+use drasi_lib::reactions::{Reaction, ReactionBase, ReactionBaseParams};
 
 use crate::config::{MsSqlStoredProcReactionConfig, QueryConfig};
 use crate::executor::MsSqlExecutor;
