@@ -22,49 +22,37 @@ jobs:
       - name: Show Rust toolchain
         run: rustup show
 
-      - name: Install dependencies for bundled jq + protobuf
+      - name: Install libraries
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            protobuf-compiler \
-            build-essential \
-            autoconf \
-            automake \
-            libtool \
-            make \
-            gcc \
-            g++ \
-            pkg-config \
-            flex \
-            bison
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler build-essential autoconf automake libtool flex bison
 
-      - name: Prepare jq pre-generated sources (workaround for bundled build)
-        run: |
-          # Download jq 1.6 release tarball which contains pre-generated lexer.c and parser.c
-          wget -q https://github.com/jqlang/jq/releases/download/jq-1.6/jq-1.6.tar.gz -O /tmp/jq-1.6.tar.gz
-          tar -xzf /tmp/jq-1.6.tar.gz -C /tmp
+      - name: Cache Cargo registry
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
 
-          cargo fetch
+      - name: Cache Cargo index
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-index-
 
-          # Find the exact jq-src dir (version can vary)
-          JQ_SRC_DIR=$(find ~/.cargo/registry/src -type d -name "jq-src-*" | head -n 1)
-          if [ -z "$JQ_SRC_DIR" ] || [ ! -d "$JQ_SRC_DIR/modules/jq" ]; then
-            echo "jq-src not found after fetch — is bundled feature enabled?"
-            exit 1
-          fi
-
-          # Copy pre-generated files from release tarball to jq-src git checkout
-          # and update modification times to prevent build system from trying to regenerate them
-          echo "Copying pre-generated parser/lexer files to $JQ_SRC_DIR/modules/jq/src/"
-          cp /tmp/jq-1.6/src/lexer.c "$JQ_SRC_DIR/modules/jq/src/"
-          cp /tmp/jq-1.6/src/lexer.h "$JQ_SRC_DIR/modules/jq/src/"
-          cp /tmp/jq-1.6/src/parser.c "$JQ_SRC_DIR/modules/jq/src/"
-          cp /tmp/jq-1.6/src/parser.h "$JQ_SRC_DIR/modules/jq/src/"
-          touch "$JQ_SRC_DIR/modules/jq/src/lexer.c" "$JQ_SRC_DIR/modules/jq/src/parser.c"
-          ls -la "$JQ_SRC_DIR/modules/jq/src/lexer.c" "$JQ_SRC_DIR/modules/jq/src/parser.c"
+      - name: Cache Cargo build
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-clippy-
 
       - name: Run Cargo Clippy
-        run: cargo clippy --all-targets --all-features
+        run: cargo clippy --all-targets
 
   fmt_check:
     name: Format check

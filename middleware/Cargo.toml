@@ -26,7 +26,7 @@ relabel = []
 unwind = []
 
 # Convenience feature to enable all middleware
-all = ["jq", "decoder", "map", "parse_json", "promote", "relabel", "unwind"]
+all = ["bundled-jq", "decoder", "map", "parse_json", "promote", "relabel", "unwind"]
 
 [package.metadata.docs.rs]
 features = ["all"]
