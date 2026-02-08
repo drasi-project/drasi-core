@@ -69,7 +69,7 @@ impl Float {
 
     pub(crate) fn as_f64(&self) -> Option<f64> {
         match self.value {
-            n if n.is_finite() => Some(n),
+            n if !n.is_nan() => Some(n),
             _ => None,
         }
     }
@@ -83,10 +83,10 @@ impl Float {
 
     #[inline]
     pub fn from_f64(f: f64) -> Option<Float> {
-        if f.is_finite() {
-            Some(Float { value: f })
-        } else {
+        if f.is_nan() {
             None
+        } else {
+            Some(Float { value: f })
         }
     }
 
