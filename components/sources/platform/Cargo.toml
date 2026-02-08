@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-source-platform"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "Platform source plugin for Drasi"
