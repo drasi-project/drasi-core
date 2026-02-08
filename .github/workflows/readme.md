@@ -63,6 +63,11 @@ To modify or create agentic workflows, you'll need to:
 - **Trigger**: 
   - Automatically triggered on pull requests to the `main`, `feature/*`, or `release/*` branches and any pushes.
 
+### [pr-title-checker](pr-title-checker.yml)
+- **Purpose**: Ensures pull request titles comply with the PR title conventions before merging.
+- **Trigger**: 
+  - Automatically triggered on pull request creation, title updates, and reopen for pull requests.
+
 ### [coverage.yaml](coverage.yaml)
 - **Purpose**: Generates and uploads code coverage reports to Codecov.
 - **Trigger**: Automatically triggered on pull requests to the `main`, `feature/*`, or `release/*` branches and pushes to the `codecov-test` branch.
