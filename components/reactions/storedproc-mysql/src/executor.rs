@@ -36,6 +36,16 @@ impl MySqlExecutor {
     pub async fn new(config: &MySqlStoredProcReactionConfig) -> Result<Self> {
         let port = config.get_port();
 
+        // Get credentials from identity provider or fall back to user/password
+        let (username, password) = if let Some(provider) = &config.identity_provider {
+            debug!("Using identity provider for authentication");
+            let credentials = provider.get_credentials().await?;
+            credentials.into_auth_pair()
+        } else {
+            debug!("Using username/password for authentication");
+            (config.user.clone(), config.password.clone())
+        };
+
         info!(
             "Connecting to MySQL: {}:{}/{}",
             config.hostname, port, config.database
@@ -45,11 +55,13 @@ impl MySqlExecutor {
         let mut opts_builder = OptsBuilder::default()
             .ip_or_hostname(&config.hostname)
             .tcp_port(port)
-            .user(Some(&config.user))
-            .pass(Some(&config.password))
+            .user(Some(&username))
+            .pass(Some(&password))
             .db_name(Some(&config.database));
 
         // Configure SSL if enabled
+        // Uses system trust store for certificate validation
+        // For AWS RDS on macOS: sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/rds-ca-bundle.pem
         if config.ssl {
             opts_builder = opts_builder.ssl_opts(Some(SslOpts::default()));
         }
