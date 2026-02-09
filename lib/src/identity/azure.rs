@@ -17,8 +17,8 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use azure_core::credentials::TokenCredential;
 use azure_identity::{
-    AzureCliCredential, DeveloperToolsCredential, ManagedIdentityCredential,
-    ManagedIdentityCredentialOptions, UserAssignedId, WorkloadIdentityCredential,
+    DeveloperToolsCredential, ManagedIdentityCredential, ManagedIdentityCredentialOptions,
+    UserAssignedId, WorkloadIdentityCredential,
 };
 use std::sync::Arc;
 
