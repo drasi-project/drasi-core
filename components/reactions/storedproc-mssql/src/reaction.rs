@@ -476,6 +476,25 @@ impl MsSqlStoredProcReactionBuilder {
         self
     }
 
+    /// Set the stored procedure name (shortcut for simple configurations)
+    ///
+    /// Creates default templates that execute the specified procedure with:
+    /// - added: passes @after data
+    /// - updated: passes @before and @after data
+    /// - deleted: passes @before data
+    pub fn with_stored_procedure(mut self, proc_name: impl Into<String>) -> Self {
+        use crate::config::TemplateSpec;
+
+        let proc = proc_name.into();
+        let query_config = QueryConfig {
+            added: Some(TemplateSpec::new(format!("EXEC {proc} @after"))),
+            updated: Some(TemplateSpec::new(format!("EXEC {proc} @before, @after"))),
+            deleted: Some(TemplateSpec::new(format!("EXEC {proc} @before"))),
+        };
+        self.config.default_template = Some(query_config);
+        self
+    }
+
     /// Build the MsSqlStoredProcReaction
     pub async fn build(self) -> Result<MsSqlStoredProcReaction> {
         MsSqlStoredProcReaction::from_builder(

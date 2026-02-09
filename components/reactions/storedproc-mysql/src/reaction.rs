@@ -473,6 +473,25 @@ impl MySqlStoredProcReactionBuilder {
         self
     }
 
+    /// Set the stored procedure name (shortcut for simple configurations)
+    ///
+    /// Creates default templates that call the specified procedure with:
+    /// - added: passes @after data
+    /// - updated: passes @before and @after data
+    /// - deleted: passes @before data
+    pub fn with_stored_procedure(mut self, proc_name: impl Into<String>) -> Self {
+        use crate::config::TemplateSpec;
+
+        let proc = proc_name.into();
+        let query_config = QueryConfig {
+            added: Some(TemplateSpec::new(format!("CALL {proc}(@after)"))),
+            updated: Some(TemplateSpec::new(format!("CALL {proc}(@before, @after)"))),
+            deleted: Some(TemplateSpec::new(format!("CALL {proc}(@before)"))),
+        };
+        self.config.default_template = Some(query_config);
+        self
+    }
+
     /// Build the MySqlStoredProcReaction
     pub async fn build(self) -> Result<MySqlStoredProcReaction> {
         MySqlStoredProcReaction::from_builder(

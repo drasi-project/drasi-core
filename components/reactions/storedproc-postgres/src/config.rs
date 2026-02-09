@@ -89,6 +89,10 @@ pub struct PostgresStoredProcReactionConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
 
+    /// Identity provider for authentication (takes precedence over user/password)
+    #[serde(skip)]
+    pub identity_provider: Option<Box<dyn IdentityProvider>>,
+
     /// Database user (deprecated: use identity_provider instead)
     #[serde(default)]
     pub user: String,
@@ -103,11 +107,6 @@ pub struct PostgresStoredProcReactionConfig {
     /// Enable SSL/TLS
     #[serde(default)]
     pub ssl: bool,
-
-    /// Identity provider for authentication
-    /// Takes precedence over user/password if set
-    #[serde(skip)]
-    pub identity_provider: Option<Box<dyn IdentityProvider>>,
 
     /// Query-specific template configurations for stored procedure commands
     #[serde(default)]
@@ -132,11 +131,11 @@ impl std::fmt::Debug for PostgresStoredProcReactionConfig {
         f.debug_struct("PostgresStoredProcReactionConfig")
             .field("hostname", &self.hostname)
             .field("port", &self.port)
+            .field("identity_provider", &self.identity_provider.is_some())
             .field("user", &self.user)
-            .field("password", &"***") // Don't expose password in debug output
+            .field("password", &"***")
             .field("database", &self.database)
             .field("ssl", &self.ssl)
-            .field("identity_provider", &self.identity_provider.is_some())
             .field("routes", &self.routes)
             .field("default_template", &self.default_template)
             .field("command_timeout_ms", &self.command_timeout_ms)
@@ -150,11 +149,11 @@ impl Default for PostgresStoredProcReactionConfig {
         Self {
             hostname: default_hostname(),
             port: None,
+            identity_provider: None,
             user: String::new(),
             password: String::new(),
             database: String::new(),
             ssl: false,
-            identity_provider: None,
             routes: HashMap::new(),
             default_template: None,
             command_timeout_ms: default_timeout_ms(),
