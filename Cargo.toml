@@ -12,6 +12,7 @@ members = [
 
   # Source Plugins
   "components/sources/postgres",
+  "components/sources/mongodb",
   "components/sources/http",
   "components/sources/grpc",
   "components/sources/platform",
@@ -82,6 +83,7 @@ drasi-lib = { version = "0.3.3", path = "lib" }
 
 # Component plugins
 drasi-source-postgres = { version = "0.1.3", path = "components/sources/postgres" }
+drasi-source-mongodb = { version = "0.1.0", path = "components/sources/mongodb" }
 drasi-source-application = { version = "0.1.3", path = "components/sources/application" }
 drasi-bootstrap-application = { version = "0.1.3", path = "components/bootstrappers/application" }
 drasi-reaction-http = { version = "0.1.4", path = "components/reactions/http" }

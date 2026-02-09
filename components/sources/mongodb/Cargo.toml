@@ -1,0 +1,29 @@
+[package]
+name = "drasi-source-mongodb"
+version = "0.1.0"
+edition = "2021"
+authors = ["The Drasi Authors"]
+description = "MongoDB source plugin for Drasi"
+license = "Apache-2.0"
+
+[dependencies]
+async-trait = "0.1"
+anyhow = "1.0"
+log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+mongodb = { version = "2.8", features = ["tokio-runtime"] }
+bson = { version = "2.9", features = ["chrono-0_4", "uuid-1", "serde_with"] }
+ordered-float = "3.9"
+futures = "0.3"
+url = "2.5"
+
+drasi-core = { path = "../../../core", version = "0.3.2" }
+drasi-lib = { path = "../../../lib", version = "0.3.3" }
+
+[dev-dependencies]
+testcontainers = "0.23"
+tokio-test = "0.4"
