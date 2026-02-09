@@ -130,7 +130,7 @@ use drasi_lib::identity::AzureIdentityProvider;
 let identity_provider = AzureIdentityProvider::with_workload_identity("myuser@myserver")?;
 
 // For local development or Azure VMs with Managed Identity
-let identity_provider = AzureIdentityProvider::with_default_credentials("myuser@myserver").await?;
+let identity_provider = AzureIdentityProvider::with_default_credentials("myuser@myserver")?;
 
 let reaction = MsSqlStoredProcReaction::builder("my-reaction")
     .with_hostname("myserver.database.windows.net")
