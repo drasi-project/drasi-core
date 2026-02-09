@@ -122,9 +122,7 @@ impl PostgresExecutor {
             None
         };
 
-        let is_cert_auth = credentials
-            .as_ref()
-            .map_or(false, |c| c.is_certificate());
+        let is_cert_auth = credentials.as_ref().map_or(false, |c| c.is_certificate());
 
         // For username/password and token auth, extract the auth pair
         let (username, password) = if let Some(creds) = &credentials {
@@ -141,7 +139,11 @@ impl PostgresExecutor {
         };
 
         // Build connection string
-        let ssl_mode = if config.ssl || is_cert_auth { "require" } else { "disable" };
+        let ssl_mode = if config.ssl || is_cert_auth {
+            "require"
+        } else {
+            "disable"
+        };
 
         // Log connection attempt (without password)
         debug!(
@@ -156,7 +158,11 @@ impl PostgresExecutor {
 
         info!(
             "Connecting to PostgreSQL: {}:{}/{} (SSL: {}, cert_auth: {})",
-            config.hostname, port, config.database, config.ssl || is_cert_auth, is_cert_auth
+            config.hostname,
+            port,
+            config.database,
+            config.ssl || is_cert_auth,
+            is_cert_auth
         );
 
         // Connect to database with appropriate TLS configuration
@@ -175,7 +181,9 @@ impl PostgresExecutor {
                 .danger_accept_invalid_hostnames(false)
                 .danger_accept_invalid_certs(false)
                 .build()
-                .map_err(|e| anyhow!("Failed to create TLS connector with client certificate: {e}"))?;
+                .map_err(|e| {
+                    anyhow!("Failed to create TLS connector with client certificate: {e}")
+                })?;
             let connector = MakeTlsConnector::new(tls_connector);
 
             debug!("Attempting mTLS connection to PostgreSQL with client certificate...");
