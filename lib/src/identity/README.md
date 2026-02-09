@@ -34,7 +34,7 @@ use drasi_lib::identity::AzureIdentityProvider;
 let provider = AzureIdentityProvider::with_workload_identity("myuser@myserver")?;
 
 // For Azure VMs with Managed Identity or local development with Azure CLI
-let provider = AzureIdentityProvider::with_default_credentials("myuser@myserver").await?;
+let provider = AzureIdentityProvider::with_default_credentials("myuser@myserver")?;
 ```
 
 See [azure/README.md](azure/README.md) for detailed Azure setup.
