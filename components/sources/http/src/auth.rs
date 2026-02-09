@@ -26,6 +26,7 @@ use hmac::{Hmac, Mac};
 use sha1::Sha1;
 use sha2::Sha256;
 use std::env;
+use subtle::ConstantTimeEq;
 
 /// Result of authentication verification
 #[derive(Debug, Clone, PartialEq)]
@@ -157,11 +158,7 @@ fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    let mut result = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        result |= x ^ y;
-    }
-    result == 0
+    a.ct_eq(b).into()
 }
 
 /// Verify bearer token

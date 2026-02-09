@@ -756,14 +756,13 @@ impl HttpSource {
         debug!("[{source_id}] Webhook processing complete: {success_count} succeeded, {error_count} failed");
 
         if error_count > 0 && success_count == 0 {
-            (
+            return handle_error(
+                error_behavior,
+                &source_id,
                 StatusCode::BAD_REQUEST,
-                Json(EventResponse {
-                    success: false,
-                    message: format!("All {error_count} mappings failed"),
-                    error: last_error,
-                }),
-            )
+                &format!("All {error_count} mappings failed"),
+                last_error.as_deref(),
+            );
         } else if error_count > 0 {
             (
                 StatusCode::OK,
