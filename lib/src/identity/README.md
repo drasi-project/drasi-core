@@ -63,7 +63,7 @@ let provider = AwsIdentityProvider::with_assumed_role(
 ).await?;
 ```
 
-See [aws/README.md](aws/README.md) for detailed AWS setup.
+See the AWS provider documentation in this repository for detailed AWS setup.
 
 ## Usage with Reactions
 
