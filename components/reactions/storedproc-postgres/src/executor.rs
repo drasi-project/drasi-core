@@ -16,6 +16,7 @@
 
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
+use drasi_lib::identity::Credentials;
 use log::{debug, info};
 use postgres_native_tls::MakeTlsConnector;
 use serde_json::Value;
@@ -113,23 +114,39 @@ impl PostgresExecutor {
     pub async fn new(config: &PostgresStoredProcReactionConfig) -> Result<Self> {
         let port = config.get_port();
 
-        // Get credentials from identity provider or fall back to user/password
-        let (username, password) = if let Some(provider) = &config.identity_provider {
+        // Resolve credentials from identity provider or fall back to user/password
+        let credentials = if let Some(provider) = &config.identity_provider {
             debug!("Using identity provider for authentication");
-            let credentials = provider.get_credentials().await?;
-            credentials.into_auth_pair()
+            Some(provider.get_credentials().await?)
+        } else {
+            None
+        };
+
+        let is_cert_auth = credentials
+            .as_ref()
+            .map_or(false, |c| c.is_certificate());
+
+        // For username/password and token auth, extract the auth pair
+        let (username, password) = if let Some(creds) = &credentials {
+            if !creds.is_certificate() {
+                creds.clone().into_auth_pair()
+            } else {
+                // Certificate auth: username is optional, password is not used
+                let (_, _, cert_username) = creds.clone().into_certificate();
+                (cert_username.unwrap_or_default(), String::new())
+            }
         } else {
             debug!("Using username/password for authentication");
             (config.user.clone(), config.password.clone())
         };
 
         // Build connection string
-        let ssl_mode = if config.ssl { "require" } else { "disable" };
+        let ssl_mode = if config.ssl || is_cert_auth { "require" } else { "disable" };
 
         // Log connection attempt (without password)
         debug!(
-            "Connection details - host: {}, port: {}, user: {}, database: {}, ssl: {}",
-            config.hostname, port, username, config.database, ssl_mode
+            "Connection details - host: {}, port: {}, user: {}, database: {}, ssl: {}, cert_auth: {}",
+            config.hostname, port, username, config.database, ssl_mode, is_cert_auth
         );
 
         let connection_string = format!(
@@ -138,17 +155,48 @@ impl PostgresExecutor {
         );
 
         info!(
-            "Connecting to PostgreSQL: {}:{}/{} (SSL: {})",
-            config.hostname, port, config.database, config.ssl
+            "Connecting to PostgreSQL: {}:{}/{} (SSL: {}, cert_auth: {})",
+            config.hostname, port, config.database, config.ssl || is_cert_auth, is_cert_auth
         );
 
         // Connect to database with appropriate TLS configuration
-        let client = if config.ssl {
-            // Use system trust store for certificate validation
-            // On macOS: sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/rds-ca-bundle.pem
-            // On Linux: sudo cp ~/rds-ca-bundle.pem /usr/local/share/ca-certificates/ && sudo update-ca-certificates
+        let client = if is_cert_auth {
+            // Client certificate authentication (mTLS)
+            let (cert_pem, key_pem, _) = credentials.unwrap().into_certificate();
+
+            let identity = native_tls::Identity::from_pkcs8(
+                cert_pem.as_bytes(),
+                key_pem.as_bytes(),
+            )
+            .map_err(|e| anyhow!("Failed to load client certificate: {e}. Ensure cert_pem and key_pem are valid PEM-encoded data."))?;
+
             let tls_connector = native_tls::TlsConnector::builder()
-                .min_protocol_version(Some(native_tls::Protocol::Tlsv12))
+                .identity(identity)
+                .danger_accept_invalid_hostnames(false)
+                .danger_accept_invalid_certs(false)
+                .build()
+                .map_err(|e| anyhow!("Failed to create TLS connector with client certificate: {e}"))?;
+            let connector = MakeTlsConnector::new(tls_connector);
+
+            debug!("Attempting mTLS connection to PostgreSQL with client certificate...");
+            let (client, connection) = tokio_postgres::connect(&connection_string, connector)
+                .await
+                .map_err(|e| {
+                    log::error!("mTLS connection error: {e:?}");
+                    anyhow!("Failed to connect to database with client certificate: {e}")
+                })?;
+
+            // Spawn connection handler
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    log::error!("PostgreSQL connection error: {e}");
+                }
+            });
+
+            client
+        } else if config.ssl {
+            // Server-only TLS (no client certificate)
+            let tls_connector = native_tls::TlsConnector::builder()
                 .danger_accept_invalid_hostnames(false)
                 .danger_accept_invalid_certs(false)
                 .build()

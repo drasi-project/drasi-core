@@ -15,6 +15,7 @@
 //! MS SQL Server executor for stored procedure invocation.
 
 use anyhow::{anyhow, Result};
+use drasi_lib::identity::Credentials;
 use log::{debug, info};
 use serde_json::Value;
 use std::sync::Arc;
@@ -45,6 +46,13 @@ impl MsSqlExecutor {
         let (username, password) = if let Some(provider) = &config.identity_provider {
             debug!("Using identity provider for authentication");
             let credentials = provider.get_credentials().await?;
+            if credentials.is_certificate() {
+                anyhow::bail!(
+                    "Certificate-based authentication is not supported for MS SQL Server. \
+                     The tiberius driver does not expose client certificate configuration. \
+                     Use token or password authentication instead."
+                );
+            }
             credentials.into_auth_pair()
         } else {
             debug!("Using username/password for authentication");

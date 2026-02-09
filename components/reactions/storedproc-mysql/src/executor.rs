@@ -15,6 +15,7 @@
 //! MySQL executor for stored procedure invocation.
 
 use anyhow::{anyhow, Result};
+use drasi_lib::identity::Credentials;
 use log::{debug, info};
 use mysql_async::prelude::*;
 use mysql_async::{OptsBuilder, Pool, SslOpts};
@@ -40,6 +41,13 @@ impl MySqlExecutor {
         let (username, password) = if let Some(provider) = &config.identity_provider {
             debug!("Using identity provider for authentication");
             let credentials = provider.get_credentials().await?;
+            if credentials.is_certificate() {
+                anyhow::bail!(
+                    "Certificate-based authentication is not supported for MySQL. \
+                     The mysql_async driver requires PKCS12 format which is incompatible \
+                     with PEM-based credentials. Use token or password authentication instead."
+                );
+            }
             credentials.into_auth_pair()
         } else {
             debug!("Using username/password for authentication");

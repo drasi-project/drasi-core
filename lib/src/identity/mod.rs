@@ -40,15 +40,56 @@ pub enum Credentials {
     UsernamePassword { username: String, password: String },
     /// Token-based authentication (Azure AD, AWS IAM, etc.).
     Token { username: String, token: String },
+    /// Client certificate authentication (mTLS).
+    ///
+    /// Used for database connections that authenticate via TLS client certificates
+    /// instead of passwords or tokens.
+    Certificate {
+        /// PEM-encoded client certificate.
+        cert_pem: String,
+        /// PEM-encoded private key.
+        key_pem: String,
+        /// Optional username (some databases require it alongside certificates).
+        username: Option<String>,
+    },
 }
 
 impl Credentials {
     /// Extract username and password/token for connection string building.
+    ///
+    /// # Panics
+    /// Panics if called on `Certificate` credentials. Use [`into_certificate`](Self::into_certificate)
+    /// for certificate-based authentication.
     pub fn into_auth_pair(self) -> (String, String) {
         match self {
             Credentials::UsernamePassword { username, password } => (username, password),
             Credentials::Token { username, token } => (username, token),
+            Credentials::Certificate { .. } => {
+                panic!("Certificate credentials cannot be converted to an auth pair. Use into_certificate() instead.")
+            }
         }
+    }
+
+    /// Extract certificate and key for TLS client authentication.
+    ///
+    /// Returns `(cert_pem, key_pem, optional_username)`.
+    ///
+    /// # Panics
+    /// Panics if called on non-Certificate credentials.
+    pub fn into_certificate(self) -> (String, String, Option<String>) {
+        match self {
+            Credentials::Certificate {
+                cert_pem,
+                key_pem,
+                username,
+            } => (cert_pem, key_pem, username),
+            _ => panic!("Not certificate credentials. Use into_auth_pair() instead."),
+        }
+    }
+
+    /// Returns `true` if this is a `Certificate` variant.
+    pub fn is_certificate(&self) -> bool {
+        matches!(self, Credentials::Certificate { .. })
     }
 }
 
