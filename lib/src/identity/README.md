@@ -7,7 +7,7 @@ This module provides identity provider abstractions for database authentication 
 The identity provider pattern allows reactions to authenticate with databases using cloud-native identity solutions:
 
 - **Azure AD Authentication** - Use Azure Managed Identity or Workload Identity for Azure Database for PostgreSQL/MySQL
-- **AWS IAM Authentication** - Use AWS IAM users or roles for Amazon RDS and Aurora databases
+- **AWS IAM Authentication** - Use AWS IAM users, roles, or IRSA (EKS) for Amazon RDS and Aurora databases
 - **Password Authentication** - Traditional username/password authentication
 
 
@@ -37,23 +37,24 @@ let provider = AzureIdentityProvider::with_workload_identity("myuser@myserver")?
 let provider = AzureIdentityProvider::with_default_credentials("myuser@myserver")?;
 ```
 
-See [azure/README.md](azure/README.md) for detailed Azure setup.
+See the Azure provider documentation in this repository for detailed Azure setup.
 
 ### AWS IAM Provider
 
-AWS IAM authentication for RDS and Aurora:
+AWS IAM authentication for RDS and Aurora. Supports **IRSA (IAM Roles for Service Accounts)** on EKS — the default credential chain automatically detects the `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE` environment variables injected by EKS.
 
 ```rust
 use drasi_lib::identity::AwsIdentityProvider;
 
-// Using IAM user credentials
+// Works automatically with IRSA on EKS, EC2 instance profiles,
+// environment variables, or ~/.aws/credentials
 let provider = AwsIdentityProvider::new(
     "myuser",
     "mydb.rds.amazonaws.com",
     5432
 ).await?;
 
-// Assuming an IAM role
+// Or explicitly assume an IAM role
 let provider = AwsIdentityProvider::with_assumed_role(
     "myuser",
     "mydb.rds.amazonaws.com",
@@ -62,8 +63,6 @@ let provider = AwsIdentityProvider::with_assumed_role(
     None
 ).await?;
 ```
-
-See the AWS provider documentation in this repository for detailed AWS setup.
 
 ## Usage with Reactions
 
