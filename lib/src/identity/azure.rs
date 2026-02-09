@@ -29,35 +29,36 @@ const DEFAULT_AZURE_SCOPE: &str = "https://ossrdbms-aad.database.windows.net/.de
 /// Each instance represents a single authentication method.
 /// Create multiple providers if you need fallback behavior.
 ///
-/// # Username Format
+/// # Identity Name
 ///
-/// For Azure Database for PostgreSQL, the username should be in the format:
-/// `username@servername` (e.g., `myuser@myserver`).
+/// The `identity_name` is the database identity used for authentication.
+/// For Azure Database for PostgreSQL, this should be in the format:
+/// `user@servername` (e.g., `myuser@myserver`).
 ///
 /// For Azure AD authentication, use the Azure AD principal name
 /// (e.g., `user@tenant.onmicrosoft.com`).
 #[derive(Clone)]
 pub struct AzureIdentityProvider {
     credential: Arc<dyn TokenCredential>,
-    username: String,
+    identity_name: String,
     scope: String,
 }
 
 impl AzureIdentityProvider {
     /// Create provider using system-assigned managed identity.
     ///
-    /// The username should be in the format `user@tenant.onmicrosoft.com`
-    /// for Azure AD authentication.
+    /// The `identity_name` is the database identity used for authentication,
+    /// typically in the format `user@tenant.onmicrosoft.com` for Azure AD.
     ///
     /// This is appropriate for production workloads running in Azure with
     /// a system-assigned managed identity.
-    pub fn new(username: impl Into<String>) -> Result<Self> {
+    pub fn new(identity_name: impl Into<String>) -> Result<Self> {
         let credential = ManagedIdentityCredential::new(None)
             .map_err(|e| anyhow!("Failed to create managed identity credential: {e}"))?;
 
         Ok(Self {
             credential: credential as Arc<dyn TokenCredential>,
-            username: username.into(),
+            identity_name: identity_name.into(),
             scope: DEFAULT_AZURE_SCOPE.to_string(),
         })
     }
@@ -67,7 +68,7 @@ impl AzureIdentityProvider {
     /// This is useful for user-assigned managed identities where you need to
     /// specify which identity to use.
     pub fn with_managed_identity(
-        username: impl Into<String>,
+        identity_name: impl Into<String>,
         client_id: impl Into<String>,
     ) -> Result<Self> {
         let mut options = ManagedIdentityCredentialOptions::default();
@@ -77,7 +78,7 @@ impl AzureIdentityProvider {
 
         Ok(Self {
             credential: credential as Arc<dyn TokenCredential>,
-            username: username.into(),
+            identity_name: identity_name.into(),
             scope: DEFAULT_AZURE_SCOPE.to_string(),
         })
     }
@@ -104,13 +105,13 @@ impl AzureIdentityProvider {
     ///     "myuser@tenant.onmicrosoft.com"
     /// )?;
     /// ```
-    pub fn with_default_credentials(username: impl Into<String>) -> Result<Self> {
+    pub fn with_default_credentials(identity_name: impl Into<String>) -> Result<Self> {
         let credential = DeveloperToolsCredential::new(None)
             .map_err(|e| anyhow!("Failed to create developer tools credential: {e}"))?;
 
         Ok(Self {
             credential: credential as Arc<dyn TokenCredential>,
-            username: username.into(),
+            identity_name: identity_name.into(),
             scope: DEFAULT_AZURE_SCOPE.to_string(),
         })
     }
@@ -134,13 +135,13 @@ impl AzureIdentityProvider {
     ///     "myidentity"  // The managed identity name
     /// )?;
     /// ```
-    pub fn with_workload_identity(username: impl Into<String>) -> Result<Self> {
+    pub fn with_workload_identity(identity_name: impl Into<String>) -> Result<Self> {
         let credential = WorkloadIdentityCredential::new(None)
             .map_err(|e| anyhow!("Failed to create workload identity credential: {e}"))?;
 
         Ok(Self {
             credential: credential as Arc<dyn TokenCredential>,
-            username: username.into(),
+            identity_name: identity_name.into(),
             scope: DEFAULT_AZURE_SCOPE.to_string(),
         })
     }
@@ -165,7 +166,7 @@ impl IdentityProvider for AzureIdentityProvider {
             .map_err(|e| anyhow!("Failed to get Azure AD token: {e}"))?;
 
         Ok(Credentials::Token {
-            username: self.username.clone(),
+            username: self.identity_name.clone(),
             token: token_response.token.secret().to_string(),
         })
     }
@@ -186,7 +187,7 @@ mod tests {
             "03bbedd2-cce5-45ab-9414-1c1cb82361f0",
         )
         .unwrap();
-        assert_eq!(provider.username, "user@tenant.onmicrosoft.com");
+        assert_eq!(provider.identity_name, "user@tenant.onmicrosoft.com");
         assert_eq!(provider.scope, DEFAULT_AZURE_SCOPE);
     }
 
@@ -209,7 +210,7 @@ mod tests {
         )
         .unwrap();
         let cloned = provider.clone();
-        assert_eq!(cloned.username, provider.username);
+        assert_eq!(cloned.identity_name, provider.identity_name);
         assert_eq!(cloned.scope, provider.scope);
     }
 
@@ -232,7 +233,7 @@ mod tests {
             AzureIdentityProvider::with_default_credentials("user@tenant.onmicrosoft.com")
                 .expect("Failed to create default credentials provider");
 
-        assert_eq!(provider.username, "user@tenant.onmicrosoft.com");
+        assert_eq!(provider.identity_name, "user@tenant.onmicrosoft.com");
         assert_eq!(provider.scope, DEFAULT_AZURE_SCOPE);
     }
 
@@ -262,16 +263,16 @@ mod tests {
         .unwrap()
         .with_scope("https://scope2.com/.default");
 
-        assert_eq!(provider1.username, "user1@tenant.onmicrosoft.com");
+        assert_eq!(provider1.identity_name, "user1@tenant.onmicrosoft.com");
         assert_eq!(provider1.scope, "https://scope1.com/.default");
 
-        assert_eq!(provider2.username, "user2@tenant.onmicrosoft.com");
+        assert_eq!(provider2.identity_name, "user2@tenant.onmicrosoft.com");
         assert_eq!(provider2.scope, "https://scope2.com/.default");
     }
 
     #[test]
-    fn test_username_formats() {
-        // Test different valid username formats
+    fn test_identity_name_formats() {
+        // Test different valid identity name formats
         let formats = vec![
             "user@tenant.onmicrosoft.com",
             "first.last@company.com",
@@ -279,10 +280,10 @@ mod tests {
             "user-name@sub.domain.com",
         ];
 
-        for username in formats {
+        for identity_name in formats {
             let provider =
-                AzureIdentityProvider::with_managed_identity(username, "client-id").unwrap();
-            assert_eq!(provider.username, username);
+                AzureIdentityProvider::with_managed_identity(identity_name, "client-id").unwrap();
+            assert_eq!(provider.identity_name, identity_name);
         }
     }
 
