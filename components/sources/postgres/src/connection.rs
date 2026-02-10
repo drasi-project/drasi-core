@@ -313,7 +313,14 @@ impl ReplicationConnection {
                 BackendMessage::ErrorResponse(err) => {
                     if err.message.contains("already exists") {
                         debug!("Replication slot already exists: {slot_name}");
-                        // Try to get existing slot info
+                        // Drain the ReadyForQuery that PostgreSQL sends after ErrorResponse
+                        loop {
+                            let drain_msg = self.read_message().await?;
+                            if let BackendMessage::ReadyForQuery(status) = drain_msg {
+                                self.transaction_status = status;
+                                break;
+                            }
+                        }
                         return self.get_replication_slot_info(slot_name).await;
                     }
                     return Err(anyhow!("CREATE_REPLICATION_SLOT failed: {}", err.message));
@@ -331,16 +338,76 @@ impl ReplicationConnection {
         &mut self,
         slot_name: &str,
     ) -> Result<ReplicationSlotInfo> {
-        // For existing slots, we can assume they exist and use default values
-        // The actual slot info will be retrieved when we start replication
-        debug!("Using existing replication slot: {slot_name}");
+        debug!("Querying existing replication slot: {slot_name}");
 
-        Ok(ReplicationSlotInfo {
+        let slot_name_escaped = slot_name.replace('\'', "''");
+        let query = format!(
+            "SELECT slot_name, confirmed_flush_lsn, restart_lsn, plugin FROM pg_replication_slots WHERE slot_name = '{slot_name_escaped}'"
+        );
+
+        self.send_message(FrontendMessage::Query(query)).await?;
+
+        let mut slot_info = ReplicationSlotInfo {
             slot_name: slot_name.to_string(),
-            consistent_point: "0/0".to_string(), // Will be updated from START_REPLICATION
+            consistent_point: "0/0".to_string(),
             snapshot_name: None,
             output_plugin: "pgoutput".to_string(),
-        })
+        };
+        let mut found_row = false;
+
+        loop {
+            let msg = self.read_message().await?;
+            match msg {
+                BackendMessage::RowDescription(_) => {
+                    // Skip row description
+                }
+                BackendMessage::DataRow(row) => {
+                    found_row = true;
+                    if row.len() >= 4 {
+                        if let Some(Some(confirmed_flush_lsn)) = row.get(1) {
+                            let lsn = String::from_utf8_lossy(confirmed_flush_lsn).to_string();
+                            if !lsn.is_empty() {
+                                slot_info.consistent_point = lsn;
+                            }
+                        }
+                        if slot_info.consistent_point == "0/0" {
+                            if let Some(Some(restart_lsn)) = row.get(2) {
+                                let lsn = String::from_utf8_lossy(restart_lsn).to_string();
+                                if !lsn.is_empty() {
+                                    slot_info.consistent_point = lsn;
+                                }
+                            }
+                        }
+                        if let Some(Some(plugin)) = row.get(3) {
+                            slot_info.output_plugin = String::from_utf8_lossy(plugin).to_string();
+                        }
+                    }
+                }
+                BackendMessage::CommandComplete(_) => {
+                    // Command completed
+                }
+                BackendMessage::ReadyForQuery(status) => {
+                    self.transaction_status = status;
+                    break;
+                }
+                BackendMessage::ErrorResponse(err) => {
+                    return Err(anyhow!("Failed to query replication slot: {}", err.message));
+                }
+                _ => {
+                    warn!("Unexpected message during slot query: {msg:?}");
+                }
+            }
+        }
+
+        if !found_row {
+            return Err(anyhow!("Replication slot not found: {slot_name}"));
+        }
+
+        info!(
+            "Using existing replication slot: {slot_name} at LSN {}",
+            slot_info.consistent_point
+        );
+        Ok(slot_info)
     }
 
     pub async fn start_replication(
