@@ -177,19 +177,6 @@ pub async fn create_test_table(client: &Client, table_name: &str) -> Result<()> 
     Ok(())
 }
 
-pub async fn create_test_table_replica_identity_nothing(
-    client: &Client,
-    table_name: &str,
-) -> Result<()> {
-    let create_sql = format!(
-        "CREATE TABLE IF NOT EXISTS {table_name} (\n    id INTEGER PRIMARY KEY,\n    name TEXT NOT NULL\n)"
-    );
-    execute_sql(client, &create_sql).await?;
-    let replica_sql = format!("ALTER TABLE {table_name} REPLICA IDENTITY NOTHING");
-    execute_sql(client, &replica_sql).await?;
-    Ok(())
-}
-
 pub async fn create_test_table_replica_identity_default(
     client: &Client,
     table_name: &str,

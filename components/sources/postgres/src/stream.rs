@@ -607,10 +607,6 @@ impl ReplicationStream {
             }
         }
 
-        // Note: SourceChange::Update only needs the after element
-        // The before state is tracked internally by drasi-core
-        // We still process old_tuple to ensure we have the correct element_id
-
         let after_element = Element::Node {
             metadata: ElementMetadata {
                 reference: ElementReference::new(&self.source_id, &element_id),
