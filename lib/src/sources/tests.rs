@@ -188,19 +188,117 @@ pub fn create_test_mock_source(id: String, event_tx: ComponentEventSender) -> Te
     TestMockSource::new(id, event_tx).unwrap()
 }
 
+/// A test source that uses SourceBase for logging integration tests.
+///
+/// This source uses the full SourceBase infrastructure including logger support.
+pub struct LoggingTestSource {
+    base: crate::sources::SourceBase,
+}
+
+impl LoggingTestSource {
+    pub fn new(id: impl Into<String>) -> Result<Self> {
+        let params = crate::sources::SourceBaseParams::new(id);
+        let base = crate::sources::SourceBase::new(params)?;
+        Ok(Self { base })
+    }
+
+    /// Log a message at info level (for testing)
+    /// Note: With tracing refactor, logs should be emitted via tracing::info!()
+    /// within a span that has component_id and component_type attributes
+    pub async fn emit_log(&self, _message: &str) {
+        // Logging is now done via tracing spans, not ComponentLogger
+        // This method is kept for API compatibility but does nothing
+    }
+
+    /// Log messages at various levels (for testing)
+    pub async fn emit_all_log_levels(&self) {
+        // Logging is now done via tracing spans, not ComponentLogger
+        // This method is kept for API compatibility but does nothing
+    }
+}
+
+#[async_trait]
+impl Source for LoggingTestSource {
+    fn id(&self) -> &str {
+        self.base.get_id()
+    }
+
+    fn type_name(&self) -> &str {
+        "logging-test"
+    }
+
+    fn properties(&self) -> HashMap<String, serde_json::Value> {
+        HashMap::new()
+    }
+
+    fn auto_start(&self) -> bool {
+        self.base.auto_start
+    }
+
+    async fn start(&self) -> Result<()> {
+        self.base
+            .set_status_with_event(ComponentStatus::Running, Some("Started".to_string()))
+            .await?;
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        self.base.stop_common().await
+    }
+
+    async fn status(&self) -> ComponentStatus {
+        self.base.get_status().await
+    }
+
+    async fn subscribe(
+        &self,
+        settings: crate::config::SourceSubscriptionSettings,
+    ) -> Result<SubscriptionResponse> {
+        self.base
+            .subscribe_with_bootstrap(&settings, "logging-test")
+            .await
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
+        self.base.initialize(context).await;
+    }
+}
+
 #[cfg(test)]
 mod manager_tests {
     use super::*;
     use crate::sources::SourceManager;
     use tokio::sync::mpsc;
 
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Counter for generating unique test IDs
+    static TEST_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// Generate a unique component ID for tests to avoid conflicts in parallel test runs
+    fn unique_id(prefix: &str) -> String {
+        let counter = TEST_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+        format!("{prefix}-{counter}")
+    }
+
     async fn create_test_manager() -> (
         Arc<SourceManager>,
         mpsc::Receiver<ComponentEvent>,
         mpsc::Sender<ComponentEvent>,
     ) {
+        // Use the global shared log registry since tracing subscriber is global
+        let log_registry = crate::managers::get_or_init_global_registry();
+
         let (event_tx, event_rx) = mpsc::channel(100);
-        let manager = Arc::new(SourceManager::new(event_tx.clone()));
+        let manager = Arc::new(SourceManager::new(
+            "test-instance",
+            event_tx.clone(),
+            log_registry,
+        ));
         (manager, event_rx, event_tx)
     }
 
@@ -564,5 +662,320 @@ mod manager_tests {
             matches!(status, ComponentStatus::Running),
             "Source with auto_start=false should be manually startable"
         );
+    }
+
+    // ============================================================================
+    // Log Streaming Integration Tests
+    // ============================================================================
+
+    #[tokio::test]
+    async fn test_source_log_subscription() {
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        // Create a mock source
+        let source = create_test_mock_source("logging-source".to_string(), _event_tx);
+        manager.add_source(source).await.unwrap();
+
+        // Subscribe to logs
+        let result = manager.subscribe_logs("logging-source").await;
+        assert!(
+            result.is_some(),
+            "Should be able to subscribe to existing source logs"
+        );
+
+        let (history, _receiver) = result.unwrap();
+        // History should be empty initially
+        assert!(history.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_source_log_subscription_nonexistent() {
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        // Try to subscribe to a non-existent source
+        let result = manager.subscribe_logs("nonexistent-source").await;
+        assert!(
+            result.is_none(),
+            "Should return None for non-existent source"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_source_base_logs_flow_to_subscriber() {
+        use tracing::Instrument;
+
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        // Use unique ID to avoid conflicts with parallel tests
+        let source_id = unique_id("logger-source");
+        let source_id_clone = source_id.clone();
+
+        // Create a LoggingTestSource that uses SourceBase
+        let source = LoggingTestSource::new(&source_id).unwrap();
+        manager.add_source(source).await.unwrap();
+
+        // Subscribe to logs before emitting
+        let (history, mut receiver) = manager.subscribe_logs(&source_id).await.unwrap();
+        assert!(history.is_empty(), "No logs should exist before logging");
+
+        // Emit a log within a component span (must include instance_id to match manager)
+        let span = tracing::info_span!(
+            "test_span",
+            instance_id = "test-instance",
+            component_id = %source_id_clone,
+            component_type = "source"
+        );
+        async {
+            tracing::info!("test log message");
+        }
+        .instrument(span)
+        .await;
+
+        // Wait for async log routing
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Should receive the log via broadcast
+        let received = tokio::time::timeout(std::time::Duration::from_millis(200), receiver.recv())
+            .await
+            .expect("Timeout waiting for log")
+            .expect("Channel error");
+
+        assert!(
+            received.message.contains("test log message"),
+            "Expected message containing 'test log message', got: {}",
+            received.message
+        );
+        assert_eq!(received.component_id, source_id);
+        assert_eq!(received.level, crate::managers::LogLevel::Info);
+    }
+
+    #[tokio::test]
+    async fn test_source_base_logs_all_levels() {
+        use tracing::Instrument;
+
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        // Use unique ID to avoid conflicts with parallel tests
+        let source_id = unique_id("multi-level-source");
+        let source_id_clone = source_id.clone();
+
+        // Create a LoggingTestSource
+        let source = LoggingTestSource::new(&source_id).unwrap();
+        manager.add_source(source).await.unwrap();
+
+        // Emit logs at all levels within a component span (must include instance_id)
+        let span = tracing::info_span!(
+            "test_span",
+            instance_id = "test-instance",
+            component_id = %source_id_clone,
+            component_type = "source"
+        );
+        async {
+            tracing::trace!("trace level");
+            tracing::debug!("debug level");
+            tracing::info!("info level");
+            tracing::warn!("warn level");
+            tracing::error!("error level");
+        }
+        .instrument(span)
+        .await;
+
+        // Wait for async log routing
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Subscribe after logging to get history
+        let (history, _receiver) = manager.subscribe_logs(&source_id).await.unwrap();
+
+        // Should have log messages (note: trace/debug may be filtered by EnvFilter)
+        // The tracing subscriber uses INFO as default level
+        assert!(
+            history.len() >= 3,
+            "Should have at least 3 log messages (info, warn, error)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_source_base_log_history_persists() {
+        use tracing::Instrument;
+
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        // Use unique ID to avoid conflicts with parallel tests
+        let source_id = unique_id("history-source");
+        let source_id_clone = source_id.clone();
+
+        // Create and add source
+        let source = LoggingTestSource::new(&source_id).unwrap();
+        manager.add_source(source).await.unwrap();
+
+        // Emit some logs within a component span (must include instance_id)
+        let span = tracing::info_span!(
+            "test_span",
+            instance_id = "test-instance",
+            component_id = %source_id_clone,
+            component_type = "source"
+        );
+        async {
+            tracing::info!("first");
+            tracing::info!("second");
+            tracing::info!("third");
+        }
+        .instrument(span)
+        .await;
+
+        // Wait for async log routing
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Subscribe and verify history
+        let (history, _receiver) = manager.subscribe_logs(&source_id).await.unwrap();
+        assert_eq!(history.len(), 3);
+        assert!(history[0].message.contains("first"));
+        assert!(history[1].message.contains("second"));
+        assert!(history[2].message.contains("third"));
+
+        // Subscribe again - should get same history
+        let (history2, _receiver2) = manager.subscribe_logs(&source_id).await.unwrap();
+        assert_eq!(history2.len(), 3);
+    }
+
+    // ============================================================================
+    // Log Macro Routing Tests
+    // ============================================================================
+
+    #[tokio::test]
+    async fn test_log_macro_routed_to_component_logs() {
+        use tracing::Instrument;
+
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        // Use unique ID to avoid conflicts with parallel tests
+        let source_id = unique_id("log-routing-source");
+        let source_id_clone = source_id.clone();
+
+        let source = LoggingTestSource::new(&source_id).unwrap();
+        manager.add_source(source).await.unwrap();
+
+        let (_history, mut receiver) = manager.subscribe_logs(&source_id).await.unwrap();
+
+        // Call tracing::info!() within a component span (must include instance_id)
+        let span = tracing::info_span!(
+            "test_span",
+            instance_id = "test-instance",
+            component_id = %source_id_clone,
+            component_type = "source"
+        );
+        async {
+            tracing::info!("Test log from macro");
+        }
+        .instrument(span)
+        .await;
+
+        // Wait for async log task
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let received =
+            tokio::time::timeout(std::time::Duration::from_millis(200), receiver.recv()).await;
+
+        match received {
+            Ok(Ok(msg)) => {
+                assert!(
+                    msg.message.contains("Test log from macro"),
+                    "Expected message containing 'Test log from macro', got: {}",
+                    msg.message
+                );
+            }
+            Ok(Err(e)) => panic!("Channel error: {e:?}"),
+            Err(_) => {
+                let (history, _) = manager.subscribe_logs(&source_id).await.unwrap();
+                panic!(
+                    "Timeout. History: {:?}",
+                    history.iter().map(|m| &m.message).collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    // ============================================================================
+    // Cleanup Tests
+    // ============================================================================
+
+    /// Test that deleting a source cleans up its event history
+    #[tokio::test]
+    async fn test_delete_source_cleans_up_event_history() {
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        // Use unique ID to avoid conflicts with parallel tests
+        let source_id = unique_id("cleanup-events-source");
+
+        // Add a source
+        let source = LoggingTestSource::new(&source_id).unwrap();
+        manager.add_source(source).await.unwrap();
+
+        // Record an event manually to simulate lifecycle
+        manager
+            .record_event(ComponentEvent {
+                component_id: source_id.clone(),
+                component_type: crate::ComponentType::Source,
+                status: ComponentStatus::Running,
+                timestamp: chrono::Utc::now(),
+                message: Some("Test event".to_string()),
+            })
+            .await;
+
+        // Verify events exist
+        let events = manager.get_source_events(&source_id).await;
+        assert!(!events.is_empty(), "Expected events after recording");
+
+        // Delete the source
+        manager.delete_source(source_id.clone()).await.unwrap();
+
+        // Verify events are cleaned up
+        let events_after = manager.get_source_events(&source_id).await;
+        assert!(events_after.is_empty(), "Expected no events after deletion");
+    }
+
+    /// Test that deleting a source cleans up its log history
+    #[tokio::test]
+    async fn test_delete_source_cleans_up_log_history() {
+        use tracing::Instrument;
+
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        // Use unique ID to avoid conflicts with parallel tests
+        let source_id = unique_id("cleanup-logs-source");
+        let source_id_clone = source_id.clone();
+
+        // Add a source
+        let source = LoggingTestSource::new(&source_id).unwrap();
+        manager.add_source(source).await.unwrap();
+
+        // Generate some logs using tracing within a component span (must include instance_id)
+        let span = tracing::info_span!(
+            "test_span",
+            instance_id = "test-instance",
+            component_id = %source_id_clone,
+            component_type = "source"
+        );
+        async {
+            tracing::info!("test log message");
+        }
+        .instrument(span)
+        .await;
+
+        // Wait for log to be recorded
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Verify logs exist
+        let result = manager.subscribe_logs(&source_id).await;
+        assert!(result.is_some(), "Expected to subscribe to source logs");
+        let (logs, _) = result.unwrap();
+        assert!(!logs.is_empty(), "Expected logs after emitting");
+
+        // Delete the source
+        manager.delete_source(source_id.clone()).await.unwrap();
+
+        // Verify logs are cleaned up (subscribe should fail for non-existent source)
+        let result = manager.subscribe_logs(&source_id).await;
+        assert!(result.is_none(), "Expected None for deleted source logs");
     }
 }
