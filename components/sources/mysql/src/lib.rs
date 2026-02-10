@@ -30,6 +30,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use async_trait::async_trait;
 use log::{error, info};
+use tracing::Instrument;
 
 use drasi_lib::channels::{ComponentEvent, ComponentStatus, ComponentType, DispatchMode};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
@@ -141,24 +142,42 @@ impl Source for MySqlReplicationSource {
         let status_tx = self.base.status_tx();
         let status_clone = self.base.status.clone();
 
-        let task = tokio::spawn(async move {
-            let mut stream = ReplicationStream::new(config, source_id.clone(), base);
-            if let Err(e) = stream.run().await {
-                error!("Replication task failed for {source_id}: {e}");
-                *status_clone.write().await = ComponentStatus::Error;
-                if let Some(ref tx) = *status_tx.read().await {
-                    let _ = tx
-                        .send(ComponentEvent {
-                            component_id: source_id,
-                            component_type: ComponentType::Source,
-                            status: ComponentStatus::Error,
-                            timestamp: chrono::Utc::now(),
-                            message: Some(format!("Replication failed: {e}")),
-                        })
-                        .await;
+        let instance_id = self
+            .base
+            .context()
+            .await
+            .map(|c| c.instance_id)
+            .unwrap_or_default();
+
+        let source_id_for_span = source_id.clone();
+        let span = tracing::info_span!(
+            "mysql_replication_task",
+            instance_id = %instance_id,
+            component_id = %source_id_for_span,
+            component_type = "source"
+        );
+
+        let task = tokio::spawn(
+            async move {
+                let mut stream = ReplicationStream::new(config, source_id.clone(), base);
+                if let Err(e) = stream.run().await {
+                    error!("Replication task failed for {source_id}: {e}");
+                    *status_clone.write().await = ComponentStatus::Error;
+                    if let Some(ref tx) = *status_tx.read().await {
+                        let _ = tx
+                            .send(ComponentEvent {
+                                component_id: source_id,
+                                component_type: ComponentType::Source,
+                                status: ComponentStatus::Error,
+                                timestamp: chrono::Utc::now(),
+                                message: Some(format!("Replication failed: {e}")),
+                            })
+                            .await;
+                    }
                 }
             }
-        });
+            .instrument(span),
+        );
 
         *self.base.task_handle.write().await = Some(task);
         self.base.set_status(ComponentStatus::Running).await;
