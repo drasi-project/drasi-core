@@ -52,6 +52,7 @@ members = [
   "shared-tests",
   "query-perf",
   "examples/query",
+  "lib-integration-tests",
   ]
 
 # Exclude internal crates from workspace packaging
@@ -59,6 +60,7 @@ exclude = [
   "shared-tests",
   "query-perf",
   "examples/query",
+  "lib-integration-tests",
 ]
 
 resolver = "2"
@@ -90,6 +92,8 @@ drasi-reaction-http = { version = "0.1.5", path = "components/reactions/http" }
 drasi-reaction-grpc = { version = "0.2.2", path = "components/reactions/grpc" }
 drasi-index-rocksdb = { version = "0.2.2", path = "components/indexes/rocksdb" }
 drasi-index-garnet = { version = "0.1.4", path = "components/indexes/garnet" }
+drasi-bootstrap-postgres = { path = "components/bootstrappers/postgres" }
+drasi-reaction-application = { path = "components/reactions/application" }
 drasi-source-mysql = { version = "0.1.0", path = "components/sources/mysql" }
 drasi-bootstrap-mysql = { version = "0.1.0", path = "components/bootstrappers/mysql" }
 
