@@ -21,27 +21,42 @@ use tokio::sync::RwLock;
 use crate::channels::*;
 use crate::config::ReactionRuntime;
 use crate::context::ReactionRuntimeContext;
-use crate::managers::{is_operation_valid, log_component_error, Operation};
+use crate::managers::{
+    is_operation_valid, log_component_error, ComponentEventHistory, ComponentLogKey,
+    ComponentLogRegistry, Operation,
+};
 use crate::reactions::{QueryProvider, Reaction};
 use crate::state_store::StateStoreProvider;
 
 pub struct ReactionManager {
+    instance_id: String,
     reactions: Arc<RwLock<HashMap<String, Arc<dyn Reaction>>>>,
     event_tx: ComponentEventSender,
     /// Query provider for reactions to access queries (injected after DrasiLib is constructed)
     query_provider: Arc<RwLock<Option<Arc<dyn QueryProvider>>>>,
     /// State store provider for reactions to persist state
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
+    /// Event history for tracking component lifecycle events
+    event_history: Arc<RwLock<ComponentEventHistory>>,
+    /// Log registry for component log streaming
+    log_registry: Arc<ComponentLogRegistry>,
 }
 
 impl ReactionManager {
     /// Create a new ReactionManager
-    pub fn new(event_tx: ComponentEventSender) -> Self {
+    pub fn new(
+        instance_id: impl Into<String>,
+        event_tx: ComponentEventSender,
+        log_registry: Arc<ComponentLogRegistry>,
+    ) -> Self {
         Self {
+            instance_id: instance_id.into(),
             reactions: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
             query_provider: Arc::new(RwLock::new(None)),
             state_store: Arc::new(RwLock::new(None)),
+            event_history: Arc::new(RwLock::new(ComponentEventHistory::new())),
+            log_registry,
         }
     }
 
@@ -93,6 +108,7 @@ impl ReactionManager {
 
         // Construct runtime context for this reaction
         let context = ReactionRuntimeContext::new(
+            &self.instance_id,
             &reaction_id,
             self.event_tx.clone(),
             self.state_store.read().await.clone(),
@@ -180,14 +196,15 @@ impl ReactionManager {
 
         if let Some(reaction) = reaction {
             let status = reaction.status().await;
+            let error_message = match &status {
+                ComponentStatus::Error => self.event_history.read().await.get_last_error(&id),
+                _ => None,
+            };
             let runtime = ReactionRuntime {
                 id: reaction.id().to_string(),
                 reaction_type: reaction.type_name().to_string(),
                 status: status.clone(),
-                error_message: match &status {
-                    ComponentStatus::Error => Some("Reaction error occurred".to_string()),
-                    _ => None,
-                },
+                error_message,
                 queries: reaction.query_ids(),
                 properties: reaction.properties(),
             };
@@ -229,6 +246,11 @@ impl ReactionManager {
 
             // Now remove the reaction
             self.reactions.write().await.remove(&id);
+            // Clean up event history for this reaction
+            self.event_history.write().await.remove_component(&id);
+            // Clean up log registry for this reaction
+            let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Reaction, &id);
+            self.log_registry.remove_component_by_key(&log_key).await;
             info!("Deleted reaction: {id}");
 
             Ok(())
@@ -312,5 +334,72 @@ impl ReactionManager {
             }
         }
         Ok(())
+    }
+
+    /// Record a component event in the history.
+    ///
+    /// This should be called by the event processing loop to track component
+    /// lifecycle events for later querying.
+    pub async fn record_event(&self, event: ComponentEvent) {
+        self.event_history.write().await.record_event(event);
+    }
+
+    /// Get events for a specific reaction.
+    ///
+    /// Returns events in chronological order (oldest first).
+    pub async fn get_reaction_events(&self, id: &str) -> Vec<ComponentEvent> {
+        self.event_history.read().await.get_events(id)
+    }
+
+    /// Get all events across all reactions.
+    ///
+    /// Returns events sorted by timestamp (oldest first).
+    pub async fn get_all_events(&self) -> Vec<ComponentEvent> {
+        self.event_history.read().await.get_all_events()
+    }
+
+    /// Subscribe to live logs for a reaction.
+    ///
+    /// Returns the log history and a broadcast receiver for new logs.
+    /// Returns None if the reaction doesn't exist.
+    pub async fn subscribe_logs(
+        &self,
+        id: &str,
+    ) -> Option<(
+        Vec<crate::managers::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
+    )> {
+        // Verify the reaction exists
+        {
+            let reactions = self.reactions.read().await;
+            if !reactions.contains_key(id) {
+                return None;
+            }
+        }
+
+        let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Reaction, id);
+        Some(self.log_registry.subscribe_by_key(&log_key).await)
+    }
+
+    /// Subscribe to live events for a reaction.
+    ///
+    /// Returns the event history and a broadcast receiver for new events.
+    /// Returns None if the reaction doesn't exist.
+    pub async fn subscribe_events(
+        &self,
+        id: &str,
+    ) -> Option<(
+        Vec<ComponentEvent>,
+        tokio::sync::broadcast::Receiver<ComponentEvent>,
+    )> {
+        // Verify the reaction exists
+        {
+            let reactions = self.reactions.read().await;
+            if !reactions.contains_key(id) {
+                return None;
+            }
+        }
+
+        Some(self.event_history.write().await.subscribe(id))
     }
 }
