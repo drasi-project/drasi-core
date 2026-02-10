@@ -236,11 +236,11 @@ impl Source for MockSource {
 
                     seq += 1;
 
-                // Generate data based on type
-                let source_change = match data_type {
-                    DataType::Counter => {
-                        let element_id = format!("counter_{seq}");
-                        let reference = ElementReference::new(&source_name, &element_id);
+                    // Generate data based on type
+                    let source_change = match data_type {
+                        DataType::Counter => {
+                            let element_id = format!("counter_{seq}");
+                            let reference = ElementReference::new(&source_name, &element_id);
 
                             let mut property_map = ElementPropertyMap::new();
                             property_map.insert(
@@ -273,14 +273,14 @@ impl Source for MockSource {
                                 properties: property_map,
                             };
 
-                        SourceChange::Insert { element }
-                    }
-                    DataType::SensorReading { sensor_count } => {
-                        // Constrain sensor_id to the configured number of sensors
-                        let sensor_id = rand::random::<u32>() % sensor_count;
-                        // Use sensor_id as the element_id for stable identity
-                        let element_id = format!("sensor_{sensor_id}");
-                        let reference = ElementReference::new(&source_name, &element_id);
+                            SourceChange::Insert { element }
+                        }
+                        DataType::SensorReading { sensor_count } => {
+                            // Constrain sensor_id to the configured number of sensors
+                            let sensor_id = rand::random::<u32>() % sensor_count;
+                            // Use sensor_id as the element_id for stable identity
+                            let element_id = format!("sensor_{sensor_id}");
+                            let reference = ElementReference::new(&source_name, &element_id);
 
                             let mut property_map = ElementPropertyMap::new();
                             property_map.insert(
@@ -337,22 +337,22 @@ impl Source for MockSource {
                                 properties: property_map,
                             };
 
-                        // Determine if this is a new sensor (Insert) or an update (Update)
-                        let is_new = {
-                            let mut seen = seen_sensors.write().await;
-                            seen.insert(sensor_id)
-                        };
+                            // Determine if this is a new sensor (Insert) or an update (Update)
+                            let is_new = {
+                                let mut seen = seen_sensors.write().await;
+                                seen.insert(sensor_id)
+                            };
 
-                        if is_new {
-                            SourceChange::Insert { element }
-                        } else {
-                            SourceChange::Update { element }
+                            if is_new {
+                                SourceChange::Insert { element }
+                            } else {
+                                SourceChange::Update { element }
+                            }
                         }
-                    }
-                    DataType::Generic => {
-                        // Generic data
-                        let element_id = format!("generic_{seq}");
-                        let reference = ElementReference::new(&source_name, &element_id);
+                        DataType::Generic => {
+                            // Generic data
+                            let element_id = format!("generic_{seq}");
+                            let reference = ElementReference::new(&source_name, &element_id);
 
                             let mut property_map = ElementPropertyMap::new();
                             property_map.insert(
