@@ -1010,7 +1010,7 @@ impl Source for HttpSource {
             if let Some(ref webhooks) = self.config.webhooks {
                 if let Some(ref cors_config) = webhooks.cors {
                     if cors_config.enabled {
-                        info!("[{source_id}] CORS enabled for webhook endpoints");
+                        info!("[{}] CORS enabled for webhook endpoints", self.base.id);
                         router.layer(build_cors_layer(cors_config))
                     } else {
                         router
