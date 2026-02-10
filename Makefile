@@ -19,3 +19,6 @@ help:
 
 clippy:
 	RUSTFLAGS="$(RUSTFLAGS)" cargo clippy --all-targets --all-features
+
+clippy-fix:
+	RUSTFLAGS="$(RUSTFLAGS)" cargo clippy --all-targets --all-features --fix
