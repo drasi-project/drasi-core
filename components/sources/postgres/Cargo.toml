@@ -53,3 +53,11 @@ rust_decimal = { version = "1.34", features = ["db-tokio-postgres"] }
 pbkdf2 = "0.12"
 tokio-stream = "0.1"
 prost-types = "0.12"
+
+[dev-dependencies]
+drasi-bootstrap-postgres.workspace = true
+drasi-reaction-application.workspace = true
+env_logger = "0.10.0"
+serial_test = "3.0"
+testcontainers = "0.23"
+tokio-test = "0.4"
