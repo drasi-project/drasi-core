@@ -169,7 +169,13 @@ mod manager_tests {
         mpsc::Sender<ComponentEvent>,
     ) {
         let (event_tx, event_rx) = mpsc::channel(100);
-        let manager = Arc::new(ReactionManager::new(event_tx.clone()));
+        // Use the global shared log registry for test isolation with tracing
+        let log_registry = crate::managers::get_or_init_global_registry();
+        let manager = Arc::new(ReactionManager::new(
+            "test-instance",
+            event_tx.clone(),
+            log_registry,
+        ));
         // Inject mock QueryProvider so add_reaction() can construct ReactionRuntimeContext
         manager
             .inject_query_provider(Arc::new(MockQueryProvider))
@@ -501,5 +507,70 @@ mod manager_tests {
             matches!(status, ComponentStatus::Running),
             "Reaction with auto_start=false should be manually startable"
         );
+    }
+
+    // ============================================================================
+    // Cleanup Tests
+    // ============================================================================
+
+    /// Test that deleting a reaction cleans up its event history
+    #[tokio::test]
+    async fn test_delete_reaction_cleans_up_event_history() {
+        let (manager, _event_rx, event_tx) = create_test_manager().await;
+
+        // Add a reaction
+        let reaction =
+            create_test_mock_reaction("cleanup-events-reaction".to_string(), vec![], event_tx);
+        manager.add_reaction(reaction).await.unwrap();
+
+        // Record an event manually to simulate lifecycle
+        manager
+            .record_event(ComponentEvent {
+                component_id: "cleanup-events-reaction".to_string(),
+                component_type: ComponentType::Reaction,
+                status: ComponentStatus::Running,
+                timestamp: chrono::Utc::now(),
+                message: Some("Test event".to_string()),
+            })
+            .await;
+
+        // Verify events exist
+        let events = manager.get_reaction_events("cleanup-events-reaction").await;
+        assert!(!events.is_empty(), "Expected events after recording");
+
+        // Delete the reaction
+        manager
+            .delete_reaction("cleanup-events-reaction".to_string())
+            .await
+            .unwrap();
+
+        // Verify events are cleaned up
+        let events_after = manager.get_reaction_events("cleanup-events-reaction").await;
+        assert!(events_after.is_empty(), "Expected no events after deletion");
+    }
+
+    /// Test that deleting a reaction cleans up its log history
+    #[tokio::test]
+    async fn test_delete_reaction_cleans_up_log_history() {
+        let (manager, _event_rx, event_tx) = create_test_manager().await;
+
+        // Add a reaction
+        let reaction =
+            create_test_mock_reaction("cleanup-logs-reaction".to_string(), vec![], event_tx);
+        manager.add_reaction(reaction).await.unwrap();
+
+        // Subscribe to create the channel
+        let result = manager.subscribe_logs("cleanup-logs-reaction").await;
+        assert!(result.is_some(), "Expected to subscribe to reaction logs");
+
+        // Delete the reaction
+        manager
+            .delete_reaction("cleanup-logs-reaction".to_string())
+            .await
+            .unwrap();
+
+        // Verify logs are cleaned up (subscribe should fail for non-existent reaction)
+        let result = manager.subscribe_logs("cleanup-logs-reaction").await;
+        assert!(result.is_none(), "Expected None for deleted reaction logs");
     }
 }

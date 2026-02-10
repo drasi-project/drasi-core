@@ -52,6 +52,7 @@ members = [
   "shared-tests",
   "query-perf",
   "examples/query",
+  "lib-integration-tests",
   ]
 
 # Exclude internal crates from workspace packaging
@@ -59,6 +60,7 @@ exclude = [
   "shared-tests",
   "query-perf",
   "examples/query",
+  "lib-integration-tests",
 ]
 
 resolver = "2"
