@@ -341,7 +341,7 @@ mod manager_tests {
         manager.add_source(source).await.unwrap();
 
         // Remove the source
-        let result = manager.delete_source("test-source".to_string()).await;
+        let result = manager.delete_source("test-source".to_string(), false).await;
         assert!(result.is_ok());
 
         // Verify source was removed
@@ -353,7 +353,7 @@ mod manager_tests {
     async fn test_remove_nonexistent_source() {
         let (manager, _event_rx, _event_tx) = create_test_manager().await;
 
-        let result = manager.delete_source("nonexistent".to_string()).await;
+        let result = manager.delete_source("nonexistent".to_string(), false).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
@@ -927,7 +927,7 @@ mod manager_tests {
         assert!(!events.is_empty(), "Expected events after recording");
 
         // Delete the source
-        manager.delete_source(source_id.clone()).await.unwrap();
+        manager.delete_source(source_id.clone(), false).await.unwrap();
 
         // Verify events are cleaned up
         let events_after = manager.get_source_events(&source_id).await;
@@ -972,10 +972,247 @@ mod manager_tests {
         assert!(!logs.is_empty(), "Expected logs after emitting");
 
         // Delete the source
-        manager.delete_source(source_id.clone()).await.unwrap();
+        manager.delete_source(source_id.clone(), false).await.unwrap();
 
         // Verify logs are cleaned up (subscribe should fail for non-existent source)
         let result = manager.subscribe_logs(&source_id).await;
         assert!(result.is_none(), "Expected None for deleted source logs");
+    }
+
+    // ========================================================================
+    // Deprovision tests
+    // ========================================================================
+
+    /// A test source that tracks deprovision calls.
+    struct DeprovisionTestSource {
+        id: String,
+        status: Arc<RwLock<ComponentStatus>>,
+        deprovision_called: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl DeprovisionTestSource {
+        fn new(id: &str) -> (Self, Arc<std::sync::atomic::AtomicBool>) {
+            let deprovision_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            (
+                Self {
+                    id: id.to_string(),
+                    status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
+                    deprovision_called: deprovision_called.clone(),
+                },
+                deprovision_called,
+            )
+        }
+
+        fn new_simple(id: &str) -> Self {
+            Self {
+                id: id.to_string(),
+                status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
+                deprovision_called: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Source for DeprovisionTestSource {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn type_name(&self) -> &str {
+            "deprovision-test"
+        }
+
+        fn properties(&self) -> HashMap<String, serde_json::Value> {
+            HashMap::new()
+        }
+
+        fn auto_start(&self) -> bool {
+            false
+        }
+
+        async fn start(&self) -> Result<()> {
+            *self.status.write().await = ComponentStatus::Running;
+            Ok(())
+        }
+
+        async fn stop(&self) -> Result<()> {
+            *self.status.write().await = ComponentStatus::Stopped;
+            Ok(())
+        }
+
+        async fn status(&self) -> ComponentStatus {
+            self.status.read().await.clone()
+        }
+
+        async fn subscribe(
+            &self,
+            _settings: crate::config::SourceSubscriptionSettings,
+        ) -> Result<SubscriptionResponse> {
+            Err(anyhow::anyhow!("Not supported"))
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        async fn deprovision(&self) -> Result<()> {
+            self.deprovision_called.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn initialize(&self, _context: crate::context::SourceRuntimeContext) {}
+    }
+
+    #[tokio::test]
+    async fn test_delete_with_cleanup_calls_deprovision() {
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        let (source, deprovision_flag) = DeprovisionTestSource::new("deprovision-source");
+        manager.add_source(source).await.unwrap();
+
+        // Delete with cleanup = true
+        manager.delete_source("deprovision-source".to_string(), true).await.unwrap();
+
+        assert!(
+            deprovision_flag.load(std::sync::atomic::Ordering::SeqCst),
+            "deprovision() should have been called"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_without_cleanup_skips_deprovision() {
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        let (source, deprovision_flag) = DeprovisionTestSource::new("no-deprovision-source");
+        manager.add_source(source).await.unwrap();
+
+        // Delete with cleanup = false
+        manager.delete_source("no-deprovision-source".to_string(), false).await.unwrap();
+
+        assert!(
+            !deprovision_flag.load(std::sync::atomic::Ordering::SeqCst),
+            "deprovision() should NOT have been called"
+        );
+    }
+
+    // ========================================================================
+    // Update (replace instance) tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_update_source_replaces_stopped_source() {
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        let source = DeprovisionTestSource::new_simple("reconfig-stopped-source");
+        manager.add_source(source).await.unwrap();
+
+        // Update while stopped by providing a new instance
+        let new_source = DeprovisionTestSource::new_simple("reconfig-stopped-source");
+        manager.update_source("reconfig-stopped-source".to_string(), new_source).await.unwrap();
+
+        // Source should still be stopped
+        let status = manager.get_source_status("reconfig-stopped-source".to_string()).await.unwrap();
+        assert_eq!(status, ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_update_source_stops_and_restarts_running_source() {
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        let source = DeprovisionTestSource::new_simple("reconfig-running-source");
+        manager.add_source(source).await.unwrap();
+
+        // Start the source first
+        manager.start_source("reconfig-running-source".to_string()).await.unwrap();
+        let status = manager.get_source_status("reconfig-running-source".to_string()).await.unwrap();
+        assert_eq!(status, ComponentStatus::Running);
+
+        // Update while running
+        let new_source = DeprovisionTestSource::new_simple("reconfig-running-source");
+        manager.update_source("reconfig-running-source".to_string(), new_source).await.unwrap();
+
+        // Should be running again
+        let status = manager.get_source_status("reconfig-running-source".to_string()).await.unwrap();
+        assert_eq!(status, ComponentStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn test_update_source_preserves_log_history() {
+        use tracing::Instrument;
+
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        let source_id = unique_id("reconfig-logs-source");
+        let source = DeprovisionTestSource::new_simple(&source_id);
+        manager.add_source(source).await.unwrap();
+
+        // Generate some logs
+        let span = tracing::info_span!(
+            "test_span",
+            instance_id = "test-instance",
+            component_id = %source_id,
+            component_type = "source"
+        );
+        async { tracing::info!("pre-update log"); }.instrument(span).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Verify logs exist
+        let (logs_before, _) = manager.subscribe_logs(&source_id).await.unwrap();
+        assert!(!logs_before.is_empty(), "Expected logs before update");
+
+        // Update with a new instance
+        let new_source = DeprovisionTestSource::new_simple(&source_id);
+        manager.update_source(source_id.clone(), new_source).await.unwrap();
+
+        // Verify logs still exist after update
+        let (logs_after, _) = manager.subscribe_logs(&source_id).await.unwrap();
+        assert!(!logs_after.is_empty(), "Expected logs to be preserved after update");
+    }
+
+    #[tokio::test]
+    async fn test_update_source_emits_reconfiguring_event() {
+        let (manager, mut event_rx, _event_tx) = create_test_manager().await;
+
+        let source = DeprovisionTestSource::new_simple("reconfig-event-source");
+        manager.add_source(source).await.unwrap();
+
+        // Update
+        let new_source = DeprovisionTestSource::new_simple("reconfig-event-source");
+        manager.update_source("reconfig-event-source".to_string(), new_source).await.unwrap();
+
+        // Check events
+        let mut found_reconfiguring = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if event.component_id == "reconfig-event-source"
+                && event.status == ComponentStatus::Reconfiguring
+            {
+                found_reconfiguring = true;
+            }
+        }
+        assert!(found_reconfiguring, "Expected Reconfiguring event");
+    }
+
+    #[tokio::test]
+    async fn test_update_source_rejects_mismatched_id() {
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        let source = DeprovisionTestSource::new_simple("original-source");
+        manager.add_source(source).await.unwrap();
+
+        // Try to update with a different ID
+        let new_source = DeprovisionTestSource::new_simple("different-id");
+        let result = manager.update_source("original-source".to_string(), new_source).await;
+        assert!(result.is_err(), "Expected error for mismatched IDs");
+        assert!(result.unwrap_err().to_string().contains("does not match"));
+    }
+
+    #[tokio::test]
+    async fn test_update_nonexistent_source() {
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        let new_source = DeprovisionTestSource::new_simple("nonexistent");
+        let result = manager.update_source("nonexistent".to_string(), new_source).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
     }
 }

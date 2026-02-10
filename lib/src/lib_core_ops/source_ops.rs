@@ -76,11 +76,11 @@ impl DrasiLib {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// core.remove_source("old-source").await?;
+    /// core.remove_source("old-source", false).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn remove_source(&self, id: &str) -> Result<()> {
+    pub async fn remove_source(&self, id: &str, cleanup: bool) -> Result<()> {
         self.state_guard.require_initialized().await?;
 
         // Stop if running
@@ -99,9 +99,50 @@ impl DrasiLib {
 
         // Delete the source
         self.source_manager
-            .delete_source(id.to_string())
+            .delete_source(id.to_string(), cleanup)
             .await
             .map_err(|e| DrasiError::provisioning(format!("Failed to delete source: {e}")))?;
+
+        Ok(())
+    }
+
+    /// Update a source by replacing it with a new instance.
+    ///
+    /// This stops the old source, replaces it with the new one, and restarts
+    /// if it was running before. Log and event history are preserved.
+    ///
+    /// The new source must have the same ID as the existing one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the source doesn't exist, if the IDs don't match,
+    /// or if the new source cannot be started.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// // let new_source = MySource::new(updated_config)?;
+    /// // core.update_source("my-source", new_source).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn update_source(
+        &self,
+        id: &str,
+        new_source: impl crate::sources::Source + 'static,
+    ) -> Result<()> {
+        self.state_guard.require_initialized().await?;
+
+        self.source_manager
+            .update_source(id.to_string(), new_source)
+            .await
+            .map_err(|e| {
+                match e.downcast::<DrasiError>() {
+                    Ok(drasi_err) => drasi_err,
+                    Err(e) => DrasiError::provisioning(format!("Failed to update source: {e}")),
+                }
+            })?;
 
         Ok(())
     }

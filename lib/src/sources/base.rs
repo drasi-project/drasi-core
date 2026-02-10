@@ -603,6 +603,21 @@ impl SourceBase {
         Ok(())
     }
 
+    /// Clear the source's state store partition.
+    ///
+    /// This is called during deprovision to remove all persisted state
+    /// associated with this source. Sources that override `deprovision()`
+    /// can call this to clean up their state store.
+    pub async fn deprovision_common(&self) -> Result<()> {
+        info!("Deprovisioning source '{}'", self.id);
+        if let Some(store) = self.state_store().await {
+            let count = store.clear_store(&self.id).await
+                .map_err(|e| anyhow::anyhow!("Failed to clear state store for source '{}': {}", self.id, e))?;
+            info!("Cleared {} keys from state store for source '{}'", count, self.id);
+        }
+        Ok(())
+    }
+
     /// Get the current status
     pub async fn get_status(&self) -> ComponentStatus {
         self.status.read().await.clone()

@@ -214,7 +214,7 @@ impl ReactionManager {
         }
     }
 
-    pub async fn delete_reaction(&self, id: String) -> Result<()> {
+    pub async fn delete_reaction(&self, id: String, cleanup: bool) -> Result<()> {
         // First check if the reaction exists
         let reaction = {
             let reactions = self.reactions.read().await;
@@ -244,6 +244,13 @@ impl ReactionManager {
                 is_operation_valid(&status, &Operation::Delete).map_err(|e| anyhow::anyhow!(e))?;
             }
 
+            // Call deprovision if cleanup is requested
+            if cleanup {
+                if let Err(e) = reaction.deprovision().await {
+                    tracing::warn!("Deprovision failed for reaction '{id}': {e}");
+                }
+            }
+
             // Now remove the reaction
             self.reactions.write().await.remove(&id);
             // Clean up event history for this reaction
@@ -252,6 +259,85 @@ impl ReactionManager {
             let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Reaction, &id);
             self.log_registry.remove_component_by_key(&log_key).await;
             info!("Deleted reaction: {id}");
+
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Reaction not found: {id}"))
+        }
+    }
+
+    /// Update a reaction by replacing it with a new instance.
+    ///
+    /// Flow: validate exists → emit Reconfiguring event → stop old if running →
+    /// initialize new → replace → restart if was running.
+    /// Log and event history are preserved.
+    pub async fn update_reaction(
+        &self,
+        id: String,
+        new_reaction: impl Reaction + 'static,
+    ) -> Result<()> {
+        let old_reaction = {
+            let reactions = self.reactions.read().await;
+            reactions.get(&id).cloned()
+        };
+
+        if let Some(old_reaction) = old_reaction {
+            // Verify the new reaction has the same ID
+            if new_reaction.id() != id {
+                return Err(anyhow::anyhow!(
+                    "New reaction ID '{}' does not match existing reaction ID '{}'",
+                    new_reaction.id(),
+                    id
+                ));
+            }
+
+            let status = old_reaction.status().await;
+            let was_running = matches!(status, ComponentStatus::Running);
+
+            // Emit Reconfiguring event
+            let _ = self.event_tx.send(ComponentEvent {
+                component_id: id.clone(),
+                component_type: ComponentType::Reaction,
+                status: ComponentStatus::Reconfiguring,
+                timestamp: chrono::Utc::now(),
+                message: Some("Reconfiguring reaction".to_string()),
+            }).await;
+
+            // Stop old instance if running
+            if was_running {
+                info!("Stopping reaction '{id}' for reconfiguration");
+                old_reaction.stop().await?;
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+
+            // Initialize the new reaction with runtime context
+            let new_reaction: Arc<dyn Reaction> = Arc::new(new_reaction);
+            let query_provider = self.query_provider.read().await.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "QueryProvider not injected - was ReactionManager initialized properly?"
+                )
+            })?;
+            let context = ReactionRuntimeContext::new(
+                &self.instance_id,
+                &id,
+                self.event_tx.clone(),
+                self.state_store.read().await.clone(),
+                query_provider,
+            );
+            new_reaction.initialize(context).await;
+
+            // Replace in the reactions map
+            {
+                let mut reactions = self.reactions.write().await;
+                reactions.insert(id.clone(), new_reaction);
+            }
+
+            info!("Reconfigured reaction '{id}'");
+
+            // Restart if it was running before
+            if was_running {
+                self.start_reaction(id).await?;
+            }
 
             Ok(())
         } else {

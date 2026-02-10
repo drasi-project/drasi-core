@@ -254,7 +254,7 @@ impl SourceManager {
         }
     }
 
-    pub async fn delete_source(&self, id: String) -> Result<()> {
+    pub async fn delete_source(&self, id: String, cleanup: bool) -> Result<()> {
         // First check if the source exists
         let source = {
             let sources = self.sources.read().await;
@@ -284,6 +284,13 @@ impl SourceManager {
                 is_operation_valid(&status, &Operation::Delete).map_err(|e| anyhow::anyhow!(e))?;
             }
 
+            // Call deprovision if cleanup is requested
+            if cleanup {
+                if let Err(e) = source.deprovision().await {
+                    tracing::warn!("Deprovision failed for source '{id}': {e}");
+                }
+            }
+
             // Now remove the source
             self.sources.write().await.remove(&id);
             // Clean up event history for this source
@@ -292,6 +299,79 @@ impl SourceManager {
             let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Source, &id);
             self.log_registry.remove_component_by_key(&log_key).await;
             info!("Deleted source: {id}");
+
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Source not found: {id}"))
+        }
+    }
+
+    /// Update a source by replacing it with a new instance.
+    ///
+    /// Flow: validate exists → emit Reconfiguring event → stop old if running →
+    /// initialize new → replace → restart if was running.
+    /// Log and event history are preserved.
+    pub async fn update_source(
+        &self,
+        id: String,
+        new_source: impl Source + 'static,
+    ) -> Result<()> {
+        let old_source = {
+            let sources = self.sources.read().await;
+            sources.get(&id).cloned()
+        };
+
+        if let Some(old_source) = old_source {
+            // Verify the new source has the same ID
+            if new_source.id() != id {
+                return Err(anyhow::anyhow!(
+                    "New source ID '{}' does not match existing source ID '{}'",
+                    new_source.id(),
+                    id
+                ));
+            }
+
+            let status = old_source.status().await;
+            let was_running = matches!(status, ComponentStatus::Running);
+
+            // Emit Reconfiguring event
+            let _ = self.event_tx.send(ComponentEvent {
+                component_id: id.clone(),
+                component_type: ComponentType::Source,
+                status: ComponentStatus::Reconfiguring,
+                timestamp: chrono::Utc::now(),
+                message: Some("Reconfiguring source".to_string()),
+            }).await;
+
+            // Stop old instance if running
+            if was_running {
+                info!("Stopping source '{id}' for reconfiguration");
+                old_source.stop().await?;
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+
+            // Initialize the new source with runtime context
+            let new_source: Arc<dyn Source> = Arc::new(new_source);
+            let context = SourceRuntimeContext::new(
+                &self.instance_id,
+                &id,
+                self.event_tx.clone(),
+                self.state_store.read().await.clone(),
+            );
+            new_source.initialize(context).await;
+
+            // Replace in the sources map
+            {
+                let mut sources = self.sources.write().await;
+                sources.insert(id.clone(), new_source);
+            }
+
+            info!("Reconfigured source '{id}'");
+
+            // Restart if it was running before
+            if was_running {
+                self.start_source(id).await?;
+            }
 
             Ok(())
         } else {

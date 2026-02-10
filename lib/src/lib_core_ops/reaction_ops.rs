@@ -76,11 +76,11 @@ impl DrasiLib {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// core.remove_reaction("old-reaction").await?;
+    /// core.remove_reaction("old-reaction", false).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn remove_reaction(&self, id: &str) -> Result<()> {
+    pub async fn remove_reaction(&self, id: &str, cleanup: bool) -> Result<()> {
         self.state_guard.require_initialized().await?;
 
         // Stop if running
@@ -99,9 +99,50 @@ impl DrasiLib {
 
         // Delete the reaction
         self.reaction_manager
-            .delete_reaction(id.to_string())
+            .delete_reaction(id.to_string(), cleanup)
             .await
             .map_err(|e| DrasiError::provisioning(format!("Failed to delete reaction: {e}")))?;
+
+        Ok(())
+    }
+
+    /// Update a reaction by replacing it with a new instance.
+    ///
+    /// This stops the old reaction, replaces it with the new one, and restarts
+    /// if it was running before. Log and event history are preserved.
+    ///
+    /// The new reaction must have the same ID as the existing one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the reaction doesn't exist, if the IDs don't match,
+    /// or if the new reaction cannot be started.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// // let new_reaction = MyReaction::new(updated_config);
+    /// // core.update_reaction("my-reaction", new_reaction).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn update_reaction(
+        &self,
+        id: &str,
+        new_reaction: impl crate::reactions::Reaction + 'static,
+    ) -> Result<()> {
+        self.state_guard.require_initialized().await?;
+
+        self.reaction_manager
+            .update_reaction(id.to_string(), new_reaction)
+            .await
+            .map_err(|e| {
+                match e.downcast::<DrasiError>() {
+                    Ok(drasi_err) => drasi_err,
+                    Err(e) => DrasiError::provisioning(format!("Failed to update reaction: {e}")),
+                }
+            })?;
 
         Ok(())
     }
