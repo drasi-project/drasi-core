@@ -611,9 +611,17 @@ impl SourceBase {
     pub async fn deprovision_common(&self) -> Result<()> {
         info!("Deprovisioning source '{}'", self.id);
         if let Some(store) = self.state_store().await {
-            let count = store.clear_store(&self.id).await
-                .map_err(|e| anyhow::anyhow!("Failed to clear state store for source '{}': {}", self.id, e))?;
-            info!("Cleared {} keys from state store for source '{}'", count, self.id);
+            let count = store.clear_store(&self.id).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to clear state store for source '{}': {}",
+                    self.id,
+                    e
+                )
+            })?;
+            info!(
+                "Cleared {} keys from state store for source '{}'",
+                count, self.id
+            );
         }
         Ok(())
     }

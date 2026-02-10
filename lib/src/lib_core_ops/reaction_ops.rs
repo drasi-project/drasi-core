@@ -137,11 +137,9 @@ impl DrasiLib {
         self.reaction_manager
             .update_reaction(id.to_string(), new_reaction)
             .await
-            .map_err(|e| {
-                match e.downcast::<DrasiError>() {
-                    Ok(drasi_err) => drasi_err,
-                    Err(e) => DrasiError::provisioning(format!("Failed to update reaction: {e}")),
-                }
+            .map_err(|e| match e.downcast::<DrasiError>() {
+                Ok(drasi_err) => drasi_err,
+                Err(e) => DrasiError::provisioning(format!("Failed to update reaction: {e}")),
             })?;
 
         Ok(())

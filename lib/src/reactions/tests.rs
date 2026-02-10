@@ -227,7 +227,9 @@ mod manager_tests {
         manager.add_reaction(reaction).await.unwrap();
 
         // Delete the reaction
-        let result = manager.delete_reaction("test-reaction".to_string(), false).await;
+        let result = manager
+            .delete_reaction("test-reaction".to_string(), false)
+            .await;
         assert!(result.is_ok());
 
         // Verify reaction was removed
@@ -239,7 +241,9 @@ mod manager_tests {
     async fn test_delete_nonexistent_reaction() {
         let (manager, _event_rx, _event_tx) = create_test_manager().await;
 
-        let result = manager.delete_reaction("nonexistent".to_string(), false).await;
+        let result = manager
+            .delete_reaction("nonexistent".to_string(), false)
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
@@ -649,7 +653,8 @@ mod manager_tests {
         }
 
         async fn deprovision(&self) -> anyhow::Result<()> {
-            self.deprovision_called.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.deprovision_called
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
     }
@@ -661,7 +666,10 @@ mod manager_tests {
         let (reaction, deprovision_flag) = DeprovisionTestReaction::new("deprovision-reaction");
         manager.add_reaction(reaction).await.unwrap();
 
-        manager.delete_reaction("deprovision-reaction".to_string(), true).await.unwrap();
+        manager
+            .delete_reaction("deprovision-reaction".to_string(), true)
+            .await
+            .unwrap();
 
         assert!(
             deprovision_flag.load(std::sync::atomic::Ordering::SeqCst),
@@ -676,7 +684,10 @@ mod manager_tests {
         let (reaction, deprovision_flag) = DeprovisionTestReaction::new("no-deprovision-reaction");
         manager.add_reaction(reaction).await.unwrap();
 
-        manager.delete_reaction("no-deprovision-reaction".to_string(), false).await.unwrap();
+        manager
+            .delete_reaction("no-deprovision-reaction".to_string(), false)
+            .await
+            .unwrap();
 
         assert!(
             !deprovision_flag.load(std::sync::atomic::Ordering::SeqCst),
@@ -696,9 +707,15 @@ mod manager_tests {
         manager.add_reaction(reaction).await.unwrap();
 
         let new_reaction = DeprovisionTestReaction::new_simple("reconfig-stopped-reaction");
-        manager.update_reaction("reconfig-stopped-reaction".to_string(), new_reaction).await.unwrap();
+        manager
+            .update_reaction("reconfig-stopped-reaction".to_string(), new_reaction)
+            .await
+            .unwrap();
 
-        let status = manager.get_reaction_status("reconfig-stopped-reaction".to_string()).await.unwrap();
+        let status = manager
+            .get_reaction_status("reconfig-stopped-reaction".to_string())
+            .await
+            .unwrap();
         assert_eq!(status, ComponentStatus::Stopped);
     }
 
@@ -709,14 +726,26 @@ mod manager_tests {
         let reaction = DeprovisionTestReaction::new_simple("reconfig-running-reaction");
         manager.add_reaction(reaction).await.unwrap();
 
-        manager.start_reaction("reconfig-running-reaction".to_string()).await.unwrap();
-        let status = manager.get_reaction_status("reconfig-running-reaction".to_string()).await.unwrap();
+        manager
+            .start_reaction("reconfig-running-reaction".to_string())
+            .await
+            .unwrap();
+        let status = manager
+            .get_reaction_status("reconfig-running-reaction".to_string())
+            .await
+            .unwrap();
         assert_eq!(status, ComponentStatus::Running);
 
         let new_reaction = DeprovisionTestReaction::new_simple("reconfig-running-reaction");
-        manager.update_reaction("reconfig-running-reaction".to_string(), new_reaction).await.unwrap();
+        manager
+            .update_reaction("reconfig-running-reaction".to_string(), new_reaction)
+            .await
+            .unwrap();
 
-        let status = manager.get_reaction_status("reconfig-running-reaction".to_string()).await.unwrap();
+        let status = manager
+            .get_reaction_status("reconfig-running-reaction".to_string())
+            .await
+            .unwrap();
         assert_eq!(status, ComponentStatus::Running);
     }
 
@@ -728,7 +757,10 @@ mod manager_tests {
         manager.add_reaction(reaction).await.unwrap();
 
         let new_reaction = DeprovisionTestReaction::new_simple("reconfig-event-reaction");
-        manager.update_reaction("reconfig-event-reaction".to_string(), new_reaction).await.unwrap();
+        manager
+            .update_reaction("reconfig-event-reaction".to_string(), new_reaction)
+            .await
+            .unwrap();
 
         let mut found_reconfiguring = false;
         while let Ok(event) = event_rx.try_recv() {
@@ -749,7 +781,9 @@ mod manager_tests {
         manager.add_reaction(reaction).await.unwrap();
 
         let new_reaction = DeprovisionTestReaction::new_simple("different-id");
-        let result = manager.update_reaction("original-reaction".to_string(), new_reaction).await;
+        let result = manager
+            .update_reaction("original-reaction".to_string(), new_reaction)
+            .await;
         assert!(result.is_err(), "Expected error for mismatched IDs");
         assert!(result.unwrap_err().to_string().contains("does not match"));
     }
@@ -759,7 +793,9 @@ mod manager_tests {
         let (manager, _event_rx, _event_tx) = create_test_manager().await;
 
         let new_reaction = DeprovisionTestReaction::new_simple("nonexistent");
-        let result = manager.update_reaction("nonexistent".to_string(), new_reaction).await;
+        let result = manager
+            .update_reaction("nonexistent".to_string(), new_reaction)
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }

@@ -137,11 +137,9 @@ impl DrasiLib {
         self.source_manager
             .update_source(id.to_string(), new_source)
             .await
-            .map_err(|e| {
-                match e.downcast::<DrasiError>() {
-                    Ok(drasi_err) => drasi_err,
-                    Err(e) => DrasiError::provisioning(format!("Failed to update source: {e}")),
-                }
+            .map_err(|e| match e.downcast::<DrasiError>() {
+                Ok(drasi_err) => drasi_err,
+                Err(e) => DrasiError::provisioning(format!("Failed to update source: {e}")),
             })?;
 
         Ok(())

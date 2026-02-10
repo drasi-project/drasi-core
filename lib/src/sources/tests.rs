@@ -341,7 +341,9 @@ mod manager_tests {
         manager.add_source(source).await.unwrap();
 
         // Remove the source
-        let result = manager.delete_source("test-source".to_string(), false).await;
+        let result = manager
+            .delete_source("test-source".to_string(), false)
+            .await;
         assert!(result.is_ok());
 
         // Verify source was removed
@@ -353,7 +355,9 @@ mod manager_tests {
     async fn test_remove_nonexistent_source() {
         let (manager, _event_rx, _event_tx) = create_test_manager().await;
 
-        let result = manager.delete_source("nonexistent".to_string(), false).await;
+        let result = manager
+            .delete_source("nonexistent".to_string(), false)
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
@@ -927,7 +931,10 @@ mod manager_tests {
         assert!(!events.is_empty(), "Expected events after recording");
 
         // Delete the source
-        manager.delete_source(source_id.clone(), false).await.unwrap();
+        manager
+            .delete_source(source_id.clone(), false)
+            .await
+            .unwrap();
 
         // Verify events are cleaned up
         let events_after = manager.get_source_events(&source_id).await;
@@ -972,7 +979,10 @@ mod manager_tests {
         assert!(!logs.is_empty(), "Expected logs after emitting");
 
         // Delete the source
-        manager.delete_source(source_id.clone(), false).await.unwrap();
+        manager
+            .delete_source(source_id.clone(), false)
+            .await
+            .unwrap();
 
         // Verify logs are cleaned up (subscribe should fail for non-existent source)
         let result = manager.subscribe_logs(&source_id).await;
@@ -1056,7 +1066,8 @@ mod manager_tests {
         }
 
         async fn deprovision(&self) -> Result<()> {
-            self.deprovision_called.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.deprovision_called
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
 
@@ -1071,7 +1082,10 @@ mod manager_tests {
         manager.add_source(source).await.unwrap();
 
         // Delete with cleanup = true
-        manager.delete_source("deprovision-source".to_string(), true).await.unwrap();
+        manager
+            .delete_source("deprovision-source".to_string(), true)
+            .await
+            .unwrap();
 
         assert!(
             deprovision_flag.load(std::sync::atomic::Ordering::SeqCst),
@@ -1087,7 +1101,10 @@ mod manager_tests {
         manager.add_source(source).await.unwrap();
 
         // Delete with cleanup = false
-        manager.delete_source("no-deprovision-source".to_string(), false).await.unwrap();
+        manager
+            .delete_source("no-deprovision-source".to_string(), false)
+            .await
+            .unwrap();
 
         assert!(
             !deprovision_flag.load(std::sync::atomic::Ordering::SeqCst),
@@ -1108,10 +1125,16 @@ mod manager_tests {
 
         // Update while stopped by providing a new instance
         let new_source = DeprovisionTestSource::new_simple("reconfig-stopped-source");
-        manager.update_source("reconfig-stopped-source".to_string(), new_source).await.unwrap();
+        manager
+            .update_source("reconfig-stopped-source".to_string(), new_source)
+            .await
+            .unwrap();
 
         // Source should still be stopped
-        let status = manager.get_source_status("reconfig-stopped-source".to_string()).await.unwrap();
+        let status = manager
+            .get_source_status("reconfig-stopped-source".to_string())
+            .await
+            .unwrap();
         assert_eq!(status, ComponentStatus::Stopped);
     }
 
@@ -1123,16 +1146,28 @@ mod manager_tests {
         manager.add_source(source).await.unwrap();
 
         // Start the source first
-        manager.start_source("reconfig-running-source".to_string()).await.unwrap();
-        let status = manager.get_source_status("reconfig-running-source".to_string()).await.unwrap();
+        manager
+            .start_source("reconfig-running-source".to_string())
+            .await
+            .unwrap();
+        let status = manager
+            .get_source_status("reconfig-running-source".to_string())
+            .await
+            .unwrap();
         assert_eq!(status, ComponentStatus::Running);
 
         // Update while running
         let new_source = DeprovisionTestSource::new_simple("reconfig-running-source");
-        manager.update_source("reconfig-running-source".to_string(), new_source).await.unwrap();
+        manager
+            .update_source("reconfig-running-source".to_string(), new_source)
+            .await
+            .unwrap();
 
         // Should be running again
-        let status = manager.get_source_status("reconfig-running-source".to_string()).await.unwrap();
+        let status = manager
+            .get_source_status("reconfig-running-source".to_string())
+            .await
+            .unwrap();
         assert_eq!(status, ComponentStatus::Running);
     }
 
@@ -1153,7 +1188,11 @@ mod manager_tests {
             component_id = %source_id,
             component_type = "source"
         );
-        async { tracing::info!("pre-update log"); }.instrument(span).await;
+        async {
+            tracing::info!("pre-update log");
+        }
+        .instrument(span)
+        .await;
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // Verify logs exist
@@ -1162,11 +1201,17 @@ mod manager_tests {
 
         // Update with a new instance
         let new_source = DeprovisionTestSource::new_simple(&source_id);
-        manager.update_source(source_id.clone(), new_source).await.unwrap();
+        manager
+            .update_source(source_id.clone(), new_source)
+            .await
+            .unwrap();
 
         // Verify logs still exist after update
         let (logs_after, _) = manager.subscribe_logs(&source_id).await.unwrap();
-        assert!(!logs_after.is_empty(), "Expected logs to be preserved after update");
+        assert!(
+            !logs_after.is_empty(),
+            "Expected logs to be preserved after update"
+        );
     }
 
     #[tokio::test]
@@ -1178,7 +1223,10 @@ mod manager_tests {
 
         // Update
         let new_source = DeprovisionTestSource::new_simple("reconfig-event-source");
-        manager.update_source("reconfig-event-source".to_string(), new_source).await.unwrap();
+        manager
+            .update_source("reconfig-event-source".to_string(), new_source)
+            .await
+            .unwrap();
 
         // Check events
         let mut found_reconfiguring = false;
@@ -1201,7 +1249,9 @@ mod manager_tests {
 
         // Try to update with a different ID
         let new_source = DeprovisionTestSource::new_simple("different-id");
-        let result = manager.update_source("original-source".to_string(), new_source).await;
+        let result = manager
+            .update_source("original-source".to_string(), new_source)
+            .await;
         assert!(result.is_err(), "Expected error for mismatched IDs");
         assert!(result.unwrap_err().to_string().contains("does not match"));
     }
@@ -1211,7 +1261,9 @@ mod manager_tests {
         let (manager, _event_rx, _event_tx) = create_test_manager().await;
 
         let new_source = DeprovisionTestSource::new_simple("nonexistent");
-        let result = manager.update_source("nonexistent".to_string(), new_source).await;
+        let result = manager
+            .update_source("nonexistent".to_string(), new_source)
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }

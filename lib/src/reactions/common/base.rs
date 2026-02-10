@@ -468,9 +468,17 @@ impl ReactionBase {
     pub async fn deprovision_common(&self) -> Result<()> {
         info!("Deprovisioning reaction '{}'", self.id);
         if let Some(store) = self.state_store().await {
-            let count = store.clear_store(&self.id).await
-                .map_err(|e| anyhow::anyhow!("Failed to clear state store for reaction '{}': {}", self.id, e))?;
-            info!("Cleared {} keys from state store for reaction '{}'", count, self.id);
+            let count = store.clear_store(&self.id).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to clear state store for reaction '{}': {}",
+                    self.id,
+                    e
+                )
+            })?;
+            info!(
+                "Cleared {} keys from state store for reaction '{}'",
+                count, self.id
+            );
         }
         Ok(())
     }

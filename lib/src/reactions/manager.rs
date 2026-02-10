@@ -268,8 +268,9 @@ impl ReactionManager {
 
     /// Update a reaction by replacing it with a new instance.
     ///
-    /// Flow: validate exists → emit Reconfiguring event → stop old if running →
-    /// initialize new → replace → restart if was running.
+    /// Flow: validate exists → validate status → emit Reconfiguring event →
+    /// stop if running/starting → wait for stopped → initialize new →
+    /// replace (if still exists) → restart if was running.
     /// Log and event history are preserved.
     pub async fn update_reaction(
         &self,
@@ -292,22 +293,50 @@ impl ReactionManager {
             }
 
             let status = old_reaction.status().await;
-            let was_running = matches!(status, ComponentStatus::Running);
+            let was_running =
+                matches!(status, ComponentStatus::Running | ComponentStatus::Starting);
+
+            // Validate that update is allowed in the current state
+            if was_running {
+                // Running/Starting components will be stopped, then validated
+            } else {
+                is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
+            }
 
             // Emit Reconfiguring event
-            let _ = self.event_tx.send(ComponentEvent {
-                component_id: id.clone(),
-                component_type: ComponentType::Reaction,
-                status: ComponentStatus::Reconfiguring,
-                timestamp: chrono::Utc::now(),
-                message: Some("Reconfiguring reaction".to_string()),
-            }).await;
+            let _ = self
+                .event_tx
+                .send(ComponentEvent {
+                    component_id: id.clone(),
+                    component_type: ComponentType::Reaction,
+                    status: ComponentStatus::Reconfiguring,
+                    timestamp: chrono::Utc::now(),
+                    message: Some("Reconfiguring reaction".to_string()),
+                })
+                .await;
 
-            // Stop old instance if running
+            // If running or starting, stop first then validate
             if was_running {
                 info!("Stopping reaction '{id}' for reconfiguration");
                 old_reaction.stop().await?;
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+                // Poll for Stopped status with timeout
+                let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
+                loop {
+                    let current = old_reaction.status().await;
+                    if matches!(current, ComponentStatus::Stopped | ComponentStatus::Error) {
+                        break;
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(anyhow::anyhow!(
+                            "Timed out waiting for reaction '{id}' to stop"
+                        ));
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                }
+
+                let status = old_reaction.status().await;
+                is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
             }
 
             // Initialize the new reaction with runtime context
@@ -326,9 +355,15 @@ impl ReactionManager {
             );
             new_reaction.initialize(context).await;
 
-            // Replace in the reactions map
+            // Replace in the reactions map only if the entry still exists
+            // (guards against concurrent deletion)
             {
                 let mut reactions = self.reactions.write().await;
+                if !reactions.contains_key(&id) {
+                    return Err(anyhow::anyhow!(
+                        "Reaction '{id}' was concurrently deleted during reconfiguration"
+                    ));
+                }
                 reactions.insert(id.clone(), new_reaction);
             }
 

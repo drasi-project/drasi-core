@@ -34,6 +34,44 @@ use tokio::time::timeout;
 use tracing::Instrument;
 
 // ============================================================================
+// Helpers
+// ============================================================================
+
+/// Poll until a source reaches the expected status (with timeout).
+async fn wait_for_source_status(drasi: &DrasiLib, id: &str, expected: ComponentStatus) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(status) = drasi.get_source_status(id).await {
+            if status == expected {
+                return;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Timed out waiting for source '{id}' to reach {expected:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Poll until a reaction reaches the expected status (with timeout).
+async fn wait_for_reaction_status(drasi: &DrasiLib, id: &str, expected: ComponentStatus) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(status) = drasi.get_reaction_status(id).await {
+            if status == expected {
+                return;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Timed out waiting for reaction '{id}' to reach {expected:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+// ============================================================================
 // Test Source with deprovision/reconfigure support
 // ============================================================================
 
@@ -340,7 +378,7 @@ async fn test_source_remove_with_cleanup_calls_deprovision() {
         .unwrap();
 
     drasi.start().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_source_status(&drasi, "deprov-src-1", ComponentStatus::Running).await;
 
     drasi.remove_source("deprov-src-1", true).await.unwrap();
 
@@ -372,7 +410,7 @@ async fn test_source_remove_without_cleanup_skips_deprovision() {
         .unwrap();
 
     drasi.start().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_source_status(&drasi, "deprov-src-2", ComponentStatus::Running).await;
 
     drasi.remove_source("deprov-src-2", false).await.unwrap();
 
@@ -397,11 +435,11 @@ async fn test_source_remove_stopped_with_cleanup() {
         .unwrap();
 
     drasi.start().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_source_status(&drasi, "deprov-src-3", ComponentStatus::Running).await;
 
     // Stop first, then remove
     drasi.stop_source("deprov-src-3").await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_for_source_status(&drasi, "deprov-src-3", ComponentStatus::Stopped).await;
 
     drasi.remove_source("deprov-src-3", true).await.unwrap();
 
@@ -437,7 +475,7 @@ async fn test_reaction_remove_with_cleanup_calls_deprovision() {
         .unwrap();
 
     drasi.start().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    wait_for_reaction_status(&drasi, "deprov-rxn-1", ComponentStatus::Running).await;
 
     drasi.remove_reaction("deprov-rxn-1", true).await.unwrap();
 
@@ -469,7 +507,7 @@ async fn test_reaction_remove_without_cleanup_skips_deprovision() {
         .unwrap();
 
     drasi.start().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    wait_for_reaction_status(&drasi, "deprov-rxn-2", ComponentStatus::Running).await;
 
     drasi.remove_reaction("deprov-rxn-2", false).await.unwrap();
 
@@ -499,7 +537,7 @@ async fn test_source_update_running_stops_and_restarts() {
         .unwrap();
 
     drasi.start().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_source_status(&drasi, "reconfig-src-1", ComponentStatus::Running).await;
 
     // Should be running
     let status = drasi.get_source_status("reconfig-src-1").await.unwrap();
@@ -515,10 +553,14 @@ async fn test_source_update_running_stops_and_restarts() {
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_source_status(&drasi, "reconfig-src-1", ComponentStatus::Running).await;
 
     // Old instance was stopped
-    assert_eq!(stop_count.load(Ordering::SeqCst), 1, "should have stopped old instance");
+    assert_eq!(
+        stop_count.load(Ordering::SeqCst),
+        1,
+        "should have stopped old instance"
+    );
     // New instance was started
     assert_eq!(
         new_start_count.load(Ordering::SeqCst),
@@ -545,11 +587,11 @@ async fn test_source_update_stopped_replaces_without_restart() {
         .unwrap();
 
     drasi.start().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_source_status(&drasi, "reconfig-src-2", ComponentStatus::Running).await;
 
     // Stop the source
     drasi.stop_source("reconfig-src-2").await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_for_source_status(&drasi, "reconfig-src-2", ComponentStatus::Stopped).await;
 
     let new_source = TestSource::new("reconfig-src-2").unwrap();
     let new_start_count = new_source.start_count();
@@ -558,8 +600,6 @@ async fn test_source_update_stopped_replaces_without_restart() {
         .update_source("reconfig-src-2", new_source)
         .await
         .unwrap();
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // New instance should NOT have been started (was stopped)
     assert_eq!(
@@ -595,7 +635,7 @@ async fn test_reaction_update_running_stops_and_restarts() {
         .unwrap();
 
     drasi.start().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    wait_for_reaction_status(&drasi, "reconfig-rxn-1", ComponentStatus::Running).await;
 
     let new_reaction = TestReaction::new("reconfig-rxn-1", vec!["reconfig-rxn-q-1".to_string()]);
     let new_start_count = new_reaction.start_count();
@@ -605,10 +645,18 @@ async fn test_reaction_update_running_stops_and_restarts() {
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_reaction_status(&drasi, "reconfig-rxn-1", ComponentStatus::Running).await;
 
-    assert_eq!(stop_count.load(Ordering::SeqCst), 1, "should have stopped old instance");
-    assert_eq!(new_start_count.load(Ordering::SeqCst), 1, "should have started new instance");
+    assert_eq!(
+        stop_count.load(Ordering::SeqCst),
+        1,
+        "should have stopped old instance"
+    );
+    assert_eq!(
+        new_start_count.load(Ordering::SeqCst),
+        1,
+        "should have started new instance"
+    );
 
     drasi.stop().await.unwrap();
 }
@@ -629,13 +677,18 @@ async fn test_source_update_emits_reconfiguring_event() {
         .unwrap();
 
     drasi.start().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_source_status(&drasi, "reconfig-evt-src", ComponentStatus::Running).await;
 
     // Subscribe to events before update
     let (_history, mut event_rx) = drasi
         .subscribe_source_events("reconfig-evt-src")
         .await
         .unwrap();
+
+    // Drain any pending events from initial startup that may not have
+    // been dispatched yet
+    tokio::task::yield_now().await;
+    while event_rx.try_recv().is_ok() {}
 
     let new_source = TestSource::new("reconfig-evt-src").unwrap();
 
@@ -656,9 +709,7 @@ async fn test_source_update_emits_reconfiguring_event() {
         "Expected Reconfiguring event, got: {statuses:?}"
     );
     assert!(
-        events
-            .iter()
-            .any(|e| e.status == ComponentStatus::Running),
+        events.iter().any(|e| e.status == ComponentStatus::Running),
         "Expected Running event after reconfigure, got: {statuses:?}"
     );
 
@@ -673,8 +724,7 @@ async fn test_reaction_update_emits_reconfiguring_event() {
         .from_source("reconfig-evt-rxn-src")
         .query("MATCH (n) RETURN n")
         .build();
-    let reaction =
-        TestReaction::new("reconfig-evt-rxn", vec!["reconfig-evt-rxn-q".to_string()]);
+    let reaction = TestReaction::new("reconfig-evt-rxn", vec!["reconfig-evt-rxn-q".to_string()]);
 
     let drasi = DrasiLib::builder()
         .with_source(source)
@@ -685,12 +735,17 @@ async fn test_reaction_update_emits_reconfiguring_event() {
         .unwrap();
 
     drasi.start().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    wait_for_reaction_status(&drasi, "reconfig-evt-rxn", ComponentStatus::Running).await;
 
     let (_history, mut event_rx) = drasi
         .subscribe_reaction_events("reconfig-evt-rxn")
         .await
         .unwrap();
+
+    // Drain any pending events from initial startup that may not have
+    // been dispatched yet
+    tokio::task::yield_now().await;
+    while event_rx.try_recv().is_ok() {}
 
     let new_reaction =
         TestReaction::new("reconfig-evt-rxn", vec!["reconfig-evt-rxn-q".to_string()]);
@@ -730,7 +785,7 @@ async fn test_source_update_preserves_log_history() {
         .unwrap();
 
     drasi.start().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    wait_for_source_status(&drasi, "reconfig-log-src", ComponentStatus::Running).await;
 
     // Capture pre-update log count
     let (pre_logs, _) = drasi
@@ -747,7 +802,7 @@ async fn test_source_update_preserves_log_history() {
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    wait_for_source_status(&drasi, "reconfig-log-src", ComponentStatus::Running).await;
 
     // Post-update logs should include pre-update logs plus new ones
     let (post_logs, _) = drasi
@@ -901,7 +956,11 @@ async fn test_source_remove_with_cleanup_clears_state_store() {
         .unwrap();
 
     let keys = state_store.list_keys("cleanup-src").await.unwrap();
-    assert_eq!(keys.len(), 2, "State store should have 2 keys before delete");
+    assert_eq!(
+        keys.len(),
+        2,
+        "State store should have 2 keys before delete"
+    );
 
     let source = TestSource::new("cleanup-src").unwrap();
 
@@ -913,7 +972,7 @@ async fn test_source_remove_with_cleanup_clears_state_store() {
         .unwrap();
 
     drasi.start().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_source_status(&drasi, "cleanup-src", ComponentStatus::Running).await;
 
     drasi.remove_source("cleanup-src", true).await.unwrap();
 
@@ -952,7 +1011,7 @@ async fn test_source_remove_without_cleanup_preserves_state_store() {
         .unwrap();
 
     drasi.start().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_source_status(&drasi, "no-cleanup-src", ComponentStatus::Running).await;
 
     drasi.remove_source("no-cleanup-src", false).await.unwrap();
 
