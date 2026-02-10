@@ -416,10 +416,14 @@ async fn poll_cdc_changes(
         let dispatchers = dispatchers.read().await;
         for dispatcher in dispatchers.iter() {
             for change in &batch {
-                let wrapper = SourceEventWrapper::new(
+                let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
+                profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
+
+                let wrapper = SourceEventWrapper::with_profiling(
                     source_id.to_string(),
                     drasi_lib::channels::SourceEvent::Change(change.clone()),
                     chrono::Utc::now(),
+                    profiling,
                 );
                 dispatcher.dispatch_change(Arc::new(wrapper)).await?;
             }
