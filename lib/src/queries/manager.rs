@@ -78,8 +78,14 @@ fn convert_variable_value_to_json(value: &VariableValue) -> serde_json::Value {
         VariableValue::Null => serde_json::Value::Null,
         VariableValue::Bool(b) => serde_json::Value::Bool(*b),
         VariableValue::Float(f) => {
-            // Float might be NaN or Infinity, handle gracefully
-            serde_json::Value::String(f.to_string())
+            // Handle infinity and NaN by converting to null
+            // JSON doesn't support infinity in mathematical contexts
+            if !f.is_f64() {
+                serde_json::Value::Null
+            } else {
+                // For finite values, convert to string to preserve precision
+                serde_json::Value::String(f.to_string())
+            }
         }
         VariableValue::Integer(i) => {
             // Integer might be too large for JSON number

@@ -102,7 +102,10 @@ impl Float {
 
 impl From<Float> for Number {
     fn from(val: Float) -> Self {
-        Number::from_f64(val.value).expect("a finite float")
+        // This should only be called for finite floats
+        // The From<VariableValue> for Value trait checks finiteness before calling this
+        // If infinity somehow reaches here, we panic to catch the bug
+        Number::from_f64(val.value).expect("Float must be finite when converting to JSON Number. This is a bug - infinity/NaN should be converted to null before reaching this point.")
     }
 }
 
