@@ -33,6 +33,7 @@ use anyhow::Result;
 use log::{debug, error, info, warn};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::Instrument;
 
 use crate::channels::priority_queue::PriorityQueue;
 use crate::channels::{
@@ -323,6 +324,13 @@ impl ReactionBase {
             let query_id_clone = query_id.clone();
             let reaction_id = self.id.clone();
 
+            // Get instance_id from context for log routing isolation
+            let instance_id = self
+                .context()
+                .await
+                .map(|c| c.instance_id.clone())
+                .unwrap_or_default();
+
             // Get query dispatch mode to determine enqueue strategy
             let query_config = query.get_config();
             let dispatch_mode = query_config
@@ -331,48 +339,57 @@ impl ReactionBase {
             let use_blocking_enqueue =
                 matches!(dispatch_mode, crate::channels::DispatchMode::Channel);
 
-            // Spawn forwarder task to read from receiver and enqueue to priority queue
-            let forwarder_task = tokio::spawn(async move {
-                debug!(
-                    "[{reaction_id}] Started result forwarder for query '{query_id_clone}' (dispatch_mode: {dispatch_mode:?}, blocking_enqueue: {use_blocking_enqueue})"
-                );
+            // Spawn forwarder task with tracing span for proper log routing
+            let span = tracing::info_span!(
+                "reaction_forwarder",
+                instance_id = %instance_id,
+                component_id = %reaction_id,
+                component_type = "reaction"
+            );
+            let forwarder_task = tokio::spawn(
+                async move {
+                    debug!(
+                        "[{reaction_id}] Started result forwarder for query '{query_id_clone}' (dispatch_mode: {dispatch_mode:?}, blocking_enqueue: {use_blocking_enqueue})"
+                    );
 
-                loop {
-                    match receiver.recv().await {
-                        Ok(query_result) => {
-                            // Use appropriate enqueue method based on dispatch mode
-                            if use_blocking_enqueue {
-                                // Channel mode: Use blocking enqueue to prevent message loss
-                                // This creates backpressure when the priority queue is full
-                                priority_queue.enqueue_wait(query_result).await;
-                            } else {
-                                // Broadcast mode: Use non-blocking enqueue to prevent deadlock
-                                // Messages may be dropped when priority queue is full
-                                if !priority_queue.enqueue(query_result).await {
-                                    warn!(
-                                        "[{reaction_id}] Failed to enqueue result from query '{query_id_clone}' - priority queue at capacity (broadcast mode)"
-                                    );
+                    loop {
+                        match receiver.recv().await {
+                            Ok(query_result) => {
+                                // Use appropriate enqueue method based on dispatch mode
+                                if use_blocking_enqueue {
+                                    // Channel mode: Use blocking enqueue to prevent message loss
+                                    // This creates backpressure when the priority queue is full
+                                    priority_queue.enqueue_wait(query_result).await;
+                                } else {
+                                    // Broadcast mode: Use non-blocking enqueue to prevent deadlock
+                                    // Messages may be dropped when priority queue is full
+                                    if !priority_queue.enqueue(query_result).await {
+                                        warn!(
+                                            "[{reaction_id}] Failed to enqueue result from query '{query_id_clone}' - priority queue at capacity (broadcast mode)"
+                                        );
+                                    }
                                 }
                             }
-                        }
-                        Err(e) => {
-                            // Check if it's a lag error or closed channel
-                            let error_str = e.to_string();
-                            if error_str.contains("lagged") {
-                                warn!(
-                                    "[{reaction_id}] Receiver lagged for query '{query_id_clone}': {error_str}"
-                                );
-                                continue;
-                            } else {
-                                info!(
-                                    "[{reaction_id}] Receiver error for query '{query_id_clone}': {error_str}"
-                                );
-                                break;
+                            Err(e) => {
+                                // Check if it's a lag error or closed channel
+                                let error_str = e.to_string();
+                                if error_str.contains("lagged") {
+                                    warn!(
+                                        "[{reaction_id}] Receiver lagged for query '{query_id_clone}': {error_str}"
+                                    );
+                                    continue;
+                                } else {
+                                    info!(
+                                        "[{reaction_id}] Receiver error for query '{query_id_clone}': {error_str}"
+                                    );
+                                    break;
+                                }
                             }
                         }
                     }
                 }
-            });
+                .instrument(span),
+            );
 
             // Store the forwarder task handle
             self.subscription_tasks.write().await.push(forwarder_task);
@@ -488,6 +505,7 @@ mod tests {
 
         // Create context and initialize
         let context = ReactionRuntimeContext::new(
+            "test-instance",
             "test-reaction",
             status_tx,
             None,

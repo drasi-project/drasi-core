@@ -1,6 +1,6 @@
 [package]
 name = "drasi-bootstrap-noop"
-version = "0.1.2"
+version = "0.1.4"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "No-op bootstrap provider plugin for Drasi"

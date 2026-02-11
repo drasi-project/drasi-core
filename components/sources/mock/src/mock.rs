@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::config::MockSourceConfig;
+use super::config::{DataType, MockSourceConfig};
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_core::models::{
@@ -20,81 +20,113 @@ use drasi_core::models::{
 };
 use log::{debug, info};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use drasi_lib::channels::*;
 use drasi_lib::managers::{log_component_start, log_component_stop};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
+use tracing::Instrument;
 
 /// Mock source that generates synthetic data for testing and development.
 ///
 /// This source runs an internal tokio task that generates data at configurable
-/// intervals. It supports different data types (counter, sensor, generic) to
-/// simulate various real-world scenarios.
+/// intervals. It supports different data types (Counter, SensorReading, Generic)
+/// to simulate various real-world scenarios.
 ///
-/// # Fields
+/// # Event Generation Behavior
 ///
-/// - `base`: Common source functionality (dispatchers, status, lifecycle)
-/// - `config`: Mock-specific configuration (data_type, interval_ms)
+/// - **Counter**: Always emits INSERT events with sequential IDs
+/// - **SensorReading**: Emits INSERT for first reading per sensor, UPDATE thereafter
+/// - **Generic**: Always emits INSERT events with sequential IDs
+///
+/// # Thread Safety
+///
+/// This type is `Send + Sync` and can be safely shared across threads.
+/// Internal state is protected by `RwLock`.
 pub struct MockSource {
-    /// Base source implementation providing common functionality
+    /// Base source implementation providing dispatchers, status tracking, and lifecycle management.
     base: SourceBase,
-    /// Mock source configuration
+
+    /// Configuration specifying data type and generation interval.
     config: MockSourceConfig,
+
+    /// Tracks sensor IDs that have been seen for INSERT vs UPDATE logic.
+    /// Only used when `config.data_type` is `SensorReading`.
+    seen_sensors: Arc<RwLock<HashSet<u32>>>,
 }
 
 impl MockSource {
-    /// Create a new MockSource with the given ID and configuration.
+    /// Creates a new `MockSource` with the given ID and configuration.
     ///
-    /// The event channel is automatically injected when the source is added
-    /// to DrasiLib via `add_source()`.
+    /// The source is created in a stopped state. Call [`start()`](Self::start) to begin
+    /// generating events, or add it to DrasiLib which will start it automatically
+    /// (unless `auto_start` is disabled via the builder).
     ///
     /// # Arguments
     ///
-    /// * `id` - Unique identifier for this source instance
-    /// * `config` - Mock source configuration
+    /// * `id` - Unique identifier for this source instance. Must be unique within a DrasiLib instance.
+    /// * `config` - Configuration specifying data type and generation interval.
     ///
     /// # Returns
     ///
-    /// A new `MockSource` instance, or an error if construction fails.
+    /// A new `MockSource` instance, or an error if validation fails.
     ///
     /// # Errors
     ///
-    /// Returns an error if the base source cannot be initialized.
+    /// Returns [`anyhow::Error`] if:
+    /// - `config.interval_ms` is 0 (would cause spin loop)
+    /// - `config.data_type` is `SensorReading` with `sensor_count` of 0
     ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// use drasi_source_mock::{MockSource, MockSourceBuilder};
+    /// use drasi_source_mock::{MockSource, MockSourceConfig, DataType};
     ///
-    /// let config = MockSourceBuilder::new()
-    ///     .with_data_type("sensor")
-    ///     .with_interval_ms(1000)
-    ///     .build();
+    /// let config = MockSourceConfig {
+    ///     data_type: DataType::sensor_reading(10),
+    ///     interval_ms: 1000,
+    /// };
     ///
     /// let source = MockSource::new("my-mock-source", config)?;
     /// ```
     pub fn new(id: impl Into<String>, config: MockSourceConfig) -> Result<Self> {
+        config.validate()?;
         let id = id.into();
         let params = SourceBaseParams::new(id);
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
+            seen_sensors: Arc::new(RwLock::new(HashSet::new())),
         })
     }
 
-    /// Create a new MockSource with custom dispatch settings
+    /// Creates a new `MockSource` with custom dispatch settings.
     ///
-    /// The event channel is automatically injected when the source is added
-    /// to DrasiLib via `add_source()`.
+    /// This is a lower-level constructor for advanced use cases where you need
+    /// control over event dispatching. For most cases, prefer [`MockSource::builder()`].
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Unique identifier for this source instance.
+    /// * `config` - Configuration specifying data type and generation interval.
+    /// * `dispatch_mode` - Optional dispatch mode (`Channel` or `Broadcast`).
+    /// * `dispatch_buffer_capacity` - Optional buffer size for dispatch channels.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`anyhow::Error`] if:
+    /// - `config.interval_ms` is 0
+    /// - `config.data_type` is `SensorReading` with `sensor_count` of 0
     pub fn with_dispatch(
         id: impl Into<String>,
         config: MockSourceConfig,
         dispatch_mode: Option<DispatchMode>,
         dispatch_buffer_capacity: Option<usize>,
     ) -> Result<Self> {
+        config.validate()?;
         let id = id.into();
         let mut params = SourceBaseParams::new(id);
         if let Some(mode) = dispatch_mode {
@@ -106,6 +138,7 @@ impl MockSource {
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
+            seen_sensors: Arc::new(RwLock::new(HashSet::new())),
         })
     }
 }
@@ -125,12 +158,18 @@ impl Source for MockSource {
         let mut props = HashMap::new();
         props.insert(
             "data_type".to_string(),
-            serde_json::Value::String(self.config.data_type.clone()),
+            serde_json::Value::String(self.config.data_type.to_string()),
         );
         props.insert(
             "interval_ms".to_string(),
             serde_json::Value::Number(self.config.interval_ms.into()),
         );
+        if let Some(sensor_count) = self.config.data_type.sensor_count() {
+            props.insert(
+                "sensor_count".to_string(),
+                serde_json::Value::Number(sensor_count.into()),
+            );
+        }
         props
     }
 
@@ -157,195 +196,233 @@ impl Source for MockSource {
         let data_type = self.config.data_type.clone();
         let interval_ms = self.config.interval_ms;
 
-        // Start the data generation task
+        // Clone seen_sensors for the task
+        let seen_sensors = Arc::clone(&self.seen_sensors);
+
+        // Clone seen_sensors for the task
+        let seen_sensors = Arc::clone(&self.seen_sensors);
+
+        // Get instance_id from context for log routing isolation
+        let instance_id = self
+            .base
+            .context()
+            .await
+            .map(|c| c.instance_id)
+            .unwrap_or_default();
+
+        // Start the data generation task with component span for proper log routing
         let status = Arc::clone(&self.base.status);
         let source_name = self.base.id.clone();
-        let task = tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
-            let mut seq = 0u64;
+        let source_id_for_span = source_id.clone();
+        let span = tracing::info_span!(
+            "mock_source_task",
+            instance_id = %instance_id,
+            component_id = %source_id_for_span,
+            component_type = "source"
+        );
+        let task = tokio::spawn(
+            async move {
+                let mut interval =
+                    tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
+                let mut seq = 0u64;
 
-            loop {
-                interval.tick().await;
+                loop {
+                    interval.tick().await;
 
-                // Check if we should stop
-                if !matches!(*status.read().await, ComponentStatus::Running) {
-                    break;
+                    // Check if we should stop
+                    if !matches!(*status.read().await, ComponentStatus::Running) {
+                        break;
+                    }
+
+                    seq += 1;
+
+                    // Generate data based on type
+                    let source_change = match data_type {
+                        DataType::Counter => {
+                            let element_id = format!("counter_{seq}");
+                            let reference = ElementReference::new(&source_name, &element_id);
+
+                            let mut property_map = ElementPropertyMap::new();
+                            property_map.insert(
+                                "value",
+                                crate::conversion::json_to_element_value_or_default(
+                                    &Value::Number(seq.into()),
+                                    drasi_core::models::ElementValue::Null,
+                                ),
+                            );
+                            property_map.insert(
+                                "timestamp",
+                                crate::conversion::json_to_element_value_or_default(
+                                    &Value::String(chrono::Utc::now().to_rfc3339()),
+                                    drasi_core::models::ElementValue::Null,
+                                ),
+                            );
+
+                            let metadata = ElementMetadata {
+                                reference,
+                                labels: Arc::from(vec![Arc::from("Counter")]),
+                                effective_from: crate::time::get_system_time_millis()
+                                    .unwrap_or_else(|e| {
+                                        log::warn!("Failed to get timestamp for mock counter: {e}");
+                                        chrono::Utc::now().timestamp_millis() as u64
+                                    }),
+                            };
+
+                            let element = Element::Node {
+                                metadata,
+                                properties: property_map,
+                            };
+
+                            SourceChange::Insert { element }
+                        }
+                        DataType::SensorReading { sensor_count } => {
+                            // Constrain sensor_id to the configured number of sensors
+                            let sensor_id = rand::random::<u32>() % sensor_count;
+                            // Use sensor_id as the element_id for stable identity
+                            let element_id = format!("sensor_{sensor_id}");
+                            let reference = ElementReference::new(&source_name, &element_id);
+
+                            let mut property_map = ElementPropertyMap::new();
+                            property_map.insert(
+                                "sensor_id",
+                                crate::conversion::json_to_element_value_or_default(
+                                    &Value::String(format!("sensor_{sensor_id}")),
+                                    drasi_core::models::ElementValue::Null,
+                                ),
+                            );
+                            property_map.insert(
+                                "temperature",
+                                crate::conversion::json_to_element_value_or_default(
+                                    &Value::Number(
+                                        serde_json::Number::from_f64(
+                                            20.0 + rand::random::<f64>() * 10.0,
+                                        )
+                                        .unwrap_or(serde_json::Number::from(25)),
+                                    ),
+                                    drasi_core::models::ElementValue::Null,
+                                ),
+                            );
+                            property_map.insert(
+                                "humidity",
+                                crate::conversion::json_to_element_value_or_default(
+                                    &Value::Number(
+                                        serde_json::Number::from_f64(
+                                            40.0 + rand::random::<f64>() * 20.0,
+                                        )
+                                        .unwrap_or(serde_json::Number::from(50)),
+                                    ),
+                                    drasi_core::models::ElementValue::Null,
+                                ),
+                            );
+                            property_map.insert(
+                                "timestamp",
+                                crate::conversion::json_to_element_value_or_default(
+                                    &Value::String(chrono::Utc::now().to_rfc3339()),
+                                    drasi_core::models::ElementValue::Null,
+                                ),
+                            );
+
+                            let metadata = ElementMetadata {
+                                reference,
+                                labels: Arc::from(vec![Arc::from("SensorReading")]),
+                                effective_from: crate::time::get_system_time_millis()
+                                    .unwrap_or_else(|e| {
+                                        log::warn!("Failed to get timestamp for mock sensor: {e}");
+                                        chrono::Utc::now().timestamp_millis() as u64
+                                    }),
+                            };
+
+                            let element = Element::Node {
+                                metadata,
+                                properties: property_map,
+                            };
+
+                            // Determine if this is a new sensor (Insert) or an update (Update)
+                            let is_new = {
+                                let mut seen = seen_sensors.write().await;
+                                seen.insert(sensor_id)
+                            };
+
+                            if is_new {
+                                SourceChange::Insert { element }
+                            } else {
+                                SourceChange::Update { element }
+                            }
+                        }
+                        DataType::Generic => {
+                            // Generic data
+                            let element_id = format!("generic_{seq}");
+                            let reference = ElementReference::new(&source_name, &element_id);
+
+                            let mut property_map = ElementPropertyMap::new();
+                            property_map.insert(
+                                "value",
+                                crate::conversion::json_to_element_value_or_default(
+                                    &Value::Number(rand::random::<i32>().into()),
+                                    drasi_core::models::ElementValue::Null,
+                                ),
+                            );
+                            property_map.insert(
+                                "message",
+                                crate::conversion::json_to_element_value_or_default(
+                                    &Value::String("Generic mock data".to_string()),
+                                    drasi_core::models::ElementValue::Null,
+                                ),
+                            );
+                            property_map.insert(
+                                "timestamp",
+                                crate::conversion::json_to_element_value_or_default(
+                                    &Value::String(chrono::Utc::now().to_rfc3339()),
+                                    drasi_core::models::ElementValue::Null,
+                                ),
+                            );
+
+                            let metadata = ElementMetadata {
+                                reference,
+                                labels: Arc::from(vec![Arc::from("Generic")]),
+                                effective_from: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .expect("System time is before UNIX epoch")
+                                    .as_nanos()
+                                    as u64,
+                            };
+
+                            let element = Element::Node {
+                                metadata,
+                                properties: property_map,
+                            };
+
+                            SourceChange::Insert { element }
+                        }
+                    };
+
+                    // Create profiling metadata with timestamps
+                    let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
+                    profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
+
+                    let wrapper = SourceEventWrapper::with_profiling(
+                        source_id.clone(),
+                        SourceEvent::Change(source_change),
+                        chrono::Utc::now(),
+                        profiling,
+                    );
+
+                    // Dispatch to all subscribers via helper
+                    if let Err(e) = SourceBase::dispatch_from_task(
+                        base_dispatchers.clone(),
+                        wrapper,
+                        &source_id,
+                    )
+                    .await
+                    {
+                        debug!("Failed to dispatch change: {e}");
+                    }
                 }
 
-                seq += 1;
-
-                // Generate data based on type
-                let source_change = match data_type.as_str() {
-                    "counter" => {
-                        let element_id = format!("counter_{seq}");
-                        let reference = ElementReference::new(&source_name, &element_id);
-
-                        let mut property_map = ElementPropertyMap::new();
-                        property_map.insert(
-                            "value",
-                            crate::conversion::json_to_element_value_or_default(
-                                &Value::Number(seq.into()),
-                                drasi_core::models::ElementValue::Null,
-                            ),
-                        );
-                        property_map.insert(
-                            "timestamp",
-                            crate::conversion::json_to_element_value_or_default(
-                                &Value::String(chrono::Utc::now().to_rfc3339()),
-                                drasi_core::models::ElementValue::Null,
-                            ),
-                        );
-
-                        let metadata = ElementMetadata {
-                            reference,
-                            labels: Arc::from(vec![Arc::from("Counter")]),
-                            effective_from: crate::time::get_system_time_millis().unwrap_or_else(
-                                |e| {
-                                    log::warn!("Failed to get timestamp for mock counter: {e}");
-                                    chrono::Utc::now().timestamp_millis() as u64
-                                },
-                            ),
-                        };
-
-                        let element = Element::Node {
-                            metadata,
-                            properties: property_map,
-                        };
-
-                        SourceChange::Insert { element }
-                    }
-                    "sensor" => {
-                        let sensor_id = rand::random::<u32>() % 5;
-                        let element_id = format!("reading_{sensor_id}_{seq}");
-                        let reference = ElementReference::new(&source_name, &element_id);
-
-                        let mut property_map = ElementPropertyMap::new();
-                        property_map.insert(
-                            "sensor_id",
-                            crate::conversion::json_to_element_value_or_default(
-                                &Value::String(format!("sensor_{sensor_id}")),
-                                drasi_core::models::ElementValue::Null,
-                            ),
-                        );
-                        property_map.insert(
-                            "temperature",
-                            crate::conversion::json_to_element_value_or_default(
-                                &Value::Number(
-                                    serde_json::Number::from_f64(
-                                        20.0 + rand::random::<f64>() * 10.0,
-                                    )
-                                    .unwrap_or(serde_json::Number::from(25)),
-                                ),
-                                drasi_core::models::ElementValue::Null,
-                            ),
-                        );
-                        property_map.insert(
-                            "humidity",
-                            crate::conversion::json_to_element_value_or_default(
-                                &Value::Number(
-                                    serde_json::Number::from_f64(
-                                        40.0 + rand::random::<f64>() * 20.0,
-                                    )
-                                    .unwrap_or(serde_json::Number::from(50)),
-                                ),
-                                drasi_core::models::ElementValue::Null,
-                            ),
-                        );
-                        property_map.insert(
-                            "timestamp",
-                            crate::conversion::json_to_element_value_or_default(
-                                &Value::String(chrono::Utc::now().to_rfc3339()),
-                                drasi_core::models::ElementValue::Null,
-                            ),
-                        );
-
-                        let metadata = ElementMetadata {
-                            reference,
-                            labels: Arc::from(vec![Arc::from("SensorReading")]),
-                            effective_from: crate::time::get_system_time_millis().unwrap_or_else(
-                                |e| {
-                                    log::warn!("Failed to get timestamp for mock sensor: {e}");
-                                    chrono::Utc::now().timestamp_millis() as u64
-                                },
-                            ),
-                        };
-
-                        let element = Element::Node {
-                            metadata,
-                            properties: property_map,
-                        };
-
-                        SourceChange::Insert { element }
-                    }
-                    _ => {
-                        // Generic data
-                        let element_id = format!("generic_{seq}");
-                        let reference = ElementReference::new(&source_name, &element_id);
-
-                        let mut property_map = ElementPropertyMap::new();
-                        property_map.insert(
-                            "value",
-                            crate::conversion::json_to_element_value_or_default(
-                                &Value::Number(rand::random::<i32>().into()),
-                                drasi_core::models::ElementValue::Null,
-                            ),
-                        );
-                        property_map.insert(
-                            "message",
-                            crate::conversion::json_to_element_value_or_default(
-                                &Value::String("Generic mock data".to_string()),
-                                drasi_core::models::ElementValue::Null,
-                            ),
-                        );
-                        property_map.insert(
-                            "timestamp",
-                            crate::conversion::json_to_element_value_or_default(
-                                &Value::String(chrono::Utc::now().to_rfc3339()),
-                                drasi_core::models::ElementValue::Null,
-                            ),
-                        );
-
-                        let metadata = ElementMetadata {
-                            reference,
-                            labels: Arc::from(vec![Arc::from("Generic")]),
-                            effective_from: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .expect("System time is before UNIX epoch")
-                                .as_nanos() as u64,
-                        };
-
-                        let element = Element::Node {
-                            metadata,
-                            properties: property_map,
-                        };
-
-                        SourceChange::Insert { element }
-                    }
-                };
-
-                // Create profiling metadata with timestamps
-                let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
-                profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
-
-                let wrapper = SourceEventWrapper::with_profiling(
-                    source_id.clone(),
-                    SourceEvent::Change(source_change),
-                    chrono::Utc::now(),
-                    profiling,
-                );
-
-                // Dispatch to all subscribers via helper
-                if let Err(e) =
-                    SourceBase::dispatch_from_task(base_dispatchers.clone(), wrapper, &source_id)
-                        .await
-                {
-                    debug!("Failed to dispatch change: {e}");
-                }
+                info!("Mock source task completed");
             }
-
-            info!("Mock source task completed");
-        });
+            .instrument(span),
+        );
 
         *self.base.task_handle.write().await = Some(task);
         self.base.set_status(ComponentStatus::Running).await;
@@ -416,29 +493,47 @@ impl Source for MockSource {
 }
 
 impl MockSource {
-    /// Inject a test event into the mock source for testing purposes.
+    /// Injects a custom event into the source for testing purposes.
     ///
-    /// This allows tests to send specific events without relying on automatic generation.
+    /// This allows tests to send specific [`SourceChange`] events (INSERT, UPDATE, DELETE)
+    /// without waiting for automatic generation. Useful for deterministic testing scenarios.
+    ///
+    /// The source does not need to be started to inject events.
     ///
     /// # Arguments
     ///
-    /// * `change` - The source change to inject
+    /// * `change` - The [`SourceChange`] to inject (e.g., `SourceChange::Insert { element }`)
     ///
     /// # Errors
     ///
-    /// Returns an error if there are no subscribers to receive the event.
+    /// Returns [`anyhow::Error`] if dispatching fails (e.g., all receivers have been dropped).
     pub async fn inject_event(&self, change: SourceChange) -> Result<()> {
         self.base.dispatch_source_change(change).await
     }
 
-    /// Create a test subscription to this source.
+    /// Creates a test subscription to receive events from this source.
     ///
-    /// This method delegates to SourceBase and is provided for convenience in tests.
-    /// The returned receiver will receive all events generated by this source.
+    /// This bypasses DrasiLib's subscription mechanism and directly subscribes to
+    /// the source's event dispatcher. Useful for unit testing the source in isolation.
     ///
     /// # Returns
     ///
-    /// A boxed receiver that will receive source events.
+    /// A boxed receiver that yields [`SourceEventWrapper`](drasi_lib::channels::SourceEventWrapper)
+    /// for each event generated or injected.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let source = MockSource::new("test", config)?;
+    /// let mut rx = source.test_subscribe();
+    ///
+    /// source.start().await?;
+    ///
+    /// // Receive events
+    /// while let Some(event) = rx.recv().await {
+    ///     println!("Received: {:?}", event);
+    /// }
+    /// ```
     pub fn test_subscribe(
         &self,
     ) -> Box<dyn drasi_lib::channels::ChangeReceiver<drasi_lib::channels::SourceEventWrapper>> {
@@ -446,26 +541,35 @@ impl MockSource {
     }
 }
 
-/// Builder for MockSource instances.
+/// Builder for [`MockSource`] instances.
 ///
 /// Provides a fluent API for constructing mock sources with sensible defaults.
-/// The builder takes the source ID at construction and returns a fully
-/// constructed `MockSource` from `build()`.
+/// This is the recommended way to create a `MockSource`.
+///
+/// # Defaults
+///
+/// | Option | Default |
+/// |--------|---------|
+/// | `data_type` | [`DataType::Generic`] |
+/// | `interval_ms` | 5000 |
+/// | `dispatch_mode` | `Channel` |
+/// | `dispatch_buffer_capacity` | 1000 |
+/// | `auto_start` | `true` |
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// use drasi_source_mock::MockSource;
+/// use drasi_source_mock::{MockSource, DataType};
 ///
 /// let source = MockSource::builder("my-source")
-///     .with_data_type("sensor")
+///     .with_data_type(DataType::sensor_reading(10))
 ///     .with_interval_ms(1000)
-///     .with_bootstrap_provider(my_provider)
+///     .with_auto_start(false)  // Don't start automatically
 ///     .build()?;
 /// ```
 pub struct MockSourceBuilder {
     id: String,
-    data_type: String,
+    data_type: DataType,
     interval_ms: u64,
     dispatch_mode: Option<DispatchMode>,
     dispatch_buffer_capacity: Option<usize>,
@@ -482,7 +586,7 @@ impl MockSourceBuilder {
     pub fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
-            data_type: "generic".to_string(),
+            data_type: DataType::Generic,
             interval_ms: 5000,
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
@@ -495,9 +599,11 @@ impl MockSourceBuilder {
     ///
     /// # Arguments
     ///
-    /// * `data_type` - One of: `"counter"`, `"sensor"`, or `"generic"` (default)
-    pub fn with_data_type(mut self, data_type: impl Into<String>) -> Self {
-        self.data_type = data_type.into();
+    /// * `data_type` - One of: `DataType::Counter`, `DataType::SensorReading { sensor_count }`, or `DataType::Generic` (default)
+    ///
+    /// For SensorReading, use `DataType::sensor_reading(count)` helper method.
+    pub fn with_data_type(mut self, data_type: DataType) -> Self {
+        self.data_type = data_type;
         self
     }
 
@@ -558,11 +664,19 @@ impl MockSourceBuilder {
     /// # Returns
     ///
     /// A fully constructed `MockSource`, or an error if construction fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The base source cannot be initialized
+    /// - The configuration is invalid (e.g., interval_ms is 0, sensor_count is 0)
     pub fn build(self) -> Result<MockSource> {
         let config = MockSourceConfig {
             data_type: self.data_type,
             interval_ms: self.interval_ms,
         };
+
+        config.validate()?;
 
         // Build SourceBaseParams with all settings
         let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
@@ -579,6 +693,7 @@ impl MockSourceBuilder {
         Ok(MockSource {
             base: SourceBase::new(params)?,
             config,
+            seen_sensors: Arc::new(RwLock::new(HashSet::new())),
         })
     }
 }
@@ -596,7 +711,7 @@ impl MockSource {
     ///
     /// ```rust,ignore
     /// let source = MockSource::builder("my-source")
-    ///     .with_data_type("sensor")
+    ///     .with_data_type(DataType::sensor_reading(10))
     ///     .with_interval_ms(1000)
     ///     .build()?;
     /// ```

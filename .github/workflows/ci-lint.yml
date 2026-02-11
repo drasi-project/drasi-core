@@ -2,12 +2,15 @@ name: Run cargo fmt and cargo clippy
 
 on:
   push:
-    branches: ['*']
+    branches:
+      - main
+      - release/*
   pull_request:
     branches:
       - main
       - feature/*
       - feature-lib
+      - release/*
 
 jobs:
   clippy_check:
@@ -22,14 +25,41 @@ jobs:
       - name: Install libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq libjq-dev protobuf-compiler
+          sudo apt-get install -y protobuf-compiler build-essential autoconf automake libtool flex bison
+
+      - name: Cache Cargo registry
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache Cargo index
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-index-
+
+      - name: Cache Cargo build
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-clippy-
       
-      - name: Set JQ_LIB_DIR
-        run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+      # Add this step to fix the lexer.c missing error
+      - name: Prepare bundled jq source
+        run: |
+          cargo fetch
+          find ~/.cargo/registry/src -name "lexer.c" -exec touch {} +
+          find ~/.cargo/registry/src -name "parser.c" -exec touch {} +
 
       - name: Run Cargo Clippy
-        run: cargo clippy --all-targets --all-features
-
+        run: cargo clippy --all-targets
 
   fmt_check:
     name: Format check

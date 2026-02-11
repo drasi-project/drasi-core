@@ -27,7 +27,10 @@ use std::collections::BTreeMap;
 use crate::channels::*;
 use crate::config::SourceRuntime;
 use crate::context::SourceRuntimeContext;
-use crate::managers::{is_operation_valid, log_component_error, Operation};
+use crate::managers::{
+    is_operation_valid, log_component_error, ComponentEventHistory, ComponentLogKey,
+    ComponentLogRegistry, Operation,
+};
 use crate::sources::Source;
 use crate::state_store::StateStoreProvider;
 
@@ -73,18 +76,28 @@ pub fn convert_json_to_element_properties(
 }
 
 pub struct SourceManager {
+    instance_id: String,
     sources: Arc<RwLock<HashMap<String, Arc<dyn Source>>>>,
     event_tx: ComponentEventSender,
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
+    event_history: Arc<RwLock<ComponentEventHistory>>,
+    log_registry: Arc<ComponentLogRegistry>,
 }
 
 impl SourceManager {
     /// Create a new SourceManager
-    pub fn new(event_tx: ComponentEventSender) -> Self {
+    pub fn new(
+        instance_id: impl Into<String>,
+        event_tx: ComponentEventSender,
+        log_registry: Arc<ComponentLogRegistry>,
+    ) -> Self {
         Self {
+            instance_id: instance_id.into(),
             sources: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
             state_store: Arc::new(RwLock::new(None)),
+            event_history: Arc::new(RwLock::new(ComponentEventHistory::new())),
+            log_registry,
         }
     }
 
@@ -126,6 +139,7 @@ impl SourceManager {
 
         // Construct runtime context for this source
         let context = SourceRuntimeContext::new(
+            &self.instance_id,
             &source_id,
             self.event_tx.clone(),
             self.state_store.read().await.clone(),
@@ -223,14 +237,15 @@ impl SourceManager {
 
         if let Some(source) = source {
             let status = source.status().await;
+            let error_message = match &status {
+                ComponentStatus::Error => self.event_history.read().await.get_last_error(&id),
+                _ => None,
+            };
             let runtime = SourceRuntime {
                 id: source.id().to_string(),
                 source_type: source.type_name().to_string(),
                 status: status.clone(),
-                error_message: match &status {
-                    ComponentStatus::Error => Some("Source error occurred".to_string()),
-                    _ => None,
-                },
+                error_message,
                 properties: source.properties(),
             };
             Ok(runtime)
@@ -271,6 +286,11 @@ impl SourceManager {
 
             // Now remove the source
             self.sources.write().await.remove(&id);
+            // Clean up event history for this source
+            self.event_history.write().await.remove_component(&id);
+            // Clean up log history for this source
+            let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Source, &id);
+            self.log_registry.remove_component_by_key(&log_key).await;
             info!("Deleted source: {id}");
 
             Ok(())
@@ -334,5 +354,72 @@ impl SourceManager {
             }
         }
         Ok(())
+    }
+
+    /// Record a component event in the history.
+    ///
+    /// This should be called by the event processing loop to track component
+    /// lifecycle events for later querying.
+    pub async fn record_event(&self, event: ComponentEvent) {
+        self.event_history.write().await.record_event(event);
+    }
+
+    /// Get events for a specific source.
+    ///
+    /// Returns events in chronological order (oldest first).
+    pub async fn get_source_events(&self, id: &str) -> Vec<ComponentEvent> {
+        self.event_history.read().await.get_events(id)
+    }
+
+    /// Get all events across all sources.
+    ///
+    /// Returns events sorted by timestamp (oldest first).
+    pub async fn get_all_events(&self) -> Vec<ComponentEvent> {
+        self.event_history.read().await.get_all_events()
+    }
+
+    /// Subscribe to live logs for a source.
+    ///
+    /// Returns the log history and a broadcast receiver for new logs.
+    /// Returns None if the source doesn't exist.
+    pub async fn subscribe_logs(
+        &self,
+        id: &str,
+    ) -> Option<(
+        Vec<crate::managers::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
+    )> {
+        // Verify the source exists
+        {
+            let sources = self.sources.read().await;
+            if !sources.contains_key(id) {
+                return None;
+            }
+        }
+
+        let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Source, id);
+        Some(self.log_registry.subscribe_by_key(&log_key).await)
+    }
+
+    /// Subscribe to live events for a source.
+    ///
+    /// Returns the event history and a broadcast receiver for new events.
+    /// Returns None if the source doesn't exist.
+    pub async fn subscribe_events(
+        &self,
+        id: &str,
+    ) -> Option<(
+        Vec<ComponentEvent>,
+        tokio::sync::broadcast::Receiver<ComponentEvent>,
+    )> {
+        // Verify the source exists
+        {
+            let sources = self.sources.read().await;
+            if !sources.contains_key(id) {
+                return None;
+            }
+        }
+
+        Some(self.event_history.write().await.subscribe(id))
     }
 }
