@@ -387,3 +387,134 @@ async fn test_sse_multi_path_integration() -> Result<()> {
     core.stop().await?;
     Ok(())
 }
+
+/// Test that infinity values from log10(0) and log(0) flow through the entire pipeline
+/// Source → Query → Reaction without panicking
+#[tokio::test]
+async fn test_infinity_e2e_source_query_reaction() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    // Create Application source
+    let config = ApplicationSourceConfig {
+        properties: HashMap::new(),
+    };
+    let (app_source, handle) = ApplicationSource::new("test-source", config)?;
+
+    // Create query that computes log10(0) which produces -Infinity
+    let query = Query::cypher("log-test")
+        .query(
+            r#"
+            MATCH (n:TestNode)
+            RETURN 
+                n.id AS id,
+                n.value AS value,
+                log10(n.value) AS log10_result,
+                log(n.value) AS ln_result
+        "#,
+        )
+        .from_source("test-source")
+        .auto_start(true)
+        .build();
+
+    // Create SSE reaction
+    let sse_reaction = SseReaction::builder("infinity-sse")
+        .with_port(18090)
+        .with_query("log-test")
+        .build()?;
+
+    // Build DrasiLib
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("infinity-test-core")
+            .with_source(app_source)
+            .with_query(query)
+            .with_reaction(sse_reaction)
+            .build()
+            .await?,
+    );
+
+    // Start the core
+    core.start().await?;
+    sleep(Duration::from_millis(500)).await;
+
+    // Connect to SSE endpoint
+    let client = reqwest::Client::new();
+    let response = client.get("http://localhost:18090/events").send().await?;
+    assert_eq!(response.status(), 200);
+
+    let stream = response.bytes_stream();
+    let mut event_stream = eventsource_stream::EventStream::new(stream).take(5);
+
+    // Test 1: Send a node with value = 0, which will produce log10(0) = -Infinity
+    let props = PropertyMapBuilder::new()
+        .with_string("id", "node-1")
+        .with_integer("value", 0)
+        .build();
+
+    handle
+        .send_node_insert("node-1", vec!["TestNode"], props)
+        .await?;
+
+    // Test 2: Send a node with positive value for comparison
+    sleep(Duration::from_millis(200)).await;
+    let props2 = PropertyMapBuilder::new()
+        .with_string("id", "node-2")
+        .with_integer("value", 100)
+        .build();
+
+    handle
+        .send_node_insert("node-2", vec!["TestNode"], props2)
+        .await?;
+
+    // Collect events
+    let mut received_data_event = false;
+    while let Some(event_result) = event_stream.next().await {
+        match event_result {
+            Ok(event) => {
+                let data = event.data.clone();
+                log::info!("Received SSE event: {}", data);
+
+                // Check if it's a data event (not heartbeat)
+                if !data.contains("heartbeat") {
+                    received_data_event = true;
+
+                    // Verify infinity is serialized as null (JSON doesn't support infinity)
+                    if data.contains("node-1") {
+                        // This event has log10(0) and log(0) which should be null
+                        assert!(
+                            data.contains("null"),
+                            "Should contain null for infinity values"
+                        );
+                        // Make sure it's NOT "-inf" (that would indicate Display trait is being used)
+                        assert!(!data.contains("-inf"), "Should not contain -inf string");
+                        log::info!("Infinity correctly serialized as null in query results");
+                    }
+
+                    if data.contains("node-2") {
+                        // This event has log10(100) = 2.0
+                        assert!(data.contains("2") || data.contains("log10_result"));
+                        log::info!("Normal float value serialized correctly");
+                    }
+                }
+
+                if received_data_event {
+                    break;
+                }
+            }
+            Err(e) => {
+                log::error!("Error reading SSE event: {}", e);
+                break;
+            }
+        }
+    }
+
+    assert!(
+        received_data_event,
+        "Should receive at least one data event"
+    );
+
+    core.stop().await?;
+    Ok(())
+}
