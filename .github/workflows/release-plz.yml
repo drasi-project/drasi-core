@@ -75,11 +75,12 @@ jobs:
           fi
 
       # On regular commits: Create/update release PR with version bumps and changelog
+      # Uses a PAT instead of GITHUB_TOKEN so the PR triggers downstream workflows (e.g. test.yml).
       - name: Create/update release PR
         if: ${{ steps.check_release.outputs.is_release != 'true' && inputs.dry_run != true && inputs.force_publish != true }}
-        run: release-plz release-pr --git-token "$GITHUB_TOKEN" --backend github
+        run: release-plz release-pr --git-token "$RELEASE_PLZ_TOKEN" --backend github
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_PLZ_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
 
       # On release PR merge OR force_publish: Publish crates to crates.io and create git tags
       - name: Publish crates
