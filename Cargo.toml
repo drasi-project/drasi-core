@@ -79,11 +79,11 @@ drasi-query-gql = { version = "0.3.2", path = "query-gql" }
 drasi-core = { version = "0.3.3", path = "core" }
 drasi-functions-cypher = { version = "0.3.3", path = "functions-cypher" }
 drasi-functions-gql = { version = "0.3.3", path = "functions-gql" }
-drasi-middleware = { version = "0.3.4", path = "middleware" }
-drasi-lib = { version = "0.3.6", path = "lib" }
+drasi-middleware = { version = "0.3.5", path = "middleware" }
+drasi-lib = { version = "0.3.7", path = "lib" }
 
 # Component plugins
-drasi-source-postgres = { version = "0.1.6", path = "components/sources/postgres" }
+drasi-source-postgres = { version = "0.1.7", path = "components/sources/postgres" }
 drasi-source-application = { version = "0.1.6", path = "components/sources/application" }
 drasi-bootstrap-application = { version = "0.1.6", path = "components/bootstrappers/application" }
 drasi-reaction-http = { version = "0.1.7", path = "components/reactions/http" }
