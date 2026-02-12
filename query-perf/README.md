@@ -323,7 +323,7 @@ PerformanceTestScenarioConfig { name: "single_node_property_projection", query: 
 }
 ```
 
-*Note: Times associated with 'bootstrap' represent the time taken to load the initial dataset (2000 rooms + buildings). 'Run' metrics represent the performance of processing the dynamic updates.*
+*Note: Bootstrap metrics cover loading the full initial dataset — 4,210 elements (2,000 rooms + 100 floors + 10 buildings + 2,100 relationships). Run metrics cover processing the source change events.*
 
 # Building Comfort Data Model
 
