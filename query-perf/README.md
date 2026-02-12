@@ -22,50 +22,26 @@ Before running these scenarios, ensure the following requirements are met.
 ## Redis server setup (if using redis backend)
 If you plan to use Redis backend, you need a running Redis instance.
 
-## RocksDB path configuration (if using RocksDB backend)
-If you use the RocksDB backend, the tool creates a persistent database on disk.
-
-#### Default Location
-By default, the tool creates a directory named `test-data` in your current working directory.
-
-#### Custom Location
-You can change the storage location by setting the `ROCKS_PATH` environment variable:
-```bash
-ROCKS_PATH=/tmp/my-custom-rocksdb cargo run --release -- --scenario <SCENARIO> --element-index <INDEX> --result-index <INDEX>
-```
-*Note: `/tmp/my-custom-rocksdb` is the custom path.*
+## RocksDB (if using RocksDB backend)
+RocksDB is an embedded database - no external server is needed. By default, data is stored in a `test-data` directory in your current working directory. You can override this with the `ROCKS_PATH` environment variable (see the Environment Variables section below).
 
 # Execution
 
 You can run the Component Performance Test Tool either from a compiled binary or using Cargo.
 
 ## Using Compiled Binary
-If you prefer to run the binary directly (e.g., in a production environment):
 
-1.  **Build the project:**
-    ```bash
-    cargo build --release -p query-perf
-    ```
-2.  **Copy the build to current directory:**
-    ```bash
-    cp ../target/release/query-perf .
-    ```
-    *Note: The 'space dot' at the end is critical! It means "copy to here".*
-3.  **Typical Command Structure:**
-    ```bash
-    ./query-perf --scenario <SCENARIO> --element-index <INDEX> --result-index <INDEX>
-    ```
+```bash
+cargo build --release -p query-perf
+./target/release/query-perf --scenario <SCENARIO> --element-index <INDEX> --result-index <INDEX>
+```
 
 ## Using Cargo
-```bash
-cargo run --release -- <ARGS>
-```
-*Note: We recommend using `--release` for accurate performance metrics.*
 
-**Typical Command Structure:**
 ```bash
 cargo run -p query-perf --release -- --scenario <SCENARIO> --element-index <INDEX> --result-index <INDEX>
 ```
+*Tip: Use `\--release` for accurate performance measurements.*
 
 
 # Command Line Arguments Description
@@ -92,7 +68,7 @@ The tool uses the following environment variables for configuration if the corre
 # Scenarios
 The currently defined Performance Test Scenarios are:
 
-### `single_node_property_projection`
+## `single_node_property_projection`
 
 Path: `query-perf/src/scenario/building_comfort_scenarios/single_node_property_projection.rs`
 
@@ -113,7 +89,7 @@ Monitors all `Room` nodes and projects their raw property values (`temperature`,
 **What it Tests:**
 Establishes the baseline performance for direct node access and property retrieval. This scenario isolates the I/O and deserialization overhead of the element index without introducing complex filtering or transformation logic.
 
-### `single_node_calculation_projection`
+## `single_node_calculation_projection`
 
 Path: `query-perf/src/scenario/building_comfort_scenarios/single_node_calculation.rs`
 
@@ -135,7 +111,7 @@ Monitors `Room` nodes but computes a derived comfort level on the fly using arit
 **What it Tests:**
 Evaluates the computational performance of the expression evaluation engine. This scenario measures the overhead of scalar arithmetic and conditional logic processing per event, independent of complex graph traversals.
 
-### `single_path_averaging_projection`
+## `single_path_averaging_projection`
 
 Path: `query-perf/src/scenario/building_comfort_scenarios/single_path_averaging.rs`
 
@@ -156,7 +132,7 @@ Joins `Room` nodes to their parent `Floor` nodes and calculates the average comf
 **What it Tests:**
 Assesses the performance of pattern matching (IO-bound) and aggregation (memory/CPU-bound). This scenario exercises the join algorithms for one-hop relationships and tests the efficiency of incremental state maintenance for aggregation functions.
 
-### `single_path_no_change_averaging_projection`
+## `single_path_no_change_averaging_projection`
 
 Path: `query-perf/src/scenario/building_comfort_scenarios/single_path_no_change_averaging.rs`
 
@@ -176,6 +152,20 @@ Joins `Room` nodes to their parent `Floor` nodes and calculates the average comf
 
 **What it Tests:**
 Uses an identical query to `single_path_averaging_projection`. Tests aggregation performance when many source changes do not affect the final aggregated result.
+
+# Element Indexes
+The currently supported Element Index options are:
+
+- `memory` — In-process memory (default, no setup required)
+- `redis` — Redis-compatible server (e.g., Redis, Garnet)
+- `rocksdb` — Embedded RocksDB on-disk storage
+
+# Result Indexes
+The currently supported Result Index options are:
+
+- `memory` — In-process memory (default, no setup required)
+- `redis` — Redis-compatible server (e.g., Redis, Garnet)
+- `rocksdb` — Embedded RocksDB on-disk storage
 
 # Examples & Sample Output
 
@@ -396,5 +386,6 @@ This data model is intentionally designed to:
 
 The same data model is reused across all scenarios to ensure **fair, consistent,
 and repeatable performance comparisons**.
+
 
 
