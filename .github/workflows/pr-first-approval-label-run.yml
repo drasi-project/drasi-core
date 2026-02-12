@@ -31,7 +31,7 @@ jobs:
     if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     permissions:
-      pull-requests: read
+      pull-requests: write
       issues: write
       actions: read
     steps:
