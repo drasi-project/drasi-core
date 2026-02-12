@@ -472,7 +472,7 @@ async fn test_decimal_datatype_serialization() -> Result<()> {
         // Verify that decimal values are numbers, not strings
         if let Some(price) = row.get("price") {
             if !price.is_number() {
-                log::error!("price is not a number: {:?}", price);
+                log::error!("price is not a number: {price:?}");
                 return false;
             }
             if price.as_f64() != Some(99.99) {
@@ -486,7 +486,7 @@ async fn test_decimal_datatype_serialization() -> Result<()> {
 
         if let Some(quantity) = row.get("quantity") {
             if !quantity.is_number() {
-                log::error!("quantity is not a number: {:?}", quantity);
+                log::error!("quantity is not a number: {quantity:?}");
                 return false;
             }
             if quantity.as_f64() != Some(10.5) {
@@ -500,14 +500,14 @@ async fn test_decimal_datatype_serialization() -> Result<()> {
 
         if let Some(total) = row.get("total") {
             if !total.is_number() {
-                log::error!("total is not a number: {:?}", total);
+                log::error!("total is not a number: {total:?}");
                 return false;
             }
             // Use approximate comparison for floating point
             if let Some(total_val) = total.as_f64() {
                 let expected = 1049.895000;
                 if (total_val - expected).abs() > 0.0001 {
-                    log::error!("total value is incorrect: expected {}, got {}", expected, total_val);
+                    log::error!("total value is incorrect: expected {expected}, got {total_val}");
                     return false;
                 }
             } else {
