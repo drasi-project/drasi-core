@@ -321,6 +321,7 @@ fn test_config_serialization() {
     let config = PostgresStoredProcReactionConfig {
         hostname: "db.example.com".to_string(),
         port: Some(5433),
+        identity_provider: None,
         user: "admin".to_string(),
         password: "secret".to_string(),
         database: "mydb".to_string(),
@@ -700,6 +701,7 @@ async fn test_postgres_parser_with_executor() {
     let config = PostgresStoredProcReactionConfig {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
+        identity_provider: None,
         user: pg_config.user.clone(),
         password: pg_config.password.clone(),
         database: pg_config.database.clone(),
@@ -760,6 +762,7 @@ async fn test_postgres_reaction_creation() {
     let config = PostgresStoredProcReactionConfig {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
+        identity_provider: None,
         user: pg_config.user.clone(),
         password: pg_config.password.clone(),
         database: pg_config.database.clone(),
@@ -847,6 +850,7 @@ async fn test_postgres_executor_with_special_characters() {
     let config = PostgresStoredProcReactionConfig {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
+        identity_provider: None,
         user: pg_config.user.clone(),
         password: pg_config.password.clone(),
         database: pg_config.database.clone(),
@@ -976,6 +980,7 @@ async fn test_postgres_executor_retry_on_failure() {
     let config = PostgresStoredProcReactionConfig {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
+        identity_provider: None,
         user: pg_config.user.clone(),
         password: pg_config.password.clone(),
         database: pg_config.database.clone(),
@@ -1060,6 +1065,7 @@ async fn test_default_template_applies_to_all_queries() {
     let config = PostgresStoredProcReactionConfig {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
+        identity_provider: None,
         user: pg_config.user.clone(),
         password: pg_config.password.clone(),
         database: pg_config.database.clone(),
@@ -1183,6 +1189,7 @@ async fn test_route_overrides_default_template() {
     let config = PostgresStoredProcReactionConfig {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
+        identity_provider: None,
         user: pg_config.user.clone(),
         password: pg_config.password.clone(),
         database: pg_config.database.clone(),
@@ -1355,6 +1362,7 @@ async fn test_executor_with_various_data_types() {
     let config = PostgresStoredProcReactionConfig {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
+        identity_provider: None,
         user: pg_config.user.clone(),
         password: pg_config.password.clone(),
         database: pg_config.database.clone(),
@@ -1471,6 +1479,7 @@ async fn test_executor_with_string_numbers() {
     let config = PostgresStoredProcReactionConfig {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
+        identity_provider: None,
         user: pg_config.user.clone(),
         password: pg_config.password.clone(),
         database: pg_config.database.clone(),
