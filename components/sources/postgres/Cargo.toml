@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-source-postgres"
-version = "0.1.3"
+version = "0.1.6"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "PostgreSQL source plugin for Drasi"
@@ -32,6 +32,7 @@ drasi-core.workspace = true
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
+tracing = "0.1"
 tokio = { version = "1.0", features = ["full"] }
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1"] }
 postgres-types = { version = "0.2", features = ["derive", "with-chrono-0_4"] }
@@ -52,3 +53,11 @@ rust_decimal = { version = "1.34", features = ["db-tokio-postgres"] }
 pbkdf2 = "0.12"
 tokio-stream = "0.1"
 prost-types = "0.12"
+
+[dev-dependencies]
+drasi-bootstrap-postgres.workspace = true
+drasi-reaction-application.workspace = true
+env_logger = "0.10.0"
+serial_test = "3.0"
+testcontainers = "0.23"
+tokio-test = "0.4"

@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-reaction-profiler"
-version = "0.2.2"
+version = "0.2.4"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "Profiler reaction plugin for Drasi"
