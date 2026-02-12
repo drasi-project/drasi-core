@@ -344,9 +344,10 @@ The model represents buildings as a hierarchy:
 By default, the scenarios generate:
 
 - **10 buildings**
-- **10 floors per building**
-- **20 rooms per floor**
-- **Total: 2,000 Room nodes**
+- **10 floors per building** (100 total)
+- **20 rooms per floor** (2,000 total)
+- **2,100 relationships** (Room→Floor and Floor→Building via `PART_OF`)
+- **4,210 total bootstrap elements**
 
 Each level is connected using explicit graph relationships (for example,
 `(:Room)-[:PART_OF]->(:Floor)`), enabling both **single-node** and
