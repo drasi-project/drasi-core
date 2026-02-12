@@ -19,18 +19,41 @@ drasi-middleware = { version = "0.3", features = ["jq", "decoder", "map"] }
 
 ### Available Middleware Features
 
-- **`jq`** - JQ query language transformations (requires autotools: `autoconf`, `automake`, `libtool`, `flex`, `bison`)
+- **`jq`** - JQ query language transformations (requires system `jq` library)
+- **`bundled-jq`** - JQ transformations with bundled jq compiled from source (requires build tools)
 - **`decoder`** - Decode encoded strings (base64, hex, URL encoding)
 - **`map`** - JSONPath-based property mapping
 - **`parse_json`** - Parse JSON strings into structured objects
 - **`promote`** - Promote nested properties to top level
 - **`relabel`** - Transform element labels
 - **`unwind`** - Unwind arrays into multiple elements
-- **`all`** - Enable all middleware (convenience feature)
+- **`all`** - Enable all middleware (convenience feature, includes `bundled-jq`)
 
-### JQ Middleware Requirements
+### JQ Middleware Options
 
-The `jq` middleware uses the bundled jq feature, which compiles jq from source. You need to install build tools:
+You can use the JQ middleware in two ways:
+
+#### Option 1: Using System JQ Library (`jq` feature)
+Uses your system's installed jq library. Install jq on your system:
+
+**macOS:**
+```bash
+brew install jq
+```
+
+**Ubuntu/Debian:**
+```bash
+sudo apt-get install libjq-dev
+```
+
+Then enable the `jq` feature:
+```toml
+[dependencies]
+drasi-middleware = { version = "0.3", features = ["jq"] }
+```
+
+#### Option 2: Bundled JQ (`bundled-jq` feature)
+Compiles jq from source during build. Requires build tools:
 
 **macOS:**
 ```bash
@@ -42,7 +65,13 @@ brew install autoconf automake libtool
 sudo apt-get install autoconf automake libtool flex bison
 ```
 
-**Note:** If you don't need JQ middleware, you can use other middleware without installing these tools.
+Then enable the `bundled-jq` feature:
+```toml
+[dependencies]
+drasi-middleware = { version = "0.3", features = ["bundled-jq"] }
+```
+
+**Note:** If you don't need JQ middleware, you can use other middleware without installing jq or these build tools.
 
 ## Middleware Development Guide
 

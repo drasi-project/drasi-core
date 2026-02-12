@@ -46,7 +46,7 @@ base64 = "0.22.0"        # Used by decoder
 hex = "0.4.3"            # Used by decoder
 urlencoding = "2.1.2"    # Used by decoder
 
-# Optional: only compiled when jq feature is enabled (always uses bundled)
+# Optional: only compiled when jq feature is enabled; use bundled-jq to compile from source
 jq-rs = { version = "0.4.1", optional = true }
 
 [dev-dependencies]
