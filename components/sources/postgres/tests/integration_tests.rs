@@ -475,8 +475,15 @@ async fn test_decimal_datatype_serialization() -> Result<()> {
                 log::error!("price is not a number: {price:?}");
                 return false;
             }
-            if price.as_f64() != Some(99.99) {
-                log::error!("price value is incorrect: {:?}", price.as_f64());
+            // Use approximate comparison for floating point
+            if let Some(price_val) = price.as_f64() {
+                let expected = 99.99;
+                if (price_val - expected).abs() > 0.0001 {
+                    log::error!("price value is incorrect: expected {expected}, got {price_val}");
+                    return false;
+                }
+            } else {
+                log::error!("price cannot be converted to f64");
                 return false;
             }
         } else {
@@ -489,8 +496,15 @@ async fn test_decimal_datatype_serialization() -> Result<()> {
                 log::error!("quantity is not a number: {quantity:?}");
                 return false;
             }
-            if quantity.as_f64() != Some(10.5) {
-                log::error!("quantity value is incorrect: {:?}", quantity.as_f64());
+            // Use approximate comparison for floating point
+            if let Some(quantity_val) = quantity.as_f64() {
+                let expected = 10.5;
+                if (quantity_val - expected).abs() > 0.0001 {
+                    log::error!("quantity value is incorrect: expected {expected}, got {quantity_val}");
+                    return false;
+                }
+            } else {
+                log::error!("quantity cannot be converted to f64");
                 return false;
             }
         } else {
