@@ -358,12 +358,14 @@ Each level is connected using explicit graph relationships (for example,
 
 Each `Room` node contains time-varying environmental properties:
 
-- `temperature`
-- `humidity`
-- `co2`
+| Property | Initial Value |
+|----------|---------------|
+| `temperature` | `72.0` |
+| `humidity` | `42.0` |
+| `co2` | `500.0` |
 
 These properties simulate sensor readings and are **continuously updated** during
-scenario execution using bounded random deltas.
+scenario execution with random deltas in the range **[-2.0, +2.0]** per event.
 
 ---
 
