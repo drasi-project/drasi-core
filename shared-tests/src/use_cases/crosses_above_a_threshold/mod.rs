@@ -30,6 +30,7 @@ use drasi_functions_cypher::CypherFunctionSet;
 use drasi_query_cypher::CypherParser;
 
 use self::data::get_bootstrap_data;
+use super::{contains_data, IGNORED_ROW_SIGNATURE};
 use crate::QueryTestConfig;
 
 mod data;
@@ -159,14 +160,18 @@ pub async fn crosses_above_a_threshold(config: &(impl QueryTestConfig + Send)) {
         // println!("Result - Invoice Status 10 days overdue: {:?}", result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "accountManagerName" => VariableValue::from(json!("Employee 01")),
-              "accountManagerEmail" => VariableValue::from(json!("emp_01@reflex.com")),
-              "customerName" => VariableValue::from(json!("Customer 01")),
-              "invoiceNumber" => VariableValue::from(json!("invoice_01"))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "accountManagerName" => VariableValue::from(json!("Employee 01")),
+                  "accountManagerEmail" => VariableValue::from(json!("emp_01@reflex.com")),
+                  "customerName" => VariableValue::from(json!("Customer 01")),
+                  "invoiceNumber" => VariableValue::from(json!("invoice_01"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     // Make invoice overdue by 11 days
@@ -237,14 +242,18 @@ pub async fn crosses_above_a_threshold(config: &(impl QueryTestConfig + Send)) {
         // println!("Result - Invoice Status PAID after 16 days: {:?}", result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Removing {
-            before: variablemap!(
-              "accountManagerName" => VariableValue::from(json!("Employee 01")),
-              "accountManagerEmail" => VariableValue::from(json!("emp_01@reflex.com")),
-              "customerName" => VariableValue::from(json!("Customer 01")),
-              "invoiceNumber" => VariableValue::from(json!("invoice_01"))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
+                  "accountManagerName" => VariableValue::from(json!("Employee 01")),
+                  "accountManagerEmail" => VariableValue::from(json!("emp_01@reflex.com")),
+                  "customerName" => VariableValue::from(json!("Customer 01")),
+                  "invoiceNumber" => VariableValue::from(json!("invoice_01"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }
 
@@ -359,13 +368,19 @@ pub async fn crosses_above_a_threshold_with_overdue_days(config: &(impl QueryTes
         // println!("Result - Invoice Status 10 days overdue: {:?}", result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Adding { after: variablemap!(
-        "accountManagerName" => VariableValue::from(json!("Employee 01")),
-        "accountManagerEmail" => VariableValue::from(json!("emp_01@reflex.com")),
-        "customerName" => VariableValue::from(json!("Customer 01")),
-        "invoiceNumber" => VariableValue::from(json!("invoice_01")),
-        "overdueDays" => VariableValue::Duration(Duration::new(chrono::Duration::days(10), 0, 0))
-      )}));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "accountManagerName" => VariableValue::from(json!("Employee 01")),
+                  "accountManagerEmail" => VariableValue::from(json!("emp_01@reflex.com")),
+                  "customerName" => VariableValue::from(json!("Customer 01")),
+                  "invoiceNumber" => VariableValue::from(json!("invoice_01")),
+                  "overdueDays" => VariableValue::Duration(Duration::new(chrono::Duration::days(10), 0, 0))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     // Make invoice overdue by 11 days
@@ -390,20 +405,26 @@ pub async fn crosses_above_a_threshold_with_overdue_days(config: &(impl QueryTes
         // println!("Result - Invoice Status 11 days overdue: {:?}", result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Updating { before: variablemap!(
-        "accountManagerName" => VariableValue::from(json!("Employee 01")),
-        "accountManagerEmail" => VariableValue::from(json!("emp_01@reflex.com")),
-        "customerName" => VariableValue::from(json!("Customer 01")),
-        "invoiceNumber" => VariableValue::from(json!("invoice_01")),
-        "overdueDays" => VariableValue::Duration(Duration::new(chrono::Duration::days(10), 0, 0))
-      ),
-      after: variablemap!(
-        "accountManagerName" => VariableValue::from(json!("Employee 01")),
-        "accountManagerEmail" => VariableValue::from(json!("emp_01@reflex.com")),
-        "customerName" => VariableValue::from(json!("Customer 01")),
-        "invoiceNumber" => VariableValue::from(json!("invoice_01")),
-        "overdueDays" => VariableValue::Duration(Duration::new(chrono::Duration::days(11), 0, 0))
-    )}));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                  "accountManagerName" => VariableValue::from(json!("Employee 01")),
+                  "accountManagerEmail" => VariableValue::from(json!("emp_01@reflex.com")),
+                  "customerName" => VariableValue::from(json!("Customer 01")),
+                  "invoiceNumber" => VariableValue::from(json!("invoice_01")),
+                  "overdueDays" => VariableValue::Duration(Duration::new(chrono::Duration::days(10), 0, 0))
+                ),
+                after: variablemap!(
+                    "accountManagerName" => VariableValue::from(json!("Employee 01")),
+                    "accountManagerEmail" => VariableValue::from(json!("emp_01@reflex.com")),
+                    "customerName" => VariableValue::from(json!("Customer 01")),
+                    "invoiceNumber" => VariableValue::from(json!("invoice_01")),
+                    "overdueDays" => VariableValue::Duration(Duration::new(chrono::Duration::days(11), 0, 0))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     // Make invoice overdue by 15 days
@@ -428,20 +449,26 @@ pub async fn crosses_above_a_threshold_with_overdue_days(config: &(impl QueryTes
         // println!("Result - Invoice Status 15 days overdue: {:?}", result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Updating { before: variablemap!(
-      "accountManagerName" => VariableValue::from(json!("Employee 01")),
-      "accountManagerEmail" => VariableValue::from(json!("emp_01@reflex.com")),
-      "customerName" => VariableValue::from(json!("Customer 01")),
-      "invoiceNumber" => VariableValue::from(json!("invoice_01")),
-      "overdueDays" => VariableValue::Duration(Duration::new(chrono::Duration::days(11), 0, 0))
-    ),
-    after: variablemap!(
-      "accountManagerName" => VariableValue::from(json!("Employee 01")),
-      "accountManagerEmail" => VariableValue::from(json!("emp_01@reflex.com")),
-      "customerName" => VariableValue::from(json!("Customer 01")),
-      "invoiceNumber" => VariableValue::from(json!("invoice_01")),
-      "overdueDays" => VariableValue::Duration(Duration::new(chrono::Duration::days(15), 0, 0))
-    )}));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                  "accountManagerName" => VariableValue::from(json!("Employee 01")),
+                  "accountManagerEmail" => VariableValue::from(json!("emp_01@reflex.com")),
+                  "customerName" => VariableValue::from(json!("Customer 01")),
+                  "invoiceNumber" => VariableValue::from(json!("invoice_01")),
+                  "overdueDays" => VariableValue::Duration(Duration::new(chrono::Duration::days(11), 0, 0))
+                ),
+                after: variablemap!(
+                  "accountManagerName" => VariableValue::from(json!("Employee 01")),
+                  "accountManagerEmail" => VariableValue::from(json!("emp_01@reflex.com")),
+                  "customerName" => VariableValue::from(json!("Customer 01")),
+                  "invoiceNumber" => VariableValue::from(json!("invoice_01")),
+                  "overdueDays" => VariableValue::Duration(Duration::new(chrono::Duration::days(15), 0, 0))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     // Make invoice PAID after 16 days
@@ -466,12 +493,18 @@ pub async fn crosses_above_a_threshold_with_overdue_days(config: &(impl QueryTes
         // println!("Result - Invoice Status PAID after 16 days: {:?}", result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Removing { before: variablemap!(
-      "accountManagerName" => VariableValue::from(json!("Employee 01")),
-      "accountManagerEmail" => VariableValue::from(json!("emp_01@reflex.com")),
-      "customerName" => VariableValue::from(json!("Customer 01")),
-      "invoiceNumber" => VariableValue::from(json!("invoice_01")),
-      "overdueDays" => VariableValue::Duration(Duration::new(chrono::Duration::days(15), 0, 0))
-    )}));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
+                  "accountManagerName" => VariableValue::from(json!("Employee 01")),
+                  "accountManagerEmail" => VariableValue::from(json!("emp_01@reflex.com")),
+                  "customerName" => VariableValue::from(json!("Customer 01")),
+                  "invoiceNumber" => VariableValue::from(json!("invoice_01")),
+                  "overdueDays" => VariableValue::Duration(Duration::new(chrono::Duration::days(15), 0, 0))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }

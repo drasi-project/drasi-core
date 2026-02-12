@@ -179,17 +179,17 @@ impl ResultEvent {
 
         for ctx in data {
             match ctx {
-                QueryPartEvaluationContext::Adding { after } => {
+                QueryPartEvaluationContext::Adding { after, .. } => {
                     added_results.push(variables_to_json(after));
                 }
-                QueryPartEvaluationContext::Updating { before, after } => {
+                QueryPartEvaluationContext::Updating { before, after, .. } => {
                     updated_results.push(UpdatePayload {
                         before: Some(variables_to_json(before)),
                         after: Some(variables_to_json(after)),
                         grouping_keys: None,
                     });
                 }
-                QueryPartEvaluationContext::Removing { before } => {
+                QueryPartEvaluationContext::Removing { before, .. } => {
                     deleted_results.push(variables_to_json(before));
                 }
                 QueryPartEvaluationContext::Aggregation {

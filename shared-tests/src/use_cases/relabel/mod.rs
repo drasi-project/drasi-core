@@ -29,6 +29,7 @@ use drasi_core::{
 use drasi_functions_cypher::CypherFunctionSet;
 use drasi_query_cypher::CypherParser;
 
+use super::{contains_data, IGNORED_ROW_SIGNATURE};
 use crate::QueryTestConfig;
 
 mod queries;
@@ -84,13 +85,17 @@ pub async fn relabel(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
         println!("Node Result - Add Person (should be User): {result:?}");
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-                "userName" => VariableValue::from(json!("John Doe")),
-                "userEmail" => VariableValue::from(json!("john.doe@example.com")),
-                "userRole" => VariableValue::from(json!("Developer"))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                    "userName" => VariableValue::from(json!("John Doe")),
+                    "userEmail" => VariableValue::from(json!("john.doe@example.com")),
+                    "userRole" => VariableValue::from(json!("Developer"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     // Insert an Employee node (should be relabeled to Staff)
@@ -142,18 +147,22 @@ pub async fn relabel(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
         println!("Node Result - Update Person: {result:?}");
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {
-            before: variablemap!(
-                "userName" => VariableValue::from(json!("John Doe")),
-                "userEmail" => VariableValue::from(json!("john.doe@example.com")),
-                "userRole" => VariableValue::from(json!("Developer"))
-            ),
-            after: variablemap!(
-                "userName" => VariableValue::from(json!("John Doe")),
-                "userEmail" => VariableValue::from(json!("john.doe@company.com")),
-                "userRole" => VariableValue::from(json!("Senior Developer"))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                    "userName" => VariableValue::from(json!("John Doe")),
+                    "userEmail" => VariableValue::from(json!("john.doe@example.com")),
+                    "userRole" => VariableValue::from(json!("Developer"))
+                ),
+                after: variablemap!(
+                    "userName" => VariableValue::from(json!("John Doe")),
+                    "userEmail" => VariableValue::from(json!("john.doe@company.com")),
+                    "userRole" => VariableValue::from(json!("Senior Developer"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     // Insert a node with multiple labels (Person and Employee)
@@ -180,13 +189,17 @@ pub async fn relabel(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
         println!("Node Result - Add Person+Employee (becomes User+Staff): {result:?}");
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-                "userName" => VariableValue::from(json!("Alice Johnson")),
-                "userEmail" => VariableValue::from(json!("alice@example.com")),
-                "userRole" => VariableValue::from(json!("Lead"))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                    "userName" => VariableValue::from(json!("Alice Johnson")),
+                    "userEmail" => VariableValue::from(json!("alice@example.com")),
+                    "userRole" => VariableValue::from(json!("Lead"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     // Insert a Company node (should be relabeled to Organization)
@@ -231,13 +244,17 @@ pub async fn relabel(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
         println!("Node Result - Delete Person: {result:?}");
-        assert!(result.contains(&QueryPartEvaluationContext::Removing {
-            before: variablemap!(
-                "userName" => VariableValue::from(json!("John Doe")),
-                "userEmail" => VariableValue::from(json!("john.doe@company.com")),
-                "userRole" => VariableValue::from(json!("Senior Developer"))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
+                    "userName" => VariableValue::from(json!("John Doe")),
+                    "userEmail" => VariableValue::from(json!("john.doe@company.com")),
+                    "userRole" => VariableValue::from(json!("Senior Developer"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     // Insert a node with an unmapped label (should remain unchanged)
