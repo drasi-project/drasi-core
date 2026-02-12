@@ -459,6 +459,10 @@ async fn test_decimal_datatype_serialization() -> Result<()> {
     core.start().await?;
 
     // Insert a row with decimal values
+    // Using different precisions to test that NUMERIC columns handle various decimal formats
+    // price: NUMERIC(10, 2) -> 99.99
+    // quantity: NUMERIC(15, 4) -> 10.5000
+    // total: NUMERIC(20, 6) -> 1049.895000
     insert_decimal_test_row(&client, DECIMAL_TABLE, 1, "99.99", "10.5000", "1049.895000").await?;
 
     // Wait for the query results to contain the inserted row
