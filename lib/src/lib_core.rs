@@ -124,7 +124,7 @@ use drasi_core::middleware::MiddlewareTypeRegistry;
 ///
 /// // Remove components
 /// core.remove_query("new-query").await?;
-/// core.remove_source("new-source").await?;
+/// core.remove_source("new-source", false).await?;
 /// # Ok(())
 /// # }
 /// ```

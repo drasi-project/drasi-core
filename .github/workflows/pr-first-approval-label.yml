@@ -12,70 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: Label PR on First Approval
+# Stage 1 of a two-stage workflow. The pull_request_review event runs with a
+# read-only GITHUB_TOKEN for fork PRs, so this workflow only saves the PR
+# number as an artifact. The privileged labeling logic lives in
+# pr-first-approval-label-run.yml, which triggers via workflow_run and
+# executes in the base-repo context with write permissions.
+
+name: PR Review Trigger
 
 on:
   pull_request_review:
     types: [submitted]
 
 jobs:
-  add-awaiting-review-label:
+  save-pr-number:
     if: github.event.review.state == 'approved'
     runs-on: ubuntu-latest
-    permissions:
-      pull-requests: write
     steps:
-      - name: Check approval count and add label
-        uses: actions/github-script@v7
+      - name: Save PR number
+        run: echo "${{ github.event.pull_request.number }}" > pr_number.txt
+
+      - name: Upload PR number
+        uses: actions/upload-artifact@v4
         with:
-          script: |
-            const { owner, repo } = context.repo;
-            const prNumber = context.payload.pull_request.number;
-
-            // Get all reviews for this PR
-            const reviews = await github.rest.pulls.listReviews({
-              owner,
-              repo,
-              pull_number: prNumber,
-            });
-
-            // Count unique approvals (latest review per user)
-            const latestReviewByUser = new Map();
-            for (const review of reviews.data) {
-              const existing = latestReviewByUser.get(review.user.login);
-              if (!existing || new Date(review.submitted_at) > new Date(existing.submitted_at)) {
-                latestReviewByUser.set(review.user.login, review);
-              }
-            }
-
-            const approvalCount = Array.from(latestReviewByUser.values())
-              .filter(r => r.state === 'APPROVED').length;
-
-            console.log(`PR #${prNumber} has ${approvalCount} approval(s)`);
-
-            // Add label if exactly 1 approval (first approval just happened)
-            if (approvalCount === 1) {
-              await github.rest.issues.addLabels({
-                owner,
-                repo,
-                issue_number: prNumber,
-                labels: ['need-2nd-review']
-              });
-              console.log('Added "need-2nd-review" label');
-            }
-
-            // Remove label if 2+ approvals (PR is fully approved)
-            if (approvalCount >= 2) {
-              try {
-                await github.rest.issues.removeLabel({
-                  owner,
-                  repo,
-                  issue_number: prNumber,
-                  name: 'need-2nd-review'
-                });
-                console.log('Removed "need-2nd-review" label');
-              } catch (e) {
-                // Label might not exist, that's fine
-                if (e.status !== 404) throw e;
-              }
-            }
+          name: review-info
+          path: pr_number.txt

@@ -482,9 +482,12 @@ core.add_reaction(new_reaction).await?;
 core.add_query(query_config).await?;
 
 // Remove components
-core.remove_source("my-source").await?;
+core.remove_source("my-source", false).await?;
 core.remove_query("my-query").await?;
-core.remove_reaction("my-reaction").await?;
+core.remove_reaction("my-reaction", false).await?;
+
+// Remove with cleanup (calls deprovision on the component)
+core.remove_source("my-source", true).await?;
 
 // Inspection
 let sources = core.list_sources().await?;
