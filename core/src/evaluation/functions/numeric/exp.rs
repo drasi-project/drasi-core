@@ -39,38 +39,46 @@ impl ScalarFunction for Exp {
         }
         match &args[0] {
             VariableValue::Null => Ok(VariableValue::Null),
-            VariableValue::Integer(n) => match n.as_i64() {
-                Some(i) => {
-                    let result = (i as f64).exp();
-                    match Float::from_f64(result) {
-                        Some(f) => Ok(VariableValue::Float(f)),
-                        None => Err(FunctionError {
+            VariableValue::Integer(n) => {
+                let value = match n.as_i64() {
+                    Some(i) => (i as f64).exp(),
+                    None => {
+                        return Err(FunctionError {
                             function_name: expression.name.to_string(),
                             error: FunctionEvaluationError::OverflowError,
-                        }),
+                        })
                     }
-                }
-                None => Err(FunctionError {
-                    function_name: expression.name.to_string(),
-                    error: FunctionEvaluationError::OverflowError,
-                }),
-            },
-            VariableValue::Float(n) => match n.as_f64() {
-                Some(f) => {
-                    let result = f.exp();
-                    match Float::from_f64(result) {
-                        Some(f) => Ok(VariableValue::Float(f)),
-                        None => Err(FunctionError {
+                };
+                Ok(VariableValue::Float(match Float::from_f64(value) {
+                    Some(f) => f,
+                    None => {
+                        return Err(FunctionError {
                             function_name: expression.name.to_string(),
                             error: FunctionEvaluationError::OverflowError,
-                        }),
+                        })
                     }
-                }
-                None => Err(FunctionError {
-                    function_name: expression.name.to_string(),
-                    error: FunctionEvaluationError::OverflowError,
-                }),
-            },
+                }))
+            }
+            VariableValue::Float(n) => {
+                let value = match n.as_f64() {
+                    Some(f) => f.exp(),
+                    None => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                };
+                Ok(VariableValue::Float(match Float::from_f64(value) {
+                    Some(f) => f,
+                    None => {
+                        return Err(FunctionError {
+                            function_name: expression.name.to_string(),
+                            error: FunctionEvaluationError::OverflowError,
+                        })
+                    }
+                }))
+            }
             _ => Err(FunctionError {
                 function_name: expression.name.to_string(),
                 error: FunctionEvaluationError::InvalidArgument(0),

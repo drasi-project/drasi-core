@@ -17,9 +17,9 @@ use std::sync::Arc;
 use crate::evaluation::context::QueryVariables;
 use crate::evaluation::functions::numeric::E;
 use crate::evaluation::functions::ScalarFunction;
-use crate::evaluation::variable_value::float::Float;
 use crate::evaluation::variable_value::VariableValue;
 use crate::evaluation::{ExpressionEvaluationContext, InstantQueryClock};
+use crate::evaluation::{FunctionError, FunctionEvaluationError};
 use drasi_query_ast::ast;
 
 #[tokio::test]
@@ -60,7 +60,6 @@ async fn test_e_arg_count() {
         )
         .await;
 
-    use crate::evaluation::{FunctionError, FunctionEvaluationError};
     assert!(matches!(
         result.unwrap_err(),
         FunctionError {

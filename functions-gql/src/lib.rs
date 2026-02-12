@@ -65,7 +65,6 @@ fn register_text_functions(registry: &FunctionRegistry) {
 fn register_numeric_functions(registry: &FunctionRegistry) {
     registry.register_function("abs", Function::Scalar(Arc::new(Abs {})));
     registry.register_function("ceil", Function::Scalar(Arc::new(Ceil {})));
-    registry.register_function("e", Function::Scalar(Arc::new(E {})));
     registry.register_function("exp", Function::Scalar(Arc::new(Exp {})));
     registry.register_function("floor", Function::Scalar(Arc::new(Floor {})));
     registry.register_function("round", Function::Scalar(Arc::new(Round {})));

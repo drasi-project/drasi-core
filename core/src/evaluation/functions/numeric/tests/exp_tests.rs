@@ -17,13 +17,14 @@ use std::sync::Arc;
 use crate::evaluation::context::QueryVariables;
 use crate::evaluation::functions::numeric::Exp;
 use crate::evaluation::functions::ScalarFunction;
-use crate::evaluation::variable_value::float::Float;
 use crate::evaluation::variable_value::VariableValue;
-use crate::evaluation::{ExpressionEvaluationContext, FunctionEvaluationError, InstantQueryClock};
+use crate::evaluation::{
+    ExpressionEvaluationContext, FunctionError, FunctionEvaluationError, InstantQueryClock,
+};
 use drasi_query_ast::ast;
 
 #[tokio::test]
-async fn test_exp() {
+async fn test_exp_zero() {
     let func = Exp {};
     let binding = QueryVariables::new();
     let context =
@@ -43,7 +44,20 @@ async fn test_exp() {
         )
         .await
         .unwrap();
-    assert_eq!(result, VariableValue::Float(Float::from_f64(1.0).unwrap()));
+    assert_eq!(result, VariableValue::Float(1.0.into()));
+}
+
+#[tokio::test]
+async fn test_exp_integer() {
+    let func = Exp {};
+    let binding = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
+    let expression = ast::FunctionExpression {
+        name: Arc::from("exp"),
+        args: vec![],
+        position_in_query: 0,
+    };
 
     // Test with integer 1
     let result = func
@@ -56,24 +70,50 @@ async fn test_exp() {
         .unwrap();
     assert_eq!(
         result,
-        VariableValue::Float(Float::from_f64(std::f64::consts::E).unwrap())
+        VariableValue::Float(std::f64::consts::E.into())
     );
+}
+
+#[tokio::test]
+async fn test_exp_float() {
+    let func = Exp {};
+    let binding = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
+    let expression = ast::FunctionExpression {
+        name: Arc::from("exp"),
+        args: vec![],
+        position_in_query: 0,
+    };
 
     // Test with float
     let result = func
         .call(
             &context,
             &expression,
-            vec![VariableValue::Float(Float::from_f64(2.0).unwrap())],
+            vec![VariableValue::Float(2.0.into())],
         )
         .await
         .unwrap();
     match result {
         VariableValue::Float(f) => {
-            assert!((f.as_f64().unwrap() - std::f64::consts::E.powf(2.0)).abs() < 1e-10);
+            assert_eq!(f.as_f64().unwrap(), (2.0f64).exp());
         }
         _ => panic!("Expected float result"),
     }
+}
+
+#[tokio::test]
+async fn test_exp_negative() {
+    let func = Exp {};
+    let binding = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&binding, Arc::new(InstantQueryClock::new(0, 0)));
+    let expression = ast::FunctionExpression {
+        name: Arc::from("exp"),
+        args: vec![],
+        position_in_query: 0,
+    };
 
     // Test with negative integer (-1)
     let result = func
@@ -87,7 +127,7 @@ async fn test_exp() {
     match result {
         VariableValue::Float(f) => {
             // exp(-1) = 1/e
-            assert!((f.as_f64().unwrap() - (-1.0f64).exp()).abs() < 1e-10);
+            assert_eq!(f.as_f64().unwrap(), (-1.0f64).exp());
         }
         _ => panic!("Expected float result for negative input"),
     }
@@ -156,7 +196,7 @@ async fn test_exp_arg_count() {
     let result = func
         .call(&context, &expression, vec![])
         .await;
-    use crate::evaluation::{FunctionError, FunctionEvaluationError};
+
     assert!(matches!(
         result.unwrap_err(),
         FunctionError {
