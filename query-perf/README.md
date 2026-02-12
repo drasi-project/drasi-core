@@ -11,8 +11,8 @@ Before running these scenarios, ensure the following requirements are met.
 
 ## Rust Toolchain
 
-- You need the latest stable release of Rust, which includes `cargo` (the package manager and build tool).
-- Recommended version: latest stable
+- This project uses Rust 1.88.0 (pinned in `rust-toolchain.toml`). If you have [rustup](https://rustup.rs/) installed, the correct version will be selected automatically.
+- Verify with:
 - Verify with:
   ```bash
   rustc --version
