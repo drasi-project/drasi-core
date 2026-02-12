@@ -482,9 +482,12 @@ core.add_reaction(new_reaction).await?;
 core.add_query(query_config).await?;
 
 // Remove components
-core.remove_source("my-source").await?;
+core.remove_source("my-source", false).await?;
 core.remove_query("my-query").await?;
-core.remove_reaction("my-reaction").await?;
+core.remove_reaction("my-reaction", false).await?;
+
+// Remove with cleanup (calls deprovision on the component)
+core.remove_source("my-source", true).await?;
 
 // Inspection
 let sources = core.list_sources().await?;
@@ -666,11 +669,117 @@ let core = DrasiLib::builder()
 - **Channel mode**: Provides backpressure but may block senders
 - Check `dispatch_buffer_capacity` and `priority_queue_capacity` settings
 
-### Debug Logging
+---
+
+## Logging
+
+DrasiLib provides a component-aware logging system that routes logs to per-component streams, enabling you to subscribe to and monitor logs from specific sources, queries, and reactions.
+
+### Initializing Logging
+
+**Important:** You must initialize DrasiLib's logging **before** any other logger is set up in your application.
+
+#### Option 1: Default Logger (stderr output)
 
 ```rust
-std::env::set_var("RUST_LOG", "drasi_lib=debug");
-env_logger::init();
+use drasi_lib::init_logging;
+
+fn main() {
+    // Initialize DrasiLib logging first, before any other logger
+    init_logging();
+    
+    // Now create and use DrasiLib...
+}
+```
+
+#### Option 2: Specify Log Level
+
+```rust
+use drasi_lib::init_logging_with_level;
+
+fn main() {
+    init_logging_with_level(log::LevelFilter::Debug);
+    
+    // Now create and use DrasiLib...
+}
+```
+
+#### Option 3: Wrap Your Own Logger
+
+If you need custom log formatting, file output, or other features from your preferred logging framework, you can wrap your logger with DrasiLib's component-aware logging:
+
+```rust
+use drasi_lib::init_logging_with_logger;
+
+fn main() {
+    // Create your logger but DON'T install it directly
+    let my_logger = env_logger::Builder::from_default_env()
+        .format_timestamp_millis()
+        .build();
+    
+    // Let DrasiLib wrap it with component logging support
+    init_logging_with_logger(my_logger, log::LevelFilter::Debug);
+    
+    // Now both your logger AND component log streaming work!
+}
+```
+
+### Non-Panicking Variants
+
+If you need to handle initialization failures gracefully:
+
+```rust
+use drasi_lib::{try_init_logging, try_init_logging_with_logger};
+
+// Returns Err if another logger is already set
+if let Err(e) = try_init_logging() {
+    eprintln!("Warning: Could not initialize Drasi logging: {}", e);
+}
+```
+
+### Subscribing to Component Logs
+
+Once DrasiLib is running, you can subscribe to logs from specific components:
+
+```rust
+// Subscribe to source logs
+let (history, mut receiver) = core.subscribe_source_logs("my-source").await?;
+
+// `history` contains recent log messages
+for log in history {
+    println!("[{}] {}: {}", log.level, log.component_id, log.message);
+}
+
+// `receiver` streams new log messages in real-time
+while let Ok(log) = receiver.recv().await {
+    println!("[LIVE] {}: {}", log.level, log.message);
+}
+```
+
+Similar methods exist for queries and reactions:
+
+```rust
+let (history, receiver) = core.subscribe_query_logs("my-query").await?;
+let (history, receiver) = core.subscribe_reaction_logs("my-reaction").await?;
+```
+
+### How Component Logging Works
+
+1. **Standard `log::info!()`, `log::debug!()`, etc. macros work automatically** within component contexts
+2. When code runs inside a source, query, or reaction task, logs are routed to that component's log stream
+3. Logs are also forwarded to your logger (or stderr) for normal output
+4. Subscribers receive logs in real-time via broadcast channels
+
+### Log Message Structure
+
+```rust
+pub struct LogMessage {
+    pub timestamp: DateTime<Utc>,
+    pub level: LogLevel,        // Trace, Debug, Info, Warn, Error
+    pub message: String,
+    pub component_id: String,   // e.g., "my-source", "my-query"
+    pub component_type: ComponentType,  // Source, Query, or Reaction
+}
 ```
 
 ---

@@ -21,27 +21,42 @@ use tokio::sync::RwLock;
 use crate::channels::*;
 use crate::config::ReactionRuntime;
 use crate::context::ReactionRuntimeContext;
-use crate::managers::{is_operation_valid, log_component_error, Operation};
+use crate::managers::{
+    is_operation_valid, log_component_error, ComponentEventHistory, ComponentLogKey,
+    ComponentLogRegistry, Operation,
+};
 use crate::reactions::{QueryProvider, Reaction};
 use crate::state_store::StateStoreProvider;
 
 pub struct ReactionManager {
+    instance_id: String,
     reactions: Arc<RwLock<HashMap<String, Arc<dyn Reaction>>>>,
     event_tx: ComponentEventSender,
     /// Query provider for reactions to access queries (injected after DrasiLib is constructed)
     query_provider: Arc<RwLock<Option<Arc<dyn QueryProvider>>>>,
     /// State store provider for reactions to persist state
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
+    /// Event history for tracking component lifecycle events
+    event_history: Arc<RwLock<ComponentEventHistory>>,
+    /// Log registry for component log streaming
+    log_registry: Arc<ComponentLogRegistry>,
 }
 
 impl ReactionManager {
     /// Create a new ReactionManager
-    pub fn new(event_tx: ComponentEventSender) -> Self {
+    pub fn new(
+        instance_id: impl Into<String>,
+        event_tx: ComponentEventSender,
+        log_registry: Arc<ComponentLogRegistry>,
+    ) -> Self {
         Self {
+            instance_id: instance_id.into(),
             reactions: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
             query_provider: Arc::new(RwLock::new(None)),
             state_store: Arc::new(RwLock::new(None)),
+            event_history: Arc::new(RwLock::new(ComponentEventHistory::new())),
+            log_registry,
         }
     }
 
@@ -93,6 +108,7 @@ impl ReactionManager {
 
         // Construct runtime context for this reaction
         let context = ReactionRuntimeContext::new(
+            &self.instance_id,
             &reaction_id,
             self.event_tx.clone(),
             self.state_store.read().await.clone(),
@@ -180,14 +196,15 @@ impl ReactionManager {
 
         if let Some(reaction) = reaction {
             let status = reaction.status().await;
+            let error_message = match &status {
+                ComponentStatus::Error => self.event_history.read().await.get_last_error(&id),
+                _ => None,
+            };
             let runtime = ReactionRuntime {
                 id: reaction.id().to_string(),
                 reaction_type: reaction.type_name().to_string(),
                 status: status.clone(),
-                error_message: match &status {
-                    ComponentStatus::Error => Some("Reaction error occurred".to_string()),
-                    _ => None,
-                },
+                error_message,
                 queries: reaction.query_ids(),
                 properties: reaction.properties(),
             };
@@ -197,7 +214,7 @@ impl ReactionManager {
         }
     }
 
-    pub async fn delete_reaction(&self, id: String) -> Result<()> {
+    pub async fn delete_reaction(&self, id: String, cleanup: bool) -> Result<()> {
         // First check if the reaction exists
         let reaction = {
             let reactions = self.reactions.read().await;
@@ -227,9 +244,135 @@ impl ReactionManager {
                 is_operation_valid(&status, &Operation::Delete).map_err(|e| anyhow::anyhow!(e))?;
             }
 
+            // Call deprovision if cleanup is requested
+            if cleanup {
+                if let Err(e) = reaction.deprovision().await {
+                    tracing::warn!("Deprovision failed for reaction '{id}': {e}");
+                }
+            }
+
             // Now remove the reaction
             self.reactions.write().await.remove(&id);
+            // Clean up event history for this reaction
+            self.event_history.write().await.remove_component(&id);
+            // Clean up log registry for this reaction
+            let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Reaction, &id);
+            self.log_registry.remove_component_by_key(&log_key).await;
             info!("Deleted reaction: {id}");
+
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Reaction not found: {id}"))
+        }
+    }
+
+    /// Update a reaction by replacing it with a new instance.
+    ///
+    /// Flow: validate exists → validate status → emit Reconfiguring event →
+    /// stop if running/starting → wait for stopped → initialize new →
+    /// replace (if still exists) → restart if was running.
+    /// Log and event history are preserved.
+    pub async fn update_reaction(
+        &self,
+        id: String,
+        new_reaction: impl Reaction + 'static,
+    ) -> Result<()> {
+        let old_reaction = {
+            let reactions = self.reactions.read().await;
+            reactions.get(&id).cloned()
+        };
+
+        if let Some(old_reaction) = old_reaction {
+            // Verify the new reaction has the same ID
+            if new_reaction.id() != id {
+                return Err(anyhow::anyhow!(
+                    "New reaction ID '{}' does not match existing reaction ID '{}'",
+                    new_reaction.id(),
+                    id
+                ));
+            }
+
+            let status = old_reaction.status().await;
+            let was_running =
+                matches!(status, ComponentStatus::Running | ComponentStatus::Starting);
+
+            // Validate that update is allowed in the current state
+            if was_running {
+                // Running/Starting components will be stopped, then validated
+            } else {
+                is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
+            }
+
+            // Emit Reconfiguring event
+            let _ = self
+                .event_tx
+                .send(ComponentEvent {
+                    component_id: id.clone(),
+                    component_type: ComponentType::Reaction,
+                    status: ComponentStatus::Reconfiguring,
+                    timestamp: chrono::Utc::now(),
+                    message: Some("Reconfiguring reaction".to_string()),
+                })
+                .await;
+
+            // If running or starting, stop first then validate
+            if was_running {
+                info!("Stopping reaction '{id}' for reconfiguration");
+                old_reaction.stop().await?;
+
+                // Poll for Stopped status with timeout
+                let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
+                loop {
+                    let current = old_reaction.status().await;
+                    if matches!(current, ComponentStatus::Stopped | ComponentStatus::Error) {
+                        break;
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(anyhow::anyhow!(
+                            "Timed out waiting for reaction '{id}' to stop"
+                        ));
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                }
+
+                let status = old_reaction.status().await;
+                is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
+            }
+
+            // Initialize the new reaction with runtime context
+            let new_reaction: Arc<dyn Reaction> = Arc::new(new_reaction);
+            let query_provider = self.query_provider.read().await.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "QueryProvider not injected - was ReactionManager initialized properly?"
+                )
+            })?;
+            let context = ReactionRuntimeContext::new(
+                &self.instance_id,
+                &id,
+                self.event_tx.clone(),
+                self.state_store.read().await.clone(),
+                query_provider,
+            );
+            new_reaction.initialize(context).await;
+
+            // Replace in the reactions map only if the entry still exists
+            // (guards against concurrent deletion)
+            {
+                let mut reactions = self.reactions.write().await;
+                if !reactions.contains_key(&id) {
+                    return Err(anyhow::anyhow!(
+                        "Reaction '{id}' was concurrently deleted during reconfiguration"
+                    ));
+                }
+                reactions.insert(id.clone(), new_reaction);
+            }
+
+            info!("Reconfigured reaction '{id}'");
+
+            // Restart if it was running before
+            if was_running {
+                self.start_reaction(id).await?;
+            }
 
             Ok(())
         } else {
@@ -312,5 +455,72 @@ impl ReactionManager {
             }
         }
         Ok(())
+    }
+
+    /// Record a component event in the history.
+    ///
+    /// This should be called by the event processing loop to track component
+    /// lifecycle events for later querying.
+    pub async fn record_event(&self, event: ComponentEvent) {
+        self.event_history.write().await.record_event(event);
+    }
+
+    /// Get events for a specific reaction.
+    ///
+    /// Returns events in chronological order (oldest first).
+    pub async fn get_reaction_events(&self, id: &str) -> Vec<ComponentEvent> {
+        self.event_history.read().await.get_events(id)
+    }
+
+    /// Get all events across all reactions.
+    ///
+    /// Returns events sorted by timestamp (oldest first).
+    pub async fn get_all_events(&self) -> Vec<ComponentEvent> {
+        self.event_history.read().await.get_all_events()
+    }
+
+    /// Subscribe to live logs for a reaction.
+    ///
+    /// Returns the log history and a broadcast receiver for new logs.
+    /// Returns None if the reaction doesn't exist.
+    pub async fn subscribe_logs(
+        &self,
+        id: &str,
+    ) -> Option<(
+        Vec<crate::managers::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
+    )> {
+        // Verify the reaction exists
+        {
+            let reactions = self.reactions.read().await;
+            if !reactions.contains_key(id) {
+                return None;
+            }
+        }
+
+        let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Reaction, id);
+        Some(self.log_registry.subscribe_by_key(&log_key).await)
+    }
+
+    /// Subscribe to live events for a reaction.
+    ///
+    /// Returns the event history and a broadcast receiver for new events.
+    /// Returns None if the reaction doesn't exist.
+    pub async fn subscribe_events(
+        &self,
+        id: &str,
+    ) -> Option<(
+        Vec<ComponentEvent>,
+        tokio::sync::broadcast::Receiver<ComponentEvent>,
+    )> {
+        // Verify the reaction exists
+        {
+            let reactions = self.reactions.read().await;
+            if !reactions.contains_key(id) {
+                return None;
+            }
+        }
+
+        Some(self.event_history.write().await.subscribe(id))
     }
 }
