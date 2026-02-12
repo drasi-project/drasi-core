@@ -1263,6 +1263,7 @@ async fn test_route_with_none_falls_back_to_default() {
     let config = PostgresStoredProcReactionConfig {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
+        identity_provider: None,
         user: pg_config.user.clone(),
         password: pg_config.password.clone(),
         database: pg_config.database.clone(),
