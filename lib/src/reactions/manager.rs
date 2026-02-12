@@ -214,7 +214,7 @@ impl ReactionManager {
         }
     }
 
-    pub async fn delete_reaction(&self, id: String) -> Result<()> {
+    pub async fn delete_reaction(&self, id: String, cleanup: bool) -> Result<()> {
         // First check if the reaction exists
         let reaction = {
             let reactions = self.reactions.read().await;
@@ -244,6 +244,13 @@ impl ReactionManager {
                 is_operation_valid(&status, &Operation::Delete).map_err(|e| anyhow::anyhow!(e))?;
             }
 
+            // Call deprovision if cleanup is requested
+            if cleanup {
+                if let Err(e) = reaction.deprovision().await {
+                    tracing::warn!("Deprovision failed for reaction '{id}': {e}");
+                }
+            }
+
             // Now remove the reaction
             self.reactions.write().await.remove(&id);
             // Clean up event history for this reaction
@@ -252,6 +259,120 @@ impl ReactionManager {
             let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Reaction, &id);
             self.log_registry.remove_component_by_key(&log_key).await;
             info!("Deleted reaction: {id}");
+
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Reaction not found: {id}"))
+        }
+    }
+
+    /// Update a reaction by replacing it with a new instance.
+    ///
+    /// Flow: validate exists → validate status → emit Reconfiguring event →
+    /// stop if running/starting → wait for stopped → initialize new →
+    /// replace (if still exists) → restart if was running.
+    /// Log and event history are preserved.
+    pub async fn update_reaction(
+        &self,
+        id: String,
+        new_reaction: impl Reaction + 'static,
+    ) -> Result<()> {
+        let old_reaction = {
+            let reactions = self.reactions.read().await;
+            reactions.get(&id).cloned()
+        };
+
+        if let Some(old_reaction) = old_reaction {
+            // Verify the new reaction has the same ID
+            if new_reaction.id() != id {
+                return Err(anyhow::anyhow!(
+                    "New reaction ID '{}' does not match existing reaction ID '{}'",
+                    new_reaction.id(),
+                    id
+                ));
+            }
+
+            let status = old_reaction.status().await;
+            let was_running =
+                matches!(status, ComponentStatus::Running | ComponentStatus::Starting);
+
+            // Validate that update is allowed in the current state
+            if was_running {
+                // Running/Starting components will be stopped, then validated
+            } else {
+                is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
+            }
+
+            // Emit Reconfiguring event
+            let _ = self
+                .event_tx
+                .send(ComponentEvent {
+                    component_id: id.clone(),
+                    component_type: ComponentType::Reaction,
+                    status: ComponentStatus::Reconfiguring,
+                    timestamp: chrono::Utc::now(),
+                    message: Some("Reconfiguring reaction".to_string()),
+                })
+                .await;
+
+            // If running or starting, stop first then validate
+            if was_running {
+                info!("Stopping reaction '{id}' for reconfiguration");
+                old_reaction.stop().await?;
+
+                // Poll for Stopped status with timeout
+                let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
+                loop {
+                    let current = old_reaction.status().await;
+                    if matches!(current, ComponentStatus::Stopped | ComponentStatus::Error) {
+                        break;
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(anyhow::anyhow!(
+                            "Timed out waiting for reaction '{id}' to stop"
+                        ));
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                }
+
+                let status = old_reaction.status().await;
+                is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
+            }
+
+            // Initialize the new reaction with runtime context
+            let new_reaction: Arc<dyn Reaction> = Arc::new(new_reaction);
+            let query_provider = self.query_provider.read().await.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "QueryProvider not injected - was ReactionManager initialized properly?"
+                )
+            })?;
+            let context = ReactionRuntimeContext::new(
+                &self.instance_id,
+                &id,
+                self.event_tx.clone(),
+                self.state_store.read().await.clone(),
+                query_provider,
+            );
+            new_reaction.initialize(context).await;
+
+            // Replace in the reactions map only if the entry still exists
+            // (guards against concurrent deletion)
+            {
+                let mut reactions = self.reactions.write().await;
+                if !reactions.contains_key(&id) {
+                    return Err(anyhow::anyhow!(
+                        "Reaction '{id}' was concurrently deleted during reconfiguration"
+                    ));
+                }
+                reactions.insert(id.clone(), new_reaction);
+            }
+
+            info!("Reconfigured reaction '{id}'");
+
+            // Restart if it was running before
+            if was_running {
+                self.start_reaction(id).await?;
+            }
 
             Ok(())
         } else {

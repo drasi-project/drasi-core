@@ -454,6 +454,32 @@ impl ReactionBase {
             );
         }
 
+        *self.status.write().await = ComponentStatus::Stopped;
+        info!("Reaction '{}' stopped", self.id);
+
+        Ok(())
+    }
+
+    /// Clear the reaction's state store partition.
+    ///
+    /// This is called during deprovision to remove all persisted state
+    /// associated with this reaction. Reactions that override `deprovision()`
+    /// can call this to clean up their state store.
+    pub async fn deprovision_common(&self) -> Result<()> {
+        info!("Deprovisioning reaction '{}'", self.id);
+        if let Some(store) = self.state_store().await {
+            let count = store.clear_store(&self.id).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to clear state store for reaction '{}': {}",
+                    self.id,
+                    e
+                )
+            })?;
+            info!(
+                "Cleared {} keys from state store for reaction '{}'",
+                count, self.id
+            );
+        }
         Ok(())
     }
 

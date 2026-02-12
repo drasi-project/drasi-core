@@ -80,14 +80,14 @@ drasi-core = { version = "0.3.3", path = "core" }
 drasi-functions-cypher = { version = "0.3.3", path = "functions-cypher" }
 drasi-functions-gql = { version = "0.3.3", path = "functions-gql" }
 drasi-middleware = { version = "0.3.4", path = "middleware" }
-drasi-lib = { version = "0.3.5", path = "lib" }
+drasi-lib = { version = "0.3.6", path = "lib" }
 
 # Component plugins
-drasi-source-postgres = { version = "0.1.5", path = "components/sources/postgres" }
-drasi-source-application = { version = "0.1.5", path = "components/sources/application" }
-drasi-bootstrap-application = { version = "0.1.5", path = "components/bootstrappers/application" }
-drasi-reaction-http = { version = "0.1.6", path = "components/reactions/http" }
-drasi-reaction-grpc = { version = "0.2.3", path = "components/reactions/grpc" }
+drasi-source-postgres = { version = "0.1.6", path = "components/sources/postgres" }
+drasi-source-application = { version = "0.1.6", path = "components/sources/application" }
+drasi-bootstrap-application = { version = "0.1.6", path = "components/bootstrappers/application" }
+drasi-reaction-http = { version = "0.1.7", path = "components/reactions/http" }
+drasi-reaction-grpc = { version = "0.2.4", path = "components/reactions/grpc" }
 drasi-index-rocksdb = { version = "0.2.2", path = "components/indexes/rocksdb" }
 drasi-index-garnet = { version = "0.1.4", path = "components/indexes/garnet" }
 drasi-bootstrap-postgres = { path = "components/bootstrappers/postgres" }

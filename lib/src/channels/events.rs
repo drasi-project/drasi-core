@@ -162,6 +162,7 @@ pub enum ComponentStatus {
     Running,
     Stopping,
     Stopped,
+    Reconfiguring,
     Error,
 }
 

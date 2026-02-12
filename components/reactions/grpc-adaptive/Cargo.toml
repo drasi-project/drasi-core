@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-reaction-grpc-adaptive"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "gRPC Adaptive reaction plugin for Drasi"
