@@ -32,6 +32,7 @@ default = []
 
 # Middleware features (passed through to drasi-middleware)
 middleware-jq = ["drasi-middleware/jq"]
+middleware-bundled-jq = ["drasi-middleware/bundled-jq"]
 middleware-decoder = ["drasi-middleware/decoder"]
 middleware-map = ["drasi-middleware/map"]
 middleware-parse-json = ["drasi-middleware/parse_json"]
