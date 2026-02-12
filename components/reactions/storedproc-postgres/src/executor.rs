@@ -122,7 +122,7 @@ impl PostgresExecutor {
             None
         };
 
-        let is_cert_auth = credentials.as_ref().map_or(false, |c| c.is_certificate());
+        let is_cert_auth = credentials.as_ref().is_some_and(|c| c.is_certificate());
 
         // For username/password and token auth, extract the auth pair
         let (username, password) = if let Some(creds) = &credentials {
@@ -168,7 +168,9 @@ impl PostgresExecutor {
         // Connect to database with appropriate TLS configuration
         let client = if is_cert_auth {
             // Client certificate authentication (mTLS)
-            let (cert_pem, key_pem, _) = credentials.unwrap().into_certificate();
+            let (cert_pem, key_pem, _) = credentials
+                .expect("credentials must exist when is_cert_auth is true")
+                .into_certificate();
 
             let identity = native_tls::Identity::from_pkcs8(
                 cert_pem.as_bytes(),
