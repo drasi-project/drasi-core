@@ -27,7 +27,7 @@ pub trait Timestamped {
 /// Type of Drasi component
 ///
 /// Used for identifying component types in events and monitoring.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum ComponentType {
     Source,
     Query,
@@ -162,6 +162,7 @@ pub enum ComponentStatus {
     Running,
     Stopping,
     Stopped,
+    Reconfiguring,
     Error,
 }
 

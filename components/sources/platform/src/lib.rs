@@ -178,6 +178,7 @@ use drasi_lib::channels::{
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::manager::convert_json_to_element_properties;
 use drasi_lib::Source;
+use tracing::Instrument;
 
 #[cfg(test)]
 mod tests;
@@ -708,6 +709,7 @@ impl PlatformSource {
     /// Start the stream consumer task
     async fn start_consumer_task(
         source_id: String,
+        instance_id: String,
         platform_config: PlatformConfig,
         dispatchers: Arc<
             RwLock<
@@ -721,6 +723,13 @@ impl PlatformSource {
         event_tx: Arc<RwLock<Option<ComponentEventSender>>>,
         status: Arc<RwLock<ComponentStatus>>,
     ) -> JoinHandle<()> {
+        let source_id_for_span = source_id.clone();
+        let span = tracing::info_span!(
+            "platform_source_consumer",
+            instance_id = %instance_id,
+            component_id = %source_id_for_span,
+            component_type = "source"
+        );
         tokio::spawn(async move {
             info!(
                 "Starting platform source consumer for source '{}' on stream '{}'",
@@ -1062,7 +1071,7 @@ impl PlatformSource {
                     }
                 }
             }
-        })
+        }.instrument(span))
     }
 }
 
@@ -1135,9 +1144,18 @@ impl Source for PlatformSource {
         // Update status
         *self.base.status.write().await = ComponentStatus::Running;
 
+        // Get instance_id from context for log routing isolation
+        let instance_id = self
+            .base
+            .context()
+            .await
+            .map(|c| c.instance_id)
+            .unwrap_or_default();
+
         // Start consumer task
         let task = Self::start_consumer_task(
             self.base.id.clone(),
+            instance_id,
             platform_config,
             self.base.dispatchers.clone(),
             self.base.status_tx(),

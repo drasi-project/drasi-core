@@ -14,8 +14,14 @@
 
 //! Shared utilities for component managers (SourceManager, QueryManager, ReactionManager)
 
+mod component_log;
+mod event_history;
 mod logging;
 mod state_validation;
+mod tracing_layer;
 
+pub use component_log::*;
+pub use event_history::*;
 pub use logging::*;
 pub use state_validation::*;
+pub use tracing_layer::*;
