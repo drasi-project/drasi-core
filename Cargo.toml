@@ -12,6 +12,7 @@ members = [
 
   # Source Plugins
   "components/sources/postgres",
+  "components/sources/sqlite",
   "components/sources/http",
   "components/sources/grpc",
   "components/sources/platform",
@@ -20,6 +21,7 @@ members = [
 
   # Bootstrap Plugins
   "components/bootstrappers/postgres",
+  "components/bootstrappers/sqlite",
   "components/bootstrappers/platform",
   "components/bootstrappers/scriptfile",
   "components/bootstrappers/application",
