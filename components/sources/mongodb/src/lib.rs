@@ -2,12 +2,12 @@ pub mod config;
 pub mod stream;
 pub mod conversion;
 
+use url::Url;
 use anyhow::Result;
 use async_trait::async_trait;
 use log::{error, info};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::task::JoinHandle;
 
 use drasi_lib::channels::{ComponentEvent, ComponentStatus, ComponentType, SubscriptionResponse};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
@@ -19,14 +19,31 @@ use crate::stream::ReplicationStream;
 pub struct MongoSource {
     pub base: SourceBase,
     config: MongoSourceConfig,
+    shutdown_tx: Arc<tokio::sync::RwLock<Option<tokio::sync::broadcast::Sender<()>>>>,
 }
 
 impl MongoSource {
-    pub fn new(id: impl Into<String>, config: MongoSourceConfig) -> Result<Self> {
+    pub fn new(id: impl Into<String>, mut config: MongoSourceConfig) -> Result<Self> {
         let params = SourceBaseParams::new(id.into());
+        
+        // Resolve database if not provided
+        if config.database.is_none() {
+            if let Ok(url) = Url::parse(&config.connection_string) {
+                let path = url.path().trim_start_matches('/');
+                if !path.is_empty() {
+                    config.database = Some(path.to_string());
+                }
+            }
+        }
+        
+        if config.database.is_none() {
+            return Err(anyhow::anyhow!("Database name must be provided in config or connection string"));
+        }
+
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
+            shutdown_tx: Arc::new(tokio::sync::RwLock::new(None)),
         })
     }
 
@@ -47,9 +64,32 @@ impl Source for MongoSource {
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
         let mut props = HashMap::new();
-        props.insert("connection_string".to_string(), serde_json::Value::String(self.config.connection_string.clone()));
-        props.insert("database".to_string(), serde_json::Value::String(self.config.database.clone()));
-        props.insert("collection".to_string(), serde_json::Value::String(self.config.collection.clone()));
+        
+        let connection_string = if let Ok(mut url) = Url::parse(&self.config.connection_string) {
+            if url.password().is_some() {
+                 let _ = url.set_password(Some("REDACTED"));
+            }
+            if !url.username().is_empty() {
+                 let _ = url.set_username("REDACTED");
+            }
+            url.to_string()
+        } else {
+            "REDACTED".to_string()
+        };
+
+        props.insert("connection_string".to_string(), serde_json::Value::String(connection_string));
+        if let Some(db) = &self.config.database {
+            props.insert("database".to_string(), serde_json::Value::String(db.clone()));
+        }
+        let cols = self.config.get_collections();
+        props.insert("collections".to_string(), serde_json::Value::from(cols));
+        
+        if self.config.username.is_some() {
+            props.insert("username".to_string(), serde_json::Value::String("REDACTED".to_string()));
+        }
+        if self.config.password.is_some() {
+            props.insert("password".to_string(), serde_json::Value::String("REDACTED".to_string()));
+        }
         props
     }
 
@@ -63,8 +103,8 @@ impl Source for MongoSource {
         
         // validate config before starting
         if let Err(e) = self.config.validate() {
-            let msg = format!("Invalid configuration: {}", e);
-            error!("{}", msg);
+            let msg = format!("Invalid configuration: {e}");
+            error!("{msg}");
             self.base.set_status_with_event(ComponentStatus::Error, Some(msg)).await?;
             return Err(e);
         }
@@ -72,16 +112,23 @@ impl Source for MongoSource {
         let config = self.config.clone();
         let source_id = self.base.id.clone();
         let dispatchers = self.base.dispatchers.clone();
-        let status_tx = self.base.status_tx();
         let status_clone = self.base.status.clone();
+        let state_store = self.base.state_store().await;
+        
+        // Shutdown channel for the stream task
+        let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
+        *self.shutdown_tx.write().await = Some(shutdown_tx);
 
+        let status_tx = self.base.status_tx();
+        
         let task = tokio::spawn(async move {
             let mut stream = ReplicationStream::new(
                 config,
                 source_id.clone(),
                 dispatchers,
-                status_tx.clone(),
                 status_clone.clone(),
+                shutdown_rx,
+                state_store,
             );
             
             if let Err(e) = stream.run().await {
@@ -114,6 +161,10 @@ impl Source for MongoSource {
     }
 
     async fn stop(&self) -> Result<()> {
+        self.base.set_status(ComponentStatus::Stopping).await;
+        if let Some(tx) = self.shutdown_tx.read().await.as_ref() {
+            let _ = tx.send(());
+        }
         self.base.stop_common().await
     }
 
@@ -148,9 +199,12 @@ impl MongoSourceBuilder {
             id: id.into(),
             config: MongoSourceConfig {
                 connection_string: String::new(),
-                database: String::new(),
-                collection: String::new(),
+                database: None,
+                collection: None,
+                collections: Vec::new(),
                 pipeline: None,
+                username: None,
+                password: None,
             },
         }
     }
@@ -161,12 +215,27 @@ impl MongoSourceBuilder {
     }
 
     pub fn with_database(mut self, db: impl Into<String>) -> Self {
-        self.config.database = db.into();
+        self.config.database = Some(db.into());
         self
     }
 
     pub fn with_collection(mut self, col: impl Into<String>) -> Self {
-        self.config.collection = col.into();
+        self.config.collection = Some(col.into());
+        self
+    }
+    
+    pub fn with_collections(mut self, cols: Vec<String>) -> Self {
+        self.config.collections = cols;
+        self
+    }
+
+    pub fn with_username(mut self, username: impl Into<String>) -> Self {
+        self.config.username = Some(username.into());
+        self
+    }
+
+    pub fn with_password(mut self, password: impl Into<String>) -> Self {
+        self.config.password = Some(password.into());
         self
     }
     

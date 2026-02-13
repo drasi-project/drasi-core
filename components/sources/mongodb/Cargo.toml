@@ -27,3 +27,6 @@ drasi-lib = { path = "../../../lib", version = "0.3.3" }
 [dev-dependencies]
 testcontainers = "0.23"
 tokio-test = "0.4"
+drasi-query-cypher = { path = "../../../query-cypher", version = "0.3.2" }
+drasi-functions-cypher = { path = "../../../functions-cypher", version = "0.3.2" }
+

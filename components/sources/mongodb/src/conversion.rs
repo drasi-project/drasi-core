@@ -4,7 +4,6 @@ use drasi_core::models::{Element, ElementMetadata, ElementReference, ElementValu
 use mongodb::bson::{Bson, Document};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use ordered_float::OrderedFloat;
 
 pub fn bson_to_element_value(bson: Bson) -> Result<ElementValue> {
     match bson {
@@ -102,7 +101,7 @@ pub fn change_stream_event_to_source_change(
         other => other.to_string(), // Fallback for complex keys
     };
     
-    let element_id = format!("{}:{}", collection_name, id_str);
+    let element_id = format!("{collection_name}:{id_str}");
     let labels = Arc::from([Arc::from(collection_name)]);
     
     // Determine effective timestamp
@@ -149,20 +148,30 @@ pub fn change_stream_event_to_source_change(
             }))
         }
         mongodb::change_stream::event::OperationType::Update => {
-            let update_desc = event.update_description.ok_or_else(|| anyhow!("Missing update_description"))?;
-            let updated_fields = update_desc.updated_fields;
-            let removed_fields = update_desc.removed_fields;
-            
-            // Hydrate dot notation and handle removed fields
-            let hydrated_update = hydrate_dot_notation(&updated_fields, &removed_fields)?;
-            let properties = document_to_properties(&hydrated_update)?;
-            
-            Ok(Some(SourceChange::Update {
-                element: Element::Node {
-                    metadata,
-                    properties,
-                },
-            }))
+            if let Some(full_doc) = event.full_document {
+                let properties = document_to_properties(&full_doc)?;
+                Ok(Some(SourceChange::Update {
+                    element: Element::Node {
+                        metadata,
+                        properties,
+                    },
+                }))
+            } else {
+                let update_desc = event.update_description.ok_or_else(|| anyhow!("Missing update_description"))?;
+                let updated_fields = update_desc.updated_fields;
+                let removed_fields = update_desc.removed_fields;
+                
+                // Hydrate dot notation and handle removed fields
+                let hydrated_update = hydrate_dot_notation(&updated_fields, &removed_fields)?;
+                let properties = document_to_properties(&hydrated_update)?;
+                
+                Ok(Some(SourceChange::Update {
+                    element: Element::Node {
+                        metadata,
+                        properties,
+                    },
+                }))
+            }
         }
         mongodb::change_stream::event::OperationType::Delete => {
             Ok(Some(SourceChange::Delete { metadata }))
