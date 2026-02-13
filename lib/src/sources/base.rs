@@ -421,28 +421,36 @@ impl SourceBase {
                 .map(|c| c.instance_id.clone())
                 .unwrap_or_default();
 
-            // Spawn bootstrap task
-            info!("About to spawn bootstrap task for query '{}'", settings.query_id);
+            // Spawn bootstrap task with tracing span for log routing
+            let span = tracing::info_span!(
+                "source_bootstrap",
+                instance_id = %instance_id,
+                component_id = %source_id,
+                component_type = "source"
+            );
             
-            tokio::spawn(async move {
-                match provider
-                    .bootstrap(request, &context, bootstrap_tx, Some(&settings_clone))
-                    .await
-                {
-                    Ok(count) => {
-                        info!(
-                            "Bootstrap completed successfully for query '{}', sent {count} events",
-                            settings_clone.query_id
-                        );
-                    }
-                    Err(e) => {
-                        error!(
-                            "Bootstrap failed for query '{}': {e}",
-                            settings_clone.query_id
-                        );
+            tokio::spawn(
+                async move {
+                    match provider
+                        .bootstrap(request, &context, bootstrap_tx, Some(&settings_clone))
+                        .await
+                    {
+                        Ok(count) => {
+                            info!(
+                                "Bootstrap completed successfully for query '{}', sent {count} events",
+                                settings_clone.query_id
+                            );
+                        }
+                        Err(e) => {
+                            error!(
+                                "Bootstrap failed for query '{}': {e}",
+                                settings_clone.query_id
+                            );
+                        }
                     }
                 }
-            });
+                .instrument(span),
+            );
             
             // Yield to allow the spawned task to start
             tokio::task::yield_now().await;
