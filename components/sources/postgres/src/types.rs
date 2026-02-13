@@ -215,7 +215,7 @@ mod tests {
 
         // Should be a Number, not a String
         assert!(json.is_number(), "Decimal should be serialized as a number");
-        
+
         // Verify the value is correct
         let num = json.as_f64().unwrap();
         assert_eq!(num, 123.45);
@@ -227,8 +227,11 @@ mod tests {
         let pg_value = PostgresValue::Numeric(decimal);
         let json = pg_value.to_json();
 
-        assert!(json.is_number(), "Integer decimal should be serialized as a number");
-        
+        assert!(
+            json.is_number(),
+            "Integer decimal should be serialized as a number"
+        );
+
         let num = json.as_f64().unwrap();
         assert_eq!(num, 100.0);
     }
@@ -239,8 +242,11 @@ mod tests {
         let pg_value = PostgresValue::Numeric(decimal);
         let json = pg_value.to_json();
 
-        assert!(json.is_number(), "Small decimal should be serialized as a number");
-        
+        assert!(
+            json.is_number(),
+            "Small decimal should be serialized as a number"
+        );
+
         let num = json.as_f64().unwrap();
         assert_eq!(num, 0.00001);
     }
@@ -251,8 +257,11 @@ mod tests {
         let pg_value = PostgresValue::Numeric(decimal);
         let json = pg_value.to_json();
 
-        assert!(json.is_number(), "Negative decimal should be serialized as a number");
-        
+        assert!(
+            json.is_number(),
+            "Negative decimal should be serialized as a number"
+        );
+
         let num = json.as_f64().unwrap();
         assert_eq!(num, -999.99);
     }
@@ -263,8 +272,11 @@ mod tests {
         let pg_value = PostgresValue::Numeric(decimal);
         let json = pg_value.to_json();
 
-        assert!(json.is_number(), "Zero decimal should be serialized as a number");
-        
+        assert!(
+            json.is_number(),
+            "Zero decimal should be serialized as a number"
+        );
+
         let num = json.as_f64().unwrap();
         assert_eq!(num, 0.0);
     }
