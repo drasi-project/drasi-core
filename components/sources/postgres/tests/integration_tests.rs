@@ -275,6 +275,9 @@ async fn test_update_without_old_tuple_stays_update() -> Result<()> {
 
     let core = build_core(pg.config(), slot_name).await?;
     core.start().await?;
+    
+    // Wait for bootstrap to complete and query to be running
+    wait_for_query_results(&core, "test-query", |results| results.is_empty()).await?;
 
     insert_test_row(&client, TEST_TABLE, 1, "Alice").await?;
     wait_for_query_results(&core, "test-query", |results| {
@@ -355,6 +358,9 @@ async fn test_full_crud_cycle() -> Result<()> {
 
     let core = build_core(pg.config(), slot_name).await?;
     core.start().await?;
+    
+    // Wait for bootstrap to complete and query to be running
+    wait_for_query_results(&core, "test-query", |results| results.is_empty()).await?;
 
     insert_test_row(&client, TEST_TABLE, 1, "Alice").await?;
     wait_for_query_results(&core, "test-query", |results| {
