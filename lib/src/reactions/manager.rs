@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use anyhow::Result;
-use log::{error, info};
+use log::{error, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -224,20 +224,23 @@ impl ReactionManager {
         if let Some(reaction) = reaction {
             let status = reaction.status().await;
 
-            // If the reaction is running, stop it first
-            if matches!(status, ComponentStatus::Running) {
+            // If the reaction is running or starting, stop it first
+            if matches!(status, ComponentStatus::Running | ComponentStatus::Starting) {
                 info!("Stopping reaction '{id}' before deletion");
-                reaction.stop().await?;
+                if let Err(e) = reaction.stop().await {
+                    warn!("Failed to stop reaction '{id}' during deletion (may already be stopped): {e}");
+                }
 
                 // Wait a bit to ensure the reaction has fully stopped
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-                // Verify it's stopped
+                // Verify it's stopped - accept Stopped or Error
                 let new_status = reaction.status().await;
-                if !matches!(new_status, ComponentStatus::Stopped) {
-                    return Err(anyhow::anyhow!(
-                        "Failed to stop reaction '{id}' before deletion"
-                    ));
+                if !matches!(
+                    new_status,
+                    ComponentStatus::Stopped | ComponentStatus::Error
+                ) {
+                    warn!("Reaction '{id}' in unexpected state {new_status:?} after stop, proceeding with deletion");
                 }
             } else {
                 // Still validate the operation for non-running states
