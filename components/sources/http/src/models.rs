@@ -189,11 +189,11 @@ fn create_element_from_http(
                 properties: prop_map,
                 in_node: ElementReference {
                     source_id: Arc::from(source_id),
-                    element_id: Arc::from(to.as_str()),
+                    element_id: Arc::from(from.as_str()),
                 },
                 out_node: ElementReference {
                     source_id: Arc::from(source_id),
-                    element_id: Arc::from(from.as_str()),
+                    element_id: Arc::from(to.as_str()),
                 },
             })
         }
