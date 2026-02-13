@@ -15,6 +15,8 @@
 //! PostgreSQL test helpers for replication integration tests.
 
 use anyhow::{anyhow, Result};
+use rust_decimal::Decimal;
+use std::str::FromStr;
 use std::sync::Arc;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio_postgres::{Client, NoTls};
@@ -278,10 +280,16 @@ pub async fn insert_decimal_test_row(
     quantity: &str,
     total: &str,
 ) -> Result<()> {
+    let price_decimal = Decimal::from_str(price)?;
+    let quantity_decimal = Decimal::from_str(quantity)?;
+    let total_decimal = Decimal::from_str(total)?;
+    
     let sql = format!(
-        "INSERT INTO {} (id, price, quantity, total) VALUES ($1, $2::NUMERIC, $3::NUMERIC, $4::NUMERIC)",
+        "INSERT INTO {} (id, price, quantity, total) VALUES ($1, $2, $3, $4)",
         quote_ident(table)
     );
-    client.execute(&sql, &[&id, &price, &quantity, &total]).await?;
+    client
+        .execute(&sql, &[&id, &price_decimal, &quantity_decimal, &total_decimal])
+        .await?;
     Ok(())
 }
