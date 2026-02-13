@@ -177,8 +177,8 @@ impl ScriptFileBootstrapProvider {
                 effective_from: 0,
             },
             properties,
-            in_node: end_ref,
-            out_node: start_ref,
+            in_node: start_ref,
+            out_node: end_ref,
         })
     }
 
@@ -421,10 +421,10 @@ mod tests {
                 assert_eq!(metadata.reference.element_id.as_ref(), "r1");
                 assert_eq!(metadata.labels.len(), 1);
                 assert_eq!(metadata.labels[0].as_ref(), "KNOWS");
-                assert_eq!(out_node.source_id.as_ref(), "test_source");
-                assert_eq!(out_node.element_id.as_ref(), "n1");
                 assert_eq!(in_node.source_id.as_ref(), "test_source");
-                assert_eq!(in_node.element_id.as_ref(), "n2");
+                assert_eq!(in_node.element_id.as_ref(), "n1");
+                assert_eq!(out_node.source_id.as_ref(), "test_source");
+                assert_eq!(out_node.element_id.as_ref(), "n2");
                 assert!(properties.get(&Arc::from("since")).is_some());
             }
             _ => panic!("Expected Relation element"),

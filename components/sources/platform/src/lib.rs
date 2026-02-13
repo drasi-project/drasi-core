@@ -1425,8 +1425,8 @@ fn transform_platform_event(
                 Element::Relation {
                     metadata,
                     properties,
-                    out_node: ElementReference::new(source_id, start_id),
-                    in_node: ElementReference::new(source_id, end_id),
+                    in_node: ElementReference::new(source_id, start_id),
+                    out_node: ElementReference::new(source_id, end_id),
                 }
             }
             _ => return Err(anyhow::anyhow!("Unknown element type: {element_type}")),
