@@ -311,7 +311,7 @@ mod event_generation {
         };
 
         let source = MockSource::new("test-counter", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         // Start the source
         let result = source.start().await;
@@ -345,7 +345,7 @@ mod event_generation {
         };
 
         let source = MockSource::new("test-counter-schema", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         source.start().await.unwrap();
 
@@ -399,7 +399,7 @@ mod event_generation {
         };
 
         let source = MockSource::new("test-counter-seq", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         source.start().await.unwrap();
 
@@ -439,7 +439,7 @@ mod event_generation {
         };
 
         let source = MockSource::new("test-counter-insert", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         source.start().await.unwrap();
 
@@ -469,7 +469,7 @@ mod event_generation {
         };
 
         let source = MockSource::new("test-sensor", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         // Start the source
         source.start().await.unwrap();
@@ -501,7 +501,7 @@ mod event_generation {
         };
 
         let source = MockSource::new("test-sensor-schema", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         source.start().await.unwrap();
 
@@ -584,7 +584,7 @@ mod event_generation {
         };
 
         let source = MockSource::new("test-sensor-update", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         source.start().await.unwrap();
 
@@ -637,7 +637,7 @@ mod event_generation {
         };
 
         let source = MockSource::new("test-sensor-count", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         source.start().await.unwrap();
 
@@ -689,7 +689,7 @@ mod event_generation {
         };
 
         let source = MockSource::new("test-generic", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         // Start the source
         source.start().await.unwrap();
@@ -721,7 +721,7 @@ mod event_generation {
         };
 
         let source = MockSource::new("test-generic-schema", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         source.start().await.unwrap();
 
@@ -786,7 +786,7 @@ mod event_generation {
         };
 
         let source = MockSource::new("test-generic-insert", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         source.start().await.unwrap();
 
@@ -999,7 +999,7 @@ mod inject_event {
         };
 
         let source = MockSource::new("test-inject", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         // Create a custom element to inject
         let element_id = "custom_injected_1";
@@ -1056,7 +1056,7 @@ mod inject_event {
         };
 
         let source = MockSource::new("test-inject-update", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         // Create an Update event
         let reference = ElementReference::new("test-inject-update", "updated_element");
@@ -1105,7 +1105,7 @@ mod inject_event {
         };
 
         let source = MockSource::new("test-inject-delete", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         // Create a Delete event (Delete only takes metadata, not element)
         let reference = ElementReference::new("test-inject-delete", "deleted_element");
@@ -1310,7 +1310,7 @@ mod lifecycle_advanced {
         };
 
         let source = MockSource::new("test-gen-stops", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         // Start and collect some events
         source.start().await.unwrap();
