@@ -53,34 +53,12 @@ const METADATA_CF: &str = "metadata";
 const VALUES_BLOCK_CACHE_SIZE: u64 = 32;
 
 impl RocksDbResultIndex {
-    pub fn new(query_id: &str, path: &str) -> Result<Self, IndexError> {
-        let mut opts = Options::default();
-        opts.create_if_missing(true);
-        opts.create_missing_column_families(true);
-        opts.set_db_write_buffer_size(32 * 1024 * 1024);
-
-        let path = std::path::PathBuf::from(path)
-            .join(query_id)
-            .join("aggregations");
-        let path = match path.to_str() {
-            Some(path) => path,
-            None => return Err(IndexError::NotSupported),
-        };
-
-        let db = match OptimisticTransactionDB::open_cf_descriptors(
-            &opts,
-            path,
-            vec![
-                rocksdb::ColumnFamilyDescriptor::new(VALUES_CF, get_value_cf_options()),
-                rocksdb::ColumnFamilyDescriptor::new(SETS_CF, get_lss_cf_options()),
-                rocksdb::ColumnFamilyDescriptor::new(METADATA_CF, get_metadata_cf_options()),
-            ],
-        ) {
-            Ok(db) => db,
-            Err(e) => return Err(IndexError::other(e)),
-        };
-
-        Ok(RocksDbResultIndex { db: Arc::new(db) })
+    /// Create a new RocksDbResultIndex from a shared database handle.
+    ///
+    /// The database must already have the required column families created.
+    /// Use `open_unified_db()` to open a database with all required CFs.
+    pub fn new(db: Arc<OptimisticTransactionDB>) -> Self {
+        RocksDbResultIndex { db }
     }
 }
 
@@ -371,7 +349,7 @@ impl ResultSequenceCounter for RocksDbResultIndex {
 
 impl ResultIndex for RocksDbResultIndex {}
 
-fn get_lss_cf_options() -> Options {
+pub(crate) fn get_lss_cf_options() -> Options {
     let mut lss_opts = Options::default();
     lss_opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
     lss_opts.set_merge_operator_associative("increment", increment_merge);
@@ -379,16 +357,25 @@ fn get_lss_cf_options() -> Options {
     lss_opts
 }
 
-fn get_value_cf_options() -> Options {
+pub(crate) fn get_value_cf_options() -> Options {
     let mut values_opts = Options::default();
     values_opts.optimize_for_point_lookup(VALUES_BLOCK_CACHE_SIZE);
     values_opts
 }
 
-fn get_metadata_cf_options() -> Options {
+pub(crate) fn get_metadata_cf_options() -> Options {
     let mut values_opts = Options::default();
     values_opts.optimize_for_point_lookup(1);
     values_opts
+}
+
+/// Collect all column family descriptors needed by the result index.
+pub(crate) fn result_cf_descriptors() -> Vec<rocksdb::ColumnFamilyDescriptor> {
+    vec![
+        rocksdb::ColumnFamilyDescriptor::new(VALUES_CF, get_value_cf_options()),
+        rocksdb::ColumnFamilyDescriptor::new(SETS_CF, get_lss_cf_options()),
+        rocksdb::ColumnFamilyDescriptor::new(METADATA_CF, get_metadata_cf_options()),
+    ]
 }
 
 fn encode_set_value_key(set_id: u64, value: OrderedFloat<f64>) -> [u8; 20] {
