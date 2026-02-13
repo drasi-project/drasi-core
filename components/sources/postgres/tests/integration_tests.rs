@@ -25,10 +25,10 @@ use drasi_source_postgres::{
     PostgresReplicationSource, PostgresSourceConfig, SslMode, TableKeyConfig,
 };
 use postgres_helpers::{
-    create_logical_replication_slot, create_publication, create_test_table,
-    create_test_table_replica_identity_default, delete_test_row, grant_replication,
-    grant_table_access, insert_test_row, setup_replication_postgres, update_test_row,
-    create_decimal_test_table, insert_decimal_test_row,
+    create_decimal_test_table, create_logical_replication_slot, create_publication,
+    create_test_table, create_test_table_replica_identity_default, delete_test_row,
+    grant_replication, grant_table_access, insert_decimal_test_row, insert_test_row,
+    setup_replication_postgres, update_test_row,
 };
 use serial_test::serial;
 use std::sync::Arc;
@@ -472,7 +472,7 @@ async fn test_decimal_datatype_serialization() -> Result<()> {
         }
 
         let row = &results[0];
-        
+
         // Verify that decimal values are numbers, not strings
         if let Some(price) = row.get("price") {
             if !price.is_number() {
@@ -504,7 +504,9 @@ async fn test_decimal_datatype_serialization() -> Result<()> {
             if let Some(quantity_val) = quantity.as_f64() {
                 let expected = 10.5;
                 if (quantity_val - expected).abs() > 0.0001 {
-                    log::error!("quantity value is incorrect: expected {expected}, got {quantity_val}");
+                    log::error!(
+                        "quantity value is incorrect: expected {expected}, got {quantity_val}"
+                    );
                     return false;
                 }
             } else {
