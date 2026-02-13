@@ -20,7 +20,7 @@ use drasi_bootstrap_postgres::{
     TableKeyConfig as BootstrapTableKeyConfig,
 };
 use drasi_lib::{DrasiLib, Query};
-use drasi_reaction_application::ApplicationReaction;
+use drasi_reaction_application::{ApplicationReaction, ApplicationReactionHandle};
 use drasi_source_postgres::{
     PostgresReplicationSource, PostgresSourceConfig, SslMode, TableKeyConfig,
 };
@@ -69,7 +69,7 @@ async fn wait_for_query_results(
 async fn build_core(
     config: &postgres_helpers::ReplicationPostgresConfig,
     slot_name: String,
-) -> Result<Arc<DrasiLib>> {
+) -> Result<(Arc<DrasiLib>, ApplicationReactionHandle)> {
     let source_config = PostgresSourceConfig {
         host: config.host.clone(),
         port: config.port,
@@ -121,7 +121,7 @@ async fn build_core(
         .enable_bootstrap(true)
         .build();
 
-    let (reaction, _handle) = ApplicationReaction::builder("test-reaction")
+    let (reaction, handle) = ApplicationReaction::builder("test-reaction")
         .with_query("test-query")
         .build();
 
@@ -135,7 +135,7 @@ async fn build_core(
             .await?,
     );
 
-    Ok(core)
+    Ok((core, handle))
 }
 
 #[tokio::test]
@@ -155,7 +155,7 @@ async fn test_source_connects_and_starts() -> Result<()> {
     let slot_name = slot_name();
     create_logical_replication_slot(&client, &slot_name).await?;
 
-    let core = build_core(pg.config(), slot_name).await?;
+    let (core, _handle) = build_core(pg.config(), slot_name).await?;
     core.start().await?;
 
     wait_for_query_results(&core, "test-query", |results| results.is_empty()).await?;
@@ -185,7 +185,7 @@ async fn test_insert_detection() -> Result<()> {
     let slot_name = slot_name();
     create_logical_replication_slot(&client, &slot_name).await?;
 
-    let core = build_core(pg.config(), slot_name).await?;
+    let (core, _handle) = build_core(pg.config(), slot_name).await?;
     core.start().await?;
 
     insert_test_row(&client, TEST_TABLE, 1, "Alice").await?;
@@ -220,7 +220,7 @@ async fn test_update_detection() -> Result<()> {
     let slot_name = slot_name();
     create_logical_replication_slot(&client, &slot_name).await?;
 
-    let core = build_core(pg.config(), slot_name).await?;
+    let (core, _handle) = build_core(pg.config(), slot_name).await?;
     core.start().await?;
 
     insert_test_row(&client, TEST_TABLE, 1, "Alice").await?;
@@ -262,7 +262,7 @@ async fn test_update_without_old_tuple_stays_update() -> Result<()> {
     let slot_name = slot_name();
     create_logical_replication_slot(&client, &slot_name).await?;
 
-    let core = build_core(pg.config(), slot_name).await?;
+    let (core, _handle) = build_core(pg.config(), slot_name).await?;
     core.start().await?;
 
     insert_test_row(&client, TEST_TABLE, 1, "Alice").await?;
@@ -305,7 +305,7 @@ async fn test_delete_detection() -> Result<()> {
     let slot_name = slot_name();
     create_logical_replication_slot(&client, &slot_name).await?;
 
-    let core = build_core(pg.config(), slot_name).await?;
+    let (core, _handle) = build_core(pg.config(), slot_name).await?;
     core.start().await?;
 
     insert_test_row(&client, TEST_TABLE, 1, "Alice").await?;
@@ -342,7 +342,7 @@ async fn test_full_crud_cycle() -> Result<()> {
     let slot_name = slot_name();
     create_logical_replication_slot(&client, &slot_name).await?;
 
-    let core = build_core(pg.config(), slot_name).await?;
+    let (core, _handle) = build_core(pg.config(), slot_name).await?;
     core.start().await?;
 
     insert_test_row(&client, TEST_TABLE, 1, "Alice").await?;
