@@ -610,6 +610,7 @@ impl Query for DrasiQuery {
             let query_id = self.base.config.id.clone();
             let bootstrap_state = self.bootstrap_state.clone();
             let instance_id = self.instance_id.clone();
+            let bootstrap_current_results = self.current_results.clone();
 
             for (source_id, mut bootstrap_rx) in bootstrap_channels {
                 // Mark source bootstrap as in progress
@@ -628,6 +629,7 @@ impl Query for DrasiQuery {
                 let bootstrap_state_clone = bootstrap_state.clone();
                 let base_dispatchers_clone = base_dispatchers.clone();
                 let instance_id_clone = instance_id.clone();
+                let current_results_clone = bootstrap_current_results.clone();
 
                 let span = tracing::info_span!(
                     "query_bootstrap",
@@ -653,7 +655,34 @@ impl Query for DrasiQuery {
                                             "[BOOTSTRAP] Query '{}' received {} results from bootstrap event {}",
                                             query_id_clone, results.len(), count
                                         );
-                                        // Bootstrap results are processed silently - not sent to reactions
+
+                                        // Apply bootstrap results to current_results so they
+                                        // are visible via the query results API.
+                                        let mut result_set = current_results_clone.write().await;
+                                        for ctx in &results {
+                                            match ctx {
+                                                QueryPartEvaluationContext::Adding { after } => {
+                                                    result_set.push(convert_query_variables_to_json(after));
+                                                }
+                                                QueryPartEvaluationContext::Removing { before } => {
+                                                    let data = convert_query_variables_to_json(before);
+                                                    result_set.retain(|item| item != &data);
+                                                }
+                                                QueryPartEvaluationContext::Updating { before, after } => {
+                                                    let before_json = convert_query_variables_to_json(before);
+                                                    let after_json = convert_query_variables_to_json(after);
+                                                    if let Some(pos) = result_set.iter().position(|item| item == &before_json) {
+                                                        result_set[pos] = after_json;
+                                                    } else {
+                                                        result_set.retain(|item| item != &before_json);
+                                                        result_set.push(after_json);
+                                                    }
+                                                }
+                                                QueryPartEvaluationContext::Aggregation { .. }
+                                                | QueryPartEvaluationContext::Noop => {}
+                                            }
+                                        }
+                                        drop(result_set);
                                     }
                                 }
                                 Err(e) => {
@@ -865,8 +894,8 @@ impl Query for DrasiQuery {
                                             }
                                         }
                                     QueryPartEvaluationContext::Removing { before } => {
-                                        warn!(
-                                            "Query '{query_id}' got Removing context for UPDATE source event"
+                                        debug!(
+                                            "Query '{query_id}' got Removing context"
                                         );
                                         ResultDiff::Delete {
                                             data: convert_query_variables_to_json(before),
