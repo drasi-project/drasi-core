@@ -303,7 +303,7 @@ mod event_generation {
     use drasi_lib::Source;
     use std::collections::HashSet;
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_counter_data_generation() {
         let config = MockSourceConfig {
             data_type: DataType::Counter,
@@ -337,7 +337,7 @@ mod event_generation {
         source.stop().await.unwrap();
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_counter_generates_correct_schema() {
         let config = MockSourceConfig {
             data_type: DataType::Counter,
@@ -391,7 +391,7 @@ mod event_generation {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_counter_values_are_sequential() {
         let config = MockSourceConfig {
             data_type: DataType::Counter,
@@ -431,7 +431,7 @@ mod event_generation {
         assert_eq!(values[2], 3);
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_counter_always_generates_insert_events() {
         let config = MockSourceConfig {
             data_type: DataType::Counter,
@@ -461,7 +461,7 @@ mod event_generation {
         source.stop().await.unwrap();
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_sensor_data_generation() {
         let config = MockSourceConfig {
             data_type: DataType::sensor_reading(5),
@@ -493,7 +493,7 @@ mod event_generation {
         source.stop().await.unwrap();
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_sensor_generates_correct_schema() {
         let config = MockSourceConfig {
             data_type: DataType::sensor_reading(5),
@@ -575,7 +575,7 @@ mod event_generation {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_sensor_insert_then_update_behavior() {
         // Use only 2 sensors to increase chance of seeing same sensor twice
         let config = MockSourceConfig {
@@ -628,7 +628,7 @@ mod event_generation {
         assert!(seen_update, "Should have seen at least one Update");
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_sensor_respects_sensor_count() {
         let sensor_count = 3u32;
         let config = MockSourceConfig {
@@ -681,7 +681,7 @@ mod event_generation {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_generic_data_generation() {
         let config = MockSourceConfig {
             data_type: DataType::Generic,
@@ -713,7 +713,7 @@ mod event_generation {
         source.stop().await.unwrap();
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_generic_generates_correct_schema() {
         let config = MockSourceConfig {
             data_type: DataType::Generic,
@@ -778,7 +778,7 @@ mod event_generation {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_generic_always_generates_insert_events() {
         let config = MockSourceConfig {
             data_type: DataType::Generic,
@@ -991,7 +991,7 @@ mod inject_event {
     use drasi_lib::Source;
     use std::sync::Arc;
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_inject_event_delivers_to_subscribers() {
         let config = MockSourceConfig {
             data_type: DataType::Counter,
@@ -1048,7 +1048,7 @@ mod inject_event {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_inject_update_event() {
         let config = MockSourceConfig {
             data_type: DataType::Counter,
@@ -1097,7 +1097,7 @@ mod inject_event {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_inject_delete_event() {
         let config = MockSourceConfig {
             data_type: DataType::Counter,
@@ -1302,7 +1302,7 @@ mod lifecycle_advanced {
         assert_eq!(source.status().await, ComponentStatus::Stopped);
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_data_generation_stops_after_stop() {
         let config = MockSourceConfig {
             data_type: DataType::Counter,

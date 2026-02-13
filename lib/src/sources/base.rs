@@ -532,11 +532,11 @@ impl SourceBase {
     /// # Panics
     /// Panics if the receiver cannot be created (e.g., internal error)
     pub fn test_subscribe(&self) -> Box<dyn ChangeReceiver<SourceEventWrapper>> {
-        // Use block_in_place to avoid nested executor issues in async tests
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.create_streaming_receiver())
-        })
-        .expect("Failed to create test subscription receiver")
+        // Block on the async operation to create the receiver
+        // This works on both single-threaded and multi-threaded runtimes
+        tokio::runtime::Handle::current()
+            .block_on(self.create_streaming_receiver())
+            .expect("Failed to create test subscription receiver")
     }
 
     /// Helper function to dispatch events from spawned tasks
