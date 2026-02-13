@@ -25,6 +25,9 @@ use drasi_functions_cypher::CypherFunctionSet;
 use drasi_query_cypher::CypherParser;
 
 #[allow(clippy::print_stdout, clippy::unwrap_used)]
+// Note: drasi-core requires a multi-threaded tokio runtime.
+// #[tokio::main] defaults to multi-threaded, which is correct.
+// Alternatively, you can use: #[tokio::main(flavor = "multi_thread")]
 #[tokio::main]
 async fn main() {
     let query_str = "
