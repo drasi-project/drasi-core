@@ -404,6 +404,18 @@ impl MsSqlStoredProcReactionBuilder {
         self
     }
 
+    /// Set the identity provider for authentication
+    ///
+    /// This takes precedence over `with_user` and `with_password`.
+    /// Use this for cloud authentication (Azure Managed Identity, AWS IAM, etc.)
+    pub fn with_identity_provider(
+        mut self,
+        provider: impl drasi_lib::identity::IdentityProvider + 'static,
+    ) -> Self {
+        self.config.identity_provider = Some(Box::new(provider));
+        self
+    }
+
     /// Enable or disable SSL/TLS
     pub fn with_ssl(mut self, enable: bool) -> Self {
         self.config.ssl = enable;
@@ -461,6 +473,25 @@ impl MsSqlStoredProcReactionBuilder {
     /// Set the full configuration at once
     pub fn with_config(mut self, config: MsSqlStoredProcReactionConfig) -> Self {
         self.config = config;
+        self
+    }
+
+    /// Set the stored procedure name (shortcut for simple configurations)
+    ///
+    /// Creates default templates that execute the specified procedure with:
+    /// - added: passes @after data
+    /// - updated: passes @before and @after data
+    /// - deleted: passes @before data
+    pub fn with_stored_procedure(mut self, proc_name: impl Into<String>) -> Self {
+        use crate::config::TemplateSpec;
+
+        let proc = proc_name.into();
+        let query_config = QueryConfig {
+            added: Some(TemplateSpec::new(format!("EXEC {proc} @after"))),
+            updated: Some(TemplateSpec::new(format!("EXEC {proc} @before, @after"))),
+            deleted: Some(TemplateSpec::new(format!("EXEC {proc} @before"))),
+        };
+        self.config.default_template = Some(query_config);
         self
     }
 

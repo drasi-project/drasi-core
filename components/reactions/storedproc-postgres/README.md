@@ -81,6 +81,8 @@ async fn main() -> anyhow::Result<()> {
 
 ### Builder API
 
+#### Traditional Username/Password Authentication
+
 ```rust
 let reaction = PostgresStoredProcReaction::builder("my-reaction")
     .with_hostname("localhost")
@@ -100,6 +102,100 @@ let reaction = PostgresStoredProcReaction::builder("my-reaction")
     .build()
     .await?;
 ```
+
+#### Cloud Identity Provider Authentication
+
+For cloud-managed PostgreSQL databases, you can use identity providers instead of passwords:
+
+**Azure AD Authentication (Azure Database for PostgreSQL):**
+
+```rust
+use drasi_lib::identity::AzureIdentityProvider;
+
+// For Azure Kubernetes Service with Workload Identity
+let identity_provider = AzureIdentityProvider::with_workload_identity("myuser@myserver")?;
+
+// For local development or Azure VMs with Managed Identity
+let identity_provider = AzureIdentityProvider::with_default_credentials("myuser@myserver").await?;
+
+let reaction = PostgresStoredProcReaction::builder("my-reaction")
+    .with_hostname("myserver.postgres.database.azure.com")
+    .with_port(5432)
+    .with_database("mydb")
+    .with_identity_provider(identity_provider)
+    .with_ssl(true)  // Required for Azure
+    .with_query("query1")
+    .with_default_template(QueryConfig {
+        added: Some(TemplateSpec::new("CALL add_record(@after.id, @after.name)")),
+        updated: Some(TemplateSpec::new("CALL update_record(@after.id, @after.name)")),
+        deleted: Some(TemplateSpec::new("CALL delete_record(@before.id)")),
+    })
+    .build()
+    .await?;
+```
+
+**AWS IAM Authentication (Amazon RDS/Aurora):**
+
+```rust
+use drasi_lib::identity::AwsIdentityProvider;
+
+// Using IAM user credentials
+let identity_provider = AwsIdentityProvider::new(
+    "myuser",
+    "mydb.rds.amazonaws.com",
+    5432
+).await?;
+
+// Or assuming an IAM role
+let identity_provider = AwsIdentityProvider::with_assumed_role(
+    "myuser",
+    "mydb.rds.amazonaws.com",
+    5432,
+    "arn:aws:iam::123456789012:role/RDSAccessRole",
+    None
+).await?;
+
+let reaction = PostgresStoredProcReaction::builder("my-reaction")
+    .with_hostname("mydb.rds.amazonaws.com")
+    .with_port(5432)
+    .with_database("mydb")
+    .with_identity_provider(identity_provider)
+    .with_ssl(true)  // Recommended for RDS
+    .with_query("query1")
+    .with_default_template(QueryConfig {
+        added: Some(TemplateSpec::new("CALL add_record(@after.id, @after.name)")),
+        updated: Some(TemplateSpec::new("CALL update_record(@after.id, @after.name)")),
+        deleted: Some(TemplateSpec::new("CALL delete_record(@before.id)")),
+    })
+    .build()
+    .await?;
+```
+
+**Password Provider (programmatic username/password):**
+
+```rust
+use drasi_lib::identity::PasswordIdentityProvider;
+
+let identity_provider = PasswordIdentityProvider::new("postgres", "secret");
+
+let reaction = PostgresStoredProcReaction::builder("my-reaction")
+    .with_hostname("localhost")
+    .with_port(5432)
+    .with_database("mydb")
+    .with_identity_provider(identity_provider)
+    .with_query("query1")
+    .with_default_template(QueryConfig {
+        added: Some(TemplateSpec::new("CALL add_record(@after.id, @after.name)")),
+        updated: Some(TemplateSpec::new("CALL update_record(@after.id, @after.name)")),
+        deleted: Some(TemplateSpec::new("CALL delete_record(@before.id)")),
+    })
+    .build()
+    .await?;
+```
+
+> **Note:** When using identity providers, do not call `.with_user()` or `.with_password()`. The identity provider handles authentication automatically.
+>
+> See the [Identity Provider README](../../../lib/src/identity/README.md) for detailed setup instructions for Azure AD and AWS IAM authentication.
 
 ### Configuration Options
 

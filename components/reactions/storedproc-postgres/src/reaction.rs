@@ -125,6 +125,11 @@ impl PostgresStoredProcReaction {
         })
     }
 
+    /// Test the database connection
+    pub async fn test_connection(&self) -> Result<()> {
+        self.executor.test_connection().await
+    }
+
     /// Prepare context data with after/before fields based on operation type
     fn prepare_context(operation: OperationType, data: &serde_json::Value) -> serde_json::Value {
         use serde_json::json;
@@ -397,7 +402,23 @@ impl PostgresStoredProcReactionBuilder {
         self
     }
 
+    /// Set the identity provider for authentication
+    ///
+    /// This takes precedence over `with_user` and `with_password`.
+    /// Use this for cloud authentication (Azure Managed Identity, AWS IAM, etc.)
+    pub fn with_identity_provider(
+        mut self,
+        provider: impl drasi_lib::identity::IdentityProvider + 'static,
+    ) -> Self {
+        self.config.identity_provider = Some(Box::new(provider));
+        self
+    }
+
     /// Enable or disable SSL/TLS
+    ///
+    /// SSL certificates must be installed in the system trust store.
+    /// For AWS RDS on macOS:
+    ///   sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/rds-ca-bundle.pem
     pub fn with_ssl(mut self, enable: bool) -> Self {
         self.config.ssl = enable;
         self
@@ -454,6 +475,25 @@ impl PostgresStoredProcReactionBuilder {
     /// Set the full configuration at once
     pub fn with_config(mut self, config: PostgresStoredProcReactionConfig) -> Self {
         self.config = config;
+        self
+    }
+
+    /// Set the stored procedure name (shortcut for simple configurations)
+    ///
+    /// Creates default templates that call the specified procedure with:
+    /// - added: passes @after data
+    /// - updated: passes @before and @after data
+    /// - deleted: passes @before data
+    pub fn with_stored_procedure(mut self, proc_name: impl Into<String>) -> Self {
+        use crate::config::TemplateSpec;
+
+        let proc = proc_name.into();
+        let query_config = QueryConfig {
+            added: Some(TemplateSpec::new(format!("CALL {proc}(@after)"))),
+            updated: Some(TemplateSpec::new(format!("CALL {proc}(@before, @after)"))),
+            deleted: Some(TemplateSpec::new(format!("CALL {proc}(@before)"))),
+        };
+        self.config.default_template = Some(query_config);
         self
     }
 
