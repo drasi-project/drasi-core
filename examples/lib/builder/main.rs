@@ -52,9 +52,10 @@ use drasi_source_http::HttpSource;
 use drasi_bootstrap_scriptfile::ScriptFileBootstrapProvider;
 use drasi_reaction_log::{LogReaction, QueryConfig, TemplateSpec};
 
-// Note: drasi-core requires a multi-threaded tokio runtime.
-// #[tokio::main] defaults to multi-threaded, which is correct.
-// Alternatively, you can use: #[tokio::main(flavor = "multi_thread")]
+// Note: drasi-core currently requires rt-multi-thread tokio feature due to
+// one block_in_place call in a test helper. Core functionality (including storage)
+// works on both single-threaded and multi-threaded runtimes.
+// #[tokio::main] defaults to multi-threaded.
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging - set RUST_LOG=debug for more detail

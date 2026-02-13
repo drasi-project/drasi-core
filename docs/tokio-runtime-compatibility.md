@@ -4,12 +4,12 @@
 
 **Can drasi-core work with a single-threaded tokio runtime?**
 
-**Answer:** No, not currently. The project has deep dependencies on multi-threaded runtime features that would cause panics if run on a single-threaded runtime.
+**Answer:** Yes, with minimal changes. The project only has **one blocking issue**: a single `block_in_place` call in a test helper function.
 
-**Key Blockers:**
-- 36 critical `spawn_blocking` operations in storage layers
-- 1 `block_in_place` call in source base
-- Architecture designed for concurrent task execution
+**Key Finding:**
+- `tokio::task::spawn_blocking` works on **both** single-threaded and multi-threaded runtimes (uses separate blocking thread pool)
+- **Only blocker:** 1 `block_in_place` call in `test_subscribe()` test helper - requires `rt-multi-thread` feature
+- 77 `tokio::spawn` calls work fine on single-threaded runtime (via cooperative multitasking)
 
 ---
 
@@ -29,17 +29,36 @@ tokio = { version = "1.29.1", features = ["rt-multi-thread", "sync", "time", "ma
 
 ### Statistics
 
-- **77 instances** of `tokio::spawn()` for concurrent task processing
-- **36 instances** of `tokio::task::spawn_blocking()` for storage I/O
+- **77 instances** of `tokio::spawn()` for concurrent task processing (works on single-threaded via cooperative multitasking)
+- **36 instances** of `tokio::task::spawn_blocking()` for storage I/O (works on single-threaded - uses separate blocking thread pool)
 - **17 tests** explicitly using `#[tokio::test(flavor = "multi_thread")]`
 - **1 test** using `#[tokio::test(flavor = "current_thread")]` (isolated log worker)
-- **1 instance** of `tokio::task::block_in_place()` (requires multi-threaded runtime)
+- **1 instance** of `tokio::task::block_in_place()` (only this requires multi-threaded runtime)
 
 ---
 
 ## Critical Issues for Single-Threaded Runtime
 
-### 1. Storage Layer Blocking Operations
+### 1. The ONLY Blocker: `block_in_place` in Test Helper
+
+**Location:** `lib/src/sources/base.rs:536`
+
+```rust
+pub fn test_subscribe(&self) -> Box<dyn ChangeReceiver<SourceEventWrapper>> {
+    // Use block_in_place to avoid nested executor issues in async tests
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(self.create_streaming_receiver())
+    })
+    .expect("Failed to create test subscription receiver")
+}
+```
+
+**Impact:** 
+- `block_in_place` requires `rt-multi-thread` feature - won't compile without it
+- Only used in `test_subscribe()` - a test helper function
+- **Easy fix:** Make this function async or provide alternative for tests
+
+### 2. Storage Layer Blocking Operations (NOT a blocker)
 
 **RocksDB Index** (`components/indexes/rocksdb/`):
 All database operations use `spawn_blocking` because RocksDB is a synchronous C++ library:
@@ -52,31 +71,23 @@ let task = task::spawn_blocking(move || {
 });
 ```
 
-**Impact:** On single-threaded runtime, `spawn_blocking` will panic:
-```
-cannot spawn blocking task on current-thread runtime
-```
+**Impact:** None - `spawn_blocking` works on single-threaded runtime!
 
-**Affected Files:**
+**How it works:**
+- Tokio maintains a **separate blocking thread pool** independent of the async executor
+- Even on `current_thread` runtime:
+  - Async tasks run on one thread (cooperative multitasking)
+  - Blocking tasks run on dedicated blocking threads (managed by tokio)
+- No code changes needed for these operations
+
+**Affected Files (all work fine on single-threaded):**
 - `components/indexes/rocksdb/src/element_index.rs`: 8 occurrences
 - `components/indexes/rocksdb/src/archive_index.rs`: 5 occurrences  
 - `components/indexes/rocksdb/src/result_index.rs`: 9 occurrences
 - `components/indexes/rocksdb/src/future_queue.rs`: 6 occurrences
 - `components/state_stores/redb/src/provider.rs`: 14 occurrences
 
-### 2. Synchronous-to-Async Bridge
-
-**Location:** `lib/src/sources/base.rs:536`
-
-```rust
-tokio::task::block_in_place(|| {
-    tokio::runtime::Handle::current().block_on(self.create_streaming_receiver())
-})
-```
-
-**Impact:** `block_in_place` only works on multi-threaded runtime. It moves the current task off the thread so it can block without blocking the executor. Single-threaded runtime will panic.
-
-### 3. Concurrent Task Architecture
+### 3. Concurrent Task Architecture (works via cooperative multitasking)
 
 The system spawns many independent concurrent tasks:
 - **Per-query event processors** (`lib/src/queries/manager.rs:528`)
@@ -85,168 +96,126 @@ The system spawns many independent concurrent tasks:
 - **HTTP/gRPC servers** with concurrent request handlers (`components/reactions/sse/src/sse.rs:506, 525`)
 - **Priority queue workers** (`lib/src/channels/priority_queue.rs:526, 566, 599`)
 
-**Impact:** While these could technically run via cooperative multitasking on a single thread, the architecture assumes true parallelism for performance. Single-threaded execution would create severe bottlenecks.
+**Impact:** These all work fine on single-threaded runtime via cooperative multitasking. Performance may be reduced compared to true parallelism, but no code changes needed.
 
-### 4. Potential Deadlock Scenarios
+### 4. Performance Considerations
 
-**Broadcast Channels:** The system uses `tokio::sync::broadcast` extensively. On single-threaded runtime:
-- If a broadcast sender blocks waiting for slow receivers
-- And receivers need CPU time to process (but can't get scheduled)
-- **Deadlock occurs**
+### 4. Performance Considerations
 
-**Example:**
-```rust
-// lib/src/queries/manager.rs:541
-priority_queue.enqueue_wait(arc_event).await;  // Can block if queue is full
-```
+On single-threaded runtime:
+- Async tasks use cooperative multitasking (yields at `.await` points)
+- Blocking I/O still runs on separate threads (via `spawn_blocking`)
+- May have reduced throughput for CPU-intensive concurrent workloads
+- But functionally equivalent to multi-threaded for most use cases
+
+**Potential concern:** Deep task queues could cause latency if many tasks are pending, but unlikely to deadlock with proper async design.
 
 ---
 
 ## Solution Approaches
 
-### Approach 1: Async Storage Abstraction (Recommended for Single-Threaded Support)
+### Approach 1: Fix the One Blocker (Recommended - ~1 hour)
 
-**Design:** Replace `spawn_blocking` with a dedicated thread pool independent of tokio runtime type.
+**Design:** Remove or replace the single `block_in_place` call in test helper.
 
-**Implementation:**
+**Option A - Make it async:**
 ```rust
-use once_cell::sync::Lazy;
-use threadpool::ThreadPool;
+pub async fn test_subscribe(&self) -> Box<dyn ChangeReceiver<SourceEventWrapper>> {
+    self.create_streaming_receiver()
+        .await
+        .expect("Failed to create test subscription receiver")
+}
+```
 
-// Dedicated blocking pool independent of tokio runtime
-static STORAGE_POOL: Lazy<ThreadPool> = Lazy::new(|| {
-    ThreadPool::new(num_cpus::get())
-});
-
-// Replace spawn_blocking calls
-async fn async_db_operation<T>(db_op: impl FnOnce() -> T + Send + 'static) -> T 
-where
-    T: Send + 'static,
-{
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    STORAGE_POOL.execute(move || {
-        let result = db_op();
-        let _ = tx.send(result);
-    });
-    rx.await.expect("Storage operation failed")
+**Option B - Conditional compilation:**
+```rust
+pub fn test_subscribe(&self) -> Box<dyn ChangeReceiver<SourceEventWrapper>> {
+    #[cfg(feature = "rt-multi-thread")]
+    {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.create_streaming_receiver())
+        })
+        .expect("Failed to create test subscription receiver")
+    }
+    #[cfg(not(feature = "rt-multi-thread"))]
+    {
+        // For single-threaded, callers must use async version
+        panic!("test_subscribe requires rt-multi-thread feature. Use async version instead.")
+    }
 }
 ```
 
 **Changes Required:**
-1. Add dependencies: `threadpool`, `once_cell`, `num_cpus`
-2. Create `async-trait` based storage abstraction
-3. Replace all 36 `spawn_blocking` calls with custom async wrapper
-4. Replace `block_in_place` with alternative approach
-5. Update all tests to verify single-threaded compatibility
+1. Update `test_subscribe()` in `lib/src/sources/base.rs`
+2. Update any tests that use it to be async (if using Option A)
+3. Remove `rt-multi-thread` from required features in Cargo.toml files
 
 **Pros:**
-- Works with any tokio runtime type
-- Maintains performance for blocking operations
-- Minimal changes to business logic
-- Compatible with existing storage backends
+- Minimal change (one function)
+- Enables single-threaded runtime support
+- All storage operations already work
 
 **Cons:**
-- Additional dependency complexity
-- Need to manage thread pool lifecycle
-- Requires careful migration
+- Need to update test code that calls `test_subscribe()`
 
-**Estimated Effort:** 1-2 weeks (one developer)
+**Estimated Effort:** 1 hour
 
-### Approach 2: Fully Async Storage Backend
+### Approach 2: Keep Multi-Threaded (No Changes Needed)
 
-**Design:** Replace RocksDB/Redb with async-native database (e.g., `sled`, `surrealdb`).
+**Design:** Keep current architecture with `rt-multi-thread` requirement.
+
+**Rationale:**
+- Only one small blocker exists
+- Multi-threaded provides better performance for concurrent workloads
+- Current architecture works well
 
 **Pros:**
-- Native async, no blocking operations
-- Simpler runtime requirements
-- Better integration with async ecosystem
+- Zero changes needed
+- Maintains optimal performance
 
 **Cons:**
-- **Major breaking change** to storage layer
-- Database migration for existing users
-- May sacrifice RocksDB performance/maturity
-- Alternative databases may lack required features
+- Cannot run in single-threaded environments (if that's ever needed)
 
-**Estimated Effort:** 1-2 months (major refactoring)
+### ~Approach 1: Async Storage Abstraction~ (NOT NEEDED)
 
-### Approach 3: Document Multi-Threaded Requirement (Recommended for Current State)
+**This approach is obsolete** - `spawn_blocking` already works on single-threaded runtime!
 
-**Design:** Accept multi-threaded runtime as an architectural constraint.
+~~**Design:** Replace `spawn_blocking` with a dedicated thread pool independent of tokio runtime type.~~
 
-**Implementation:**
-1. Update documentation to clearly state requirement
-2. Add compile-time checks for correct tokio features
-3. Update all examples with proper runtime configuration
-4. Add troubleshooting guide
+The original documentation incorrectly stated this was needed. Tokio's `spawn_blocking` already provides this functionality automatically.
 
-**Example Compile-Time Check:**
-```rust
-// In lib.rs or core/lib.rs
-#[cfg(not(all(
-    feature = "tokio",
-    any(
-        all(not(tokio_unstable), tokio_unstable),
-        all(tokio_rt_multi_thread, not(tokio_rt_current_thread))
-    )
-)))]
-compile_error!(
-    "drasi-core requires tokio with multi-threaded runtime.\n\
-     Add to your Cargo.toml:\n\
-     tokio = { version = \"1.0\", features = [\"rt-multi-thread\", \"macros\", \"sync\", \"time\"] }"
-);
-```
+### ~Approach 3: Fully Async Storage Backend~ (NOT NEEDED)
 
-**Pros:**
-- Zero code changes
-- Maintains current performance
-- Honest about system requirements
-- Immediate solution
+**This approach is also obsolete** - `spawn_blocking` works fine on single-threaded runtime.
 
-**Cons:**
-- Cannot run in single-threaded environments
-- Limits deployment scenarios (WASM, embedded)
-- Higher resource usage
+~~**Design:** Replace RocksDB/Redb with async-native database (e.g., `sled`, `surrealdb`).~~
 
-**Estimated Effort:** 1 day (documentation only)
+No need to change storage backends - current approach works on both runtime types.
 
 ---
 
 ## Recommendations
 
-### Short-Term (Immediate)
+### Immediate Action (If Single-Threaded Support Desired)
 
-**Implement Approach 3: Document the Requirement**
+**Implement Approach 1: Fix the One Blocker** (~1 hour effort)
 
-1. Create this documentation file
-2. Update README.md with runtime requirements
-3. Add troubleshooting section to docs
-4. Update all example code with proper annotations
+1. Update `test_subscribe()` in `lib/src/sources/base.rs` to async version or conditional compilation
+2. Update tests that call it
+3. Remove `rt-multi-thread` requirement from Cargo.toml files
+4. Test with `#[tokio::test(flavor = "current_thread")]`
 
-### Medium-Term (If Single-Threaded is Critical)
+### If Single-Threaded Not Required
 
-**Implement Approach 1: Async Storage Abstraction**
+**Keep current architecture** - it works well and provides good performance.
 
-Only pursue if there are specific use cases requiring single-threaded runtime:
-- Embedded systems with limited resources
-- WebAssembly deployment
-- Testing simplicity
-- Specific deployment constraints
-
-### Long-Term (Consider for Major Version)
-
-**Evaluate Approach 2: Fully Async Storage**
-
-If moving toward fully async ecosystem, consider:
-- Research async-native database alternatives
-- Benchmark performance vs. RocksDB
-- Plan migration path for existing users
-- Design backward compatibility strategy
+The `rt-multi-thread` feature is only blocking due to one test helper function. If single-threaded support isn't needed, no changes required.
 
 ---
 
 ## Testing Strategy
 
-### For Single-Threaded Support (if implementing Approach 1)
+### For Single-Threaded Support (if implementing fix)
 
 1. **Convert all tests to current_thread flavor:**
    ```rust
@@ -269,95 +238,84 @@ If moving toward fully async ecosystem, consider:
    }
    ```
 
-3. **Deadlock testing under load:**
-   - Multiple concurrent queries
-   - High-throughput sources
-   - Slow consumers with broadcast channels
+3. **Test with storage operations:**
+   - Verify RocksDB/Redb operations work via spawn_blocking
+   - Confirm no panics or errors
 
 4. **Performance benchmarks:**
-   - Compare single-threaded vs. multi-threaded
+   - Compare single-threaded vs. multi-threaded throughput
    - Measure I/O operation latency
    - Test concurrent query processing
 
-### For Documenting Requirement (Approach 3)
-
-1. **Verify all examples work with multi-threaded runtime**
-2. **Add negative tests that verify panics with wrong runtime**
-3. **Document expected error messages**
-
 ---
 
-## Migration Guide (if implementing Approach 1)
+## Migration Guide (if implementing fix)
 
 ### For Library Users
 
+**Current (requires rt-multi-thread):**
+```rust
+[dependencies]
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "sync", "time"] }
+```
+
+**After fix (both work):**
+```rust
+# Either runtime type works:
+tokio = { version = "1.0", features = ["rt", "macros", "sync", "time"] }  # minimal
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "sync", "time"] }  # multi-threaded
+```
+
+### For Test Code
+
+Update tests that use `test_subscribe()` to use async version:
+
 **Before:**
 ```rust
-#[tokio::main]
-async fn main() {
-    // Works (defaults to multi-threaded)
+fn test_something() {
+    let receiver = source.test_subscribe();  // sync, uses block_in_place
 }
 ```
 
 **After:**
 ```rust
-// Both work:
-#[tokio::main]  // multi-threaded
-#[tokio::main(flavor = "current_thread")]  // single-threaded
-async fn main() {
-    // Both supported
-}
-```
-
-### For Plugin Developers
-
-**Before:**
-```rust
-async fn store_data(&self, key: &str, value: &[u8]) -> Result<()> {
-    tokio::task::spawn_blocking(move || {
-        // RocksDB operations
-    }).await?
-}
-```
-
-**After:**
-```rust
-async fn store_data(&self, key: &str, value: &[u8]) -> Result<()> {
-    storage::async_operation(move || {
-        // RocksDB operations (runs on dedicated pool)
-    }).await
+async fn test_something() {
+    let receiver = source.test_subscribe().await;  // async
 }
 ```
 
 ---
 
-## Open Questions
+## Conclusion
 
-1. **What is the target deployment environment?**
-   - Server/cloud → multi-threaded is fine
-   - Embedded/WASM → single-threaded is critical
+**Current State:**
+The drasi-core project has **minimal barriers** to single-threaded runtime support:
+- Only blocker: One `block_in_place` call in a test helper function
+- All storage operations (36 `spawn_blocking` calls) already work on single-threaded runtime
+- All concurrent tasks (77 `tokio::spawn` calls) already work via cooperative multitasking
 
-2. **What is acceptable performance profile?**
-   - Need parallelism for throughput?
-   - Can tolerate single-threaded constraints?
+**Feasibility Assessment:**
+- **Technically Possible:** Yes, with ~1 hour of work
+- **Practically Viable:** Yes, minimal changes required
+- **Recommended:** Only if single-threaded support is needed for specific deployment scenarios
 
-3. **Are there specific use cases requiring single-threaded?**
-   - Testing simplicity?
-   - Resource constraints?
-   - Specific runtime environments?
+**Recommendation:**
+1. **If single-threaded not needed:** Keep current architecture (no changes)
+2. **If single-threaded support desired:** Fix the one `block_in_place` call (~1 hour)
+3. **Do NOT pursue:** "Async storage abstraction" or database migration - not needed!
 
-4. **What is priority vs. effort tradeoff?**
-   - Quick documentation (1 day) vs.
-   - Storage abstraction (1-2 weeks) vs.
-   - Full async migration (1-2 months)
+**Effort Estimates:**
+- Fix blocker: ~1 hour (make test helper async)
+- ~~Approach 1 (Storage abstraction): NOT NEEDED~~
+- ~~Approach 2 (Async database): NOT NEEDED~~
 
 ---
 
 ## References
 
 ### Tokio Documentation
-- [spawn_blocking](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html)
-- [block_in_place](https://docs.rs/tokio/latest/tokio/task/fn.block_in_place.html)
+- [spawn_blocking](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html) - Works on both runtime types
+- [block_in_place](https://docs.rs/tokio/latest/tokio/task/fn.block_in_place.html) - Requires rt-multi-thread
 - [Runtime flavors](https://docs.rs/tokio/latest/tokio/runtime/index.html#runtime-flavors)
 - [Bridging with sync code](https://tokio.rs/tokio/topics/bridging)
 
