@@ -280,11 +280,11 @@ impl ApplicationSourceHandle {
             properties,
             in_node: ElementReference {
                 source_id: Arc::from(self.source_id.as_str()),
-                element_id: end_node_id.into(),
+                element_id: start_node_id.into(),
             },
             out_node: ElementReference {
                 source_id: Arc::from(self.source_id.as_str()),
-                element_id: start_node_id.into(),
+                element_id: end_node_id.into(),
             },
         };
 
