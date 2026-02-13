@@ -349,6 +349,9 @@ impl PostgresBootstrapHandler {
                 error!("PostgreSQL connection error: {e}");
             }
         });
+        
+        // Yield to allow connection handler to start
+        tokio::task::yield_now().await;
 
         Ok(client)
     }
