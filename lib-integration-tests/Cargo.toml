@@ -11,6 +11,8 @@ workspace = true
 # Test dependencies only - this crate has no library code
 drasi-lib.workspace = true
 drasi-source-postgres.workspace = true
+drasi-source-application.workspace = true
+drasi-reaction-application.workspace = true
 
 tokio = { version = "1.6", features = ["full"] }
 testcontainers = "0.23"
