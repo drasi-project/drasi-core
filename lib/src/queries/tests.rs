@@ -17,7 +17,7 @@ mod manager_tests {
     use super::super::*;
     use crate::channels::*;
     use crate::config::{QueryConfig, QueryLanguage, SourceSubscriptionConfig};
-    use crate::sources::tests::create_test_mock_source;
+    use crate::sources::tests::{create_test_bootstrap_mock_source, create_test_mock_source};
     use crate::sources::SourceManager;
     use drasi_core::middleware::MiddlewareTypeRegistry;
     use std::sync::Arc;
@@ -94,7 +94,13 @@ mod manager_tests {
     ) {
         let (event_tx, event_rx) = mpsc::channel(100);
 
-        let source_manager = Arc::new(SourceManager::new(event_tx.clone()));
+        // Use the global shared log registry for test isolation with tracing
+        let log_registry = crate::managers::get_or_init_global_registry();
+        let source_manager = Arc::new(SourceManager::new(
+            "test-instance",
+            event_tx.clone(),
+            log_registry.clone(),
+        ));
 
         // Create a test IndexFactory with empty backends (no plugin, memory only)
         let index_factory = Arc::new(crate::indexes::IndexFactory::new(vec![], None));
@@ -103,10 +109,12 @@ mod manager_tests {
         let middleware_registry = Arc::new(MiddlewareTypeRegistry::new());
 
         let query_manager = Arc::new(QueryManager::new(
+            "test-instance",
             event_tx.clone(),
             source_manager.clone(),
             index_factory,
             middleware_registry,
+            log_registry,
         ));
 
         (query_manager, event_rx, event_tx, source_manager)
@@ -548,6 +556,148 @@ mod manager_tests {
             retrieved2.auto_start,
             "Retrieved config should preserve auto_start=true"
         );
+    }
+
+    // ============================================================================
+    // Cleanup Tests
+    // ============================================================================
+
+    /// Test that deleting a query cleans up its event history
+    #[tokio::test]
+    async fn test_delete_query_cleans_up_event_history() {
+        let (manager, _event_rx, _event_tx, _source_manager) = create_test_manager().await;
+
+        // Add a query
+        let config = create_test_query_config("cleanup-events-query", vec![]);
+        manager.add_query(config).await.unwrap();
+
+        // Record an event manually to simulate lifecycle
+        manager
+            .record_event(ComponentEvent {
+                component_id: "cleanup-events-query".to_string(),
+                component_type: ComponentType::Query,
+                status: ComponentStatus::Running,
+                timestamp: chrono::Utc::now(),
+                message: Some("Test event".to_string()),
+            })
+            .await;
+
+        // Verify events exist
+        let events = manager.get_query_events("cleanup-events-query").await;
+        assert!(!events.is_empty(), "Expected events after recording");
+
+        // Delete the query
+        manager
+            .delete_query("cleanup-events-query".to_string())
+            .await
+            .unwrap();
+
+        // Verify events are cleaned up
+        let events_after = manager.get_query_events("cleanup-events-query").await;
+        assert!(events_after.is_empty(), "Expected no events after deletion");
+    }
+
+    // ============================================================================
+    // Bootstrap gate tests
+    // ============================================================================
+
+    /// Test that the bootstrap gate delays the query's transition from Starting to Running
+    /// until the bootstrap channel is closed (signaling bootstrap completion).
+    #[tokio::test]
+    async fn test_bootstrap_gate_delays_running_status() {
+        let (manager, mut event_rx, event_tx, source_manager) = create_test_manager().await;
+
+        // Create a bootstrap channel — test controls the sender
+        let (bootstrap_tx, bootstrap_rx) = tokio::sync::mpsc::channel::<BootstrapEvent>(100);
+
+        // Add a source that provides the bootstrap channel
+        let source =
+            create_test_bootstrap_mock_source("bs-source".to_string(), event_tx, bootstrap_rx);
+        source_manager.add_source(source).await.unwrap();
+
+        // Add a query subscribed to this source
+        let config = create_test_query_config("bs-query", vec!["bs-source".to_string()]);
+        manager.add_query(config).await.unwrap();
+
+        // Start the query
+        manager.start_query("bs-query".to_string()).await.unwrap();
+
+        // Drain the Starting event from the channel
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while let Some(event) = event_rx.recv().await {
+                if event.component_id == "bs-query"
+                    && matches!(event.status, ComponentStatus::Starting)
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("Timeout waiting for Starting event");
+
+        // Give the system a moment to settle
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // While bootstrap channel is still open, the query should remain in Starting state
+        let status = manager
+            .get_query_status("bs-query".to_string())
+            .await
+            .unwrap();
+        assert!(
+            matches!(status, ComponentStatus::Starting),
+            "Expected Starting while bootstrap is in progress, got {status:?}"
+        );
+
+        // Drop the bootstrap sender — closes the channel, signaling bootstrap completion
+        drop(bootstrap_tx);
+
+        // Wait for the Running event
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(event) = event_rx.recv().await {
+                if event.component_id == "bs-query"
+                    && matches!(event.status, ComponentStatus::Running)
+                {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("Timeout waiting for Running event after bootstrap completion");
+
+        // Verify the query is now Running
+        let status = manager
+            .get_query_status("bs-query".to_string())
+            .await
+            .unwrap();
+        assert!(
+            matches!(status, ComponentStatus::Running),
+            "Expected Running after bootstrap completed, got {status:?}"
+        );
+    }
+
+    /// Test that deleting a query cleans up its log history
+    #[tokio::test]
+    async fn test_delete_query_cleans_up_log_history() {
+        let (manager, _event_rx, _event_tx, _source_manager) = create_test_manager().await;
+
+        // Add a query
+        let config = create_test_query_config("cleanup-logs-query", vec![]);
+        manager.add_query(config).await.unwrap();
+
+        // Generate a log via subscribe (which creates the channel) then check
+        // First subscribe to create the channel
+        let result = manager.subscribe_logs("cleanup-logs-query").await;
+        assert!(result.is_some(), "Expected to subscribe to query logs");
+
+        // Delete the query
+        manager
+            .delete_query("cleanup-logs-query".to_string())
+            .await
+            .unwrap();
+
+        // Verify logs are cleaned up (subscribe should fail for non-existent query)
+        let result = manager.subscribe_logs("cleanup-logs-query").await;
+        assert!(result.is_none(), "Expected None for deleted query logs");
     }
 }
 

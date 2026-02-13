@@ -117,6 +117,7 @@ use drasi_lib::channels::{DispatchMode, *};
 use drasi_lib::managers::{log_component_start, log_component_stop};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
+use tracing::Instrument;
 
 // Include generated protobuf code
 // Allow unwrap in generated proto code - tonic generates code with unwrap() for HTTP response building
@@ -288,9 +289,18 @@ impl Source for GrpcSource {
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         *self.base.shutdown_tx.write().await = Some(shutdown_tx);
 
+        // Get instance_id from context for log routing isolation
+        let instance_id = self
+            .base
+            .context()
+            .await
+            .map(|c| c.instance_id)
+            .unwrap_or_default();
+
         // Create gRPC service
         let service = GrpcSourceService {
             source_id: self.base.id.clone(),
+            instance_id: instance_id.clone(),
             dispatchers: self.base.dispatchers.clone(),
         };
 
@@ -301,37 +311,48 @@ impl Source for GrpcSource {
         let source_id = self.base.id.clone();
         let status_tx = self.base.status_tx();
 
-        let task = tokio::spawn(async move {
-            *status.write().await = ComponentStatus::Running;
+        let source_id_for_span = source_id.clone();
+        let span = tracing::info_span!(
+            "grpc_source_server",
+            instance_id = %instance_id,
+            component_id = %source_id_for_span,
+            component_type = "source"
+        );
+        let task = tokio::spawn(
+            async move {
+                *status.write().await = ComponentStatus::Running;
 
-            let running_event = ComponentEvent {
-                component_id: source_id.clone(),
-                component_type: ComponentType::Source,
-                status: ComponentStatus::Running,
-                timestamp: chrono::Utc::now(),
-                message: Some(format!("gRPC source listening on {addr}")),
-            };
+                let running_event = ComponentEvent {
+                    component_id: source_id.clone(),
+                    component_type: ComponentType::Source,
+                    status: ComponentStatus::Running,
+                    timestamp: chrono::Utc::now(),
+                    message: Some(format!("gRPC source listening on {addr}")),
+                };
 
-            if let Some(ref tx) = *status_tx.read().await {
-                if let Err(e) = tx.send(running_event).await {
-                    error!("Failed to send component event: {e}");
+                if let Some(ref tx) = *status_tx.read().await {
+                    if let Err(e) = tx.send(running_event).await {
+                        error!("Failed to send component event: {e}");
+                    }
                 }
+
+                // Run the server with graceful shutdown
+                let server =
+                    Server::builder()
+                        .add_service(svc)
+                        .serve_with_shutdown(addr, async move {
+                            let _ = shutdown_rx.await;
+                            debug!("gRPC source received shutdown signal");
+                        });
+
+                if let Err(e) = server.await {
+                    error!("gRPC server error: {e}");
+                }
+
+                *status.write().await = ComponentStatus::Stopped;
             }
-
-            // Run the server with graceful shutdown
-            let server = Server::builder()
-                .add_service(svc)
-                .serve_with_shutdown(addr, async move {
-                    let _ = shutdown_rx.await;
-                    debug!("gRPC source received shutdown signal");
-                });
-
-            if let Err(e) = server.await {
-                error!("gRPC server error: {e}");
-            }
-
-            *status.write().await = ComponentStatus::Stopped;
-        });
+            .instrument(span),
+        );
 
         *self.base.task_handle.write().await = Some(task);
         self.base.set_status(ComponentStatus::Running).await;
@@ -377,6 +398,8 @@ impl Source for GrpcSource {
 struct GrpcSourceService {
     /// The source ID used for event attribution
     source_id: String,
+    /// Instance ID for log routing isolation
+    instance_id: String,
     /// Shared dispatchers for sending events to subscribers
     dispatchers: Arc<
         RwLock<
@@ -460,76 +483,87 @@ impl SourceService for GrpcSourceService {
     ) -> Result<Response<Self::StreamEventsStream>, Status> {
         let mut stream = request.into_inner();
         let source_id = self.source_id.clone();
+        let instance_id = self.instance_id.clone();
         let dispatchers = self.dispatchers.clone();
 
         let (tx, rx) = tokio::sync::mpsc::channel(128);
 
-        tokio::spawn(async move {
-            let mut events_processed = 0u64;
+        let source_id_for_span = source_id.clone();
+        let span = tracing::info_span!(
+            "grpc_stream_events",
+            instance_id = %instance_id,
+            component_id = %source_id_for_span,
+            component_type = "source"
+        );
+        tokio::spawn(
+            async move {
+                let mut events_processed = 0u64;
 
-            while let Ok(Some(proto_change)) = stream.message().await {
-                match convert_proto_to_source_change(&proto_change, &source_id) {
-                    Ok(source_change) => {
-                        // Create profiling metadata with timestamps
-                        let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
-                        profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
+                while let Ok(Some(proto_change)) = stream.message().await {
+                    match convert_proto_to_source_change(&proto_change, &source_id) {
+                        Ok(source_change) => {
+                            // Create profiling metadata with timestamps
+                            let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
+                            profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-                        let wrapper = SourceEventWrapper::with_profiling(
-                            source_id.clone(),
-                            SourceEvent::Change(source_change),
-                            chrono::Utc::now(),
-                            profiling,
-                        );
+                            let wrapper = SourceEventWrapper::with_profiling(
+                                source_id.clone(),
+                                SourceEvent::Change(source_change),
+                                chrono::Utc::now(),
+                                profiling,
+                            );
 
-                        // Dispatch via helper
-                        if let Err(e) = SourceBase::dispatch_from_task(
-                            dispatchers.clone(),
-                            wrapper.clone(),
-                            &source_id,
-                        )
-                        .await
-                        {
-                            debug!("[{source_id}] Failed to dispatch (no subscribers): {e}");
+                            // Dispatch via helper
+                            if let Err(e) = SourceBase::dispatch_from_task(
+                                dispatchers.clone(),
+                                wrapper.clone(),
+                                &source_id,
+                            )
+                            .await
+                            {
+                                debug!("[{source_id}] Failed to dispatch (no subscribers): {e}");
+                            }
+
+                            events_processed += 1;
+
+                            // Send periodic updates
+                            if events_processed.is_multiple_of(100) {
+                                let _ = tx
+                                    .send(Ok(StreamEventResponse {
+                                        success: true,
+                                        message: format!("Processed {events_processed} events"),
+                                        error: String::new(),
+                                        events_processed,
+                                    }))
+                                    .await;
+                            }
                         }
-
-                        events_processed += 1;
-
-                        // Send periodic updates
-                        if events_processed.is_multiple_of(100) {
+                        Err(e) => {
+                            error!("[{source_id}] Invalid event data: {e}");
                             let _ = tx
                                 .send(Ok(StreamEventResponse {
-                                    success: true,
-                                    message: format!("Processed {events_processed} events"),
-                                    error: String::new(),
+                                    success: false,
+                                    message: "Invalid event data".to_string(),
+                                    error: e.to_string(),
                                     events_processed,
                                 }))
                                 .await;
                         }
                     }
-                    Err(e) => {
-                        error!("[{source_id}] Invalid event data: {e}");
-                        let _ = tx
-                            .send(Ok(StreamEventResponse {
-                                success: false,
-                                message: "Invalid event data".to_string(),
-                                error: e.to_string(),
-                                events_processed,
-                            }))
-                            .await;
-                    }
                 }
-            }
 
-            // Send final response
-            let _ = tx
-                .send(Ok(StreamEventResponse {
-                    success: true,
-                    message: format!("Stream completed. Processed {events_processed} events"),
-                    error: String::new(),
-                    events_processed,
-                }))
-                .await;
-        });
+                // Send final response
+                let _ = tx
+                    .send(Ok(StreamEventResponse {
+                        success: true,
+                        message: format!("Stream completed. Processed {events_processed} events"),
+                        error: String::new(),
+                        events_processed,
+                    }))
+                    .await;
+            }
+            .instrument(span),
+        );
 
         Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
             rx,
@@ -547,14 +581,25 @@ impl SourceService for GrpcSourceService {
         // This could be extended to support bootstrap
         let (tx, rx) = tokio::sync::mpsc::channel(1);
 
-        tokio::spawn(async move {
-            let _ = tx
-                .send(Ok(BootstrapResponse {
-                    elements: vec![],
-                    total_count: 0,
-                }))
-                .await;
-        });
+        let instance_id = self.instance_id.clone();
+        let source_id_for_span = self.source_id.clone();
+        let span = tracing::info_span!(
+            "grpc_request_bootstrap",
+            instance_id = %instance_id,
+            component_id = %source_id_for_span,
+            component_type = "source"
+        );
+        tokio::spawn(
+            async move {
+                let _ = tx
+                    .send(Ok(BootstrapResponse {
+                        elements: vec![],
+                        total_count: 0,
+                    }))
+                    .await;
+            }
+            .instrument(span),
+        );
 
         Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
             rx,

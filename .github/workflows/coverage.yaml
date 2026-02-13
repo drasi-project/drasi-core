@@ -44,7 +44,7 @@ jobs:
           - 6379:6379
     steps:
       - name: Checkout repository
-        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install libraries
         run: |
@@ -55,7 +55,7 @@ jobs:
         run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
 
       - name: Cache Cargo registry
-        uses: actions/cache@v4.2.2 # v4.0.2
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
         with:
           path: ~/.cargo/registry
           key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
@@ -63,7 +63,7 @@ jobs:
             ${{ runner.os }}-cargo-registry-
 
       - name: Cache Cargo index
-        uses: actions/cache@v4.2.2 # v4.0.2
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
         with:
           path: ~/.cargo/git
           key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
@@ -71,7 +71,7 @@ jobs:
             ${{ runner.os }}-cargo-index-
 
       - name: Cache Cargo build
-        uses: actions/cache@v4.2.2 # v4.0.2
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
         with:
           path: target
           key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
@@ -97,7 +97,7 @@ jobs:
 
       - name: Upload Code Coverage Report to Codecov
         if: "!contains(github.event.head_commit.message, 'clippy fix')"
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@0561704f0f02c16a585d4c7555e57fa2e44cf909 # v5.5.2
         with:
           files: drasi-core-tarpaulin-report.xml
           name: codecov-drasi-core

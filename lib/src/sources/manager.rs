@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use anyhow::Result;
-use log::info;
+use log::{info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -27,7 +27,10 @@ use std::collections::BTreeMap;
 use crate::channels::*;
 use crate::config::SourceRuntime;
 use crate::context::SourceRuntimeContext;
-use crate::managers::{is_operation_valid, log_component_error, Operation};
+use crate::managers::{
+    is_operation_valid, log_component_error, ComponentEventHistory, ComponentLogKey,
+    ComponentLogRegistry, Operation,
+};
 use crate::sources::Source;
 use crate::state_store::StateStoreProvider;
 
@@ -73,18 +76,28 @@ pub fn convert_json_to_element_properties(
 }
 
 pub struct SourceManager {
+    instance_id: String,
     sources: Arc<RwLock<HashMap<String, Arc<dyn Source>>>>,
     event_tx: ComponentEventSender,
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
+    event_history: Arc<RwLock<ComponentEventHistory>>,
+    log_registry: Arc<ComponentLogRegistry>,
 }
 
 impl SourceManager {
     /// Create a new SourceManager
-    pub fn new(event_tx: ComponentEventSender) -> Self {
+    pub fn new(
+        instance_id: impl Into<String>,
+        event_tx: ComponentEventSender,
+        log_registry: Arc<ComponentLogRegistry>,
+    ) -> Self {
         Self {
+            instance_id: instance_id.into(),
             sources: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
             state_store: Arc::new(RwLock::new(None)),
+            event_history: Arc::new(RwLock::new(ComponentEventHistory::new())),
+            log_registry,
         }
     }
 
@@ -126,6 +139,7 @@ impl SourceManager {
 
         // Construct runtime context for this source
         let context = SourceRuntimeContext::new(
+            &self.instance_id,
             &source_id,
             self.event_tx.clone(),
             self.state_store.read().await.clone(),
@@ -223,14 +237,15 @@ impl SourceManager {
 
         if let Some(source) = source {
             let status = source.status().await;
+            let error_message = match &status {
+                ComponentStatus::Error => self.event_history.read().await.get_last_error(&id),
+                _ => None,
+            };
             let runtime = SourceRuntime {
                 id: source.id().to_string(),
                 source_type: source.type_name().to_string(),
                 status: status.clone(),
-                error_message: match &status {
-                    ComponentStatus::Error => Some("Source error occurred".to_string()),
-                    _ => None,
-                },
+                error_message,
                 properties: source.properties(),
             };
             Ok(runtime)
@@ -239,7 +254,7 @@ impl SourceManager {
         }
     }
 
-    pub async fn delete_source(&self, id: String) -> Result<()> {
+    pub async fn delete_source(&self, id: String, cleanup: bool) -> Result<()> {
         // First check if the source exists
         let source = {
             let sources = self.sources.read().await;
@@ -249,29 +264,148 @@ impl SourceManager {
         if let Some(source) = source {
             let status = source.status().await;
 
-            // If the source is running, stop it first
-            if matches!(status, ComponentStatus::Running) {
+            // If the source is running or starting, stop it first
+            if matches!(status, ComponentStatus::Running | ComponentStatus::Starting) {
                 info!("Stopping source '{id}' before deletion");
-                source.stop().await?;
+                if let Err(e) = source.stop().await {
+                    warn!("Failed to stop source '{id}' during deletion (may already be stopped): {e}");
+                }
 
                 // Wait a bit to ensure the source has fully stopped
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-                // Verify it's stopped
+                // Verify it's stopped - accept Stopped or Error
                 let new_status = source.status().await;
-                if !matches!(new_status, ComponentStatus::Stopped) {
-                    return Err(anyhow::anyhow!(
-                        "Failed to stop source '{id}' before deletion"
-                    ));
+                if !matches!(
+                    new_status,
+                    ComponentStatus::Stopped | ComponentStatus::Error
+                ) {
+                    warn!("Source '{id}' in unexpected state {new_status:?} after stop, proceeding with deletion");
                 }
             } else {
                 // Still validate the operation for non-running states
                 is_operation_valid(&status, &Operation::Delete).map_err(|e| anyhow::anyhow!(e))?;
             }
 
+            // Call deprovision if cleanup is requested
+            if cleanup {
+                if let Err(e) = source.deprovision().await {
+                    tracing::warn!("Deprovision failed for source '{id}': {e}");
+                }
+            }
+
             // Now remove the source
             self.sources.write().await.remove(&id);
+            // Clean up event history for this source
+            self.event_history.write().await.remove_component(&id);
+            // Clean up log history for this source
+            let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Source, &id);
+            self.log_registry.remove_component_by_key(&log_key).await;
             info!("Deleted source: {id}");
+
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Source not found: {id}"))
+        }
+    }
+
+    /// Update a source by replacing it with a new instance.
+    ///
+    /// Flow: validate exists → validate status → emit Reconfiguring event →
+    /// stop if running/starting → wait for stopped → initialize new →
+    /// replace (if still exists) → restart if was running.
+    /// Log and event history are preserved.
+    pub async fn update_source(&self, id: String, new_source: impl Source + 'static) -> Result<()> {
+        let old_source = {
+            let sources = self.sources.read().await;
+            sources.get(&id).cloned()
+        };
+
+        if let Some(old_source) = old_source {
+            // Verify the new source has the same ID
+            if new_source.id() != id {
+                return Err(anyhow::anyhow!(
+                    "New source ID '{}' does not match existing source ID '{}'",
+                    new_source.id(),
+                    id
+                ));
+            }
+
+            let status = old_source.status().await;
+            let was_running =
+                matches!(status, ComponentStatus::Running | ComponentStatus::Starting);
+
+            // Validate that update is allowed in the current state
+            if was_running {
+                // Running/Starting components will be stopped, then validated
+            } else {
+                is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
+            }
+
+            // Emit Reconfiguring event
+            let _ = self
+                .event_tx
+                .send(ComponentEvent {
+                    component_id: id.clone(),
+                    component_type: ComponentType::Source,
+                    status: ComponentStatus::Reconfiguring,
+                    timestamp: chrono::Utc::now(),
+                    message: Some("Reconfiguring source".to_string()),
+                })
+                .await;
+
+            // If running or starting, stop first then validate
+            if was_running {
+                info!("Stopping source '{id}' for reconfiguration");
+                old_source.stop().await?;
+
+                // Poll for Stopped status with timeout
+                let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
+                loop {
+                    let current = old_source.status().await;
+                    if matches!(current, ComponentStatus::Stopped | ComponentStatus::Error) {
+                        break;
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(anyhow::anyhow!(
+                            "Timed out waiting for source '{id}' to stop"
+                        ));
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                }
+
+                let status = old_source.status().await;
+                is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
+            }
+
+            // Initialize the new source with runtime context
+            let new_source: Arc<dyn Source> = Arc::new(new_source);
+            let context = SourceRuntimeContext::new(
+                &self.instance_id,
+                &id,
+                self.event_tx.clone(),
+                self.state_store.read().await.clone(),
+            );
+            new_source.initialize(context).await;
+
+            // Replace in the sources map only if the entry still exists
+            // (guards against concurrent deletion)
+            {
+                let mut sources = self.sources.write().await;
+                if !sources.contains_key(&id) {
+                    return Err(anyhow::anyhow!(
+                        "Source '{id}' was concurrently deleted during reconfiguration"
+                    ));
+                }
+                sources.insert(id.clone(), new_source);
+            }
+
+            info!("Reconfigured source '{id}'");
+
+            // Restart if it was running before
+            if was_running {
+                self.start_source(id).await?;
+            }
 
             Ok(())
         } else {
@@ -334,5 +468,72 @@ impl SourceManager {
             }
         }
         Ok(())
+    }
+
+    /// Record a component event in the history.
+    ///
+    /// This should be called by the event processing loop to track component
+    /// lifecycle events for later querying.
+    pub async fn record_event(&self, event: ComponentEvent) {
+        self.event_history.write().await.record_event(event);
+    }
+
+    /// Get events for a specific source.
+    ///
+    /// Returns events in chronological order (oldest first).
+    pub async fn get_source_events(&self, id: &str) -> Vec<ComponentEvent> {
+        self.event_history.read().await.get_events(id)
+    }
+
+    /// Get all events across all sources.
+    ///
+    /// Returns events sorted by timestamp (oldest first).
+    pub async fn get_all_events(&self) -> Vec<ComponentEvent> {
+        self.event_history.read().await.get_all_events()
+    }
+
+    /// Subscribe to live logs for a source.
+    ///
+    /// Returns the log history and a broadcast receiver for new logs.
+    /// Returns None if the source doesn't exist.
+    pub async fn subscribe_logs(
+        &self,
+        id: &str,
+    ) -> Option<(
+        Vec<crate::managers::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
+    )> {
+        // Verify the source exists
+        {
+            let sources = self.sources.read().await;
+            if !sources.contains_key(id) {
+                return None;
+            }
+        }
+
+        let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Source, id);
+        Some(self.log_registry.subscribe_by_key(&log_key).await)
+    }
+
+    /// Subscribe to live events for a source.
+    ///
+    /// Returns the event history and a broadcast receiver for new events.
+    /// Returns None if the source doesn't exist.
+    pub async fn subscribe_events(
+        &self,
+        id: &str,
+    ) -> Option<(
+        Vec<ComponentEvent>,
+        tokio::sync::broadcast::Receiver<ComponentEvent>,
+    )> {
+        // Verify the source exists
+        {
+            let sources = self.sources.read().await;
+            if !sources.contains_key(id) {
+                return None;
+            }
+        }
+
+        Some(self.event_history.write().await.subscribe(id))
     }
 }
