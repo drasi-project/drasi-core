@@ -33,7 +33,7 @@ async fn test_e() {
     let expression = ast::FunctionExpression {
         name: Arc::from("e"),
         args: vec![],
-        position_in_query: 0,
+        position_in_query: 10,
     };
 
     let result = func.call(&context, &expression, vec![]).await.unwrap();
@@ -50,7 +50,7 @@ async fn test_e_arg_count() {
     let expression = ast::FunctionExpression {
         name: Arc::from("e"),
         args: vec![],
-        position_in_query: 0,
+        position_in_query: 10,
     };
 
     // Test with 1 argument (should be 0)
