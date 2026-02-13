@@ -13,6 +13,16 @@ Continuous Queries are implemented as graph queries written in the Cypher Query 
 
 Drasi-core is the internal library used by [Drasi](https://github.com/drasi-project/drasi-platform) to implement continuous queries. Drasi itself is a much broader solution with many more moving parts.  Drasi-core can be used stand-alone from Drasi for embedded scenarios, where continuous queries could run in-process inside an application.
 
+## Requirements
+
+Drasi-core requires a **multi-threaded Tokio runtime**. The library uses blocking storage operations that are incompatible with single-threaded runtimes. When using Drasi-core, ensure your `Cargo.toml` includes:
+
+```toml
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "sync", "time"] }
+```
+
+For more details, see the [Tokio Runtime Compatibility](docs/tokio-runtime-compatibility.md) documentation.
+
 ## Example
 
 In this scenario, we have a set of `Vehicles` and a set of `Zones` where vehicles can be.  The conceptual data model in Drasi is a labeled property graph, so we will add the vehicles and zones as nodes in the graph and we will connect them with a `LOCATED_IN` relationship.
