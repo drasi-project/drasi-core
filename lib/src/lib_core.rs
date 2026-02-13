@@ -21,6 +21,7 @@ use crate::channels::*;
 use crate::config::{DrasiLibConfig, RuntimeConfig};
 use crate::inspection::InspectionAPI;
 use crate::lifecycle::LifecycleManager;
+use crate::managers::ComponentLogRegistry;
 use crate::queries::QueryManager;
 use crate::reactions::ReactionManager;
 use crate::sources::SourceManager;
@@ -123,7 +124,7 @@ use drasi_core::middleware::MiddlewareTypeRegistry;
 ///
 /// // Remove components
 /// core.remove_query("new-query").await?;
-/// core.remove_source("new-source").await?;
+/// core.remove_source("new-source", false).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -162,6 +163,8 @@ pub struct DrasiLib {
     pub(crate) lifecycle: Arc<RwLock<LifecycleManager>>,
     // Middleware registry for source middleware
     pub(crate) middleware_registry: Arc<MiddlewareTypeRegistry>,
+    // Component log registry for live log streaming
+    pub(crate) log_registry: Arc<ComponentLogRegistry>,
 }
 
 impl Clone for DrasiLib {
@@ -176,6 +179,7 @@ impl Clone for DrasiLib {
             inspection: self.inspection.clone(),
             lifecycle: Arc::clone(&self.lifecycle),
             middleware_registry: Arc::clone(&self.middleware_registry),
+            log_registry: Arc::clone(&self.log_registry),
         }
     }
 }
@@ -199,33 +203,67 @@ impl DrasiLib {
     pub(crate) fn new(config: Arc<RuntimeConfig>) -> Self {
         let (channels, receivers) = EventChannels::new();
 
-        let source_manager = Arc::new(SourceManager::new(channels.component_event_tx.clone()));
+        // Use the shared global log registry.
+        // Since tracing uses a single global subscriber, all DrasiLib instances
+        // share the same log registry. This ensures logs are properly routed
+        // regardless of how many DrasiLib instances are created.
+        let log_registry = crate::managers::get_or_init_global_registry();
+
+        // Get the instance ID from config for log routing
+        let instance_id = config.id.clone();
+
+        let source_manager = Arc::new(SourceManager::new(
+            &instance_id,
+            channels.component_event_tx.clone(),
+            log_registry.clone(),
+        ));
 
         // Initialize middleware registry and register all standard middleware factories
         let mut middleware_registry = MiddlewareTypeRegistry::new();
+
+        #[cfg(feature = "middleware-jq")]
         middleware_registry.register(Arc::new(drasi_middleware::jq::JQFactory::new()));
+
+        #[cfg(feature = "middleware-map")]
         middleware_registry.register(Arc::new(drasi_middleware::map::MapFactory::new()));
+
+        #[cfg(feature = "middleware-unwind")]
         middleware_registry.register(Arc::new(drasi_middleware::unwind::UnwindFactory::new()));
+
+        #[cfg(feature = "middleware-relabel")]
         middleware_registry.register(Arc::new(
             drasi_middleware::relabel::RelabelMiddlewareFactory::new(),
         ));
+
+        #[cfg(feature = "middleware-decoder")]
         middleware_registry.register(Arc::new(drasi_middleware::decoder::DecoderFactory::new()));
+
+        #[cfg(feature = "middleware-parse-json")]
         middleware_registry.register(Arc::new(
             drasi_middleware::parse_json::ParseJsonFactory::new(),
         ));
+
+        #[cfg(feature = "middleware-promote")]
         middleware_registry.register(Arc::new(
             drasi_middleware::promote::PromoteMiddlewareFactory::new(),
         ));
+
         let middleware_registry = Arc::new(middleware_registry);
 
         let query_manager = Arc::new(QueryManager::new(
+            &instance_id,
             channels.component_event_tx.clone(),
             source_manager.clone(),
             config.index_factory.clone(),
             middleware_registry.clone(),
+            log_registry.clone(),
         ));
 
-        let reaction_manager = Arc::new(ReactionManager::new(channels.component_event_tx.clone()));
+        let reaction_manager = Arc::new(ReactionManager::new(
+            &instance_id,
+            channels.component_event_tx.clone(),
+            log_registry.clone(),
+        ));
 
         let state_guard = StateGuard::new();
 
@@ -255,6 +293,7 @@ impl DrasiLib {
             inspection,
             lifecycle,
             middleware_registry,
+            log_registry,
         }
     }
 
@@ -614,31 +653,38 @@ mod tests {
 
         let registry = core.middleware_registry();
 
-        // Verify that all 7 standard middleware factories are registered
+        // Verify that middleware factories are registered when their features are enabled
+        #[cfg(feature = "middleware-jq")]
         assert!(
             registry.get("jq").is_some(),
             "JQ factory should be registered"
         );
+        #[cfg(feature = "middleware-map")]
         assert!(
             registry.get("map").is_some(),
             "Map factory should be registered"
         );
+        #[cfg(feature = "middleware-unwind")]
         assert!(
             registry.get("unwind").is_some(),
             "Unwind factory should be registered"
         );
+        #[cfg(feature = "middleware-relabel")]
         assert!(
             registry.get("relabel").is_some(),
             "Relabel factory should be registered"
         );
+        #[cfg(feature = "middleware-decoder")]
         assert!(
             registry.get("decoder").is_some(),
             "Decoder factory should be registered"
         );
+        #[cfg(feature = "middleware-parse-json")]
         assert!(
             registry.get("parse_json").is_some(),
             "ParseJson factory should be registered"
         );
+        #[cfg(feature = "middleware-promote")]
         assert!(
             registry.get("promote").is_some(),
             "Promote factory should be registered"
@@ -654,8 +700,26 @@ mod tests {
 
         // Both Arc instances should point to the same underlying registry
         // We can't directly test Arc equality, but we can verify both work
-        assert!(registry1.get("jq").is_some());
-        assert!(registry2.get("jq").is_some());
+        // Test with any available middleware feature
+        #[cfg(feature = "middleware-jq")]
+        {
+            assert!(registry1.get("jq").is_some());
+            assert!(registry2.get("jq").is_some());
+        }
+        #[cfg(all(feature = "middleware-map", not(feature = "middleware-jq")))]
+        {
+            assert!(registry1.get("map").is_some());
+            assert!(registry2.get("map").is_some());
+        }
+        #[cfg(all(
+            feature = "middleware-decoder",
+            not(feature = "middleware-jq"),
+            not(feature = "middleware-map")
+        ))]
+        {
+            assert!(registry1.get("decoder").is_some());
+            assert!(registry2.get("decoder").is_some());
+        }
     }
 
     #[tokio::test]
@@ -665,7 +729,27 @@ mod tests {
         // Should be accessible even before server is started
         assert!(!core.is_running().await);
         let registry = core.middleware_registry();
+
+        // Verify registry is accessible (test with any available middleware)
+        #[cfg(feature = "middleware-jq")]
         assert!(registry.get("jq").is_some());
+        #[cfg(all(feature = "middleware-map", not(feature = "middleware-jq")))]
+        assert!(registry.get("map").is_some());
+
+        // If no middleware features are enabled, just verify the registry exists
+        #[cfg(not(any(
+            feature = "middleware-jq",
+            feature = "middleware-map",
+            feature = "middleware-decoder",
+            feature = "middleware-parse-json",
+            feature = "middleware-promote",
+            feature = "middleware-relabel",
+            feature = "middleware-unwind"
+        )))]
+        {
+            // Registry should exist even with no middleware
+            let _ = registry;
+        }
     }
 
     #[tokio::test]
@@ -677,7 +761,27 @@ mod tests {
         // Should be accessible after server is started
         assert!(core.is_running().await);
         let registry = core.middleware_registry();
+
+        // Verify registry is accessible (test with any available middleware)
+        #[cfg(feature = "middleware-jq")]
         assert!(registry.get("jq").is_some());
+        #[cfg(all(feature = "middleware-map", not(feature = "middleware-jq")))]
+        assert!(registry.get("map").is_some());
+
+        // If no middleware features are enabled, just verify the registry exists
+        #[cfg(not(any(
+            feature = "middleware-jq",
+            feature = "middleware-map",
+            feature = "middleware-decoder",
+            feature = "middleware-parse-json",
+            feature = "middleware-promote",
+            feature = "middleware-relabel",
+            feature = "middleware-unwind"
+        )))]
+        {
+            // Registry should exist even with no middleware
+            let _ = registry;
+        }
 
         core.stop().await.expect("Failed to stop server");
     }

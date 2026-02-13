@@ -169,7 +169,13 @@ mod manager_tests {
         mpsc::Sender<ComponentEvent>,
     ) {
         let (event_tx, event_rx) = mpsc::channel(100);
-        let manager = Arc::new(ReactionManager::new(event_tx.clone()));
+        // Use the global shared log registry for test isolation with tracing
+        let log_registry = crate::managers::get_or_init_global_registry();
+        let manager = Arc::new(ReactionManager::new(
+            "test-instance",
+            event_tx.clone(),
+            log_registry,
+        ));
         // Inject mock QueryProvider so add_reaction() can construct ReactionRuntimeContext
         manager
             .inject_query_provider(Arc::new(MockQueryProvider))
@@ -221,7 +227,9 @@ mod manager_tests {
         manager.add_reaction(reaction).await.unwrap();
 
         // Delete the reaction
-        let result = manager.delete_reaction("test-reaction".to_string()).await;
+        let result = manager
+            .delete_reaction("test-reaction".to_string(), false)
+            .await;
         assert!(result.is_ok());
 
         // Verify reaction was removed
@@ -233,7 +241,9 @@ mod manager_tests {
     async fn test_delete_nonexistent_reaction() {
         let (manager, _event_rx, _event_tx) = create_test_manager().await;
 
-        let result = manager.delete_reaction("nonexistent".to_string()).await;
+        let result = manager
+            .delete_reaction("nonexistent".to_string(), false)
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
@@ -501,5 +511,292 @@ mod manager_tests {
             matches!(status, ComponentStatus::Running),
             "Reaction with auto_start=false should be manually startable"
         );
+    }
+
+    // ============================================================================
+    // Cleanup Tests
+    // ============================================================================
+
+    /// Test that deleting a reaction cleans up its event history
+    #[tokio::test]
+    async fn test_delete_reaction_cleans_up_event_history() {
+        let (manager, _event_rx, event_tx) = create_test_manager().await;
+
+        // Add a reaction
+        let reaction =
+            create_test_mock_reaction("cleanup-events-reaction".to_string(), vec![], event_tx);
+        manager.add_reaction(reaction).await.unwrap();
+
+        // Record an event manually to simulate lifecycle
+        manager
+            .record_event(ComponentEvent {
+                component_id: "cleanup-events-reaction".to_string(),
+                component_type: ComponentType::Reaction,
+                status: ComponentStatus::Running,
+                timestamp: chrono::Utc::now(),
+                message: Some("Test event".to_string()),
+            })
+            .await;
+
+        // Verify events exist
+        let events = manager.get_reaction_events("cleanup-events-reaction").await;
+        assert!(!events.is_empty(), "Expected events after recording");
+
+        // Delete the reaction
+        manager
+            .delete_reaction("cleanup-events-reaction".to_string(), false)
+            .await
+            .unwrap();
+
+        // Verify events are cleaned up
+        let events_after = manager.get_reaction_events("cleanup-events-reaction").await;
+        assert!(events_after.is_empty(), "Expected no events after deletion");
+    }
+
+    /// Test that deleting a reaction cleans up its log history
+    #[tokio::test]
+    async fn test_delete_reaction_cleans_up_log_history() {
+        let (manager, _event_rx, event_tx) = create_test_manager().await;
+
+        // Add a reaction
+        let reaction =
+            create_test_mock_reaction("cleanup-logs-reaction".to_string(), vec![], event_tx);
+        manager.add_reaction(reaction).await.unwrap();
+
+        // Subscribe to create the channel
+        let result = manager.subscribe_logs("cleanup-logs-reaction").await;
+        assert!(result.is_some(), "Expected to subscribe to reaction logs");
+
+        // Delete the reaction
+        manager
+            .delete_reaction("cleanup-logs-reaction".to_string(), false)
+            .await
+            .unwrap();
+
+        // Verify logs are cleaned up (subscribe should fail for non-existent reaction)
+        let result = manager.subscribe_logs("cleanup-logs-reaction").await;
+        assert!(result.is_none(), "Expected None for deleted reaction logs");
+    }
+
+    // ========================================================================
+    // Deprovision tests
+    // ========================================================================
+
+    /// A test reaction that tracks deprovision calls.
+    struct DeprovisionTestReaction {
+        id: String,
+        queries: Vec<String>,
+        status: Arc<RwLock<ComponentStatus>>,
+        deprovision_called: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl DeprovisionTestReaction {
+        fn new(id: &str) -> (Self, Arc<std::sync::atomic::AtomicBool>) {
+            let deprovision_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            (
+                Self {
+                    id: id.to_string(),
+                    queries: vec![],
+                    status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
+                    deprovision_called: deprovision_called.clone(),
+                },
+                deprovision_called,
+            )
+        }
+
+        fn new_simple(id: &str) -> Self {
+            Self {
+                id: id.to_string(),
+                queries: vec![],
+                status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
+                deprovision_called: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl crate::reactions::Reaction for DeprovisionTestReaction {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn type_name(&self) -> &str {
+            "deprovision-test"
+        }
+
+        fn properties(&self) -> HashMap<String, serde_json::Value> {
+            HashMap::new()
+        }
+
+        fn query_ids(&self) -> Vec<String> {
+            self.queries.clone()
+        }
+
+        fn auto_start(&self) -> bool {
+            false
+        }
+
+        async fn initialize(&self, _context: crate::context::ReactionRuntimeContext) {}
+
+        async fn start(&self) -> anyhow::Result<()> {
+            *self.status.write().await = ComponentStatus::Running;
+            Ok(())
+        }
+
+        async fn stop(&self) -> anyhow::Result<()> {
+            *self.status.write().await = ComponentStatus::Stopped;
+            Ok(())
+        }
+
+        async fn status(&self) -> ComponentStatus {
+            self.status.read().await.clone()
+        }
+
+        async fn deprovision(&self) -> anyhow::Result<()> {
+            self.deprovision_called
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_reaction_with_cleanup_calls_deprovision() {
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        let (reaction, deprovision_flag) = DeprovisionTestReaction::new("deprovision-reaction");
+        manager.add_reaction(reaction).await.unwrap();
+
+        manager
+            .delete_reaction("deprovision-reaction".to_string(), true)
+            .await
+            .unwrap();
+
+        assert!(
+            deprovision_flag.load(std::sync::atomic::Ordering::SeqCst),
+            "deprovision() should have been called"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_reaction_without_cleanup_skips_deprovision() {
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        let (reaction, deprovision_flag) = DeprovisionTestReaction::new("no-deprovision-reaction");
+        manager.add_reaction(reaction).await.unwrap();
+
+        manager
+            .delete_reaction("no-deprovision-reaction".to_string(), false)
+            .await
+            .unwrap();
+
+        assert!(
+            !deprovision_flag.load(std::sync::atomic::Ordering::SeqCst),
+            "deprovision() should NOT have been called"
+        );
+    }
+
+    // ========================================================================
+    // Update (replace instance) tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_update_reaction_replaces_stopped_reaction() {
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        let reaction = DeprovisionTestReaction::new_simple("reconfig-stopped-reaction");
+        manager.add_reaction(reaction).await.unwrap();
+
+        let new_reaction = DeprovisionTestReaction::new_simple("reconfig-stopped-reaction");
+        manager
+            .update_reaction("reconfig-stopped-reaction".to_string(), new_reaction)
+            .await
+            .unwrap();
+
+        let status = manager
+            .get_reaction_status("reconfig-stopped-reaction".to_string())
+            .await
+            .unwrap();
+        assert_eq!(status, ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_update_reaction_stops_and_restarts_running_reaction() {
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        let reaction = DeprovisionTestReaction::new_simple("reconfig-running-reaction");
+        manager.add_reaction(reaction).await.unwrap();
+
+        manager
+            .start_reaction("reconfig-running-reaction".to_string())
+            .await
+            .unwrap();
+        let status = manager
+            .get_reaction_status("reconfig-running-reaction".to_string())
+            .await
+            .unwrap();
+        assert_eq!(status, ComponentStatus::Running);
+
+        let new_reaction = DeprovisionTestReaction::new_simple("reconfig-running-reaction");
+        manager
+            .update_reaction("reconfig-running-reaction".to_string(), new_reaction)
+            .await
+            .unwrap();
+
+        let status = manager
+            .get_reaction_status("reconfig-running-reaction".to_string())
+            .await
+            .unwrap();
+        assert_eq!(status, ComponentStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn test_update_reaction_emits_reconfiguring_event() {
+        let (manager, mut event_rx, _event_tx) = create_test_manager().await;
+
+        let reaction = DeprovisionTestReaction::new_simple("reconfig-event-reaction");
+        manager.add_reaction(reaction).await.unwrap();
+
+        let new_reaction = DeprovisionTestReaction::new_simple("reconfig-event-reaction");
+        manager
+            .update_reaction("reconfig-event-reaction".to_string(), new_reaction)
+            .await
+            .unwrap();
+
+        let mut found_reconfiguring = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if event.component_id == "reconfig-event-reaction"
+                && event.status == ComponentStatus::Reconfiguring
+            {
+                found_reconfiguring = true;
+            }
+        }
+        assert!(found_reconfiguring, "Expected Reconfiguring event");
+    }
+
+    #[tokio::test]
+    async fn test_update_reaction_rejects_mismatched_id() {
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        let reaction = DeprovisionTestReaction::new_simple("original-reaction");
+        manager.add_reaction(reaction).await.unwrap();
+
+        let new_reaction = DeprovisionTestReaction::new_simple("different-id");
+        let result = manager
+            .update_reaction("original-reaction".to_string(), new_reaction)
+            .await;
+        assert!(result.is_err(), "Expected error for mismatched IDs");
+        assert!(result.unwrap_err().to_string().contains("does not match"));
+    }
+
+    #[tokio::test]
+    async fn test_update_nonexistent_reaction() {
+        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+
+        let new_reaction = DeprovisionTestReaction::new_simple("nonexistent");
+        let result = manager
+            .update_reaction("nonexistent".to_string(), new_reaction)
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
     }
 }

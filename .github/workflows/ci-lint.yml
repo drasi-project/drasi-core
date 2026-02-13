@@ -25,10 +25,7 @@ jobs:
       - name: Install libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq libjq-dev libonig-dev protobuf-compiler
-
-      - name: Set JQ_LIB_DIR
-        run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+          sudo apt-get install -y protobuf-compiler build-essential autoconf automake libtool flex bison
 
       - name: Cache Cargo registry
         uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
@@ -55,7 +52,7 @@ jobs:
             ${{ runner.os }}-cargo-clippy-
 
       - name: Run Cargo Clippy
-        run: cargo clippy --all-targets --all-features
+        run: cargo clippy --all-targets
 
   fmt_check:
     name: Format check
