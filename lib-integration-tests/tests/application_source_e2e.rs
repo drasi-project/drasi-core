@@ -113,9 +113,7 @@ async fn test_application_source_relationship_direction_e2e() -> Result<()> {
         .send_node_insert("alice", vec!["Person"], alice_props)
         .await?;
 
-    let bob_props = PropertyMapBuilder::new()
-        .with_string("name", "Bob")
-        .build();
+    let bob_props = PropertyMapBuilder::new().with_string("name", "Bob").build();
     app_handle
         .send_node_insert("bob", vec!["Person"], bob_props)
         .await?;
@@ -149,10 +147,7 @@ async fn test_application_source_relationship_direction_e2e() -> Result<()> {
     );
 
     let query_result = result?;
-    assert!(
-        query_result.is_some(),
-        "Expected query result but got None"
-    );
+    assert!(query_result.is_some(), "Expected query result but got None");
 
     let query_result = query_result.unwrap();
     assert_eq!(
@@ -177,13 +172,13 @@ async fn test_application_source_relationship_direction_e2e() -> Result<()> {
     );
 
     let row = &query_result.results[0];
-    
+
     // Extract the data from the ResultDiff
     let data = match row {
         ResultDiff::Add { data } => data,
         _ => panic!("Expected Add result, got {:?}", row),
     };
-    
+
     let friend_name = data.get("friend_name");
     assert!(
         friend_name.is_some(),
@@ -218,17 +213,20 @@ async fn test_application_source_relationship_direction_e2e() -> Result<()> {
     );
 
     let update_result = update_result?.unwrap();
-    assert!(!update_result.results.is_empty(), "Update should produce results");
+    assert!(
+        !update_result.results.is_empty(),
+        "Update should produce results"
+    );
 
     let updated_row = &update_result.results[0];
-    
+
     // For updates, we should get either an Update or Add
     let updated_data = match updated_row {
         ResultDiff::Update { after, .. } => after,
         ResultDiff::Add { data } => data,
         _ => panic!("Expected Update or Add result, got {:?}", updated_row),
     };
-    
+
     let updated_friend_name = updated_data.get("friend_name").unwrap();
     assert_eq!(
         updated_friend_name.as_str(),
@@ -370,8 +368,8 @@ async fn test_application_source_multiple_relationships() -> Result<()> {
                 id,
                 vec!["KNOWS"],
                 PropertyMapBuilder::new().build(),
-                "alice",    // start (should map to in_node)
-                friend_id,  // end (should map to out_node)
+                "alice",   // start (should map to in_node)
+                friend_id, // end (should map to out_node)
             )
             .await?;
     }
@@ -380,26 +378,27 @@ async fn test_application_source_multiple_relationships() -> Result<()> {
     // Keep reading until we get the final count of 3
     let mut final_count = 0;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    
+
     while tokio::time::Instant::now() < deadline {
         if let Ok(Some(result)) = timeout(Duration::from_millis(500), subscription.recv()).await {
             assert_eq!(result.query_id, "multi-rel-query");
-            
+
             if let Some(row) = result.results.first() {
                 let data = match row {
                     ResultDiff::Add { data } => data,
                     ResultDiff::Aggregation { after, .. } => after,
                     _ => continue,
                 };
-                
+
                 if let Some(friend_count) = data.get("friend_count") {
-                    let count_value = friend_count.as_str()
+                    let count_value = friend_count
+                        .as_str()
                         .and_then(|s| s.parse::<i64>().ok())
                         .or_else(|| friend_count.as_i64())
                         .unwrap_or(0);
-                    
+
                     final_count = count_value;
-                    
+
                     // If we've reached 3, we're done
                     if final_count == 3 {
                         break;
@@ -411,8 +410,7 @@ async fn test_application_source_multiple_relationships() -> Result<()> {
 
     // Validate we found all 3 friends
     assert_eq!(
-        final_count,
-        3,
+        final_count, 3,
         "Alice should have 3 outgoing KNOWS relationships, found: {}",
         final_count
     );
