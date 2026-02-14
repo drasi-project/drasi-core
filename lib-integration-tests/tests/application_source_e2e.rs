@@ -176,7 +176,7 @@ async fn test_application_source_relationship_direction_e2e() -> Result<()> {
     // Extract the data from the ResultDiff
     let data = match row {
         ResultDiff::Add { data } => data,
-        _ => panic!("Expected Add result, got {:?}", row),
+        _ => panic!("Expected Add result, got {row:?}"),
     };
 
     let friend_name = data.get("friend_name");
@@ -190,8 +190,7 @@ async fn test_application_source_relationship_direction_e2e() -> Result<()> {
     assert_eq!(
         friend_name_value.as_str(),
         Some("Bob"),
-        "Expected friend_name='Bob', got {:?}. This indicates the relationship direction is correct!",
-        friend_name_value
+        "Expected friend_name='Bob', got {friend_name_value:?}. This indicates the relationship direction is correct!"
     );
 
     // =========================================================================
@@ -224,7 +223,7 @@ async fn test_application_source_relationship_direction_e2e() -> Result<()> {
     let updated_data = match updated_row {
         ResultDiff::Update { after, .. } => after,
         ResultDiff::Add { data } => data,
-        _ => panic!("Expected Update or Add result, got {:?}", updated_row),
+        _ => panic!("Expected Update or Add result, got {updated_row:?}"),
     };
 
     let updated_friend_name = updated_data.get("friend_name").unwrap();
@@ -411,8 +410,7 @@ async fn test_application_source_multiple_relationships() -> Result<()> {
     // Validate we found all 3 friends
     assert_eq!(
         final_count, 3,
-        "Alice should have 3 outgoing KNOWS relationships, found: {}",
-        final_count
+        "Alice should have 3 outgoing KNOWS relationships, found: {final_count}"
     );
 
     println!("✅ Multiple relationship test passed!");
