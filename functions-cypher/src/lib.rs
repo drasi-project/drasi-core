@@ -151,6 +151,10 @@ fn register_aggregation_functions(registry: &FunctionRegistry) {
     registry.register_function("max", Function::Aggregating(Arc::new(Max {})));
     registry.register_function("collect", Function::Aggregating(Arc::new(Collect {})));
     registry.register_function(
+        "collect_list",
+        Function::Aggregating(Arc::new(CollectList {})),
+    );
+    registry.register_function(
         "drasi.linearGradient",
         Function::Aggregating(Arc::new(LinearGradient {})),
     );
