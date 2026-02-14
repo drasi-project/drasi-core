@@ -1047,7 +1047,7 @@ let batcher_config = AdaptiveBatchConfig {
 let batcher = AdaptiveBatcher::new(batcher_config);
 ```
 
-See `http-adaptive/` for examples. The `grpc` reaction now includes built-in adaptive batching support, enable it with the `adaptive_enable` flag:
+See `http-adaptive/` for examples. The `grpc` reaction now includes built-in adaptive batching support via the `with_adaptive_batching()` method:
 
 ```rust
 use drasi_reaction_grpc::GrpcReaction;
@@ -1056,9 +1056,7 @@ use drasi_reaction_grpc::GrpcReaction;
 let reaction = GrpcReaction::builder("my-grpc-reaction")
     .with_endpoint("grpc://localhost:9090")
     .with_queries(vec!["my-query".to_string()])
-    .with_adaptive_enable(true)
-    .with_min_batch_size(10)
-    .with_max_batch_size(1000)
+    .with_adaptive_batching(10, 1000, 5000)  // min=10, max=1000, timeout=5000ms
     .build()?;
 ```
 

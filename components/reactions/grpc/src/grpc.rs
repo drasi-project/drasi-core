@@ -22,16 +22,16 @@ use std::sync::Arc;
 use std::time::Duration;
 use tonic::transport::Channel;
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus, QueryResult, ResultDiff};
+use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::{QueryProvider, Reaction};
 
-pub use super::config::GrpcReactionConfig;
+pub use super::config::{BatchingConfig, GrpcReactionConfig};
 use super::GrpcReactionBuilder;
 
 // Use modules declared in lib.rs
-use crate::connection::{self, create_client, create_client_with_retry, ConnectionState};
+use crate::connection::{create_client, create_client_with_retry, ConnectionState};
 use crate::helpers::convert_json_to_proto_struct;
 use crate::proto::{
     ProcessResultsRequest, ProtoQueryResult, ProtoQueryResultItem, ReactionServiceClient,
@@ -58,7 +58,7 @@ struct RunInternalFixedParams {
     reaction_name: String,
     endpoint: String,
     batch_size: usize,
-    batch_flush_timeout_ms: u64,
+    batch_timeout_ms: u64,
     max_retries: u32,
     metadata: HashMap<String, String>,
     timeout_ms: u64,
@@ -85,16 +85,7 @@ impl GrpcReaction {
     /// to DrasiLib via `add_reaction()`.
     pub fn new(id: impl Into<String>, queries: Vec<String>, config: GrpcReactionConfig) -> Self {
         let id = id.into();
-        let utils_adaptive_config = AdaptiveBatchConfig {
-            min_batch_size: config.adaptive.adaptive_min_batch_size,
-            max_batch_size: config.adaptive.adaptive_max_batch_size,
-            throughput_window: Duration::from_millis(
-                config.adaptive.adaptive_window_size as u64 * 100,
-            ),
-            max_wait_time: Duration::from_millis(config.adaptive.adaptive_batch_timeout_ms),
-            min_wait_time: Duration::from_millis(100),
-            adaptive_enabled: true,
-        };
+        let utils_adaptive_config = Self::from_config(&config);
         let params = ReactionBaseParams::new(id, queries);
         Self {
             base: ReactionBase::new(params),
@@ -113,17 +104,7 @@ impl GrpcReaction {
         config: GrpcReactionConfig,
         priority_queue_capacity: usize,
     ) -> Self {
-        let utils_adaptive_config = AdaptiveBatchConfig {
-            min_batch_size: config.adaptive.adaptive_min_batch_size,
-            max_batch_size: config.adaptive.adaptive_max_batch_size,
-            throughput_window: Duration::from_millis(
-                config.adaptive.adaptive_window_size as u64 * 100,
-            ),
-            max_wait_time: Duration::from_millis(config.adaptive.adaptive_batch_timeout_ms),
-            min_wait_time: Duration::from_millis(100),
-            adaptive_enabled: true,
-        };
-
+        let utils_adaptive_config = Self::from_config(&config);
         let id = id.into();
         let params = ReactionBaseParams::new(id, queries)
             .with_priority_queue_capacity(priority_queue_capacity);
@@ -142,16 +123,7 @@ impl GrpcReaction {
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
     ) -> Self {
-        let utils_adaptive_config = AdaptiveBatchConfig {
-            min_batch_size: config.adaptive.adaptive_min_batch_size,
-            max_batch_size: config.adaptive.adaptive_max_batch_size,
-            throughput_window: Duration::from_millis(
-                config.adaptive.adaptive_window_size as u64 * 100,
-            ),
-            max_wait_time: Duration::from_millis(config.adaptive.adaptive_batch_timeout_ms),
-            min_wait_time: Duration::from_millis(100),
-            adaptive_enabled: true,
-        };
+        let utils_adaptive_config = Self::from_config(&config);
         let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
         if let Some(capacity) = priority_queue_capacity {
             params = params.with_priority_queue_capacity(capacity);
@@ -479,13 +451,14 @@ impl GrpcReaction {
         let (batch_tx, batch_rx) = mpsc::channel(batch_channel_capacity);
 
         debug!(
-            "GrpcAdaptiveReaction using batch channel capacity: {} (max_batch_size: {} × 5)",
+            "GrpcReaction (adaptive mode) using batch channel capacity: {} (max_batch_size: {} × 5)",
             batch_channel_capacity, adaptive_config.max_batch_size
         );
 
         // Spawn adaptive batcher task
+        let adaptive_config_for_batcher = adaptive_config.clone();
         let batcher_handle = tokio::spawn(async move {
-            let mut batcher = AdaptiveBatcher::new(batch_rx, adaptive_config);
+            let mut batcher = AdaptiveBatcher::new(batch_rx, adaptive_config_for_batcher);
             let mut client: Option<ReactionServiceClient<Channel>> = None;
             let mut consecutive_failures = 0u32;
             let mut successful_sends = 0u64;
@@ -645,48 +618,18 @@ impl GrpcReaction {
 
                 // Convert results to proto format
                 for result in &query_result.results {
-                    let (result_type, data, before, after) = match result {
-                        ResultDiff::Add { data } => ("ADD", data.clone(), None, None),
-                        ResultDiff::Delete { data } => ("DELETE", data.clone(), None, None),
-                        ResultDiff::Update {
-                            data,
-                            before,
-                            after,
-                            ..
-                        } => (
-                            "UPDATE",
-                            data.clone(),
-                            Some(before.clone()),
-                            Some(after.clone()),
-                        ),
-                        ResultDiff::Aggregation { before, after } => (
-                            "aggregation",
-                            serde_json::to_value(result)
-                                .expect("ResultDiff serialization should succeed"),
-                            before.clone(),
-                            Some(after.clone()),
-                        ),
-                        ResultDiff::Noop => (
-                            "noop",
-                            serde_json::to_value(result)
-                                .expect("ResultDiff serialization should succeed"),
-                            None,
-                            None,
-                        ),
-                    };
-
-                    let proto_item = ProtoQueryResultItem {
-                        r#type: result_type.to_string(),
-                        data: Some(convert_json_to_proto_struct(&data)),
-                        before: before.as_ref().map(convert_json_to_proto_struct),
-                        after: after.as_ref().map(convert_json_to_proto_struct),
-                    };
-
+                    let proto_item = Self::convert_result_diff_to_proto_item(result);
                     current_batch.push(proto_item);
                 }
 
                 // Send immediately if batch is large enough
-                if current_batch.len() >= 100 {
+                if current_batch.len()
+                    >= if adaptive_config.max_batch_size > 10 {
+                        adaptive_config.max_batch_size / 10
+                    } else {
+                        1
+                    }
+                {
                     if batch_tx
                         .send((last_query_id.clone(), current_batch.clone()))
                         .await
@@ -720,7 +663,7 @@ impl GrpcReaction {
     ) {
         let endpoint = params.endpoint;
         let batch_size = params.batch_size;
-        let batch_flush_timeout_ms = params.batch_flush_timeout_ms;
+        let batch_timeout_ms = params.batch_timeout_ms;
         let max_retries = params.max_retries;
         let metadata = params.metadata;
         let timeout_ms = params.timeout_ms;
@@ -748,7 +691,7 @@ impl GrpcReaction {
 
         let mut batch = Vec::new();
         let mut last_query_id = String::new();
-        let flush_timeout = Duration::from_millis(batch_flush_timeout_ms);
+        let flush_timeout = Duration::from_millis(batch_timeout_ms);
 
         let mut flush_timer = tokio::time::interval(flush_timeout);
         flush_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -897,43 +840,7 @@ impl GrpcReaction {
             last_query_id = query_id.clone();
 
             for result in &query_result.results {
-                let (result_type, data, before, after) = match result {
-                    ResultDiff::Add { data } => ("ADD", data.clone(), None, None),
-                    ResultDiff::Delete { data } => ("DELETE", data.clone(), None, None),
-                    ResultDiff::Update {
-                        data,
-                        before,
-                        after,
-                        ..
-                    } => (
-                        "UPDATE",
-                        data.clone(),
-                        Some(before.clone()),
-                        Some(after.clone()),
-                    ),
-                    ResultDiff::Aggregation { before, after } => (
-                        "aggregation",
-                        serde_json::to_value(result)
-                            .expect("ResultDiff serialization should succeed"),
-                        before.clone(),
-                        Some(after.clone()),
-                    ),
-                    ResultDiff::Noop => (
-                        "noop",
-                        serde_json::to_value(result)
-                            .expect("ResultDiff serialization should succeed"),
-                        None,
-                        None,
-                    ),
-                };
-
-                let proto_item = ProtoQueryResultItem {
-                    r#type: result_type.to_string(),
-                    data: Some(convert_json_to_proto_struct(&data)),
-                    before: before.as_ref().map(convert_json_to_proto_struct),
-                    after: after.as_ref().map(convert_json_to_proto_struct),
-                };
-
+                let proto_item = Self::convert_result_diff_to_proto_item(result);
                 batch.push(proto_item);
 
                 if batch.len() >= batch_size {
@@ -1106,6 +1013,68 @@ impl GrpcReaction {
         info!("[{reaction_name}] gRPC reaction processing task stopped");
         *status.write().await = ComponentStatus::Stopped;
     }
+
+    fn from_config(config: &GrpcReactionConfig) -> AdaptiveBatchConfig {
+        match &config.batch_config {
+            BatchingConfig::Fixed { .. } => AdaptiveBatchConfig {
+                min_batch_size: 1,
+                max_batch_size: 100,
+                throughput_window: Duration::from_secs(5),
+                max_wait_time: Duration::from_millis(100),
+                min_wait_time: Duration::from_millis(1),
+                adaptive_enabled: false,
+            },
+            BatchingConfig::Adaptive {
+                min_batch_size,
+                max_batch_size,
+                batch_timeout_ms,
+            } => AdaptiveBatchConfig {
+                min_batch_size: *min_batch_size,
+                max_batch_size: *max_batch_size,
+                throughput_window: Duration::from_secs(5),
+                max_wait_time: Duration::from_millis(*batch_timeout_ms),
+                min_wait_time: Duration::from_millis(100),
+                adaptive_enabled: true,
+            },
+        }
+    }
+
+    fn convert_result_diff_to_proto_item(result: &ResultDiff) -> ProtoQueryResultItem {
+        let (result_type, data, before, after) = match result {
+            ResultDiff::Add { data } => ("ADD", data.clone(), None, None),
+            ResultDiff::Delete { data } => ("DELETE", data.clone(), None, None),
+            ResultDiff::Update {
+                data,
+                before,
+                after,
+                ..
+            } => (
+                "UPDATE",
+                data.clone(),
+                Some(before.clone()),
+                Some(after.clone()),
+            ),
+            ResultDiff::Aggregation { before, after } => (
+                "aggregation",
+                serde_json::to_value(result).expect("ResultDiff serialization should succeed"),
+                before.clone(),
+                Some(after.clone()),
+            ),
+            ResultDiff::Noop => (
+                "noop",
+                serde_json::to_value(result).expect("ResultDiff serialization should succeed"),
+                None,
+                None,
+            ),
+        };
+
+        ProtoQueryResultItem {
+            r#type: result_type.to_string(),
+            data: Some(convert_json_to_proto_struct(&data)),
+            before: before.as_ref().map(convert_json_to_proto_struct),
+            after: after.as_ref().map(convert_json_to_proto_struct),
+        }
+    }
 }
 
 #[async_trait]
@@ -1128,16 +1097,50 @@ impl Reaction for GrpcReaction {
             "timeout_ms".to_string(),
             serde_json::Value::Number(self.config.timeout_ms.into()),
         );
-        if !self.config.adaptive_enable {
-            props.insert(
-                "batch_size".to_string(),
-                serde_json::Value::Number(self.config.batch_size.into()),
-            );
-        } else {
-            props.insert(
-                "max_retries".to_string(),
-                serde_json::Value::Number(self.config.max_retries.into()),
-            );
+        props.insert(
+            "max_retries".to_string(),
+            serde_json::Value::Number(self.config.max_retries.into()),
+        );
+        match &self.config.batch_config {
+            BatchingConfig::Fixed {
+                batch_size,
+                batch_timeout_ms,
+            } => {
+                props.insert(
+                    "batching_strategy".to_string(),
+                    serde_json::Value::String("fixed".to_string()),
+                );
+                props.insert(
+                    "batch_size".to_string(),
+                    serde_json::Value::Number((*batch_size).into()),
+                );
+                props.insert(
+                    "batch_timeout_ms".to_string(),
+                    serde_json::Value::Number((*batch_timeout_ms).into()),
+                );
+            }
+            BatchingConfig::Adaptive {
+                min_batch_size,
+                max_batch_size,
+                batch_timeout_ms,
+            } => {
+                props.insert(
+                    "batching_strategy".to_string(),
+                    serde_json::Value::String("adaptive".to_string()),
+                );
+                props.insert(
+                    "min_batch_size".to_string(),
+                    serde_json::Value::Number((*min_batch_size).into()),
+                );
+                props.insert(
+                    "max_batch_size".to_string(),
+                    serde_json::Value::Number((*max_batch_size).into()),
+                );
+                props.insert(
+                    "batch_timeout_ms".to_string(),
+                    serde_json::Value::Number((*batch_timeout_ms).into()),
+                );
+            }
         }
         props
     }
@@ -1155,11 +1158,16 @@ impl Reaction for GrpcReaction {
     }
 
     async fn start(&self) -> Result<()> {
+        let strategy_name = match &self.config.batch_config {
+            BatchingConfig::Fixed { .. } => "fixed",
+            BatchingConfig::Adaptive { .. } => "adaptive",
+        };
+
         log_component_start("gRPC Reaction", &self.base.id);
 
         info!(
-            "[{}] gRPC reaction starting - sending to endpoint: {}, adaptive_enable: {}",
-            self.base.id, self.config.endpoint, self.config.adaptive_enable
+            "[{}] gRPC reaction starting - sending to endpoint: {}, batching strategy: {}",
+            self.base.id, self.config.endpoint, strategy_name
         );
 
         // Transition to Starting
@@ -1189,8 +1197,6 @@ impl Reaction for GrpcReaction {
         let reaction_name = self.base.id.clone();
         let status = self.base.status.clone();
         let endpoint = self.config.endpoint.clone();
-        let batch_size = self.config.batch_size;
-        let batch_flush_timeout_ms = self.config.batch_flush_timeout_ms;
         let max_retries = self.config.max_retries;
         let metadata = self.config.metadata.clone();
         let timeout_ms = self.config.timeout_ms;
@@ -1199,36 +1205,42 @@ impl Reaction for GrpcReaction {
         let priority_queue = self.base.priority_queue.clone();
         let adaptive_config = self.adaptive_config.clone();
         let base = self.base.clone_shared();
-        let adaptive_enable = self.config.adaptive_enable;
+        let batch_config = self.config.batch_config.clone();
 
         let processing_task_handle = tokio::spawn(async move {
-            if !adaptive_enable {
-                let params = RunInternalFixedParams {
-                    reaction_name,
-                    endpoint,
-                    metadata,
-                    timeout_ms,
+            match batch_config {
+                BatchingConfig::Fixed {
                     batch_size,
-                    batch_flush_timeout_ms,
-                    max_retries,
-                    connection_retry_attempts,
-                    initial_connection_timeout_ms,
-                    priority_queue,
-                    status,
-                };
-                Self::run_fixed_internal(params, shutdown_rx).await
-            } else {
-                let params = RunInternalAdaptiveParams {
-                    reaction_name,
-                    endpoint,
-                    metadata,
-                    timeout_ms,
-                    max_retries,
-                    initial_connection_timeout_ms,
-                    adaptive_config,
-                    base,
-                };
-                Self::run_adaptive_internal(params, shutdown_rx).await
+                    batch_timeout_ms,
+                } => {
+                    let params = RunInternalFixedParams {
+                        reaction_name,
+                        endpoint,
+                        metadata,
+                        timeout_ms,
+                        batch_size,
+                        batch_timeout_ms,
+                        max_retries,
+                        connection_retry_attempts,
+                        initial_connection_timeout_ms,
+                        priority_queue,
+                        status,
+                    };
+                    Self::run_fixed_internal(params, shutdown_rx).await
+                }
+                BatchingConfig::Adaptive { .. } => {
+                    let params = RunInternalAdaptiveParams {
+                        reaction_name,
+                        endpoint,
+                        metadata,
+                        timeout_ms,
+                        max_retries,
+                        initial_connection_timeout_ms,
+                        adaptive_config,
+                        base,
+                    };
+                    Self::run_adaptive_internal(params, shutdown_rx).await
+                }
             }
         });
 

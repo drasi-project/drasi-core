@@ -20,21 +20,21 @@
 //!
 //! ```rust,ignore
 //! use drasi_lib::config::{ReactionConfig, ReactionSpecificConfig};
-//! use drasi_lib::reactions::grpc::GrpcReactionConfig;
-//! use drasi_lib::reactions::common::AdaptiveBatchConfig;
+//! use drasi_reaction_grpc::GrpcReactionConfig;
+//! use drasi_reaction_grpc::BatchingConfig;
 //! use std::collections::HashMap;
 //!
 //! let grpc_config = GrpcReactionConfig {
 //!     endpoint: "grpc://localhost:50052".to_string(),
 //!     timeout_ms: 5000,
-//!     batch_size: 100,
-//!     batch_flush_timeout_ms: 1000,
 //!     max_retries: 3,
 //!     connection_retry_attempts: 5,
 //!     initial_connection_timeout_ms: 10000,
 //!     metadata: HashMap::new(),
-//!     adaptive_enable: false,
-//!     adaptive: Default::default(),
+//!     batch_config: BatchingConfig::Fixed {
+//!         batch_size: 100,
+//!         batch_timeout_ms: 1000,
+//!     },
 //! };
 //! let reaction_config = ReactionConfig {
 //!     id: "my-grpc-reaction".to_string(),
@@ -48,8 +48,8 @@
 //!
 //! ```rust,ignore
 //! use drasi_lib::config::{ReactionConfig, ReactionSpecificConfig};
-//! use drasi_lib::reactions::grpc::GrpcReactionConfig;
-//! use drasi_lib::reactions::common::AdaptiveBatchConfig;
+//! use drasi_reaction_grpc::GrpcReactionConfig;
+//! use drasi_reaction_grpc::BatchingConfig;
 //! use std::collections::HashMap;
 //!
 //! let reaction_config = ReactionConfig {
@@ -63,19 +63,15 @@
 //!         connection_retry_attempts: 5,
 //!         initial_connection_timeout_ms: 10000,
 //!         metadata: HashMap::new(),
-//!         adaptive_enable: true,
-//!         adaptive: AdaptiveBatchConfig {
-//!             adaptive_min_batch_size: 50,
-//!             adaptive_max_batch_size: 2000,
-//!             adaptive_window_size: 100,  // 10 seconds
-//!             adaptive_batch_timeout_ms: 500,
+//!         batch_config: BatchingConfig::Adaptive {
+//!             min_batch_size: 50,
+//!             max_batch_size: 2000,
+//!             batch_timeout_ms: 500,
 //!         },
 //!     }),
 //!     priority_queue_capacity: None,
 //! };
 //! ```
-
-use drasi_lib::reactions::common::AdaptiveBatchConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -91,7 +87,7 @@ fn default_batch_size() -> usize {
     100
 }
 
-fn default_batch_flush_timeout_ms() -> u64 {
+fn default_batch_timeout_ms() -> u64 {
     1000
 }
 
@@ -107,8 +103,44 @@ fn default_initial_connection_timeout_ms() -> u64 {
     10000
 }
 
-fn default_adaptive_enable() -> bool {
-    false
+fn default_adaptive_min_batch_size() -> usize {
+    1
+}
+
+fn default_adaptive_max_batch_size() -> usize {
+    100
+}
+
+fn default_adaptive_batch_timeout_ms() -> u64 {
+    1000
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "strategy", rename_all = "lowercase")]
+pub enum BatchingConfig {
+    Fixed {
+        #[serde(default = "default_batch_size")]
+        batch_size: usize,
+        #[serde(default = "default_batch_timeout_ms")]
+        batch_timeout_ms: u64,
+    },
+    Adaptive {
+        #[serde(default = "default_adaptive_min_batch_size")]
+        min_batch_size: usize,
+        #[serde(default = "default_adaptive_max_batch_size")]
+        max_batch_size: usize,
+        #[serde(default = "default_adaptive_batch_timeout_ms")]
+        batch_timeout_ms: u64,
+    },
+}
+
+impl Default for BatchingConfig {
+    fn default() -> Self {
+        BatchingConfig::Fixed {
+            batch_size: default_batch_size(),
+            batch_timeout_ms: default_batch_timeout_ms(),
+        }
+    }
 }
 
 /// gRPC reaction configuration
@@ -121,14 +153,6 @@ pub struct GrpcReactionConfig {
     /// Request timeout in milliseconds
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
-
-    /// Batch size for bundling events
-    #[serde(default = "default_batch_size")]
-    pub batch_size: usize,
-
-    /// Batch flush timeout in milliseconds
-    #[serde(default = "default_batch_flush_timeout_ms")]
-    pub batch_flush_timeout_ms: u64,
 
     /// Maximum retries for failed requests
     #[serde(default = "default_max_retries")]
@@ -146,13 +170,10 @@ pub struct GrpcReactionConfig {
     #[serde(default)]
     pub metadata: HashMap<String, String>,
 
-    /// Adaptive batching enable option
-    #[serde(default)]
-    pub adaptive_enable: bool,
-
-    /// Adaptive batching configuration (flattened into parent config)
+    /// Batching configuration (flattened into parent config)
+    /// Choose between Fixed or Adaptive batching strategy
     #[serde(flatten)]
-    pub adaptive: AdaptiveBatchConfig,
+    pub batch_config: BatchingConfig,
 }
 
 impl Default for GrpcReactionConfig {
@@ -160,14 +181,14 @@ impl Default for GrpcReactionConfig {
         Self {
             endpoint: default_grpc_endpoint(),
             timeout_ms: default_timeout_ms(),
-            batch_size: default_batch_size(),
-            batch_flush_timeout_ms: default_batch_flush_timeout_ms(),
             max_retries: default_max_retries(),
             connection_retry_attempts: default_connection_retry_attempts(),
             initial_connection_timeout_ms: default_initial_connection_timeout_ms(),
             metadata: HashMap::new(),
-            adaptive_enable: default_adaptive_enable(),
-            adaptive: AdaptiveBatchConfig::default(),
+            batch_config: BatchingConfig::Fixed {
+                batch_size: default_batch_size(),
+                batch_timeout_ms: default_batch_timeout_ms(),
+            },
         }
     }
 }

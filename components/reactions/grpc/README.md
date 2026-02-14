@@ -33,19 +33,18 @@ The builder pattern provides a fluent API for creating gRPC reactions:
 ```rust
 use drasi_reaction_grpc::GrpcReaction;
 
-// Minimal configuration
+// Minimal configuration with fixed batching
 let reaction = GrpcReaction::builder("my-grpc-reaction")
     .with_endpoint("grpc://localhost:50052")
     .with_query("sensor-alerts")
     .build()?;
 
-// Full configuration with all options
+// Fixed batching configuration
 let reaction = GrpcReaction::builder("my-grpc-reaction")
     .with_queries(vec!["query1".to_string(), "query2".to_string()])
     .with_endpoint("grpc://api.example.com:50052")
     .with_timeout_ms(10000)
-    .with_batch_size(200)
-    .with_batch_flush_timeout_ms(2000)
+    .with_fixed_batching(200, 2000)  // batch_size=200, timeout=2000ms
     .with_max_retries(5)
     .with_connection_retry_attempts(10)
     .with_initial_connection_timeout_ms(15000)
@@ -54,14 +53,25 @@ let reaction = GrpcReaction::builder("my-grpc-reaction")
     .with_priority_queue_capacity(1000)
     .with_auto_start(true)
     .build()?;
+
+// Adaptive batching configuration
+let reaction = GrpcReaction::builder("adaptive-pipeline")
+    .with_endpoint("grpc://event-processor:9090")
+    .with_queries(vec!["event-stream".to_string()])
+    .with_adaptive_batching(50, 2000, 500)  // min=50, max=2000, timeout=500ms
+    .with_timeout_ms(15000)
+    .with_max_retries(5)
+    .build()?;
 ```
 
 ### Config Struct Approach
 
 Alternatively, create a configuration object and pass it to the constructor:
 
+With fixed batching
+
 ```rust
-use drasi_reaction_grpc::{GrpcReaction, GrpcReactionConfig};
+use drasi_reaction_grpc::{GrpcReaction, GrpcReactionConfig, BatchingConfig};
 use std::collections::HashMap;
 
 let mut metadata = HashMap::new();
@@ -70,12 +80,14 @@ metadata.insert("api-key".to_string(), "your-api-key".to_string());
 let config = GrpcReactionConfig {
     endpoint: "grpc://api.example.com:50052".to_string(),
     timeout_ms: 10000,
-    batch_size: 200,
-    batch_flush_timeout_ms: 2000,
     max_retries: 5,
     connection_retry_attempts: 10,
     initial_connection_timeout_ms: 15000,
     metadata,
+    batch_config: BatchingConfig::Fixed {
+        batch_size: 200,
+        batch_timeout_ms: 2000,
+    },
 };
 
 let reaction = GrpcReaction::new(
@@ -85,31 +97,77 @@ let reaction = GrpcReaction::new(
 );
 ```
 
+Or with adaptive batching:
+
+```rust
+use drasi_reaction_grpc::{GrpcReaction, GrpcReactionConfig, BatchingConfig};
+use std::collections::HashMap;
+
+let config = GrpcReactionConfig {
+    endpoint: "grpc://event-processor:9090".to_string(),
+    timeout_ms: 15000,
+    max_retries: 5,
+    connection_retry_attempts: 5,
+    initial_connection_timeout_ms: 10000,
+    metadata: HashMap::new(),
+    batch_config: BatchingConfig::Adaptive {
+        min_batch_size: 50,
+        max_batch_size: 2000,
+        batch_timeout_ms: 500,
+    },
+};
+
+let reaction = GrpcReaction::new(
+    "adaptive-reaction",
+    vec!["event-stream".to_string()],
+    config
+);
+```
+
 ### Using Default Configuration
 
 ```rust
 use drasi_reaction_grpc::{GrpcReaction, GrpcReactionConfig};
 
-// Uses all default values
+// Uses all default values (fixed batching with batch_size=100, timeout=1000ms)
 let config = GrpcReactionConfig::default();
 let reaction = GrpcReaction::new("my-reaction", vec!["my-query".to_string()], config);
 ```
 
-### Adaptive Batching Configuration
+### Batching Strategy Selection
 
-The gRPC reaction supports **intelligent, throughput-based adaptive batching** that automatically adjusts batch sizes and wait times based on real-time traffic patterns:
+The gRPC reaction now uses a **tagged enum** for type-safe batching strategy selection, preventing configuration errors:
+
+#### Fixed Batching (Default)
+
+Use fixed batch sizes for predictable, uniform traffic:
+
+```rust
+use drasi_reaction_grpc::GrpcReaction;
+
+let reaction = GrpcReaction::builder("my-reaction")
+    .with_endpoint("grpc://localhost:50052")
+    .with_query("data-stream")
+    .with_fixed_batching(200, 1000)  // batch_size=200, flush_timeout=1000ms
+    .build()?;
+```
+
+**Fixed Batching Benefits**:
+- Predictable behavior with uniform traffic patterns
+- Simple configuration with two parameters
+- Reliable latency characteristics
+
+#### Adaptive Batching
+
+Use adaptive batching for variable or unpredictable traffic:
 
 ```rust
 use drasi_reaction_grpc::GrpcReaction;
 
 let reaction = GrpcReaction::builder("adaptive-pipeline")
     .with_endpoint("grpc://event-processor:9090")
-    .with_queries(vec!["event-stream".to_string()])
-    .with_adaptive_enable(true)
-    .with_min_batch_size(50)
-    .with_max_batch_size(2000)
-    .with_timeout_ms(15000)
-    .with_max_retries(5)
+    .with_query("event-stream")
+    .with_adaptive_batching(50, 2000, 500)  // min=50, max=2000, timeout=500ms
     .build()?;
 ```
 
@@ -122,33 +180,60 @@ let reaction = GrpcReaction::builder("adaptive-pipeline")
 
 ## Configuration Options
 
+### Batching Strategy
+
+The `batching` field uses a tagged enum to ensure type safety. Choose one strategy:
+
+#### Fixed Strategy
+```yaml
+strategy: fixed
+batch_size: 200
+batch_timeout_ms: 1000
+```
+
+#### Adaptive Strategy
+```yaml
+strategy: adaptive
+min_batch_size: 50
+max_batch_size: 2000
+batch_timeout_ms: 500
+```
+
+### Common Parameters
+
 | Name | Description | Data Type | Valid Values | Default |
 |------|-------------|-----------|--------------|---------|
 | `endpoint` | gRPC server URL | String | Valid gRPC URL (grpc://host:port) | `grpc://localhost:50052` |
 | `timeout_ms` | Request timeout in milliseconds | u64 | Positive integer | `5000` |
-| `batch_size` | Maximum number of items per batch (fixed mode) | usize | Positive integer | `100` |
-| `batch_flush_timeout_ms` | Maximum time to wait before flushing partial batch | u64 | Positive integer | `1000` |
 | `max_retries` | Maximum retry attempts for failed requests | u32 | 0 or positive integer | `3` |
 | `connection_retry_attempts` | Number of connection retry attempts | u32 | Positive integer | `5` |
 | `initial_connection_timeout_ms` | Initial connection timeout in milliseconds | u64 | Positive integer | `10000` |
 | `metadata` | Custom metadata headers to include in requests | HashMap<String, String> | Key-value pairs | Empty map |
 | `priority_queue_capacity` | Capacity of the internal priority queue | Option<usize> | None or positive integer | None (uses default) |
 | `auto_start` | Whether to automatically start the reaction | bool | true or false | `true` |
-| `adaptive_enable` | Enable intelligent throughput-based batching | bool | true or false | `false` |
-| `adaptive_min_batch_size` | Minimum items per batch (adaptive mode) | usize | 1-10000 | `10` |
-| `adaptive_max_batch_size` | Maximum items per batch (adaptive mode) | usize | 10-100000 | `1000` |
-| `adaptive_window_size` | Throughput window size (units of 100ms) | usize | 1-300 (0.1s-30s) | `50` (5 seconds) |
-| `adaptive_batch_timeout_ms` | Maximum wait time for batch completion | u64 | 1-10000 | `100` |
+
+### Fixed Batching Parameters
+
+| Name | Description | Data Type | Valid Values | Default |
+|------|-------------|-----------|--------------|---------|
+| `strategy` | Batching mode selector | String | `"fixed"` | N/A |
+| `batch_size` | Maximum number of items per batch | usize | Positive integer | `100` |
+| `batch_timeout_ms` | Maximum time to wait before flushing partial batch | u64 | Positive integer | `1000` |
+
+### Adaptive Batching Parameters
+
+| Name | Description | Data Type | Valid Values | Default |
+|------|-------------|-----------|--------------|---------|
+| `strategy` | Batching mode selector | String | `"adaptive"` | N/A |
+| `min_batch_size` | Minimum items per batch (used for idle traffic) | usize | 1-10000 | `1` |
+| `max_batch_size` | Maximum items per batch (used for burst traffic) | usize | 10-100000 | `100` |
+| `batch_timeout_ms` | Maximum wait time for batch completion | u64 | 1-10000 | `1000` |
 
 ### Configuration Details
 
 - **endpoint**: Must be in the format `grpc://hostname:port`. The protocol prefix is automatically converted to `http://` for the underlying transport.
 
 - **timeout_ms**: Controls how long the client will wait for a response from the gRPC server before timing out.
-
-- **batch_size**: Controls the maximum number of query result items to send in a single gRPC request. Larger batches improve throughput but increase memory usage.
-
-- **batch_flush_timeout_ms**: If a batch doesn't reach the `batch_size` within this timeout, it will be sent anyway. Prevents delays when query results arrive slowly.
 
 - **max_retries**: Number of times to retry a failed request. Uses exponential backoff starting at 100ms, doubling each retry, up to a maximum of 5 seconds.
 
@@ -162,23 +247,32 @@ let reaction = GrpcReaction::builder("adaptive-pipeline")
 
 - **auto_start**: If `true`, the reaction will start immediately when added to the Drasi system. If `false`, you must manually call `start()`.
 
-### Adaptive vs Fixed Batching
+### Batching Strategy Details
 
-**Fixed Batching (default, `adaptive_enable: false`)**:
-- Uses fixed `batch_size` regardless of traffic patterns
-- Reliable, predictable behavior
-- Suitable for uniform traffic patterns
-- Simple configuration
+#### Fixed Batching Strategy
 
-**Adaptive Batching (`adaptive_enable: true`)**:
-- Intelligently adjusts batch size based on measured throughput
-- Optimizes for both latency (low traffic) and throughput (high traffic)
-- Ideal for variable or unpredictable workloads
-- Requires configuring min/max batch sizes
+- **batch_size**: Controls the maximum number of query result items to send in a single gRPC request. Larger batches improve throughput but increase memory usage.
+- **batch_timeout_ms**: If a batch doesn't reach the `batch_size` within this timeout, it will be sent anyway. Prevents delays when query results arrive slowly.
+
+**Use Fixed Batching When**:
+- Traffic patterns are uniform and predictable
+- You want simple, predictable behavior
+- You have well-understood throughput characteristics
+
+#### Adaptive Batching Strategy
+
+- **min_batch_size**: Minimum batch size used during idle or low-traffic periods. Keeps latency minimal when data arrives slowly.
+- **max_batch_size**: Maximum batch size used during burst traffic. Optimizes throughput when data arrives quickly.
+- **batch_timeout_ms**: Maximum time to wait for a batch to fill before sending it regardless of size.
+
+**Use Adaptive Batching When**:
+- Traffic patterns are variable or unpredictable
+- You need to optimize for both latency (low traffic) and throughput (high traffic)
+- You want automatic adjustment without manual tuning
 
 ### Adaptive Batching Behavior
 
-When enabled, the reaction classifies traffic into five levels and adjusts parameters automatically:
+When using adaptive batching, the reaction classifies traffic into five levels and adjusts parameters automatically:
 
 | Throughput Level | Messages/Second | Batch Size Strategy | Wait Time |
 |-----------------|-----------------|---------------------|-----------|
@@ -190,7 +284,7 @@ When enabled, the reaction classifies traffic into five levels and adjusts param
 
 **Channel Capacity**: Internal batching channel automatically uses `max_batch_size × 5` for optimal pipelining and burst absorption.
 
-### Configuration Details
+### Protocol Buffer Schema
 
 The gRPC Reaction sends data using the Protocol Buffer format defined in the `drasi.v1` package. All communication uses the `ReactionService` with the `ProcessResults` RPC method.
 
@@ -301,7 +395,7 @@ use drasi_reaction_grpc::GrpcReaction;
 let reaction = GrpcReaction::builder("temperature-alerts")
     .with_endpoint("grpc://alerts.example.com:50052")
     .with_query("high-temperature-sensors")
-    .with_batch_size(50)
+    .with_fixed_batching(50, 1000)
     .build()?;
 ```
 
@@ -318,8 +412,7 @@ let reaction = GrpcReaction::builder("multi-query-aggregator")
         "device-status".to_string(),
         "alert-conditions".to_string(),
     ])
-    .with_batch_size(500)
-    .with_batch_flush_timeout_ms(5000)
+    .with_fixed_batching(500, 5000)
     .build()?;
 ```
 
@@ -349,8 +442,7 @@ use drasi_reaction_grpc::GrpcReaction;
 let reaction = GrpcReaction::builder("high-throughput-pipeline")
     .with_endpoint("grpc://pipeline.example.com:50052")
     .with_query("real-time-events")
-    .with_batch_size(1000)
-    .with_batch_flush_timeout_ms(100)
+    .with_fixed_batching(1000, 100)
     .with_priority_queue_capacity(10000)
     .with_timeout_ms(30000)
     .with_connection_retry_attempts(10)
@@ -390,10 +482,7 @@ use drasi_reaction_grpc::GrpcReaction;
 let reaction = GrpcReaction::builder("variable-traffic-handler")
     .with_endpoint("grpc://events.example.com:9090")
     .with_query("event-stream")
-    .with_adaptive_enable(true)
-    .with_min_batch_size(10)       
-    .with_max_batch_size(5000)     
-    .with_timeout_ms(15000)
+    .with_adaptive_batching(10, 5000, 15000)
     .with_max_retries(5)
     .with_priority_queue_capacity(50000)
     .build()?;
@@ -408,10 +497,7 @@ use drasi_reaction_grpc::GrpcReaction;
 let reaction = GrpcReaction::builder("low-latency-alerts")
     .with_endpoint("grpc://realtime-api:8080")
     .with_query("sensor-alerts")
-    .with_adaptive_enable(true)
-    .with_min_batch_size(1)        // Send single items immediately when idle
-    .with_max_batch_size(100)      // Batch up to 100 during traffic spikes
-    .with_timeout_ms(5000)
+    .with_adaptive_batching(1, 100, 5000)
     .build()?;
 ```
 
@@ -424,10 +510,7 @@ use drasi_reaction_grpc::GrpcReaction;
 let reaction = GrpcReaction::builder("high-throughput-pipeline")
     .with_endpoint("grpc://pipeline.example.com:9090")
     .with_query("high-volume-events")
-    .with_adaptive_enable(true)
-    .with_min_batch_size(500)      // Larger minimum batches
-    .with_max_batch_size(10000)    // Allow very large batches
-    .with_timeout_ms(30000)
+    .with_adaptive_batching(500, 10000, 30000)
     .with_priority_queue_capacity(100000)
     .build()?;
 ```
@@ -438,27 +521,18 @@ let reaction = GrpcReaction::builder("high-throughput-pipeline")
 
 **Throughput Optimization** (> 10,000 msgs/sec):
 ```rust
-.with_adaptive_enable(true)
-.with_min_batch_size(500)
-.with_max_batch_size(10000)
-.with_timeout_ms(30000)
+.with_adaptive_batching(500, 10000, 30000)
 .with_priority_queue_capacity(100000)
 ```
 
 **Latency Optimization** (< 10ms P99):
 ```rust
-.with_adaptive_enable(true)
-.with_min_batch_size(1)
-.with_max_batch_size(100)
-.with_timeout_ms(5000)
+.with_adaptive_batching(1, 100, 5000)
 ```
 
 **Balanced Configuration** (typical workloads):
 ```rust
-.with_adaptive_enable(true)
-.with_min_batch_size(50)
-.with_max_batch_size(1000)
-.with_timeout_ms(10000)
+.with_adaptive_batching(50, 1000, 10000)
 ```
 
 ## Implementing a gRPC Service
@@ -559,7 +633,7 @@ server.wait_for_termination()
 | **Batching Strategy** | Dynamic, throughput-based | Fixed size |
 | **Traffic Classification** | 5-level system (Idle/Low/Medium/High/Burst) | None |
 | **Parameter Adjustment** | Automatic based on measured throughput | Manual configuration |
-| **Idle Traffic Latency** | Minimal (1ms - sends immediately) | Fixed wait (batch_flush_timeout_ms) |
+| **Idle Traffic Latency** | Minimal (1ms - sends immediately) | Fixed wait (batch_timeout_ms) |
 | **Burst Traffic Handling** | Optimal (fills batches quickly) | Fixed batch size |
 | **Channel Capacity** | 5× max_batch_size (dynamic buffering) | Fixed size |
 | **Best Use Case** | Variable or unpredictable traffic | Predictable, uniform traffic |
@@ -614,7 +688,7 @@ The gRPC Reaction implements sophisticated error handling and retry logic:
 
 - Larger batches (`batch_size`) improve throughput but increase latency
 - Smaller batches reduce latency but increase overhead
-- Use `batch_flush_timeout_ms` to balance latency vs efficiency
+- Use `batch_timeout_ms` to balance latency vs efficiency
 
 ### Connection Management
 
