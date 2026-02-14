@@ -15,13 +15,17 @@ Drasi-core is the internal library used by [Drasi](https://github.com/drasi-proj
 
 ## Requirements
 
-Drasi-core currently requires the **`rt-multi-thread` Tokio feature** due to one `block_in_place` call in a test helper function. However, the core functionality (including all storage operations) works on both single-threaded and multi-threaded runtimes. When using Drasi-core, ensure your `Cargo.toml` includes:
+Drasi-core works with **both single-threaded and multi-threaded Tokio runtimes**. When using Drasi-core, ensure your `Cargo.toml` includes:
 
 ```toml
-tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1.0", features = ["rt", "macros", "sync", "time"] }
 ```
 
-**Note:** Single-threaded runtime support could be enabled with minimal changes (~1 hour). See the [Tokio Runtime Compatibility](docs/tokio-runtime-compatibility.md) documentation for details.
+You can use either runtime flavor:
+- `#[tokio::main]` - Defaults to multi-threaded
+- `#[tokio::main(flavor = "current_thread")]` - Single-threaded
+
+See the [Tokio Runtime Compatibility](docs/tokio-runtime-compatibility.md) documentation for implementation details.
 
 ## Example
 

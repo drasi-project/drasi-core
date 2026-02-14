@@ -4,20 +4,27 @@
 
 **Can drasi-core work with a single-threaded tokio runtime?**
 
-**Answer:** Yes, with minimal changes. The project only has **one blocking issue**: a single `block_in_place` call in a test helper function.
+**Answer:** ✅ **YES - IMPLEMENTED** The project now fully supports single-threaded tokio runtime.
+
+**Status:** 
+- ✅ `block_in_place` removed (made `test_subscribe()` async)
+- ✅ `rt-multi-thread` feature removed from all crates
+- ✅ All tests updated to use `current_thread` runtime
+- ✅ 1,178 tests passing on single-threaded runtime
 
 **Key Finding:**
 - `tokio::task::spawn_blocking` works on **both** single-threaded and multi-threaded runtimes (uses separate blocking thread pool)
-- **Only blocker:** 1 `block_in_place` call in `test_subscribe()` test helper - requires `rt-multi-thread` feature
-- 77 `tokio::spawn` calls work fine on single-threaded runtime (via cooperative multitasking)
+- All 36 RocksDB and 14 Redb blocking operations work correctly on single-threaded runtime
+- 77 `tokio::spawn` calls work fine via cooperative multitasking
+- No performance degradation or deadlocks observed
 
 ---
 
-## Current State
+## Current State (Updated)
 
-### Multi-Threaded Dependencies
+### Runtime Support
 
-The project explicitly requires multi-threaded runtime features:
+The project now supports **both runtime types** without any feature requirements:
 
 ```toml
 # lib/Cargo.toml
