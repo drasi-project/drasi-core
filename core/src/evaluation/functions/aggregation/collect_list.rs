@@ -71,7 +71,7 @@ impl AggregatingFunction for CollectList {
 
         // Get the ElementValue from the VariableValue
         let value = if args[0].is_null() {
-            Some(ElementValue::Null)
+            None
         } else {
             (&args[0]).try_into().ok()
         };
@@ -109,7 +109,7 @@ impl AggregatingFunction for CollectList {
         };
 
         let value = if args[0].is_null() {
-            Some(ElementValue::Null)
+            None
         } else {
             (&args[0]).try_into().ok()
         };
@@ -324,11 +324,9 @@ mod tests {
             .unwrap();
 
         if let VariableValue::List(list) = result {
-            assert_eq!(list.len(), 4, "Null values should be ignored");
-            assert_eq!(list[0], VariableValue::Null);
-            assert_eq!(list[1], VariableValue::Integer(42.into()));
-            assert_eq!(list[2], VariableValue::Null);
-            assert_eq!(list[3], VariableValue::String("test".into()));
+            assert_eq!(list.len(), 2, "Null values should be ignored");
+            assert_eq!(list[0], VariableValue::Integer(42.into()));
+            assert_eq!(list[1], VariableValue::String("test".into()));
         } else {
             panic!("Expected list result");
         }
@@ -466,12 +464,11 @@ mod tests {
             .unwrap();
 
         if let VariableValue::List(list) = result {
-            assert_eq!(list.len(), 5, "Should collect values of different types");
+            assert_eq!(list.len(), 4, "Should collect values of different types");
             assert_eq!(list[0], VariableValue::Integer(42.into()));
             assert_eq!(list[1], VariableValue::Float(3.125.into()));
             assert_eq!(list[2], VariableValue::String("hello".into()));
             assert_eq!(list[3], VariableValue::Bool(true));
-            assert_eq!(list[4], VariableValue::Null);
         } else {
             panic!("Expected list result");
         }
@@ -534,12 +531,10 @@ mod tests {
             .unwrap();
 
         if let VariableValue::List(list) = result {
-            assert_eq!(list.len(), 5, "Should have removed only first occurrence");
+            assert_eq!(list.len(), 3, "Should have removed only first occurrence");
             assert_eq!(list[0], val2); // First val1 was removed
-            assert_eq!(list[1], val3);
-            assert_eq!(list[2], val1); // Second val1 remains
-            assert_eq!(list[3], val2);
-            assert_eq!(list[4], val3);
+            assert_eq!(list[1], val1); // Second val1 remains
+            assert_eq!(list[2], val2);
         } else {
             panic!("Expected list result");
         }
@@ -556,31 +551,9 @@ mod tests {
             .unwrap();
 
         if let VariableValue::List(list) = result {
-            assert_eq!(list.len(), 4, "Should have removed only first occurrence");
-            assert_eq!(list[0], val3); // First val2 was removed
-            assert_eq!(list[1], val1);
-            assert_eq!(list[2], val2); // Second val2 remains
-            assert_eq!(list[3], val3);
-        } else {
-            panic!("Expected list result");
-        }
-
-        // Revert one instance of val3
-        let _ = collect
-            .revert(&context, vec![val3.clone()], &mut accumulator)
-            .await
-            .unwrap();
-
-        let result = collect
-            .snapshot(&context, vec![], &accumulator)
-            .await
-            .unwrap();
-
-        if let VariableValue::List(list) = result {
-            assert_eq!(list.len(), 3, "Should have removed only first occurrence");
-            assert_eq!(list[0], val1); // First val3 was removed
-            assert_eq!(list[1], val2);
-            assert_eq!(list[2], val3); // Second val3 remains
+            assert_eq!(list.len(), 2, "Should have removed only first occurrence");
+            assert_eq!(list[0], val1); // First val2 was removed
+            assert_eq!(list[1], val2); // Second val2 remains
         } else {
             panic!("Expected list result");
         }
