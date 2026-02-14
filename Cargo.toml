@@ -34,6 +34,7 @@ members = [
   "components/bootstrappers/oracle",
   "components/bootstrappers/here-traffic",
   "components/bootstrappers/cloudflare-radar",
+  "components/bootstrappers/neo4j",
 
   # Source Plugins
   "components/sources/postgres",
@@ -55,6 +56,7 @@ members = [
   "components/sources/oracle",
   "components/sources/here-traffic",
   "components/sources/cloudflare-radar",
+  "components/sources/neo4j",
 
   # Reaction Plugins
   "components/reactions/http",
@@ -112,6 +114,7 @@ members = [
   "query-perf",
   "examples/query",
   "lib-integration-tests",
+  "examples/lib/neo4j-getting-started",
   ]
 
 # Exclude internal crates from workspace packaging
@@ -192,6 +195,8 @@ drasi-bootstrap-gtfs-rt = { version = "0.1.0", path = "components/bootstrappers/
 drasi-source-open511 = { version = "0.1.1", path = "components/sources/open511" }
 drasi-bootstrap-open511 = { version = "0.1.0", path = "components/bootstrappers/open511" }
 drasi-bootstrap-sqlite = { version = "0.1.3", path = "components/bootstrappers/sqlite" }
+drasi-source-neo4j = { version = "0.1.0", path = "components/sources/neo4j" }
+drasi-bootstrap-neo4j = { version = "0.1.0", path = "components/bootstrappers/neo4j" }
 
 [workspace.lints.rust]
 warnings = "deny"
