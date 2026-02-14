@@ -14,6 +14,7 @@
 
 mod avg;
 mod collect;
+mod collect_list;
 mod count;
 mod last;
 pub mod lazy_sorted_set;
@@ -24,6 +25,7 @@ mod sum;
 
 pub use avg::Avg;
 pub use collect::Collect;
+pub use collect_list::CollectList;
 pub use count::Count;
 pub use last::AggregatingLast;
 pub use linear_gradient::LinearGradient;
@@ -51,6 +53,10 @@ impl RegisterAggregationFunctions for FunctionRegistry {
         self.register_function("min", Function::Aggregating(Arc::new(Min {})));
         self.register_function("max", Function::Aggregating(Arc::new(Max {})));
         self.register_function("collect", Function::Aggregating(Arc::new(Collect {})));
+        self.register_function(
+            "collect_list",
+            Function::Aggregating(Arc::new(CollectList {})),
+        );
         self.register_function(
             "drasi.linearGradient",
             Function::Aggregating(Arc::new(LinearGradient {})),
