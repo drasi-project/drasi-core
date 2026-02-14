@@ -164,7 +164,7 @@ mod tests {
     use std::sync::Arc;
 
     #[tokio::test]
-    async fn test_collect_basic() {
+    async fn test_collect_list_basic() {
         let collect_list = CollectList {};
         let index = Arc::new(InMemoryResultIndex::new());
         let variables = QueryVariables::new();
@@ -211,6 +211,504 @@ mod tests {
             assert_eq!(list[2], val3);
         } else {
             panic!("Expected list result");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_collect_list_with_revert() {
+        let collect = CollectList {};
+        let index = Arc::new(InMemoryResultIndex::new());
+        let variables = QueryVariables::new();
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+        let expression = ast::FunctionExpression {
+            name: "collect_list".into(),
+            args: vec![],
+            position_in_query: 10,
+        };
+
+        // Initialize accumulator
+        let mut accumulator = collect.initialize_accumulator(&context, &expression, &vec![], index);
+
+        // Apply some values
+        let val1 = VariableValue::String("hello".into());
+        let val2 = VariableValue::Integer(42.into());
+
+        let _ = collect
+            .apply(&context, vec![val1.clone()], &mut accumulator)
+            .await
+            .unwrap();
+        let _ = collect
+            .apply(&context, vec![val2.clone()], &mut accumulator)
+            .await
+            .unwrap();
+
+        let result = collect
+            .snapshot(&context, vec![], &accumulator)
+            .await
+            .unwrap();
+
+        if let VariableValue::List(list) = result {
+            assert_eq!(list.len(), 2);
+            assert_eq!(list[0], val1);
+            assert_eq!(list[1], val2);
+        } else {
+            panic!("Expected list result");
+        }
+
+        // Revert one value
+        let _ = collect
+            .revert(&context, vec![val2.clone()], &mut accumulator)
+            .await
+            .unwrap();
+
+        // Snapshot should return only remaining value
+        let result = collect
+            .snapshot(&context, vec![], &accumulator)
+            .await
+            .unwrap();
+
+        if let VariableValue::List(list) = result {
+            assert_eq!(list.len(), 1);
+            assert_eq!(list[0], val1);
+        } else {
+            panic!("Expected list result");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_collect_list_null_values() {
+        let collect_list = CollectList {};
+        let index = Arc::new(InMemoryResultIndex::new());
+        let variables = QueryVariables::new();
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+        let expression = ast::FunctionExpression {
+            name: "collect_list".into(),
+            args: vec![],
+            position_in_query: 10,
+        };
+
+        let mut accumulator =
+            collect_list.initialize_accumulator(&context, &expression, &vec![], index);
+
+        // Apply null values - they should be ignored
+        let _ = collect_list
+            .apply(&context, vec![VariableValue::Null], &mut accumulator)
+            .await
+            .unwrap();
+        let _ = collect_list
+            .apply(
+                &context,
+                vec![VariableValue::Integer(42.into())],
+                &mut accumulator,
+            )
+            .await
+            .unwrap();
+        let _ = collect_list
+            .apply(&context, vec![VariableValue::Null], &mut accumulator)
+            .await
+            .unwrap();
+        let _ = collect_list
+            .apply(
+                &context,
+                vec![VariableValue::String("test".into())],
+                &mut accumulator,
+            )
+            .await
+            .unwrap();
+
+        let result = collect_list
+            .snapshot(&context, vec![], &accumulator)
+            .await
+            .unwrap();
+
+        if let VariableValue::List(list) = result {
+            assert_eq!(list.len(), 4, "Null values should be ignored");
+            assert_eq!(list[0], VariableValue::Null);
+            assert_eq!(list[1], VariableValue::Integer(42.into()));
+            assert_eq!(list[2], VariableValue::Null);
+            assert_eq!(list[3], VariableValue::String("test".into()));
+        } else {
+            panic!("Expected list result");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_collect_list_empty_list() {
+        let collect_list = CollectList {};
+        let index = Arc::new(InMemoryResultIndex::new());
+        let variables = QueryVariables::new();
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+        let expression = ast::FunctionExpression {
+            name: "collect_list".into(),
+            args: vec![],
+            position_in_query: 10,
+        };
+
+        let accumulator =
+            collect_list.initialize_accumulator(&context, &expression, &vec![], index);
+
+        // Snapshot of empty accumulator should return empty list
+        let result = collect_list
+            .snapshot(&context, vec![], &accumulator)
+            .await
+            .unwrap();
+
+        if let VariableValue::List(list) = result {
+            assert_eq!(list.len(), 0, "Empty accumulator should return empty list");
+        } else {
+            panic!("Expected list result");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_collect_list_duplicate_values() {
+        let collect_list = CollectList {};
+        let index = Arc::new(InMemoryResultIndex::new());
+        let variables = QueryVariables::new();
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+        let expression = ast::FunctionExpression {
+            name: "collect_list".into(),
+            args: vec![],
+            position_in_query: 10,
+        };
+
+        let mut accumulator =
+            collect_list.initialize_accumulator(&context, &expression, &vec![], index);
+
+        // Apply duplicate values - they should all be collected
+        let val = VariableValue::Integer(42.into());
+        let _ = collect_list
+            .apply(&context, vec![val.clone()], &mut accumulator)
+            .await
+            .unwrap();
+        let _ = collect_list
+            .apply(&context, vec![val.clone()], &mut accumulator)
+            .await
+            .unwrap();
+        let _ = collect_list
+            .apply(&context, vec![val.clone()], &mut accumulator)
+            .await
+            .unwrap();
+
+        let result = collect_list
+            .snapshot(&context, vec![], &accumulator)
+            .await
+            .unwrap();
+
+        if let VariableValue::List(list) = result {
+            assert_eq!(list.len(), 3, "Duplicate values should all be collected");
+            assert_eq!(list[0], val);
+            assert_eq!(list[1], val);
+            assert_eq!(list[2], val);
+        } else {
+            panic!("Expected list result");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_collect_list_different_types() {
+        let collect_list = CollectList {};
+        let index = Arc::new(InMemoryResultIndex::new());
+        let variables = QueryVariables::new();
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+        let expression = ast::FunctionExpression {
+            name: "collect_list".into(),
+            args: vec![],
+            position_in_query: 10,
+        };
+
+        let mut accumulator =
+            collect_list.initialize_accumulator(&context, &expression, &vec![], index);
+
+        // Apply values of different types
+        let _ = collect_list
+            .apply(
+                &context,
+                vec![VariableValue::Integer(42.into())],
+                &mut accumulator,
+            )
+            .await
+            .unwrap();
+        let _ = collect_list
+            .apply(
+                &context,
+                vec![VariableValue::Float(3.125.into())],
+                &mut accumulator,
+            )
+            .await
+            .unwrap();
+        let _ = collect_list
+            .apply(
+                &context,
+                vec![VariableValue::String("hello".into())],
+                &mut accumulator,
+            )
+            .await
+            .unwrap();
+        let _ = collect_list
+            .apply(&context, vec![VariableValue::Bool(true)], &mut accumulator)
+            .await
+            .unwrap();
+
+        let _ = collect_list
+            .apply(&context, vec![VariableValue::Null], &mut accumulator)
+            .await
+            .unwrap();
+
+        let result = collect_list
+            .snapshot(&context, vec![], &accumulator)
+            .await
+            .unwrap();
+
+        if let VariableValue::List(list) = result {
+            assert_eq!(list.len(), 5, "Should collect values of different types");
+            assert_eq!(list[0], VariableValue::Integer(42.into()));
+            assert_eq!(list[1], VariableValue::Float(3.125.into()));
+            assert_eq!(list[2], VariableValue::String("hello".into()));
+            assert_eq!(list[3], VariableValue::Bool(true));
+            assert_eq!(list[4], VariableValue::Null);
+        } else {
+            panic!("Expected list result");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_collect_list_revert_multiple() {
+        let collect = CollectList {};
+        let index = Arc::new(InMemoryResultIndex::new());
+        let variables = QueryVariables::new();
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+        let expression = ast::FunctionExpression {
+            name: "collect_list".into(),
+            args: vec![],
+            position_in_query: 10,
+        };
+
+        let mut accumulator = collect.initialize_accumulator(&context, &expression, &vec![], index);
+
+        // Apply values including duplicates
+        let val1 = VariableValue::Integer(1.into());
+        let val2 = VariableValue::Integer(2.into());
+        let val3 = VariableValue::Null;
+
+        let _ = collect
+            .apply(&context, vec![val1.clone()], &mut accumulator)
+            .await
+            .unwrap();
+        let _ = collect
+            .apply(&context, vec![val2.clone()], &mut accumulator)
+            .await
+            .unwrap();
+        let _ = collect
+            .apply(&context, vec![val3.clone()], &mut accumulator)
+            .await
+            .unwrap();
+        let _ = collect
+            .apply(&context, vec![val1.clone()], &mut accumulator)
+            .await
+            .unwrap();
+        let _ = collect
+            .apply(&context, vec![val2.clone()], &mut accumulator)
+            .await
+            .unwrap();
+        let _ = collect
+            .apply(&context, vec![val3.clone()], &mut accumulator)
+            .await
+            .unwrap();
+
+        // Revert one instance of val1
+        let _ = collect
+            .revert(&context, vec![val1.clone()], &mut accumulator)
+            .await
+            .unwrap();
+
+        let result = collect
+            .snapshot(&context, vec![], &accumulator)
+            .await
+            .unwrap();
+
+        if let VariableValue::List(list) = result {
+            assert_eq!(list.len(), 5, "Should have removed only first occurrence");
+            assert_eq!(list[0], val2); // First val1 was removed
+            assert_eq!(list[1], val3);
+            assert_eq!(list[2], val1); // Second val1 remains
+            assert_eq!(list[3], val2);
+            assert_eq!(list[4], val3);
+        } else {
+            panic!("Expected list result");
+        }
+
+        // Revert one instance of val2
+        let _ = collect
+            .revert(&context, vec![val2.clone()], &mut accumulator)
+            .await
+            .unwrap();
+
+        let result = collect
+            .snapshot(&context, vec![], &accumulator)
+            .await
+            .unwrap();
+
+        if let VariableValue::List(list) = result {
+            assert_eq!(list.len(), 4, "Should have removed only first occurrence");
+            assert_eq!(list[0], val3); // First val2 was removed
+            assert_eq!(list[1], val1);
+            assert_eq!(list[2], val2); // Second val2 remains
+            assert_eq!(list[3], val3);
+        } else {
+            panic!("Expected list result");
+        }
+
+        // Revert one instance of val3
+        let _ = collect
+            .revert(&context, vec![val3.clone()], &mut accumulator)
+            .await
+            .unwrap();
+
+        let result = collect
+            .snapshot(&context, vec![], &accumulator)
+            .await
+            .unwrap();
+
+        if let VariableValue::List(list) = result {
+            assert_eq!(list.len(), 3, "Should have removed only first occurrence");
+            assert_eq!(list[0], val1); // First val3 was removed
+            assert_eq!(list[1], val2);
+            assert_eq!(list[2], val3); // Second val3 remains
+        } else {
+            panic!("Expected list result");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_collect_list_revert_nonexistent() {
+        let collect_list = CollectList {};
+        let index = Arc::new(InMemoryResultIndex::new());
+        let variables = QueryVariables::new();
+        let context =
+            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+        let expression = ast::FunctionExpression {
+            name: "collect_list".into(),
+            args: vec![],
+            position_in_query: 10,
+        };
+
+        let mut accumulator =
+            collect_list.initialize_accumulator(&context, &expression, &vec![], index);
+
+        let val1 = VariableValue::Integer(1.into());
+        let val2 = VariableValue::Integer(2.into());
+
+        let _ = collect_list
+            .apply(&context, vec![val1.clone()], &mut accumulator)
+            .await
+            .unwrap();
+
+        // Try to revert a value that doesn't exist
+        let _ = collect_list
+            .revert(&context, vec![val2.clone()], &mut accumulator)
+            .await
+            .unwrap();
+
+        let result = collect_list
+            .snapshot(&context, vec![], &accumulator)
+            .await
+            .unwrap();
+
+        if let VariableValue::List(list) = result {
+            assert_eq!(
+                list.len(),
+                1,
+                "Should not affect list if value doesn't exist"
+            );
+            assert_eq!(list[0], val1);
+        } else {
+            panic!("Expected list result");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_collect_list_error_cases() {
+        // Test error case for apply function
+        {
+            let collect_list = CollectList {};
+            let index = Arc::new(InMemoryResultIndex::new());
+            let variables = QueryVariables::new();
+            let context = ExpressionEvaluationContext::new(
+                &variables,
+                Arc::new(InstantQueryClock::new(0, 0)),
+            );
+            let expression = ast::FunctionExpression {
+                name: "collect_list".into(),
+                args: vec![],
+                position_in_query: 10,
+            };
+
+            let mut accumulator =
+                collect_list.initialize_accumulator(&context, &expression, &vec![], index);
+
+            let result = collect_list.apply(&context, vec![], &mut accumulator).await;
+            assert!(result.is_err(), "Should error with no arguments");
+
+            let result = collect_list
+                .apply(
+                    &context,
+                    vec![
+                        VariableValue::Integer(1.into()),
+                        VariableValue::Integer(2.into()),
+                    ],
+                    &mut accumulator,
+                )
+                .await;
+            assert!(result.is_err(), "Should error with too many arguments");
+        }
+
+        // Test error case for revert function
+        {
+            let collect_list = CollectList {};
+            let index = Arc::new(InMemoryResultIndex::new());
+            let variables = QueryVariables::new();
+            let context = ExpressionEvaluationContext::new(
+                &variables,
+                Arc::new(InstantQueryClock::new(0, 0)),
+            );
+            let expression = ast::FunctionExpression {
+                name: "collect_list".into(),
+                args: vec![],
+                position_in_query: 10,
+            };
+
+            let mut accumulator =
+                collect_list.initialize_accumulator(&context, &expression, &vec![], index);
+
+            let val1 = VariableValue::Integer(1.into());
+            let val2 = VariableValue::Integer(2.into());
+
+            let _ = collect_list
+                .apply(&context, vec![val1.clone()], &mut accumulator)
+                .await
+                .unwrap();
+
+            let _ = collect_list
+                .revert(&context, vec![val2.clone()], &mut accumulator)
+                .await
+                .unwrap();
+
+            let result = collect_list
+                .revert(&context, vec![], &mut accumulator)
+                .await;
+            assert!(result.is_err(), "Should error with no arguments");
+
+            let result = collect_list
+                .revert(&context, vec![val1, val2], &mut accumulator)
+                .await;
+            assert!(result.is_err(), "Should error with too many arguments");
         }
     }
 }
