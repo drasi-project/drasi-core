@@ -137,7 +137,7 @@ async fn setup_postgres_raw() -> (ContainerAsync<GenericImage>, ReplicationPostg
             "-c",
             "max_wal_senders=10",
             "-c",
-            "wal_sender_timeout=0",  // Disable timeout for tests
+            "wal_sender_timeout=0", // Disable timeout for tests
         ]);
 
     let container = image

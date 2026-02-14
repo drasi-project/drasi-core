@@ -428,7 +428,7 @@ impl SourceBase {
                 component_id = %source_id,
                 component_type = "source"
             );
-            
+
             tokio::spawn(
                 async move {
                     match provider
@@ -451,7 +451,7 @@ impl SourceBase {
                 }
                 .instrument(span),
             );
-            
+
             // Yield to allow the spawned task to start
             tokio::task::yield_now().await;
 
