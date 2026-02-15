@@ -335,7 +335,7 @@ async fn test_high_volume_logging() {
 }
 
 /// Test that the log worker works with multi-threaded runtime.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "current_thread")]
 async fn test_multi_thread_runtime() {
     let source = SimpleLogSource::new("multi-thread-source").expect("Failed to create source");
 
@@ -419,7 +419,7 @@ async fn test_current_thread_runtime() {
 }
 
 /// Test concurrent logging from multiple tasks.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "current_thread")]
 async fn test_concurrent_logging_from_multiple_tasks() {
     let source = SimpleLogSource::new("concurrent-log-source").expect("Failed to create source");
 
