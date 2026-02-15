@@ -31,7 +31,7 @@ tokio = { version = "1.0", features = ["full"] }
 async-trait = "0.1"
 
 # MySQL
-mysql_async = { version = "0.34", default-features = false, features = ["default"] }
+mysql_async = { version = "0.36", default-features = false, features = ["default"] }
 
 # Utilities
 serde = { version = "1.0", features = ["derive"] }
