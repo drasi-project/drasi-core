@@ -80,12 +80,23 @@ fn convert_variable_value_to_json(value: &VariableValue) -> serde_json::Value {
         VariableValue::Null => serde_json::Value::Null,
         VariableValue::Bool(b) => serde_json::Value::Bool(*b),
         VariableValue::Float(f) => {
-            // Float might be NaN or Infinity, handle gracefully
-            serde_json::Value::String(f.to_string())
+            // Float stores only finite f64 values, so we can safely convert to Number
+            // The From<Float> for Number implementation will handle the conversion
+            if f.is_f64() {
+                serde_json::Value::Number(f.clone().into())
+            } else {
+                // This shouldn't happen for valid Float values, but handle gracefully
+                serde_json::Value::String(f.to_string())
+            }
         }
         VariableValue::Integer(i) => {
             // Integer might be too large for JSON number
-            serde_json::Value::String(i.to_string())
+            // Try to serialize as a number first, fall back to string for very large values
+            if let Some(i64_val) = i.as_i64() {
+                serde_json::Value::Number(i64_val.into())
+            } else {
+                serde_json::Value::String(i.to_string())
+            }
         }
         VariableValue::String(s) => serde_json::Value::String(s.clone()),
         VariableValue::List(list) => {
