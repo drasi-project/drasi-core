@@ -253,7 +253,7 @@ pub async fn collect_with_filter_test(config: &(impl QueryTestConfig + Send)) {
     for ctx in &all_results {
         match ctx {
             QueryPartEvaluationContext::Updating { after, .. }
-            | QueryPartEvaluationContext::Adding { after } => {
+            | QueryPartEvaluationContext::Adding { after, .. } => {
                 if let Some(product_id) = after.get("product_id").and_then(|v| v.as_str()) {
                     if let Some(VariableValue::List(high_ratings)) = after.get("high_ratings") {
                         println!(
@@ -304,7 +304,7 @@ pub async fn collect_objects_test(config: &(impl QueryTestConfig + Send)) {
     // Check that we're collecting objects properly
     for ctx in &bootstrap_results {
         match ctx {
-            QueryPartEvaluationContext::Adding { after } => {
+            QueryPartEvaluationContext::Adding { after, .. } => {
                 if let Some(product_id) = after.get("product_id").and_then(|v| v.as_str()) {
                     if let Some(VariableValue::List(review_details)) = after.get("review_details") {
                         println!(
@@ -360,7 +360,7 @@ pub async fn collect_mixed_types_test(config: &(impl QueryTestConfig + Send)) {
     // Verify that we collect different types (strings for order IDs, floats for ratings)
     for ctx in &bootstrap_results {
         match ctx {
-            QueryPartEvaluationContext::Adding { after } => {
+            QueryPartEvaluationContext::Adding { after, .. } => {
                 if let Some(product_id) = after.get("product_id").and_then(|v| v.as_str()) {
                     let order_ids = after.get("order_ids");
                     let ratings = after.get("ratings");
@@ -427,7 +427,7 @@ pub async fn multiple_collects_test(config: &(impl QueryTestConfig + Send)) {
 
     for ctx in &bootstrap_results {
         match ctx {
-            QueryPartEvaluationContext::Adding { after } => {
+            QueryPartEvaluationContext::Adding { after, .. } => {
                 if let Some(product_id) = after.get("product_id").and_then(|v| v.as_str()) {
                     let ratings = after
                         .get("ratings")
