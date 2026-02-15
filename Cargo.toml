@@ -17,6 +17,7 @@ members = [
   "components/sources/platform",
   "components/sources/application",
   "components/sources/mock",
+  "components/sources/mysql",
 
   # Bootstrap Plugins
   "components/bootstrappers/postgres",
@@ -24,6 +25,7 @@ members = [
   "components/bootstrappers/scriptfile",
   "components/bootstrappers/application",
   "components/bootstrappers/noop",
+  "components/bootstrappers/mysql",
 
   # Reaction Plugins
   "components/reactions/http",
@@ -92,6 +94,8 @@ drasi-index-rocksdb = { version = "0.2.2", path = "components/indexes/rocksdb" }
 drasi-index-garnet = { version = "0.1.4", path = "components/indexes/garnet" }
 drasi-bootstrap-postgres = { path = "components/bootstrappers/postgres" }
 drasi-reaction-application = { path = "components/reactions/application" }
+drasi-source-mysql = { version = "0.1.0", path = "components/sources/mysql" }
+drasi-bootstrap-mysql = { version = "0.1.0", path = "components/bootstrappers/mysql" }
 
 [workspace.lints.rust]
 warnings = "deny"
