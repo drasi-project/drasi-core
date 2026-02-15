@@ -197,27 +197,37 @@ impl LazySortedSetStore for GarnetResultIndex {
         let set_key = format!("ari:{}:{}", self.query_id, set_id);
         let val_key = format!("{}:{}", set_key, value.0);
 
-        let current_count = match con.get::<&str, Option<isize>>(&val_key).await {
-            Ok(v) => v.unwrap_or(0),
-            Err(e) => return Err(IndexError::other(e)),
-        };
+        // Lua script to atomically update the value count and the sorted set
+        // If the new count is 0, we delete the value key and remove from the set
+        // Otherwise, we update the value key and ensure the value is in the set
+        let script = redis::Script::new(r#"
+            local val_key = KEYS[1]
+            local set_key = KEYS[2]
+            local delta = tonumber(ARGV[1])
+            local score = ARGV[2]
 
-        let mut pipeline = redis::pipe();
+            local current = redis.call("GET", val_key)
+            if not current then current = 0 end
+            current = tonumber(current)
+            local new_val = current + delta
 
-        if (current_count + delta) == 0 {
-            pipeline.del::<&str>(&val_key).ignore();
-            pipeline.zrem::<&str, f64>(&set_key, value.0).ignore();
-            //todo: add WATCH to ensure that the value is not changed between the get and the del
-        } else {
-            pipeline.incr::<String, isize>(val_key, delta).ignore();
-            pipeline
-                .zadd::<String, f64, f64>(set_key, value.0, value.0)
-                .ignore();
-        }
+            if new_val == 0 then
+                redis.call("DEL", val_key)
+                redis.call("ZREM", set_key, score)
+            else
+                redis.call("INCRBY", val_key, delta)
+                redis.call("ZADD", set_key, score, score)
+            end
+        "#);
 
-        if let Err(err) = pipeline.query_async::<_, ()>(&mut con).await {
-            return Err(IndexError::other(err));
-        }
+        script
+            .key(val_key)
+            .key(set_key)
+            .arg(delta)
+            .arg(value.0)
+            .invoke_async::<_, ()>(&mut con)
+            .await
+            .map_err(IndexError::other)?;
 
         Ok(())
     }
