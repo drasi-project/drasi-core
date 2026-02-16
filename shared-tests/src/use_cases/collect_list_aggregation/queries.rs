@@ -48,6 +48,21 @@ pub fn collect_objects_query() -> &'static str {
     "
 }
 
+/// Collect with mixed types
+pub fn collect_mixed_types_query() -> &'static str {
+    "
+    MATCH (p:products)
+    OPTIONAL MATCH (p)-[:PRODUCT_TO_ORDER_ITEM]->(oi:orderItem)
+    OPTIONAL MATCH (r:reviews)-[:REVIEW_TO_PRODUCT]->(p)
+    WHERE size(collect_list(oi.orderItemId)) > 0 OR size(collect_list(r.rating)) > 0
+    RETURN
+        p.productId AS product_id,
+        p.productName AS product_name,
+        collect_list(oi.orderItemId) as order_ids,
+        collect_list(r.rating) as ratings
+    "
+}
+
 /// Multiple collects in same WITH clause
 pub fn multiple_collects_query() -> &'static str {
     "

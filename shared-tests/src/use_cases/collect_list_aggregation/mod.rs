@@ -281,6 +281,75 @@ pub async fn collect_objects_test(config: &(impl QueryTestConfig + Send)) {
     );
 }
 
+/// Test collect with mixed types
+pub async fn collect_mixed_types_test(config: &(impl QueryTestConfig + Send)) {
+    let query = {
+        let function_registry = Arc::new(FunctionRegistry::new()).with_gql_function_set();
+        let parser = Arc::new(GQLParser::new(function_registry.clone()));
+        let mut builder = QueryBuilder::new(queries::collect_mixed_types_query(), parser)
+            .with_function_registry(function_registry);
+        builder = config.config_query(builder).await;
+        builder.build().await
+    };
+
+    let bootstrap_results = bootstrap_query(&query).await;
+
+    println!("\n=== CollectList Mixed Types Test ===");
+    println!("Bootstrap results: {}", bootstrap_results.len());
+
+    // Verify that we collect different types (strings for order IDs, floats for ratings)
+    for ctx in &bootstrap_results {
+        match ctx {
+            QueryPartEvaluationContext::Adding { after } => {
+                if let Some(product_id) = after.get("product_id").and_then(|v| v.as_str()) {
+                    let order_ids = after.get("order_ids");
+                    let ratings = after.get("ratings");
+
+                    println!(
+                        "Product {}: order_ids={:?}, ratings={:?}",
+                        product_id,
+                        order_ids.and_then(|v| if let VariableValue::List(l) = v {
+                            Some(l.len())
+                        } else {
+                            None
+                        }),
+                        ratings.and_then(|v| if let VariableValue::List(l) = v {
+                            Some(l.len())
+                        } else {
+                            None
+                        })
+                    );
+
+                    // Verify types
+                    if let Some(VariableValue::List(oids)) = order_ids {
+                        for oid in oids {
+                            assert!(
+                                matches!(oid, VariableValue::String(_)),
+                                "Order IDs should be strings"
+                            );
+                        }
+                    }
+
+                    if let Some(VariableValue::List(rs)) = ratings {
+                        for r in rs {
+                            assert!(
+                                matches!(r, VariableValue::Float(_)),
+                                "Ratings should be floats"
+                            );
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        bootstrap_results.len() >= 3,
+        "Should have results for all products"
+    );
+}
+
 /// Test multiple collects in same WITH clause
 pub async fn multiple_collects_test(config: &(impl QueryTestConfig + Send)) {
     let query = {

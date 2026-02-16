@@ -606,6 +606,12 @@ mod collect_list_aggregation {
     }
 
     #[tokio::test]
+    async fn collect_mixed_types() {
+        let test_config = InMemoryQueryConfig::new();
+        collect_list_aggregation::collect_mixed_types_test(&test_config).await;
+    }
+
+    #[tokio::test]
     async fn multiple_collects() {
         let test_config = InMemoryQueryConfig::new();
         collect_list_aggregation::multiple_collects_test(&test_config).await;

@@ -464,6 +464,13 @@ mod collect_list_aggregation {
     }
 
     #[tokio::test]
+    async fn collect_mixed_types() {
+        let test_config = GarnetQueryConfig::new(false).await;
+        collect_list_aggregation::collect_mixed_types_test(&test_config).await;
+        test_config.redis_grd.cleanup().await;
+    }
+
+    #[tokio::test]
     async fn multiple_collects() {
         let test_config = GarnetQueryConfig::new(false).await;
         collect_list_aggregation::multiple_collects_test(&test_config).await;
