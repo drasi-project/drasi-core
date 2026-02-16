@@ -438,6 +438,39 @@ mod collect_aggregation {
     }
 }
 
+mod collect_list_aggregation {
+    use super::GarnetQueryConfig;
+    use shared_tests::use_cases::*;
+
+    #[tokio::test]
+    async fn collect_based_aggregation_test() {
+        let test_config = GarnetQueryConfig::new(false).await;
+        collect_list_aggregation::collect_based_aggregation_test(&test_config).await;
+        test_config.redis_grd.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn collect_with_filter() {
+        let test_config = GarnetQueryConfig::new(false).await;
+        collect_list_aggregation::collect_with_filter_test(&test_config).await;
+        test_config.redis_grd.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn collect_objects() {
+        let test_config = GarnetQueryConfig::new(false).await;
+        collect_list_aggregation::collect_objects_test(&test_config).await;
+        test_config.redis_grd.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn multiple_collects() {
+        let test_config = GarnetQueryConfig::new(false).await;
+        collect_list_aggregation::multiple_collects_test(&test_config).await;
+        test_config.redis_grd.cleanup().await;
+    }
+}
+
 mod source_update_upsert {
     use super::GarnetQueryConfig;
     use shared_tests::use_cases::*;
