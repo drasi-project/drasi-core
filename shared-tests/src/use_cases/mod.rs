@@ -17,6 +17,7 @@ use drasi_core::query::QueryBuilder;
 
 pub mod building_comfort;
 pub mod collect_aggregation;
+pub mod collect_list_aggregation;
 pub mod curbside_pickup;
 pub mod dapr_state_store;
 pub mod decoder;
