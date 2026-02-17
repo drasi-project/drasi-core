@@ -20,10 +20,14 @@ use std::{
     ops::{Index, IndexMut},
 };
 
-use crate::evaluation::variable_value::{float::Float, integer::Integer, VariableValue};
+use crate::evaluation::variable_value::{
+    float::Float, integer::Integer, zoned_datetime::ZonedDateTime as VarZonedDateTime,
+    VariableValue,
+};
 
 use std::sync::Arc;
 
+use chrono::{DateTime, FixedOffset, NaiveDateTime};
 use ordered_float::OrderedFloat;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Default)]
@@ -36,6 +40,8 @@ pub enum ElementValue {
     String(Arc<str>),
     List(Vec<ElementValue>),
     Object(ElementPropertyMap),
+    LocalDateTime(NaiveDateTime),
+    ZonedDateTime(DateTime<FixedOffset>),
 }
 
 impl From<&ElementPropertyMap> for VariableValue {
@@ -58,6 +64,10 @@ impl From<&ElementValue> for VariableValue {
             ElementValue::String(s) => VariableValue::String(s.to_string()),
             ElementValue::List(l) => VariableValue::List(l.iter().map(|x| x.into()).collect()),
             ElementValue::Object(o) => o.into(),
+            ElementValue::LocalDateTime(dt) => VariableValue::LocalDateTime(*dt),
+            ElementValue::ZonedDateTime(dt) => {
+                VariableValue::ZonedDateTime(VarZonedDateTime::new(*dt, None))
+            }
         }
     }
 }
@@ -78,6 +88,10 @@ impl TryInto<ElementValue> for &VariableValue {
                 l.iter().map(|x| x.try_into().unwrap_or_default()).collect(),
             )),
             VariableValue::Object(o) => Ok(ElementValue::Object(o.into())),
+            VariableValue::LocalDateTime(dt) => Ok(ElementValue::LocalDateTime(*dt)),
+            VariableValue::ZonedDateTime(zdt) => {
+                Ok(ElementValue::ZonedDateTime(*zdt.datetime()))
+            }
             _ => Err(ConversionError {}),
         }
     }
@@ -99,6 +113,10 @@ impl TryInto<ElementValue> for VariableValue {
                 l.iter().map(|x| x.try_into().unwrap_or_default()).collect(),
             )),
             VariableValue::Object(o) => Ok(ElementValue::Object(o.into())),
+            VariableValue::LocalDateTime(dt) => Ok(ElementValue::LocalDateTime(dt)),
+            VariableValue::ZonedDateTime(zdt) => {
+                Ok(ElementValue::ZonedDateTime(*zdt.datetime()))
+            }
             _ => Err(ConversionError {}),
         }
     }
@@ -116,6 +134,8 @@ impl From<&ElementValue> for serde_json::Value {
             ElementValue::String(s) => serde_json::Value::String(s.to_string()),
             ElementValue::List(l) => serde_json::Value::Array(l.iter().map(|x| x.into()).collect()),
             ElementValue::Object(o) => serde_json::Value::Object(o.into()),
+            ElementValue::LocalDateTime(dt) => serde_json::Value::String(dt.to_string()),
+            ElementValue::ZonedDateTime(dt) => serde_json::Value::String(dt.to_rfc3339()),
         }
     }
 }

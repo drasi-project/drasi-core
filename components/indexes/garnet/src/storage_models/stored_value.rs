@@ -159,6 +159,12 @@ impl From<&ElementValue> for StoredValueContainer {
             ElementValue::Object(o) => StoredValueContainer {
                 value: Some(StoredValue::Object(o.into())),
             },
+            ElementValue::LocalDateTime(dt) => StoredValueContainer {
+                value: Some(StoredValue::String(dt.to_string())),
+            },
+            ElementValue::ZonedDateTime(dt) => StoredValueContainer {
+                value: Some(StoredValue::String(dt.to_rfc3339())),
+            },
         }
     }
 }

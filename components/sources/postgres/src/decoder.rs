@@ -710,7 +710,23 @@ pub fn decode_column_value_text(
         }
         1114 | 1184 => {
             // timestamp, timestamptz
-            Ok(ElementValue::String(Arc::from(text)))
+            // Try parsing as NaiveDateTime first (timestamp without tz)
+            if let Ok(dt) = NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f") {
+                Ok(ElementValue::LocalDateTime(dt))
+            } else if let Ok(dt) =
+                NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S")
+            {
+                Ok(ElementValue::LocalDateTime(dt))
+            } else if let Ok(dt) = DateTime::parse_from_rfc3339(text.trim()) {
+                Ok(ElementValue::ZonedDateTime(dt.fixed_offset()))
+            } else if let Ok(dt) =
+                DateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f%z")
+            {
+                Ok(ElementValue::ZonedDateTime(dt.fixed_offset()))
+            } else {
+                // Fall back to string if parsing fails
+                Ok(ElementValue::String(Arc::from(text)))
+            }
         }
         1082 => {
             // date

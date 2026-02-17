@@ -13,10 +13,13 @@
 // limitations under the License.
 
 use chrono::{DateTime, NaiveDateTime, Utc};
+use drasi_core::models::ElementValue;
+use ordered_float::OrderedFloat;
 use postgres_types::Oid;
 use rust_decimal::Decimal;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
+use std::sync::Arc;
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -157,6 +160,50 @@ impl PostgresValue {
             }
             PostgresValue::Bytea(bytes) => JsonValue::String(base64::encode(bytes)),
         }
+    }
+
+    /// Convert PostgresValue to ElementValue, preserving datetime types
+    pub fn to_element_value(&self) -> ElementValue {
+        match self {
+            PostgresValue::Null => ElementValue::Null,
+            PostgresValue::Bool(b) => ElementValue::Bool(*b),
+            PostgresValue::Int2(i) => ElementValue::Integer(*i as i64),
+            PostgresValue::Int4(i) => ElementValue::Integer(*i as i64),
+            PostgresValue::Int8(i) => ElementValue::Integer(*i),
+            PostgresValue::Float4(f) => ElementValue::Float(OrderedFloat(*f as f64)),
+            PostgresValue::Float8(f) => ElementValue::Float(OrderedFloat(*f)),
+            PostgresValue::Numeric(d) => {
+                // Convert Decimal to f64 for storage
+                ElementValue::Float(OrderedFloat(
+                    d.to_string().parse::<f64>().unwrap_or(0.0),
+                ))
+            }
+            PostgresValue::Text(s) | PostgresValue::Varchar(s) | PostgresValue::Char(s) => {
+                ElementValue::String(Arc::from(s.as_str()))
+            }
+            PostgresValue::Uuid(u) => ElementValue::String(Arc::from(u.to_string())),
+            PostgresValue::Timestamp(ts) => ElementValue::LocalDateTime(*ts),
+            PostgresValue::TimestampTz(ts) => {
+                ElementValue::ZonedDateTime(ts.fixed_offset())
+            }
+            PostgresValue::Date(d) => ElementValue::String(Arc::from(d.to_string())),
+            PostgresValue::Time(t) => ElementValue::String(Arc::from(t.to_string())),
+            PostgresValue::Json(j) | PostgresValue::Jsonb(j) => {
+                ElementValue::String(Arc::from(j.to_string()))
+            }
+            PostgresValue::Array(arr) => {
+                ElementValue::List(arr.iter().map(|v| v.to_element_value()).collect())
+            }
+            PostgresValue::Composite(_) | PostgresValue::Bytea(_) => {
+                // Fall back to JSON string representation for complex types
+                ElementValue::String(Arc::from(self.to_json().to_string()))
+            }
+        }
+    }
+
+    /// Returns true if this value is null
+    pub fn is_null(&self) -> bool {
+        matches!(self, PostgresValue::Null)
     }
 }
 
