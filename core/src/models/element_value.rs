@@ -306,3 +306,168 @@ impl From<&serde_json::Value> for ElementPropertyMap {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::evaluation::variable_value::{
+        float::Float, integer::Integer, zoned_datetime::ZonedDateTime as VarZonedDateTime,
+        VariableValue,
+    };
+    use chrono::{NaiveDate, TimeZone, Utc};
+
+    fn sample_naive_datetime() -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(2024, 6, 15)
+            .unwrap()
+            .and_hms_opt(10, 30, 45)
+            .unwrap()
+    }
+
+    fn sample_fixed_datetime() -> DateTime<FixedOffset> {
+        let offset = FixedOffset::east_opt(3600).unwrap(); // +01:00
+        offset
+            .with_ymd_and_hms(2024, 6, 15, 10, 30, 45)
+            .unwrap()
+    }
+
+    // ── ElementValue → VariableValue ────────────────────────────────────
+
+    #[test]
+    fn local_datetime_to_variable_value() {
+        let dt = sample_naive_datetime();
+        let ev = ElementValue::LocalDateTime(dt);
+        let vv: VariableValue = (&ev).into();
+        assert_eq!(vv, VariableValue::LocalDateTime(dt));
+    }
+
+    #[test]
+    fn zoned_datetime_to_variable_value() {
+        let dt = sample_fixed_datetime();
+        let ev = ElementValue::ZonedDateTime(dt);
+        let vv: VariableValue = (&ev).into();
+        let expected = VariableValue::ZonedDateTime(VarZonedDateTime::new(dt, None));
+        assert_eq!(vv, expected);
+    }
+
+    // ── VariableValue → ElementValue (by ref) ──────────────────────────
+
+    #[test]
+    fn variable_value_ref_local_datetime_to_element_value() {
+        let dt = sample_naive_datetime();
+        let vv = VariableValue::LocalDateTime(dt);
+        let ev: ElementValue = (&vv).try_into().unwrap();
+        assert_eq!(ev, ElementValue::LocalDateTime(dt));
+    }
+
+    #[test]
+    fn variable_value_ref_zoned_datetime_to_element_value() {
+        let dt = sample_fixed_datetime();
+        let vv = VariableValue::ZonedDateTime(VarZonedDateTime::new(dt, None));
+        let ev: ElementValue = (&vv).try_into().unwrap();
+        assert_eq!(ev, ElementValue::ZonedDateTime(dt));
+    }
+
+    // ── VariableValue → ElementValue (by value) ────────────────────────
+
+    #[test]
+    fn variable_value_owned_local_datetime_to_element_value() {
+        let dt = sample_naive_datetime();
+        let vv = VariableValue::LocalDateTime(dt);
+        let ev: ElementValue = vv.try_into().unwrap();
+        assert_eq!(ev, ElementValue::LocalDateTime(dt));
+    }
+
+    #[test]
+    fn variable_value_owned_zoned_datetime_to_element_value() {
+        let dt = sample_fixed_datetime();
+        let vv = VariableValue::ZonedDateTime(VarZonedDateTime::new(dt, None));
+        let ev: ElementValue = vv.try_into().unwrap();
+        assert_eq!(ev, ElementValue::ZonedDateTime(dt));
+    }
+
+    // ── ElementValue → serde_json::Value ───────────────────────────────
+
+    #[test]
+    fn local_datetime_to_json() {
+        let dt = sample_naive_datetime();
+        let ev = ElementValue::LocalDateTime(dt);
+        let json: serde_json::Value = (&ev).into();
+        assert_eq!(json, serde_json::Value::String(dt.to_string()));
+    }
+
+    #[test]
+    fn zoned_datetime_to_json() {
+        let dt = sample_fixed_datetime();
+        let ev = ElementValue::ZonedDateTime(dt);
+        let json: serde_json::Value = (&ev).into();
+        assert_eq!(json, serde_json::Value::String(dt.to_rfc3339()));
+    }
+
+    // ── Round-trip: ElementValue → VariableValue → ElementValue ────────
+
+    #[test]
+    fn roundtrip_local_datetime() {
+        let dt = sample_naive_datetime();
+        let original = ElementValue::LocalDateTime(dt);
+        let vv: VariableValue = (&original).into();
+        let recovered: ElementValue = vv.try_into().unwrap();
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn roundtrip_zoned_datetime() {
+        let dt = sample_fixed_datetime();
+        let original = ElementValue::ZonedDateTime(dt);
+        let vv: VariableValue = (&original).into();
+        let recovered: ElementValue = vv.try_into().unwrap();
+        assert_eq!(original, recovered);
+    }
+
+    // ── JSON round-trip (note: JSON strings do NOT auto-parse to datetime) ──
+
+    #[test]
+    fn json_string_does_not_become_datetime() {
+        // A JSON string that looks like a timestamp should remain an
+        // ElementValue::String, not magically become LocalDateTime.
+        let json = serde_json::Value::String("2024-06-15 10:30:45".to_string());
+        let ev: ElementValue = (&json).into();
+        assert!(matches!(ev, ElementValue::String(_)));
+    }
+
+    // ── Other variants still work ──────────────────────────────────────
+
+    #[test]
+    fn null_roundtrip() {
+        let ev = ElementValue::Null;
+        let vv: VariableValue = (&ev).into();
+        assert_eq!(vv, VariableValue::Null);
+        let recovered: ElementValue = vv.try_into().unwrap();
+        assert_eq!(recovered, ElementValue::Null);
+    }
+
+    #[test]
+    fn bool_roundtrip() {
+        let ev = ElementValue::Bool(true);
+        let vv: VariableValue = (&ev).into();
+        assert_eq!(vv, VariableValue::Bool(true));
+    }
+
+    #[test]
+    fn integer_roundtrip() {
+        let ev = ElementValue::Integer(42);
+        let vv: VariableValue = (&ev).into();
+        assert_eq!(vv, VariableValue::Integer(Integer::from(42i64)));
+    }
+
+    #[test]
+    fn zoned_datetime_utc() {
+        let dt = Utc
+            .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
+            .unwrap()
+            .fixed_offset();
+        let ev = ElementValue::ZonedDateTime(dt);
+        let vv: VariableValue = (&ev).into();
+        let recovered: ElementValue = vv.try_into().unwrap();
+        assert_eq!(recovered, ev);
+    }
+}

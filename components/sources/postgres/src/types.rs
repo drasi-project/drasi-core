@@ -240,3 +240,127 @@ mod base64 {
         result
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{NaiveDate, TimeZone, Utc};
+
+    fn sample_naive_datetime() -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(2024, 6, 15)
+            .unwrap()
+            .and_hms_opt(10, 30, 45)
+            .unwrap()
+    }
+
+    fn sample_utc_datetime() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2024, 6, 15, 10, 30, 45).unwrap()
+    }
+
+    #[test]
+    fn timestamp_to_element_value_is_local_datetime() {
+        let ts = sample_naive_datetime();
+        let pv = PostgresValue::Timestamp(ts);
+        let ev = pv.to_element_value();
+        assert_eq!(ev, ElementValue::LocalDateTime(ts));
+    }
+
+    #[test]
+    fn timestamptz_to_element_value_is_zoned_datetime() {
+        let ts = sample_utc_datetime();
+        let pv = PostgresValue::TimestampTz(ts);
+        let ev = pv.to_element_value();
+        assert_eq!(ev, ElementValue::ZonedDateTime(ts.fixed_offset()));
+    }
+
+    #[test]
+    fn null_to_element_value() {
+        let pv = PostgresValue::Null;
+        assert_eq!(pv.to_element_value(), ElementValue::Null);
+        assert!(pv.is_null());
+    }
+
+    #[test]
+    fn bool_to_element_value() {
+        let pv = PostgresValue::Bool(true);
+        assert_eq!(pv.to_element_value(), ElementValue::Bool(true));
+        assert!(!pv.is_null());
+    }
+
+    #[test]
+    fn int_types_to_element_value() {
+        assert_eq!(
+            PostgresValue::Int2(42).to_element_value(),
+            ElementValue::Integer(42)
+        );
+        assert_eq!(
+            PostgresValue::Int4(100_000).to_element_value(),
+            ElementValue::Integer(100_000)
+        );
+        assert_eq!(
+            PostgresValue::Int8(9_000_000_000).to_element_value(),
+            ElementValue::Integer(9_000_000_000)
+        );
+    }
+
+    #[test]
+    fn float_types_to_element_value() {
+        let ev = PostgresValue::Float4(3.14).to_element_value();
+        match ev {
+            ElementValue::Float(f) => assert!((f.into_inner() - 3.14f64).abs() < 0.001),
+            other => panic!("Expected Float, got {other:?}"),
+        }
+
+        let ev = PostgresValue::Float8(2.718281828).to_element_value();
+        match ev {
+            ElementValue::Float(f) => {
+                assert!((f.into_inner() - 2.718281828).abs() < 1e-9)
+            }
+            other => panic!("Expected Float, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_to_element_value() {
+        let pv = PostgresValue::Text("hello".to_string());
+        assert_eq!(
+            pv.to_element_value(),
+            ElementValue::String(Arc::from("hello"))
+        );
+    }
+
+    #[test]
+    fn array_with_timestamps_to_element_value() {
+        let ts = sample_naive_datetime();
+        let pv = PostgresValue::Array(vec![
+            PostgresValue::Timestamp(ts),
+            PostgresValue::Int4(42),
+        ]);
+        let ev = pv.to_element_value();
+        match ev {
+            ElementValue::List(items) => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0], ElementValue::LocalDateTime(ts));
+                assert_eq!(items[1], ElementValue::Integer(42));
+            }
+            other => panic!("Expected List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn timestamp_to_json_is_string() {
+        // to_json() should still produce a string (backwards compat)
+        let ts = sample_naive_datetime();
+        let pv = PostgresValue::Timestamp(ts);
+        let json = pv.to_json();
+        assert!(json.is_string());
+    }
+
+    #[test]
+    fn timestamptz_to_json_is_string() {
+        let ts = sample_utc_datetime();
+        let pv = PostgresValue::TimestampTz(ts);
+        let json = pv.to_json();
+        assert!(json.is_string());
+    }
+}
