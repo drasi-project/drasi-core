@@ -301,16 +301,16 @@ mod tests {
 
     #[test]
     fn float_types_to_element_value() {
-        let ev = PostgresValue::Float4(3.14).to_element_value();
+        let ev = PostgresValue::Float4(1.23).to_element_value();
         match ev {
-            ElementValue::Float(f) => assert!((f.into_inner() - 3.14f64).abs() < 0.001),
+            ElementValue::Float(f) => assert!((f.into_inner() - 1.23f64).abs() < 0.001),
             other => panic!("Expected Float, got {other:?}"),
         }
 
-        let ev = PostgresValue::Float8(2.718281828).to_element_value();
+        let ev = PostgresValue::Float8(9.876543210).to_element_value();
         match ev {
             ElementValue::Float(f) => {
-                assert!((f.into_inner() - 2.718281828).abs() < 1e-9)
+                assert!((f.into_inner() - 9.876543210).abs() < 1e-9)
             }
             other => panic!("Expected Float, got {other:?}"),
         }
