@@ -240,7 +240,8 @@ mod base64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{NaiveDate, TimeZone, Utc};
+    use crate::decoder::decode_column_value_text;
+    use chrono::{FixedOffset, NaiveDate, TimeZone, Utc};
 
     fn sample_naive_datetime() -> NaiveDateTime {
         NaiveDate::from_ymd_opt(2024, 6, 15)
@@ -355,5 +356,169 @@ mod tests {
         let pv = PostgresValue::TimestampTz(ts);
         let json = pv.to_json();
         assert!(json.is_string());
+    }
+
+    // ── Bootstrap / CDC parity tests ───────────────────────────────────
+    //
+    // These tests assert that `decode_column_value_text` (bootstrap path)
+    // produces the same `ElementValue` as `PostgresValue::to_element_value`
+    // (CDC path) for equivalent input data.
+
+    #[test]
+    fn parity_bool_true() {
+        let cdc = PostgresValue::Bool(true).to_element_value();
+        let bootstrap = decode_column_value_text("true", 16).unwrap();
+        assert_eq!(cdc, bootstrap, "bool true: CDC vs bootstrap mismatch");
+    }
+
+    #[test]
+    fn parity_bool_false() {
+        let cdc = PostgresValue::Bool(false).to_element_value();
+        let bootstrap = decode_column_value_text("f", 16).unwrap();
+        assert_eq!(cdc, bootstrap, "bool false: CDC vs bootstrap mismatch");
+    }
+
+    #[test]
+    fn parity_int2() {
+        let cdc = PostgresValue::Int2(42).to_element_value();
+        let bootstrap = decode_column_value_text("42", 21).unwrap();
+        assert_eq!(cdc, bootstrap, "int2: CDC vs bootstrap mismatch");
+    }
+
+    #[test]
+    fn parity_int4() {
+        let cdc = PostgresValue::Int4(100_000).to_element_value();
+        let bootstrap = decode_column_value_text("100000", 23).unwrap();
+        assert_eq!(cdc, bootstrap, "int4: CDC vs bootstrap mismatch");
+    }
+
+    #[test]
+    fn parity_int8() {
+        let cdc = PostgresValue::Int8(9_000_000_000).to_element_value();
+        let bootstrap = decode_column_value_text("9000000000", 20).unwrap();
+        assert_eq!(cdc, bootstrap, "int8: CDC vs bootstrap mismatch");
+    }
+
+    #[test]
+    fn parity_float4() {
+        let cdc = PostgresValue::Float4(1.5).to_element_value();
+        let bootstrap = decode_column_value_text("1.5", 700).unwrap();
+        assert_eq!(cdc, bootstrap, "float4: CDC vs bootstrap mismatch");
+    }
+
+    #[test]
+    fn parity_float8() {
+        let cdc = PostgresValue::Float8(9.876543210).to_element_value();
+        let bootstrap = decode_column_value_text("9.87654321", 701).unwrap();
+        assert_eq!(cdc, bootstrap, "float8: CDC vs bootstrap mismatch");
+    }
+
+    #[test]
+    fn parity_numeric() {
+        let dec = Decimal::from_str_exact("123.45").unwrap();
+        let cdc = PostgresValue::Numeric(dec).to_element_value();
+        let bootstrap = decode_column_value_text("123.45", 1700).unwrap();
+        assert_eq!(cdc, bootstrap, "numeric: CDC vs bootstrap mismatch");
+    }
+
+    #[test]
+    fn parity_text() {
+        let cdc = PostgresValue::Text("hello world".to_string()).to_element_value();
+        let bootstrap = decode_column_value_text("hello world", 25).unwrap();
+        assert_eq!(cdc, bootstrap, "text: CDC vs bootstrap mismatch");
+    }
+
+    #[test]
+    fn parity_varchar() {
+        let cdc = PostgresValue::Varchar("drasi".to_string()).to_element_value();
+        let bootstrap = decode_column_value_text("drasi", 1043).unwrap();
+        assert_eq!(cdc, bootstrap, "varchar: CDC vs bootstrap mismatch");
+    }
+
+    #[test]
+    fn parity_timestamp() {
+        // timestamp without timezone (OID 1114)
+        let dt = NaiveDate::from_ymd_opt(2024, 6, 15)
+            .unwrap()
+            .and_hms_micro_opt(10, 30, 45, 123456)
+            .unwrap();
+        let cdc = PostgresValue::Timestamp(dt).to_element_value();
+        let bootstrap = decode_column_value_text("2024-06-15 10:30:45.123456", 1114).unwrap();
+        assert_eq!(cdc, bootstrap, "timestamp: CDC vs bootstrap mismatch");
+        // Both must be LocalDateTime, not String
+        assert!(
+            matches!(cdc, ElementValue::LocalDateTime(_)),
+            "CDC timestamp should be LocalDateTime, got {cdc:?}"
+        );
+    }
+
+    #[test]
+    fn parity_timestamp_no_fractional() {
+        let dt = NaiveDate::from_ymd_opt(2024, 6, 15)
+            .unwrap()
+            .and_hms_opt(10, 30, 45)
+            .unwrap();
+        let cdc = PostgresValue::Timestamp(dt).to_element_value();
+        let bootstrap = decode_column_value_text("2024-06-15 10:30:45", 1114).unwrap();
+        assert_eq!(cdc, bootstrap, "timestamp (no frac): CDC vs bootstrap mismatch");
+    }
+
+    #[test]
+    fn parity_timestamptz_utc() {
+        // timestamptz (OID 1184) with UTC
+        let utc_dt = Utc.with_ymd_and_hms(2024, 6, 15, 10, 30, 45).unwrap();
+        let cdc = PostgresValue::TimestampTz(utc_dt).to_element_value();
+        let bootstrap = decode_column_value_text("2024-06-15T10:30:45+00:00", 1184).unwrap();
+        assert_eq!(cdc, bootstrap, "timestamptz UTC: CDC vs bootstrap mismatch");
+        // Both must be ZonedDateTime, not String
+        assert!(
+            matches!(cdc, ElementValue::ZonedDateTime(_)),
+            "CDC timestamptz should be ZonedDateTime, got {cdc:?}"
+        );
+    }
+
+    #[test]
+    fn parity_timestamptz_with_offset() {
+        // CDC always stores timestamptz as UTC, but the logical instant is the same.
+        // Bootstrap parses the offset from the string.
+        // Both should represent the same instant in time even if offsets differ.
+        let utc_dt = Utc.with_ymd_and_hms(2024, 6, 15, 8, 30, 45).unwrap(); // 08:30:45 UTC
+        let cdc = PostgresValue::TimestampTz(utc_dt).to_element_value();
+
+        // Same instant expressed as +02:00 → 10:30:45+02:00
+        let bootstrap =
+            decode_column_value_text("2024-06-15T10:30:45+02:00", 1184).unwrap();
+
+        // Both are ZonedDateTime
+        match (&cdc, &bootstrap) {
+            (ElementValue::ZonedDateTime(cdc_dt), ElementValue::ZonedDateTime(bs_dt)) => {
+                // Same instant in UTC
+                assert_eq!(
+                    cdc_dt.timestamp(),
+                    bs_dt.timestamp(),
+                    "timestamptz with offset: same UTC instant expected"
+                );
+            }
+            _ => panic!(
+                "Expected ZonedDateTime from both paths, got CDC={cdc:?}, bootstrap={bootstrap:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn parity_date() {
+        let cdc = PostgresValue::Date(NaiveDate::from_ymd_opt(2024, 6, 15).unwrap())
+            .to_element_value();
+        let bootstrap = decode_column_value_text("2024-06-15", 1082).unwrap();
+        assert_eq!(cdc, bootstrap, "date: CDC vs bootstrap mismatch");
+    }
+
+    #[test]
+    fn parity_uuid() {
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let cdc = PostgresValue::Uuid(uuid).to_element_value();
+        let bootstrap =
+            decode_column_value_text("550e8400-e29b-41d4-a716-446655440000", 2950).unwrap();
+        assert_eq!(cdc, bootstrap, "uuid: CDC vs bootstrap mismatch");
     }
 }
