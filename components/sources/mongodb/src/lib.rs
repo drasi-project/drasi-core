@@ -23,22 +23,8 @@ pub struct MongoSource {
 }
 
 impl MongoSource {
-    pub fn new(id: impl Into<String>, mut config: MongoSourceConfig) -> Result<Self> {
+    pub fn new(id: impl Into<String>, config: MongoSourceConfig) -> Result<Self> {
         let params = SourceBaseParams::new(id.into());
-        
-        // Resolve database if not provided
-        if config.database.is_none() {
-            if let Ok(url) = Url::parse(&config.connection_string) {
-                let path = url.path().trim_start_matches('/');
-                if !path.is_empty() {
-                    config.database = Some(path.to_string());
-                }
-            }
-        }
-        
-        if config.database.is_none() {
-            return Err(anyhow::anyhow!("Database name must be provided in config or connection string"));
-        }
 
         Ok(Self {
             base: SourceBase::new(params)?,
@@ -78,9 +64,7 @@ impl Source for MongoSource {
         };
 
         props.insert("connection_string".to_string(), serde_json::Value::String(connection_string));
-        if let Some(db) = &self.config.database {
-            props.insert("database".to_string(), serde_json::Value::String(db.clone()));
-        }
+        props.insert("database".to_string(), serde_json::Value::String(self.config.database.clone()));
         let cols = self.config.get_collections();
         props.insert("collections".to_string(), serde_json::Value::from(cols));
         
@@ -198,7 +182,7 @@ impl MongoSourceBuilder {
         #[allow(deprecated)]
         let config = MongoSourceConfig {
             connection_string: String::new(),
-            database: None,
+            database: String::new(),
             collection: None,
             collections: Vec::new(),
             pipeline: None,
@@ -217,7 +201,7 @@ impl MongoSourceBuilder {
     }
 
     pub fn with_database(mut self, db: impl Into<String>) -> Self {
-        self.config.database = Some(db.into());
+        self.config.database = db.into();
         self
     }
 

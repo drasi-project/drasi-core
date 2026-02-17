@@ -5,8 +5,7 @@ use mongodb::bson::Document;
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct MongoSourceConfig {
     pub connection_string: String,
-    #[serde(default)]
-    pub database: Option<String>,
+    pub database: String,
     
     /// DEPRECATED: Use `collections` instead. This field will be removed in a future version.
     /// For backward compatibility, this field is automatically migrated to `collections` during deserialization.
@@ -33,8 +32,7 @@ impl<'de> Deserialize<'de> for MongoSourceConfig {
         #[derive(Deserialize)]
         struct ConfigHelper {
             connection_string: String,
-            #[serde(default)]
-            database: Option<String>,
+            database: String,
             #[serde(default)]
             collection: Option<String>,
             #[serde(default)]
@@ -88,27 +86,10 @@ impl MongoSourceConfig {
              return Err(anyhow::anyhow!("Validation error: connection_string cannot be empty"));
         }
         
-        let mut connection_db = None;
-        if let Ok(url) = url::Url::parse(&self.connection_string) {
-            let path = url.path().trim_start_matches('/');
-            if !path.is_empty() {
-                connection_db = Some(path.to_string());
-            }
-        }
-
-        match (&self.database, &connection_db) {
-            (Some(config_db), Some(conn_db)) => {
-                if config_db != conn_db {
-                    return Err(anyhow::anyhow!(
-                        "Ambiguous configuration: database specified in both config ('{}') and connection string ('{}') but they differ",
-                        config_db, conn_db
-                    ));
-                }
-            }
-            (None, None) => {
-                 return Err(anyhow::anyhow!("Validation error: database must be specified in either config or connection string"));
-            }
-            _ => {}
+        if self.database.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Validation error: database cannot be empty"
+            ));
         }
         
         // Warn if deprecated field is still set in memory (not from deserialization)
@@ -143,8 +124,8 @@ mod tests {
     #[allow(deprecated)]
     fn test_config_validation_match() {
         let config = MongoSourceConfig {
-            connection_string: "mongodb://localhost/db".to_string(),
-            database: Some("db".to_string()),
+            connection_string: "mongodb://localhost/db" .to_string(),
+            database: "db".to_string(),
             collection: None,
             collections: vec!["col".to_string()],
             pipeline: None,
@@ -159,14 +140,14 @@ mod tests {
     fn test_config_validation_mismatch() {
         let config = MongoSourceConfig {
             connection_string: "mongodb://localhost/db1".to_string(),
-            database: Some("db2".to_string()),
+            database: "db".to_string(),
             collection: None,
             collections: vec!["col".to_string()],
             pipeline: None,
             username: None,
             password: None,
         };
-        assert!(config.validate().is_err());
+        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -174,7 +155,7 @@ mod tests {
     fn test_config_validation_only_config() {
         let config = MongoSourceConfig {
             connection_string: "mongodb://localhost".to_string(),
-            database: Some("db".to_string()),
+            database: "db".to_string(),
             collection: None,
             collections: vec!["col".to_string()],
             pipeline: None,
@@ -189,7 +170,7 @@ mod tests {
     fn test_config_validation_only_connection() {
         let config = MongoSourceConfig {
             connection_string: "mongodb://localhost/db".to_string(),
-            database: None,
+            database: "db".to_string(),
             collection: None,
             collections: vec!["col".to_string()],
             pipeline: None,
@@ -204,7 +185,7 @@ mod tests {
     fn test_config_validation_none() {
         let config = MongoSourceConfig {
             connection_string: "mongodb://localhost".to_string(),
-            database: None,
+            database: String::new(),
             collection: None,
             collections: vec![],
             pipeline: None,
@@ -218,8 +199,8 @@ mod tests {
     #[allow(deprecated)]
     fn test_config_validation_multi_collection() {
         let config = MongoSourceConfig {
-            connection_string: "mongodb://localhost/db".to_string(),
-            database: None,
+            connection_string: "mongodb://localhost".to_string(),
+            database: "db".to_string(),
             collection: None,
             collections: vec!["col1".to_string(), "col2".to_string()],
             pipeline: None,
@@ -235,7 +216,7 @@ mod tests {
     fn test_config_validation_no_collection() {
         let config = MongoSourceConfig {
             connection_string: "mongodb://localhost/db".to_string(),
-            database: None,
+            database: "db".to_string(),
             collection: None,
             collections: vec![],
             pipeline: None,
@@ -251,6 +232,7 @@ mod tests {
     fn test_collections_only_single() {
         let json = r#"{
             "connection_string": "mongodb://localhost/db",
+            "database": "mydb",
             "collections": ["my_collection"]
         }"#;
         let config: MongoSourceConfig = serde_json::from_str(json).unwrap();
@@ -264,6 +246,7 @@ mod tests {
     fn test_collections_only_multiple() {
         let json = r#"{
             "connection_string": "mongodb://localhost/db",
+            "database": "mydb",
             "collections": ["col1", "col2", "col3"]
         }"#;
         let config: MongoSourceConfig = serde_json::from_str(json).unwrap();
@@ -281,6 +264,7 @@ mod tests {
         // Simulate deserialization from JSON with old 'collection' field
         let json = r#"{
             "connection_string": "mongodb://localhost/db",
+            "database": "mydb",
             "collection": "old_col"
         }"#;
         let config: MongoSourceConfig = serde_json::from_str(json).unwrap();
@@ -294,6 +278,7 @@ mod tests {
     fn test_both_fields_merged_no_duplicate() {
         let json = r#"{
             "connection_string": "mongodb://localhost/db",
+            "database": "mydb",
             "collection": "col1",
             "collections": ["col1", "col2"]
         }"#;
@@ -309,6 +294,7 @@ mod tests {
     fn test_both_fields_merged_different() {
         let json = r#"{
             "connection_string": "mongodb://localhost/db",
+            "database": "mydb",
             "collection": "col1",
             "collections": ["col2", "col3"]
         }"#;
@@ -324,7 +310,8 @@ mod tests {
     #[test]
     fn test_neither_field_error() {
         let json = r#"{
-            "connection_string": "mongodb://localhost/db"
+            "connection_string": "mongodb://localhost/db",
+            "database": "mydb"
         }"#;
         let config: MongoSourceConfig = serde_json::from_str(json).unwrap();
         

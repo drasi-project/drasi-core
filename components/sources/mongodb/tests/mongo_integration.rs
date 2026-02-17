@@ -102,7 +102,7 @@ async fn test_mongo_source_integration() -> Result<()> {
     // Configure Source
     let config = MongoSourceConfig {
         connection_string: connection_string.clone(),
-        database: Some(db_name.to_string()),
+        database: db_name.to_string(),
         collection: Some(collection_name.to_string()),
         collections: vec![],
         pipeline: None,
@@ -357,7 +357,7 @@ async fn test_mongo_source_with_auth() -> Result<()> {
     // We configure source with connection_string_no_auth and NO overrides.
     let config_fail = MongoSourceConfig {
         connection_string: connection_string_no_auth.clone(),
-        database: Some(db_name.to_string()),
+        database: db_name.to_string(),
         collection: Some(collection_name.to_string()),
         collections: vec![],
         pipeline: None,
@@ -380,7 +380,7 @@ async fn test_mongo_source_with_auth() -> Result<()> {
     // 2. Test success with credential overrides
     let config_success = MongoSourceConfig {
         connection_string: connection_string_no_auth.clone(),
-        database: Some(db_name.to_string()),
+        database: db_name.to_string(),
         collection: Some(collection_name.to_string()),
         collections: vec![],
         pipeline: None,
@@ -470,7 +470,7 @@ async fn test_mongo_source_multi_collection() -> Result<()> {
     // Configure Source with multiple collections
     let config = MongoSourceConfig {
         connection_string: connection_string.clone(),
-        database: Some(db_name.to_string()),
+        database: db_name.to_string(),
         collection: None,
         collections: vec!["col1".to_string(), "col2".to_string()],
         pipeline: None,

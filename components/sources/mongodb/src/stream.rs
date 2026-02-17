@@ -106,10 +106,8 @@ impl ReplicationStream {
         let mut client_options = ClientOptions::parse(&self.config.connection_string).await?;
 
         // Handle credentials override
-        let username = self.config.username.clone()
-            .or_else(|| std::env::var("MONGODB_USERNAME").ok());
-        let password = self.config.password.clone()
-            .or_else(|| std::env::var("MONGODB_PASSWORD").ok());
+        let username = self.config.username.clone();
+        let password = self.config.password.clone();
 
         if let (Some(u), Some(p)) = (username, password) {
             let credential = mongodb::options::Credential::builder()
@@ -121,8 +119,7 @@ impl ReplicationStream {
 
         let client = Client::with_options(client_options)?;
         
-        let db_name = self.config.database.as_ref().ok_or_else(|| anyhow::anyhow!("Database not configured"))?;
-        let db = client.database(db_name);
+        let db = client.database(&self.config.database);
 
         let collections = self.config.get_collections();
         if collections.is_empty() {
@@ -138,7 +135,7 @@ impl ReplicationStream {
             options.resume_after = Some(token.clone());
         }
 
-        info!("Starting change stream on database: {}, collections: {:?}", db_name, collections);
+        info!("Starting change stream on database: {}, collections: {:?}", self.config.database, collections);
 
         let mut stream = if collections.len() == 1 {
             let col = db.collection::<Document>(&collections[0]);

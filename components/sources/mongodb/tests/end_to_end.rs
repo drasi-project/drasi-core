@@ -161,7 +161,7 @@ async fn test_end_to_end_basic_pipeline() -> Result<()> {
     #[allow(deprecated)]
     let config = MongoSourceConfig {
         connection_string: connection_string.clone(),
-        database: Some(db_name.to_string()),
+        database: db_name.to_string(),
         collection: None,
         collections: vec![collection_name.to_string()],
         pipeline: None,
@@ -287,7 +287,7 @@ async fn test_end_to_end_resume_persistence() -> Result<()> {
     #[allow(deprecated)]
     let config = MongoSourceConfig {
         connection_string: connection_string.clone(),
-        database: Some(db_name.to_string()),
+        database: db_name.to_string(),
         collection: None,
         collections: vec![collection_name.to_string()],
         pipeline: None,
@@ -340,7 +340,7 @@ async fn test_end_to_end_resume_persistence() -> Result<()> {
     #[allow(deprecated)]
     let config2 = MongoSourceConfig {
         connection_string: connection_string.clone(),
-        database: Some(db_name.to_string()),
+        database: db_name.to_string(),
         collection: None,
         collections: vec![collection_name.to_string()],
         pipeline: None,
@@ -415,7 +415,7 @@ async fn test_end_to_end_multi_collection() -> Result<()> {
     // 2. Create Source
     let config = MongoSourceConfig {
         connection_string: connection_string.clone(),
-        database: Some(db_name.to_string()),
+        database: db_name.to_string(),
         collection: None,
         collections: vec!["col1".to_string(), "col2".to_string()],
         pipeline: None,
@@ -528,7 +528,7 @@ async fn test_end_to_end_authentication() -> Result<()> {
     #[allow(deprecated)]
     let config = MongoSourceConfig {
         connection_string: connection_string_no_auth.clone(),
-        database: Some(db_name.to_string()),
+        database: db_name.to_string(),
         collection: None,
         collections: vec![collection_name.to_string()],
         pipeline: None,
