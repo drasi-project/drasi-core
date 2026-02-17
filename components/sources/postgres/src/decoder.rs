@@ -713,15 +713,11 @@ pub fn decode_column_value_text(
             // Try parsing as NaiveDateTime first (timestamp without tz)
             if let Ok(dt) = NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f") {
                 Ok(ElementValue::LocalDateTime(dt))
-            } else if let Ok(dt) =
-                NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S")
-            {
+            } else if let Ok(dt) = NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S") {
                 Ok(ElementValue::LocalDateTime(dt))
             } else if let Ok(dt) = DateTime::parse_from_rfc3339(text.trim()) {
                 Ok(ElementValue::ZonedDateTime(dt.fixed_offset()))
-            } else if let Ok(dt) =
-                DateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f%z")
-            {
+            } else if let Ok(dt) = DateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f%z") {
                 Ok(ElementValue::ZonedDateTime(dt.fixed_offset()))
             } else {
                 // Fall back to string if parsing fails
@@ -858,8 +854,7 @@ mod tests {
 
     #[test]
     fn decode_timestamptz_with_offset_format() {
-        let ev =
-            decode_column_value_text("2024-06-15 10:30:45.123456+0200", 1184).unwrap();
+        let ev = decode_column_value_text("2024-06-15 10:30:45.123456+0200", 1184).unwrap();
         match ev {
             ElementValue::ZonedDateTime(dt) => {
                 assert_eq!(dt.offset().local_minus_utc(), 7200); // +02:00

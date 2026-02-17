@@ -656,9 +656,7 @@ impl PostgresBootstrapHandler {
                     } else if let Ok(Some(val)) =
                         row.try_get::<_, Option<chrono::DateTime<chrono::Utc>>>(idx)
                     {
-                        drasi_core::models::ElementValue::ZonedDateTime(
-                            val.fixed_offset(),
-                        )
+                        drasi_core::models::ElementValue::ZonedDateTime(val.fixed_offset())
                     } else {
                         drasi_core::models::ElementValue::Null
                     }

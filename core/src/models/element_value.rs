@@ -89,9 +89,7 @@ impl TryInto<ElementValue> for &VariableValue {
             )),
             VariableValue::Object(o) => Ok(ElementValue::Object(o.into())),
             VariableValue::LocalDateTime(dt) => Ok(ElementValue::LocalDateTime(*dt)),
-            VariableValue::ZonedDateTime(zdt) => {
-                Ok(ElementValue::ZonedDateTime(*zdt.datetime()))
-            }
+            VariableValue::ZonedDateTime(zdt) => Ok(ElementValue::ZonedDateTime(*zdt.datetime())),
             _ => Err(ConversionError {}),
         }
     }
@@ -114,9 +112,7 @@ impl TryInto<ElementValue> for VariableValue {
             )),
             VariableValue::Object(o) => Ok(ElementValue::Object(o.into())),
             VariableValue::LocalDateTime(dt) => Ok(ElementValue::LocalDateTime(dt)),
-            VariableValue::ZonedDateTime(zdt) => {
-                Ok(ElementValue::ZonedDateTime(*zdt.datetime()))
-            }
+            VariableValue::ZonedDateTime(zdt) => Ok(ElementValue::ZonedDateTime(*zdt.datetime())),
             _ => Err(ConversionError {}),
         }
     }
@@ -325,9 +321,7 @@ mod tests {
 
     fn sample_fixed_datetime() -> DateTime<FixedOffset> {
         let offset = FixedOffset::east_opt(3600).unwrap(); // +01:00
-        offset
-            .with_ymd_and_hms(2024, 6, 15, 10, 30, 45)
-            .unwrap()
+        offset.with_ymd_and_hms(2024, 6, 15, 10, 30, 45).unwrap()
     }
 
     // ── ElementValue → VariableValue ────────────────────────────────────

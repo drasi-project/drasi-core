@@ -174,18 +174,14 @@ impl PostgresValue {
             PostgresValue::Float8(f) => ElementValue::Float(OrderedFloat(*f)),
             PostgresValue::Numeric(d) => {
                 // Convert Decimal to f64 for storage
-                ElementValue::Float(OrderedFloat(
-                    d.to_string().parse::<f64>().unwrap_or(0.0),
-                ))
+                ElementValue::Float(OrderedFloat(d.to_string().parse::<f64>().unwrap_or(0.0)))
             }
             PostgresValue::Text(s) | PostgresValue::Varchar(s) | PostgresValue::Char(s) => {
                 ElementValue::String(Arc::from(s.as_str()))
             }
             PostgresValue::Uuid(u) => ElementValue::String(Arc::from(u.to_string())),
             PostgresValue::Timestamp(ts) => ElementValue::LocalDateTime(*ts),
-            PostgresValue::TimestampTz(ts) => {
-                ElementValue::ZonedDateTime(ts.fixed_offset())
-            }
+            PostgresValue::TimestampTz(ts) => ElementValue::ZonedDateTime(ts.fixed_offset()),
             PostgresValue::Date(d) => ElementValue::String(Arc::from(d.to_string())),
             PostgresValue::Time(t) => ElementValue::String(Arc::from(t.to_string())),
             PostgresValue::Json(j) | PostgresValue::Jsonb(j) => {
@@ -332,10 +328,7 @@ mod tests {
     #[test]
     fn array_with_timestamps_to_element_value() {
         let ts = sample_naive_datetime();
-        let pv = PostgresValue::Array(vec![
-            PostgresValue::Timestamp(ts),
-            PostgresValue::Int4(42),
-        ]);
+        let pv = PostgresValue::Array(vec![PostgresValue::Timestamp(ts), PostgresValue::Int4(42)]);
         let ev = pv.to_element_value();
         match ev {
             ElementValue::List(items) => {

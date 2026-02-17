@@ -542,10 +542,7 @@ impl ReplicationStream {
         for (i, value) in tuple.iter().enumerate() {
             if let Some(column) = relation.columns.get(i) {
                 if !value.is_null() {
-                    properties.insert(
-                        &column.name,
-                        value.to_element_value(),
-                    );
+                    properties.insert(&column.name, value.to_element_value());
                 }
             }
         }
@@ -597,10 +594,7 @@ impl ReplicationStream {
         for (i, column) in relation.columns.iter().enumerate() {
             if let Some(value) = new_tuple.get(i) {
                 if !value.is_null() {
-                    after_properties.insert(
-                        &column.name,
-                        value.to_element_value(),
-                    );
+                    after_properties.insert(&column.name, value.to_element_value());
                 }
             }
         }
