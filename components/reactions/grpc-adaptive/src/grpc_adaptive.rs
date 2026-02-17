@@ -370,7 +370,7 @@ impl AdaptiveGrpcReaction {
                             Some(before.clone()),
                             Some(after.clone()),
                         ),
-                        ResultDiff::Aggregation { before, after } => (
+                        ResultDiff::Aggregation { before, after, .. } => (
                             "aggregation",
                             serde_json::to_value(result)
                                 .expect("ResultDiff serialization should succeed"),

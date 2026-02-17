@@ -74,6 +74,25 @@ fn convert_query_variables_to_json(vars: &QueryVariables) -> serde_json::Value {
     serde_json::Value::Object(result)
 }
 
+/// Find a row in the result set by matching on grouping key fields.
+/// Falls back to full JSON equality if no grouping keys are provided.
+fn find_by_grouping_keys(
+    result_set: &[serde_json::Value],
+    target: &serde_json::Value,
+    grouping_keys: &[String],
+) -> Option<usize> {
+    if grouping_keys.is_empty() {
+        // No grouping keys — fall back to exact match
+        result_set.iter().position(|item| item == target)
+    } else {
+        result_set.iter().position(|item| {
+            grouping_keys
+                .iter()
+                .all(|key| item.get(key) == target.get(key))
+        })
+    }
+}
+
 /// Convert a single VariableValue to JSON
 fn convert_variable_value_to_json(value: &VariableValue) -> serde_json::Value {
     match value {
@@ -690,14 +709,13 @@ impl Query for DrasiQuery {
                                                         result_set.push(after_json);
                                                     }
                                                 }
-                                                QueryPartEvaluationContext::Aggregation { before, after, .. } => {
+                                                QueryPartEvaluationContext::Aggregation { before, after, grouping_keys, .. } => {
                                                     let after_json = convert_query_variables_to_json(after);
                                                     if let Some(before) = before {
                                                         let before_json = convert_query_variables_to_json(before);
-                                                        if let Some(pos) = result_set.iter().position(|item| item == &before_json) {
+                                                        if let Some(pos) = find_by_grouping_keys(&result_set, &before_json, &grouping_keys) {
                                                             result_set[pos] = after_json;
                                                         } else {
-                                                            result_set.retain(|item| item != &before_json);
                                                             result_set.push(after_json);
                                                         }
                                                     } else {
@@ -1026,11 +1044,12 @@ impl Query for DrasiQuery {
                                         }
                                     }
                                     QueryPartEvaluationContext::Aggregation {
-                                        before, after, ..
+                                        before, after, grouping_keys, ..
                                     } => {
                                         ResultDiff::Aggregation {
                                             before: before.as_ref().map(convert_query_variables_to_json),
                                             after: convert_query_variables_to_json(after),
+                                            grouping_keys: if grouping_keys.is_empty() { None } else { Some(grouping_keys.clone()) },
                                         }
                                     }
                                     QueryPartEvaluationContext::Noop => {
@@ -1060,15 +1079,12 @@ impl Query for DrasiQuery {
                                             result_set.push(after.clone());
                                         }
                                     }
-                                    ResultDiff::Aggregation { before, after } => {
+                                    ResultDiff::Aggregation { before, after, grouping_keys } => {
                                         if let Some(before) = before {
-                                            if let Some(pos) =
-                                                result_set.iter().position(|item| item == before)
-                                            {
+                                            let keys = grouping_keys.as_deref().unwrap_or(&[]);
+                                            if let Some(pos) = find_by_grouping_keys(&result_set, before, keys) {
                                                 result_set[pos] = after.clone();
                                             } else {
-                                                warn!("AGGREGATION: Could not find exact match for before state, treating as remove+add");
-                                                result_set.retain(|item| item != before);
                                                 result_set.push(after.clone());
                                             }
                                         } else {
