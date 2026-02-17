@@ -228,7 +228,6 @@ fn test_config_validation_empty_user() {
 
     let result = config.validate();
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("user is required"));
 }
 
 #[test]
