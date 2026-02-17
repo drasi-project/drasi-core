@@ -1664,3 +1664,371 @@ impl QueryManager {
         Some(self.event_history.write().await.subscribe(id))
     }
 }
+
+#[cfg(test)]
+mod aggregation_result_tests {
+    use super::find_by_grouping_keys;
+    use crate::channels::events::ResultDiff;
+    use serde_json::json;
+
+    // ========================================================================
+    // find_by_grouping_keys unit tests
+    // ========================================================================
+
+    #[test]
+    fn find_by_grouping_keys_with_single_key() {
+        let result_set = vec![
+            json!({"region": "us-east", "count": 10}),
+            json!({"region": "us-west", "count": 20}),
+            json!({"region": "eu-west", "count": 30}),
+        ];
+        let target = json!({"region": "us-west", "count": 999});
+
+        let pos = find_by_grouping_keys(
+            &result_set,
+            &target,
+            &["region".to_string()],
+        );
+        assert_eq!(pos, Some(1), "Should match on region key, ignoring count");
+    }
+
+    #[test]
+    fn find_by_grouping_keys_with_multiple_keys() {
+        let result_set = vec![
+            json!({"region": "us-east", "tier": "gold", "count": 10}),
+            json!({"region": "us-east", "tier": "silver", "count": 20}),
+            json!({"region": "us-west", "tier": "gold", "count": 30}),
+        ];
+        let target = json!({"region": "us-east", "tier": "silver", "count": 0});
+
+        let pos = find_by_grouping_keys(
+            &result_set,
+            &target,
+            &["region".to_string(), "tier".to_string()],
+        );
+        assert_eq!(pos, Some(1));
+    }
+
+    #[test]
+    fn find_by_grouping_keys_no_match() {
+        let result_set = vec![
+            json!({"region": "us-east", "count": 10}),
+            json!({"region": "us-west", "count": 20}),
+        ];
+        let target = json!({"region": "eu-west", "count": 5});
+
+        let pos = find_by_grouping_keys(
+            &result_set,
+            &target,
+            &["region".to_string()],
+        );
+        assert_eq!(pos, None);
+    }
+
+    #[test]
+    fn find_by_grouping_keys_empty_keys_uses_exact_match() {
+        let result_set = vec![
+            json!({"count": 10}),
+            json!({"count": 20}),
+        ];
+
+        // Exact match succeeds
+        let pos = find_by_grouping_keys(&result_set, &json!({"count": 20}), &[]);
+        assert_eq!(pos, Some(1));
+
+        // Non-exact match fails (different count value)
+        let pos = find_by_grouping_keys(&result_set, &json!({"count": 999}), &[]);
+        assert_eq!(pos, None);
+    }
+
+    #[test]
+    fn find_by_grouping_keys_empty_result_set() {
+        let result_set: Vec<serde_json::Value> = vec![];
+        let target = json!({"region": "us-east"});
+
+        let pos = find_by_grouping_keys(&result_set, &target, &["region".to_string()]);
+        assert_eq!(pos, None);
+    }
+
+    #[test]
+    fn find_by_grouping_keys_returns_first_match() {
+        // If multiple rows share the same grouping key, return the first one
+        let result_set = vec![
+            json!({"region": "us-east", "count": 10}),
+            json!({"region": "us-east", "count": 20}),
+        ];
+        let target = json!({"region": "us-east", "count": 50});
+
+        let pos = find_by_grouping_keys(
+            &result_set,
+            &target,
+            &["region".to_string()],
+        );
+        assert_eq!(pos, Some(0), "Should return the first matching row");
+    }
+
+    #[test]
+    fn find_by_grouping_keys_missing_key_in_target() {
+        let result_set = vec![json!({"region": "us-east", "count": 10})];
+        let target = json!({"count": 10}); // no "region" key
+
+        // Both item.get("region")=Some and target.get("region")=None → not equal → no match
+        let pos = find_by_grouping_keys(
+            &result_set,
+            &target,
+            &["region".to_string()],
+        );
+        assert_eq!(pos, None);
+    }
+
+    #[test]
+    fn find_by_grouping_keys_missing_key_in_both() {
+        let result_set = vec![json!({"count": 10})]; // no "region"
+        let target = json!({"count": 20}); // no "region"
+
+        // Both return None for "region" → None == None → match
+        let pos = find_by_grouping_keys(
+            &result_set,
+            &target,
+            &["region".to_string()],
+        );
+        assert_eq!(pos, Some(0));
+    }
+
+    // ========================================================================
+    // Aggregation result_set update simulation tests
+    // These simulate the logic from the CDC and bootstrap paths
+    // ========================================================================
+
+    /// Apply an aggregation result to a result_set using the same logic as the CDC path
+    fn apply_aggregation(
+        result_set: &mut Vec<serde_json::Value>,
+        diff: &ResultDiff,
+    ) {
+        if let ResultDiff::Aggregation {
+            before,
+            after,
+            grouping_keys,
+        } = diff
+        {
+            if let Some(before) = before {
+                let keys = grouping_keys.as_deref().unwrap_or(&[]);
+                if let Some(pos) = find_by_grouping_keys(result_set, before, keys) {
+                    result_set[pos] = after.clone();
+                } else {
+                    result_set.push(after.clone());
+                }
+            } else {
+                result_set.push(after.clone());
+            }
+        }
+    }
+
+    #[test]
+    fn aggregation_first_result_is_added() {
+        let mut result_set: Vec<serde_json::Value> = vec![];
+
+        apply_aggregation(
+            &mut result_set,
+            &ResultDiff::Aggregation {
+                before: None,
+                after: json!({"region": "us-east", "total": 5}),
+                grouping_keys: Some(vec!["region".to_string()]),
+            },
+        );
+
+        assert_eq!(result_set.len(), 1);
+        assert_eq!(result_set[0], json!({"region": "us-east", "total": 5}));
+    }
+
+    #[test]
+    fn aggregation_updates_existing_group() {
+        let mut result_set = vec![
+            json!({"region": "us-east", "total": 5}),
+            json!({"region": "us-west", "total": 10}),
+        ];
+
+        apply_aggregation(
+            &mut result_set,
+            &ResultDiff::Aggregation {
+                before: Some(json!({"region": "us-east", "total": 5})),
+                after: json!({"region": "us-east", "total": 8}),
+                grouping_keys: Some(vec!["region".to_string()]),
+            },
+        );
+
+        assert_eq!(result_set.len(), 2);
+        assert_eq!(result_set[0], json!({"region": "us-east", "total": 8}));
+        assert_eq!(result_set[1], json!({"region": "us-west", "total": 10}));
+    }
+
+    #[test]
+    fn aggregation_matches_by_grouping_key_not_full_object() {
+        // The stored total differs from the before total (simulating
+        // float rounding or serialization difference). With grouping_keys,
+        // matching should still succeed on "region".
+        let mut result_set = vec![
+            json!({"region": "us-east", "total": 5.000000001}),
+        ];
+
+        apply_aggregation(
+            &mut result_set,
+            &ResultDiff::Aggregation {
+                before: Some(json!({"region": "us-east", "total": 5.0})),
+                after: json!({"region": "us-east", "total": 8}),
+                grouping_keys: Some(vec!["region".to_string()]),
+            },
+        );
+
+        // Should replace in-place, not duplicate
+        assert_eq!(result_set.len(), 1, "Should replace, not duplicate");
+        assert_eq!(result_set[0], json!({"region": "us-east", "total": 8}));
+    }
+
+    #[test]
+    fn aggregation_new_group_is_appended() {
+        let mut result_set = vec![
+            json!({"region": "us-east", "total": 5}),
+        ];
+
+        // A new group appears (eu-west not in result_set)
+        apply_aggregation(
+            &mut result_set,
+            &ResultDiff::Aggregation {
+                before: Some(json!({"region": "eu-west", "total": 0})),
+                after: json!({"region": "eu-west", "total": 3}),
+                grouping_keys: Some(vec!["region".to_string()]),
+            },
+        );
+
+        assert_eq!(result_set.len(), 2);
+        assert_eq!(result_set[1], json!({"region": "eu-west", "total": 3}));
+    }
+
+    #[test]
+    fn aggregation_without_grouping_keys_uses_exact_match() {
+        let mut result_set = vec![
+            json!({"total": 5}),
+        ];
+
+        // No grouping keys → exact match behavior
+        apply_aggregation(
+            &mut result_set,
+            &ResultDiff::Aggregation {
+                before: Some(json!({"total": 5})),
+                after: json!({"total": 8}),
+                grouping_keys: None,
+            },
+        );
+
+        assert_eq!(result_set.len(), 1);
+        assert_eq!(result_set[0], json!({"total": 8}));
+    }
+
+    #[test]
+    fn aggregation_without_grouping_keys_no_exact_match_adds_new() {
+        let mut result_set = vec![
+            json!({"total": 5}),
+        ];
+
+        // No grouping keys and before doesn't match → append
+        apply_aggregation(
+            &mut result_set,
+            &ResultDiff::Aggregation {
+                before: Some(json!({"total": 999})),
+                after: json!({"total": 8}),
+                grouping_keys: None,
+            },
+        );
+
+        // Should add since no match found
+        assert_eq!(result_set.len(), 2);
+    }
+
+    #[test]
+    fn aggregation_multi_key_update() {
+        let mut result_set = vec![
+            json!({"region": "us-east", "tier": "gold", "total": 100}),
+            json!({"region": "us-east", "tier": "silver", "total": 50}),
+            json!({"region": "us-west", "tier": "gold", "total": 75}),
+        ];
+
+        // Update us-east/silver
+        apply_aggregation(
+            &mut result_set,
+            &ResultDiff::Aggregation {
+                before: Some(json!({"region": "us-east", "tier": "silver", "total": 50})),
+                after: json!({"region": "us-east", "tier": "silver", "total": 55}),
+                grouping_keys: Some(vec!["region".to_string(), "tier".to_string()]),
+            },
+        );
+
+        assert_eq!(result_set.len(), 3);
+        assert_eq!(
+            result_set[1],
+            json!({"region": "us-east", "tier": "silver", "total": 55})
+        );
+        // Others unchanged
+        assert_eq!(
+            result_set[0],
+            json!({"region": "us-east", "tier": "gold", "total": 100})
+        );
+        assert_eq!(
+            result_set[2],
+            json!({"region": "us-west", "tier": "gold", "total": 75})
+        );
+    }
+
+    #[test]
+    fn aggregation_sequence_add_then_update() {
+        let mut result_set: Vec<serde_json::Value> = vec![];
+        let keys = Some(vec!["region".to_string()]);
+
+        // First aggregation — no before (initial add)
+        apply_aggregation(
+            &mut result_set,
+            &ResultDiff::Aggregation {
+                before: None,
+                after: json!({"region": "us-east", "count": 1}),
+                grouping_keys: keys.clone(),
+            },
+        );
+        assert_eq!(result_set.len(), 1);
+
+        // Second aggregation — update the existing group
+        apply_aggregation(
+            &mut result_set,
+            &ResultDiff::Aggregation {
+                before: Some(json!({"region": "us-east", "count": 1})),
+                after: json!({"region": "us-east", "count": 2}),
+                grouping_keys: keys.clone(),
+            },
+        );
+        assert_eq!(result_set.len(), 1, "Should update, not add");
+        assert_eq!(result_set[0]["count"], 2);
+
+        // Third aggregation — another group added
+        apply_aggregation(
+            &mut result_set,
+            &ResultDiff::Aggregation {
+                before: None,
+                after: json!({"region": "us-west", "count": 1}),
+                grouping_keys: keys.clone(),
+            },
+        );
+        assert_eq!(result_set.len(), 2);
+
+        // Fourth aggregation — update first group again
+        apply_aggregation(
+            &mut result_set,
+            &ResultDiff::Aggregation {
+                before: Some(json!({"region": "us-east", "count": 2})),
+                after: json!({"region": "us-east", "count": 3}),
+                grouping_keys: keys.clone(),
+            },
+        );
+        assert_eq!(result_set.len(), 2, "Should still be 2 groups");
+        assert_eq!(result_set[0]["count"], 3);
+        assert_eq!(result_set[1]["count"], 1);
+    }
+}
