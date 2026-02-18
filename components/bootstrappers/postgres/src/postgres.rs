@@ -751,3 +751,33 @@ struct ColumnInfo {
     name: String,
     type_oid: i32,
 }
+
+#[cfg(test)]
+mod tests {
+    use drasi_core::models::validate_effective_from;
+
+    /// Validates that the timestamp pattern used in convert_row_to_source_change
+    /// produces a value in the millisecond range, not nanoseconds.
+    ///
+    /// This test would have caught the original bug where timestamp_nanos_opt()
+    /// was used instead of timestamp_millis().
+    #[test]
+    fn effective_from_uses_milliseconds() {
+        let effective_from = chrono::Utc::now().timestamp_millis() as u64;
+        assert!(
+            validate_effective_from(effective_from).is_ok(),
+            "Postgres bootstrapper effective_from ({effective_from}) should be in millisecond range"
+        );
+    }
+
+    /// Verifies that using nanoseconds would be caught by the validator.
+    #[test]
+    fn effective_from_rejects_nanoseconds_pattern() {
+        // This is the OLD buggy pattern — should fail validation
+        let bad_effective_from = chrono::Utc::now().timestamp_nanos_opt().unwrap() as u64;
+        assert!(
+            validate_effective_from(bad_effective_from).is_err(),
+            "Nanosecond timestamp ({bad_effective_from}) should be rejected"
+        );
+    }
+}

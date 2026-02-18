@@ -176,4 +176,17 @@ mod tests {
         let result_with_default = get_timestamp_with_fallback(Some(42));
         assert!(result_with_default.is_ok());
     }
+
+    /// Validates that get_current_timestamp_millis produces a value in the
+    /// correct millisecond range, not nanoseconds or seconds.
+    #[test]
+    fn test_millis_timestamp_in_valid_range() {
+        use drasi_core::models::validate_effective_from;
+
+        let ts = get_current_timestamp_millis().unwrap();
+        assert!(
+            validate_effective_from(ts).is_ok(),
+            "HTTP source timestamp ({ts}) should be in millisecond range"
+        );
+    }
 }

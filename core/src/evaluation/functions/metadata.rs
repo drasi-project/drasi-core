@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::evaluation::variable_value::{zoned_datetime::ZonedDateTime, VariableValue};
+use crate::models::validate_effective_from;
 use async_trait::async_trait;
 use drasi_query_ast::ast;
 
@@ -67,9 +68,17 @@ impl ScalarFunction for ChangeDateTime {
             });
         }
         match &args[0] {
-            VariableValue::Element(e) => Ok(VariableValue::ZonedDateTime(
-                ZonedDateTime::from_epoch_millis(e.get_effective_from() as i64),
-            )),
+            VariableValue::Element(e) => {
+                let ts = e.get_effective_from();
+                debug_assert!(
+                    validate_effective_from(ts).is_ok(),
+                    "effective_from value {} appears to be in the wrong unit (expected milliseconds)",
+                    ts
+                );
+                Ok(VariableValue::ZonedDateTime(
+                    ZonedDateTime::from_epoch_millis(ts as i64),
+                ))
+            }
             _ => Err(FunctionError {
                 function_name: expression.name.to_string(),
                 error: FunctionEvaluationError::InvalidArgument(0),
