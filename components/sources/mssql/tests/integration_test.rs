@@ -33,6 +33,10 @@ const TEST_TABLE: &str = "dbo.Products";
 const QUERY_ID: &str = "products-query";
 const SOURCE_ID: &str = "mssql-source";
 
+const TYPES_TABLE: &str = "dbo.TypesTest";
+const TYPES_QUERY_ID: &str = "types-query";
+const TYPES_SOURCE_ID: &str = "mssql-types-source";
+
 fn value_as_string(value: &Value) -> Option<String> {
     match value {
         Value::String(s) => Some(s.clone()),
@@ -259,6 +263,282 @@ async fn test_mssql_change_detection_end_to_end() -> Result<()> {
     match result {
         Ok(inner) => inner?,
         Err(_) => anyhow::bail!("Integration test timed out after 180 seconds"),
+    }
+
+    Ok(())
+}
+
+async fn prepare_types_database(config: &MssqlConfig) -> Result<MssqlConfig> {
+    let mut client = config.connect().await?;
+    execute_sql(
+        &mut client,
+        &format!("IF DB_ID('{TEST_DB}') IS NULL CREATE DATABASE [{TEST_DB}]"),
+    )
+    .await?;
+    execute_sql(
+        &mut client,
+        &format!("ALTER DATABASE [{TEST_DB}] SET ALLOW_SNAPSHOT_ISOLATION ON"),
+    )
+    .await?;
+    drop(client);
+
+    let mut db_config = config.clone();
+    db_config.database = TEST_DB.to_string();
+    let mut db_client = db_config.connect().await?;
+
+    execute_sql(
+        &mut db_client,
+        "IF NOT EXISTS (SELECT 1 FROM sys.databases WHERE name = DB_NAME() AND is_cdc_enabled = 1)\n            EXEC sys.sp_cdc_enable_db;",
+    )
+    .await?;
+    execute_sql(
+        &mut db_client,
+        "IF OBJECT_ID('dbo.TypesTest', 'U') IS NOT NULL BEGIN \
+            IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'TypesTest' AND is_tracked_by_cdc = 1) \
+                EXEC sys.sp_cdc_disable_table @source_schema = 'dbo', @source_name = 'TypesTest', @capture_instance = 'all'; \
+            DROP TABLE dbo.TypesTest; \
+        END",
+    )
+    .await?;
+    execute_sql(
+        &mut db_client,
+        "CREATE TABLE dbo.TypesTest (
+            Id INT PRIMARY KEY,
+            IntVal INT NOT NULL,
+            BigIntVal BIGINT NOT NULL,
+            SmallIntVal SMALLINT NOT NULL,
+            TinyIntVal TINYINT NOT NULL,
+            BitVal BIT NOT NULL,
+            FloatVal FLOAT NOT NULL,
+            RealVal REAL NOT NULL,
+            DecimalVal DECIMAL(10,2) NOT NULL,
+            VarcharVal VARCHAR(100) NOT NULL,
+            NVarcharVal NVARCHAR(100) NOT NULL
+        );",
+    )
+    .await?;
+    execute_sql(
+        &mut db_client,
+        "IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'TypesTest' AND is_tracked_by_cdc = 1)\n            EXEC sys.sp_cdc_enable_table @source_schema = 'dbo', @source_name = 'TypesTest', @role_name = NULL;",
+    )
+    .await?;
+
+    Ok(db_config)
+}
+
+/// Verify that column types are correctly mapped to ElementValue types.
+/// Integers should be integers, floats should be floats, booleans should be
+/// booleans, and strings should be strings — not everything coerced to string.
+#[tokio::test]
+#[ignore]
+#[cfg(not(target_arch = "aarch64"))]
+async fn test_mssql_column_type_mapping() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let result = tokio::time::timeout(Duration::from_secs(300), async {
+        let mssql = setup_mssql()
+            .await
+            .context("Failed to start MSSQL container")?;
+        let db_config = prepare_types_database(mssql.config())
+            .await
+            .context("Failed to prepare MSSQL types database")?;
+
+        let bootstrap_provider = MsSqlBootstrapProvider::builder()
+            .with_source_id(TYPES_SOURCE_ID)
+            .with_host(&db_config.host)
+            .with_port(db_config.port)
+            .with_database(&db_config.database)
+            .with_user(&db_config.user)
+            .with_password(&db_config.password)
+            .with_tables(vec![TYPES_TABLE.to_string()])
+            .build()
+            .context("Failed to build MSSQL bootstrap provider")?;
+
+        let source = MsSqlSource::builder(TYPES_SOURCE_ID)
+            .with_host(&db_config.host)
+            .with_port(db_config.port)
+            .with_database(&db_config.database)
+            .with_user(&db_config.user)
+            .with_password(&db_config.password)
+            .with_table(TYPES_TABLE)
+            .with_poll_interval_ms(500)
+            .with_start_position(StartPosition::Current)
+            .with_trust_server_certificate(true)
+            .with_bootstrap_provider(bootstrap_provider)
+            .build()
+            .context("Failed to build MSSQL source")?;
+
+        let query = Query::cypher(TYPES_QUERY_ID)
+            .query(
+                r#"
+                MATCH (t:TypesTest)
+                RETURN t.Id AS id,
+                       t.IntVal AS int_val,
+                       t.BigIntVal AS bigint_val,
+                       t.SmallIntVal AS smallint_val,
+                       t.TinyIntVal AS tinyint_val,
+                       t.BitVal AS bit_val,
+                       t.FloatVal AS float_val,
+                       t.RealVal AS real_val,
+                       t.DecimalVal AS decimal_val,
+                       t.VarcharVal AS varchar_val,
+                       t.NVarcharVal AS nvarchar_val
+            "#,
+            )
+            .from_source(TYPES_SOURCE_ID)
+            .auto_start(true)
+            .enable_bootstrap(true)
+            .build();
+
+        let (reaction, handle) = ApplicationReaction::builder("types-reaction")
+            .with_query(TYPES_QUERY_ID)
+            .build();
+
+        let core = DrasiLib::builder()
+            .with_id("mssql-types-test")
+            .with_source(source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .build()
+            .await
+            .context("Failed to build DrasiLib")?;
+
+        core.start().await.context("Failed to start DrasiLib")?;
+
+        let mut subscription = handle
+            .subscribe_with_options(
+                SubscriptionOptions::default().with_timeout(Duration::from_secs(5)),
+            )
+            .await
+            .context("Failed to create subscription")?;
+
+        sleep(Duration::from_secs(2)).await;
+
+        let mut client = db_config.connect().await?;
+        execute_sql(
+            &mut client,
+            "INSERT INTO dbo.TypesTest (Id, IntVal, BigIntVal, SmallIntVal, TinyIntVal, BitVal, FloatVal, RealVal, DecimalVal, VarcharVal, NVarcharVal) \
+             VALUES (1, 42, 9876543210, 256, 7, 1, 3.14, 2.5, 99.95, 'hello', N'world');",
+        )
+        .await?;
+
+        let change = wait_for_change(&mut subscription, 10, |entry| {
+            matches_change(entry, "ADD", &[("id", "1")])
+        })
+        .await
+        .context("Did not observe INSERT change for types test")?;
+
+        if let ResultDiff::Add { data } = &change {
+            // Integers should be JSON numbers, not strings
+            assert!(
+                data.get("int_val").unwrap().is_number(),
+                "INT should be a number, got: {}",
+                data.get("int_val").unwrap()
+            );
+            assert_eq!(data.get("int_val").unwrap().as_i64().unwrap(), 42);
+
+            assert!(
+                data.get("bigint_val").unwrap().is_number(),
+                "BIGINT should be a number, got: {}",
+                data.get("bigint_val").unwrap()
+            );
+            assert_eq!(
+                data.get("bigint_val").unwrap().as_i64().unwrap(),
+                9876543210
+            );
+
+            assert!(
+                data.get("smallint_val").unwrap().is_number(),
+                "SMALLINT should be a number, got: {}",
+                data.get("smallint_val").unwrap()
+            );
+            assert_eq!(data.get("smallint_val").unwrap().as_i64().unwrap(), 256);
+
+            assert!(
+                data.get("tinyint_val").unwrap().is_number(),
+                "TINYINT should be a number, got: {}",
+                data.get("tinyint_val").unwrap()
+            );
+            assert_eq!(data.get("tinyint_val").unwrap().as_i64().unwrap(), 7);
+
+            // Boolean
+            assert!(
+                data.get("bit_val").unwrap().is_boolean(),
+                "BIT should be a boolean, got: {}",
+                data.get("bit_val").unwrap()
+            );
+            assert!(data.get("bit_val").unwrap().as_bool().unwrap());
+
+            // Floats should be JSON numbers
+            assert!(
+                data.get("float_val").unwrap().is_number(),
+                "FLOAT should be a number, got: {}",
+                data.get("float_val").unwrap()
+            );
+            let float_val = data.get("float_val").unwrap().as_f64().unwrap();
+            assert!(
+                (float_val - 3.14).abs() < 0.001,
+                "FLOAT value should be ~3.14, got: {float_val}"
+            );
+
+            assert!(
+                data.get("real_val").unwrap().is_number(),
+                "REAL should be a number, got: {}",
+                data.get("real_val").unwrap()
+            );
+            let real_val = data.get("real_val").unwrap().as_f64().unwrap();
+            assert!(
+                (real_val - 2.5).abs() < 0.01,
+                "REAL value should be ~2.5, got: {real_val}"
+            );
+
+            assert!(
+                data.get("decimal_val").unwrap().is_number(),
+                "DECIMAL should be a number, got: {}",
+                data.get("decimal_val").unwrap()
+            );
+            let decimal_val = data.get("decimal_val").unwrap().as_f64().unwrap();
+            assert!(
+                (decimal_val - 99.95).abs() < 0.01,
+                "DECIMAL value should be ~99.95, got: {decimal_val}"
+            );
+
+            // Strings should be JSON strings
+            assert!(
+                data.get("varchar_val").unwrap().is_string(),
+                "VARCHAR should be a string, got: {}",
+                data.get("varchar_val").unwrap()
+            );
+            assert_eq!(
+                data.get("varchar_val").unwrap().as_str().unwrap(),
+                "hello"
+            );
+
+            assert!(
+                data.get("nvarchar_val").unwrap().is_string(),
+                "NVARCHAR should be a string, got: {}",
+                data.get("nvarchar_val").unwrap()
+            );
+            assert_eq!(
+                data.get("nvarchar_val").unwrap().as_str().unwrap(),
+                "world"
+            );
+        } else {
+            anyhow::bail!("Expected ADD change");
+        }
+
+        core.stop().await.context("Failed to stop DrasiLib")?;
+        mssql.cleanup().await;
+
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+
+    match result {
+        Ok(inner) => inner?,
+        Err(_) => anyhow::bail!("Integration test timed out after 300 seconds"),
     }
 
     Ok(())

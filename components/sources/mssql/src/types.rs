@@ -47,107 +47,115 @@ pub fn extract_properties_from_cdc_row(row: &Row) -> Result<ElementPropertyMap> 
 
 /// Extract a column value from a row by index and convert to ElementValue
 ///
-/// This tries each type in sequence since tiberius requires knowing the exact type.
+/// Uses column type metadata to select the correct conversion, consistent with
+/// the bootstrapper's `convert_column_value` approach.
 pub fn extract_column_value(row: &Row, col_idx: usize) -> Result<ElementValue> {
-    // Try string types first (most common)
-    if let Ok(val) = row.try_get::<&str, _>(col_idx) {
-        return Ok(match val {
-            Some(s) => ElementValue::String(Arc::from(s)),
-            None => ElementValue::Null,
-        });
-    }
+    use tiberius::ColumnType;
 
-    // Try integer types
-    if let Ok(val) = row.try_get::<i32, _>(col_idx) {
-        return Ok(match val {
-            Some(i) => ElementValue::Integer(i as i64),
-            None => ElementValue::Null,
-        });
-    }
+    let column = &row.columns()[col_idx];
 
-    if let Ok(val) = row.try_get::<i64, _>(col_idx) {
-        return Ok(match val {
-            Some(i) => ElementValue::Integer(i),
-            None => ElementValue::Null,
-        });
-    }
-
-    if let Ok(val) = row.try_get::<i16, _>(col_idx) {
-        return Ok(match val {
-            Some(i) => ElementValue::Integer(i as i64),
-            None => ElementValue::Null,
-        });
-    }
-
-    if let Ok(val) = row.try_get::<u8, _>(col_idx) {
-        return Ok(match val {
-            Some(i) => ElementValue::Integer(i as i64),
-            None => ElementValue::Null,
-        });
-    }
-
-    // Try boolean
-    if let Ok(val) = row.try_get::<bool, _>(col_idx) {
-        return Ok(match val {
-            Some(b) => ElementValue::Bool(b),
-            None => ElementValue::Null,
-        });
-    }
-
-    // Try float types
-    if let Ok(val) = row.try_get::<f64, _>(col_idx) {
-        return Ok(match val {
-            Some(f) => ElementValue::Float(ordered_float::OrderedFloat(f)),
-            None => ElementValue::Null,
-        });
-    }
-
-    if let Ok(val) = row.try_get::<f32, _>(col_idx) {
-        return Ok(match val {
-            Some(f) => ElementValue::Float(ordered_float::OrderedFloat(f as f64)),
-            None => ElementValue::Null,
-        });
-    }
-
-    // Try decimal/numeric
-    if let Ok(val) = row.try_get::<rust_decimal::Decimal, _>(col_idx) {
-        return Ok(match val {
-            Some(d) => {
+    match column.column_type() {
+        ColumnType::Bit | ColumnType::Bitn => {
+            if let Ok(Some(val)) = row.try_get::<bool, _>(col_idx) {
+                Ok(ElementValue::Bool(val))
+            } else {
+                Ok(ElementValue::Null)
+            }
+        }
+        ColumnType::Int1
+        | ColumnType::Int2
+        | ColumnType::Int4
+        | ColumnType::Int8
+        | ColumnType::Intn => {
+            if let Ok(Some(val)) = row.try_get::<i32, _>(col_idx) {
+                Ok(ElementValue::Integer(val as i64))
+            } else if let Ok(Some(val)) = row.try_get::<i64, _>(col_idx) {
+                Ok(ElementValue::Integer(val))
+            } else if let Ok(Some(val)) = row.try_get::<i16, _>(col_idx) {
+                Ok(ElementValue::Integer(val as i64))
+            } else if let Ok(Some(val)) = row.try_get::<u8, _>(col_idx) {
+                Ok(ElementValue::Integer(val as i64))
+            } else {
+                Ok(ElementValue::Null)
+            }
+        }
+        ColumnType::Float4 | ColumnType::Float8 | ColumnType::Floatn => {
+            if let Ok(Some(val)) = row.try_get::<f32, _>(col_idx) {
+                Ok(ElementValue::Float(ordered_float::OrderedFloat(val as f64)))
+            } else if let Ok(Some(val)) = row.try_get::<f64, _>(col_idx) {
+                Ok(ElementValue::Float(ordered_float::OrderedFloat(val)))
+            } else {
+                Ok(ElementValue::Null)
+            }
+        }
+        ColumnType::Numericn | ColumnType::Decimaln => {
+            if let Ok(Some(d)) = row.try_get::<rust_decimal::Decimal, _>(col_idx) {
                 let f = d.to_string().parse::<f64>().unwrap_or(0.0);
-                ElementValue::Float(ordered_float::OrderedFloat(f))
+                Ok(ElementValue::Float(ordered_float::OrderedFloat(f)))
+            } else {
+                Ok(ElementValue::Null)
             }
-            None => ElementValue::Null,
-        });
-    }
-
-    // Try UUID
-    if let Ok(val) = row.try_get::<uuid::Uuid, _>(col_idx) {
-        return Ok(match val {
-            Some(u) => ElementValue::String(Arc::from(u.to_string())),
-            None => ElementValue::Null,
-        });
-    }
-
-    // Try datetime types - convert to string
-    if let Ok(val) = row.try_get::<chrono::NaiveDateTime, _>(col_idx) {
-        return Ok(match val {
-            Some(dt) => {
-                ElementValue::String(Arc::from(dt.format("%Y-%m-%dT%H:%M:%S%.3f").to_string()))
+        }
+        ColumnType::BigVarChar
+        | ColumnType::BigChar
+        | ColumnType::NVarchar
+        | ColumnType::NChar
+        | ColumnType::Text
+        | ColumnType::NText => {
+            if let Ok(Some(val)) = row.try_get::<&str, _>(col_idx) {
+                Ok(ElementValue::String(Arc::from(val)))
+            } else {
+                Ok(ElementValue::Null)
             }
-            None => ElementValue::Null,
-        });
+        }
+        ColumnType::Guid => {
+            if let Ok(Some(val)) = row.try_get::<uuid::Uuid, _>(col_idx) {
+                Ok(ElementValue::String(Arc::from(val.to_string())))
+            } else {
+                Ok(ElementValue::Null)
+            }
+        }
+        ColumnType::Datetime
+        | ColumnType::Datetime2
+        | ColumnType::Datetime4
+        | ColumnType::Datetimen
+        | ColumnType::Daten => {
+            if let Ok(Some(val)) = row.try_get::<chrono::NaiveDateTime, _>(col_idx) {
+                Ok(ElementValue::String(Arc::from(
+                    val.format("%Y-%m-%dT%H:%M:%S%.3f").to_string(),
+                )))
+            } else if let Ok(Some(val)) =
+                row.try_get::<chrono::DateTime<chrono::Utc>, _>(col_idx)
+            {
+                Ok(ElementValue::String(Arc::from(val.to_rfc3339())))
+            } else {
+                Ok(ElementValue::Null)
+            }
+        }
+        ColumnType::BigVarBin | ColumnType::BigBinary | ColumnType::Image => {
+            if let Ok(Some(bytes)) = row.try_get::<&[u8], _>(col_idx) {
+                Ok(ElementValue::String(Arc::from(format!(
+                    "0x{}",
+                    hex::encode(bytes)
+                ))))
+            } else {
+                Ok(ElementValue::Null)
+            }
+        }
+        _ => {
+            // For unsupported types, try to convert to string
+            if let Ok(Some(val)) = row.try_get::<&str, _>(col_idx) {
+                Ok(ElementValue::String(Arc::from(val)))
+            } else {
+                log::warn!(
+                    "Unsupported column type {:?} for column {}, treating as NULL",
+                    column.column_type(),
+                    column.name()
+                );
+                Ok(ElementValue::Null)
+            }
+        }
     }
-
-    // Try binary data
-    if let Ok(val) = row.try_get::<&[u8], _>(col_idx) {
-        return Ok(match val {
-            Some(bytes) => ElementValue::String(Arc::from(format!("0x{}", hex::encode(bytes)))),
-            None => ElementValue::Null,
-        });
-    }
-
-    // If nothing matched, return Null
-    Ok(ElementValue::Null)
 }
 
 /// Convert ElementValue to a string representation for element ID generation
