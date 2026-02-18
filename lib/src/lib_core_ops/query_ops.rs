@@ -25,6 +25,7 @@ use crate::component_ops::map_state_error;
 use crate::config::{QueryConfig, QueryRuntime};
 use crate::error::{DrasiError, Result};
 use crate::lib_core::DrasiLib;
+use drasi_core::evaluation::context::QueryVariables;
 
 impl DrasiLib {
     /// Create a query in a running server
@@ -204,7 +205,7 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_query_results(&self, id: &str) -> Result<Vec<serde_json::Value>> {
+    pub async fn get_query_results(&self, id: &str) -> Result<Vec<QueryVariables>> {
         self.inspection.get_query_results(id).await
     }
 

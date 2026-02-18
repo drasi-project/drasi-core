@@ -44,16 +44,19 @@ impl Serialize for VariableValue {
             }
             VariableValue::Date(v) => v.serialize(serializer),
             VariableValue::LocalTime(v) => v.serialize(serializer),
-            VariableValue::ZonedTime(_v) => todo!(),
+            VariableValue::ZonedTime(v) => serializer.serialize_str(&v.to_string()),
             VariableValue::LocalDateTime(v) => v.serialize(serializer),
             VariableValue::ZonedDateTime(v) => v.serialize(serializer),
-            VariableValue::Duration(_v) => todo!(),
-            VariableValue::Expression(_v) => todo!(),
-            VariableValue::ListRange(_v) => todo!(),
-            VariableValue::Element(_) => todo!(),
-            VariableValue::ElementMetadata(_m) => todo!(),
-            VariableValue::ElementReference(_) => todo!(),
-            VariableValue::Awaiting => todo!(),
+            VariableValue::Duration(v) => serializer.serialize_str(&v.to_string()),
+            VariableValue::Expression(v) => serializer.serialize_str(&format!("{v:?}")),
+            VariableValue::ListRange(v) => serializer.serialize_str(&v.to_string()),
+            VariableValue::Element(e) => {
+                let json_value: serde_json::Value = e.as_ref().into();
+                json_value.serialize(serializer)
+            }
+            VariableValue::ElementMetadata(m) => serializer.serialize_str(&m.to_string()),
+            VariableValue::ElementReference(r) => serializer.serialize_str(&r.to_string()),
+            VariableValue::Awaiting => serializer.serialize_str("Awaiting"),
         }
     }
 }

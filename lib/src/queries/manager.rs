@@ -24,7 +24,6 @@ use tokio::sync::{Notify, RwLock};
 use drasi_core::{
     evaluation::context::{QueryPartEvaluationContext, QueryVariables},
     evaluation::functions::FunctionRegistry,
-    evaluation::variable_value::VariableValue,
     middleware::MiddlewareTypeRegistry,
     query::{ContinuousQuery, QueryBuilder},
 };
@@ -65,44 +64,6 @@ impl QueryConfiguration for DefaultQueryConfig {
     }
 }
 
-/// Convert QueryVariables (`BTreeMap<Box<str>, VariableValue>`) to JSON
-fn convert_query_variables_to_json(vars: &QueryVariables) -> serde_json::Value {
-    let mut result = serde_json::Map::new();
-    for (key, value) in vars.iter() {
-        result.insert(key.to_string(), convert_variable_value_to_json(value));
-    }
-    serde_json::Value::Object(result)
-}
-
-/// Convert a single VariableValue to JSON
-fn convert_variable_value_to_json(value: &VariableValue) -> serde_json::Value {
-    match value {
-        VariableValue::Null => serde_json::Value::Null,
-        VariableValue::Bool(b) => serde_json::Value::Bool(*b),
-        VariableValue::Float(f) => {
-            // Float might be NaN or Infinity, handle gracefully
-            serde_json::Value::String(f.to_string())
-        }
-        VariableValue::Integer(i) => {
-            // Integer might be too large for JSON number
-            serde_json::Value::String(i.to_string())
-        }
-        VariableValue::String(s) => serde_json::Value::String(s.clone()),
-        VariableValue::List(list) => {
-            serde_json::Value::Array(list.iter().map(convert_variable_value_to_json).collect())
-        }
-        VariableValue::Object(map) => {
-            let mut result = serde_json::Map::new();
-            for (k, v) in map.iter() {
-                result.insert(k.clone(), convert_variable_value_to_json(v));
-            }
-            serde_json::Value::Object(result)
-        }
-        // For complex types, convert to string representation
-        _ => serde_json::Value::String(format!("{value:?}")),
-    }
-}
-
 #[async_trait]
 pub trait Query: Send + Sync {
     /// Start the query - subscribes to sources and begins processing events
@@ -132,7 +93,7 @@ pub struct DrasiQuery {
     base: QueryBase,
     #[allow(dead_code)]
     continuous_query: Option<ContinuousQuery>,
-    current_results: Arc<RwLock<Vec<serde_json::Value>>>,
+    current_results: Arc<RwLock<Vec<QueryVariables>>>,
     // Priority queue for ordered event processing
     priority_queue: PriorityQueue,
     // Reference to SourceManager for direct subscription
@@ -183,7 +144,7 @@ impl DrasiQuery {
         })
     }
 
-    pub async fn get_current_results(&self) -> Vec<serde_json::Value> {
+    pub async fn get_current_results(&self) -> Vec<QueryVariables> {
         self.current_results.read().await.clone()
     }
 }
@@ -674,20 +635,17 @@ impl Query for DrasiQuery {
                                         for ctx in &results {
                                             match ctx {
                                                 QueryPartEvaluationContext::Adding { after, .. } => {
-                                                    result_set.push(convert_query_variables_to_json(after));
+                                                    result_set.push(after.clone());
                                                 }
                                                 QueryPartEvaluationContext::Removing { before, .. } => {
-                                                    let data = convert_query_variables_to_json(before);
-                                                    result_set.retain(|item| item != &data);
+                                                    result_set.retain(|item| item != before);
                                                 }
                                                 QueryPartEvaluationContext::Updating { before, after, .. } => {
-                                                    let before_json = convert_query_variables_to_json(before);
-                                                    let after_json = convert_query_variables_to_json(after);
-                                                    if let Some(pos) = result_set.iter().position(|item| item == &before_json) {
-                                                        result_set[pos] = after_json;
+                                                    if let Some(pos) = result_set.iter().position(|item| item == before) {
+                                                        result_set[pos] = after.clone();
                                                     } else {
-                                                        result_set.retain(|item| item != &before_json);
-                                                        result_set.push(after_json);
+                                                        result_set.retain(|item| item != before);
+                                                        result_set.push(after.clone());
                                                     }
                                                 }
                                                 QueryPartEvaluationContext::Aggregation { .. }
@@ -992,7 +950,7 @@ impl Query for DrasiQuery {
                                         QueryPartEvaluationContext::Adding { after, .. } => {
                                             debug!("Query '{query_id}' got Adding context");
                                             ResultDiff::Add {
-                                                data: convert_query_variables_to_json(after),
+                                                data: after.clone(),
                                             }
                                         }
                                     QueryPartEvaluationContext::Removing { before, .. } => {
@@ -1000,15 +958,15 @@ impl Query for DrasiQuery {
                                             "Query '{query_id}' got Removing context"
                                         );
                                         ResultDiff::Delete {
-                                            data: convert_query_variables_to_json(before),
+                                            data: before.clone(),
                                         }
                                     }
                                     QueryPartEvaluationContext::Updating { before, after, .. } => {
                                         debug!("Query '{query_id}' got Updating context");
                                         ResultDiff::Update {
-                                            data: convert_query_variables_to_json(after),
-                                            before: convert_query_variables_to_json(before),
-                                            after: convert_query_variables_to_json(after),
+                                            data: after.clone(),
+                                            before: before.clone(),
+                                            after: after.clone(),
                                             grouping_keys: None,
                                         }
                                     }
@@ -1016,8 +974,8 @@ impl Query for DrasiQuery {
                                         before, after, ..
                                     } => {
                                         ResultDiff::Aggregation {
-                                            before: before.as_ref().map(convert_query_variables_to_json),
-                                            after: convert_query_variables_to_json(after),
+                                            before: before.clone(),
+                                            after: after.clone(),
                                         }
                                     }
                                     QueryPartEvaluationContext::Noop => {
@@ -1479,7 +1437,7 @@ impl QueryManager {
         queries.get(id).map(|q| q.get_config().clone())
     }
 
-    pub async fn get_query_results(&self, id: &str) -> Result<Vec<serde_json::Value>> {
+    pub async fn get_query_results(&self, id: &str) -> Result<Vec<QueryVariables>> {
         let query = {
             let queries = self.queries.read().await;
             queries.get(id).cloned()

@@ -455,8 +455,10 @@ impl Reaction for LogReaction {
 
                     match result {
                         ResultDiff::Add { data } => {
+                            let data_json = serde_json::to_value(data)
+                                .expect("QueryVariables serialization should succeed");
                             context.insert("operation".to_string(), Value::String("ADD".into()));
-                            context.insert("after".to_string(), data.clone());
+                            context.insert("after".to_string(), data_json.clone());
 
                             let template = query_config
                                 .and_then(|qc| qc.added.as_ref())
@@ -474,20 +476,22 @@ impl Reaction for LogReaction {
                                         debug!("[{reaction_name}] Template render error: {e}");
                                         #[allow(clippy::print_stdout)]
                                         {
-                                            println!("[{reaction_name}]   [ADD] {data}");
+                                            println!("[{reaction_name}]   [ADD] {data_json}");
                                         }
                                     }
                                 }
                             } else {
                                 #[allow(clippy::print_stdout)]
                                 {
-                                    println!("[{reaction_name}]   [ADD] {data}");
+                                    println!("[{reaction_name}]   [ADD] {data_json}");
                                 }
                             }
                         }
                         ResultDiff::Delete { data } => {
+                            let data_json = serde_json::to_value(data)
+                                .expect("QueryVariables serialization should succeed");
                             context.insert("operation".to_string(), Value::String("DELETE".into()));
-                            context.insert("before".to_string(), data.clone());
+                            context.insert("before".to_string(), data_json.clone());
 
                             let template = query_config
                                 .and_then(|qc| qc.deleted.as_ref())
@@ -505,14 +509,14 @@ impl Reaction for LogReaction {
                                         debug!("[{reaction_name}] Template render error: {e}");
                                         #[allow(clippy::print_stdout)]
                                         {
-                                            println!("[{reaction_name}]   [DELETE] {data}");
+                                            println!("[{reaction_name}]   [DELETE] {data_json}");
                                         }
                                     }
                                 }
                             } else {
                                 #[allow(clippy::print_stdout)]
                                 {
-                                    println!("[{reaction_name}]   [DELETE] {data}");
+                                    println!("[{reaction_name}]   [DELETE] {data_json}");
                                 }
                             }
                         }
@@ -522,10 +526,16 @@ impl Reaction for LogReaction {
                             data,
                             ..
                         } => {
+                            let before_json = serde_json::to_value(before)
+                                .expect("QueryVariables serialization should succeed");
+                            let after_json = serde_json::to_value(after)
+                                .expect("QueryVariables serialization should succeed");
+                            let data_json = serde_json::to_value(data)
+                                .expect("QueryVariables serialization should succeed");
                             context.insert("operation".to_string(), Value::String("UPDATE".into()));
-                            context.insert("before".to_string(), before.clone());
-                            context.insert("after".to_string(), after.clone());
-                            context.insert("data".to_string(), data.clone());
+                            context.insert("before".to_string(), before_json.clone());
+                            context.insert("after".to_string(), after_json.clone());
+                            context.insert("data".to_string(), data_json);
 
                             let template = query_config
                                 .and_then(|qc| qc.updated.as_ref())
@@ -544,7 +554,7 @@ impl Reaction for LogReaction {
                                         #[allow(clippy::print_stdout)]
                                         {
                                             println!(
-                                                "[{reaction_name}]   [UPDATE] {before} -> {after}"
+                                                "[{reaction_name}]   [UPDATE] {before_json} -> {after_json}"
                                             );
                                         }
                                     }
@@ -552,7 +562,7 @@ impl Reaction for LogReaction {
                             } else {
                                 #[allow(clippy::print_stdout)]
                                 {
-                                    println!("[{reaction_name}]   [UPDATE] {before} -> {after}");
+                                    println!("[{reaction_name}]   [UPDATE] {before_json} -> {after_json}");
                                 }
                             }
                         }

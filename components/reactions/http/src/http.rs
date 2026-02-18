@@ -419,6 +419,8 @@ impl Reaction for HttpReaction {
                     match result {
                         ResultDiff::Add { data } => {
                             if let Some(spec) = query_config.added.as_ref() {
+                                let data_json = serde_json::to_value(data)
+                                    .expect("QueryVariables serialization should succeed");
                                 if let Err(e) = Self::process_result(
                                     &client,
                                     &handlebars,
@@ -426,7 +428,7 @@ impl Reaction for HttpReaction {
                                     &token,
                                     spec,
                                     "ADD",
-                                    data,
+                                    &data_json,
                                     query_name,
                                     &reaction_name,
                                 )
@@ -438,6 +440,8 @@ impl Reaction for HttpReaction {
                         }
                         ResultDiff::Delete { data } => {
                             if let Some(spec) = query_config.deleted.as_ref() {
+                                let data_json = serde_json::to_value(data)
+                                    .expect("QueryVariables serialization should succeed");
                                 if let Err(e) = Self::process_result(
                                     &client,
                                     &handlebars,
@@ -445,7 +449,7 @@ impl Reaction for HttpReaction {
                                     &token,
                                     spec,
                                     "DELETE",
-                                    data,
+                                    &data_json,
                                     query_name,
                                     &reaction_name,
                                 )

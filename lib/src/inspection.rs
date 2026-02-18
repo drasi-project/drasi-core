@@ -23,6 +23,7 @@ use crate::queries::QueryManager;
 use crate::reactions::ReactionManager;
 use crate::sources::SourceManager;
 use crate::state_guard::StateGuard;
+use drasi_core::evaluation::context::QueryVariables;
 
 /// Inspection API for querying server state and component information
 ///
@@ -207,7 +208,7 @@ impl InspectionAPI {
     pub async fn get_query_results(
         &self,
         id: &str,
-    ) -> crate::error::Result<Vec<serde_json::Value>> {
+    ) -> crate::error::Result<Vec<QueryVariables>> {
         self.state_guard.require_initialized().await?;
         self.query_manager.get_query_results(id).await.map_err(|e| {
             if e.to_string().contains("not found") {

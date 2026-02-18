@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::profiling::ProfilingMetadata;
+use drasi_core::evaluation::context::QueryVariables;
 use drasi_core::models::SourceChange;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -332,21 +333,21 @@ pub struct QuerySubscriptionResponse {
 #[serde(tag = "type")]
 pub enum ResultDiff {
     #[serde(rename = "ADD")]
-    Add { data: serde_json::Value },
+    Add { data: QueryVariables },
     #[serde(rename = "DELETE")]
-    Delete { data: serde_json::Value },
+    Delete { data: QueryVariables },
     #[serde(rename = "UPDATE")]
     Update {
-        data: serde_json::Value,
-        before: serde_json::Value,
-        after: serde_json::Value,
+        data: QueryVariables,
+        before: QueryVariables,
+        after: QueryVariables,
         #[serde(skip_serializing_if = "Option::is_none")]
         grouping_keys: Option<Vec<String>>,
     },
     #[serde(rename = "aggregation")]
     Aggregation {
-        before: Option<serde_json::Value>,
-        after: serde_json::Value,
+        before: Option<QueryVariables>,
+        after: QueryVariables,
     },
     #[serde(rename = "noop")]
     Noop,
