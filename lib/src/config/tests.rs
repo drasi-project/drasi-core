@@ -137,7 +137,6 @@ mod schema_tests {
             joins: None,
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
-            priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
@@ -175,7 +174,6 @@ mod persistence_tests {
             joins: None,
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
-            priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
@@ -247,7 +245,6 @@ mod persistence_tests {
             joins: None,
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
-            priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
@@ -292,7 +289,6 @@ mod runtime_tests {
             joins: None,
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
-            priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
@@ -334,7 +330,6 @@ mod runtime_tests {
             }]),
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
-            priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
@@ -556,7 +551,6 @@ mod runtime_tests {
                 joins: None,
                 enable_bootstrap: true,
                 bootstrap_buffer_size: 10000,
-                priority_queue_capacity: None,
                 dispatch_buffer_capacity: None,
                 dispatch_mode: None,
                 storage_backend: None,
@@ -568,10 +562,6 @@ mod runtime_tests {
         assert_eq!(runtime_config.queries.len(), 1);
 
         // Verify defaults were applied
-        assert_eq!(
-            runtime_config.queries[0].priority_queue_capacity,
-            Some(10000)
-        );
         assert_eq!(
             runtime_config.queries[0].dispatch_buffer_capacity,
             Some(1000)
@@ -596,7 +586,6 @@ mod runtime_tests {
                     joins: None,
                     enable_bootstrap: true,
                     bootstrap_buffer_size: 10000,
-                    priority_queue_capacity: None,
                     dispatch_buffer_capacity: None,
                     dispatch_mode: None,
                     storage_backend: None,
@@ -611,7 +600,6 @@ mod runtime_tests {
                     joins: None,
                     enable_bootstrap: true,
                     bootstrap_buffer_size: 10000,
-                    priority_queue_capacity: Some(100000), // Override global
                     dispatch_buffer_capacity: None,
                     dispatch_mode: None,
                     storage_backend: None,
@@ -621,21 +609,13 @@ mod runtime_tests {
 
         let runtime_config = RuntimeConfig::from(config);
 
-        // q1 should inherit global defaults
-        assert_eq!(
-            runtime_config.queries[0].priority_queue_capacity,
-            Some(50000)
-        );
+        // q1 should inherit global dispatch_buffer_capacity
         assert_eq!(
             runtime_config.queries[0].dispatch_buffer_capacity,
             Some(5000)
         );
 
-        // q2 should keep its own priority_queue_capacity but inherit dispatch_buffer_capacity
-        assert_eq!(
-            runtime_config.queries[1].priority_queue_capacity,
-            Some(100000)
-        );
+        // q2 should also inherit dispatch_buffer_capacity
         assert_eq!(
             runtime_config.queries[1].dispatch_buffer_capacity,
             Some(5000)
@@ -795,7 +775,6 @@ mod dispatch_mode_tests {
             joins: None,
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
-            priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: Some(DispatchMode::Channel),
             storage_backend: None,
@@ -816,7 +795,6 @@ mod dispatch_mode_tests {
             joins: None,
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
-            priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: Some(DispatchMode::Broadcast),
             storage_backend: None,
@@ -837,7 +815,6 @@ mod dispatch_mode_tests {
             joins: None,
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
-            priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None, // Default
             storage_backend: None,

@@ -52,7 +52,6 @@ mod manager_tests {
             joins: None,
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
-            priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
@@ -79,7 +78,6 @@ mod manager_tests {
             joins: None,
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
-            priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
@@ -233,41 +231,7 @@ mod manager_tests {
     }
 
     #[tokio::test]
-    async fn test_stop_query_cancels_subscription_tasks() {
-        let (manager, _event_rx, event_tx, source_manager) = create_test_manager().await;
-
-        // Add a source so subscriptions succeed using instance-based approach
-        let source = create_test_mock_source("source1".to_string(), event_tx);
-        source_manager.add_source(source).await.unwrap();
-
-        // Add the query and start it
-        let config = create_test_query_config("test-query", vec!["source1".to_string()]);
-        manager.add_query(config).await.unwrap();
-        manager.start_query("test-query".to_string()).await.unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Inspect concrete query to verify subscription tasks are present
-        let query = manager.get_query_instance("test-query").await.unwrap();
-        let concrete = query.as_any().downcast_ref::<DrasiQuery>().unwrap();
-
-        assert!(
-            concrete.subscription_task_count().await > 0,
-            "Expected active subscription task"
-        );
-
-        manager.stop_query("test-query".to_string()).await.unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-        assert!(
-            concrete.subscription_task_count().await == 0,
-            "Subscription tasks should be cleared on stop"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_partial_subscription_failure_cleans_up_tasks() {
+    async fn test_partial_subscription_failure_returns_error() {
         let (manager, _event_rx, event_tx, source_manager) = create_test_manager().await;
 
         // Add only source1 - source2 will be missing to trigger failure
@@ -294,18 +258,6 @@ mod manager_tests {
         assert!(
             matches!(status, ComponentStatus::Error),
             "Expected Error status after failed start"
-        );
-
-        // Crucially: subscription tasks from source1 should have been cleaned up
-        let query = manager.get_query_instance("test-query").await.unwrap();
-        let concrete = query.as_any().downcast_ref::<DrasiQuery>().unwrap();
-
-        // The forwarder task for source1 was spawned before source2 subscription failed,
-        // so the rollback code should have aborted it
-        assert_eq!(
-            concrete.subscription_task_count().await,
-            0,
-            "Subscription tasks should be cleaned up after partial failure"
         );
     }
 
@@ -724,7 +676,6 @@ mod query_core_tests {
                 joins: None,
                 enable_bootstrap: true,
                 bootstrap_buffer_size: 10000,
-                priority_queue_capacity: None,
                 dispatch_buffer_capacity: None,
                 dispatch_mode: None,
                 storage_backend: None,
@@ -747,7 +698,6 @@ mod query_core_tests {
             joins: None,
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
-            priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,

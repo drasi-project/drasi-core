@@ -41,10 +41,10 @@ use crate::managers::{
     is_operation_valid, log_component_error, log_component_start, log_component_stop,
     ComponentEventHistory, ComponentLogKey, ComponentLogRegistry, Operation,
 };
-use crate::queries::PriorityQueue;
 use crate::queries::QueryBase;
 use crate::sources::Source;
 use crate::sources::{FutureQueueSource, SourceManager, FUTURE_QUEUE_SOURCE_ID};
+use futures::stream::{self, SelectAll, StreamExt};
 use tracing::Instrument;
 
 /// Default query configuration
@@ -133,12 +133,8 @@ pub struct DrasiQuery {
     #[allow(dead_code)]
     continuous_query: Option<ContinuousQuery>,
     current_results: Arc<RwLock<Vec<serde_json::Value>>>,
-    // Priority queue for ordered event processing
-    priority_queue: PriorityQueue,
     // Reference to SourceManager for direct subscription
     source_manager: Arc<SourceManager>,
-    // Track subscription tasks for cleanup
-    subscription_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
     // Abort handles for bootstrap + supervisor tasks (for cleanup on stop)
     bootstrap_abort_handles: Arc<RwLock<Vec<tokio::task::AbortHandle>>>,
     // Track bootstrap state per source
@@ -160,10 +156,6 @@ impl DrasiQuery {
         index_factory: Arc<crate::indexes::IndexFactory>,
         middleware_registry: Arc<MiddlewareTypeRegistry>,
     ) -> Result<Self> {
-        // Create priority queue with configured capacity (fallback to 10000 if not set)
-        let priority_capacity = config.priority_queue_capacity.unwrap_or(10000);
-        let priority_queue = PriorityQueue::new(priority_capacity);
-
         // Create QueryBase for common functionality
         let base = QueryBase::new(config, event_tx).context("Failed to create QueryBase")?;
 
@@ -172,9 +164,7 @@ impl DrasiQuery {
             base,
             continuous_query: None,
             current_results: Arc::new(RwLock::new(Vec::new())),
-            priority_queue,
             source_manager,
-            subscription_tasks: Arc::new(RwLock::new(Vec::new())),
             bootstrap_abort_handles: Arc::new(RwLock::new(Vec::new())),
             bootstrap_state: Arc::new(RwLock::new(HashMap::new())),
             index_factory,
@@ -188,12 +178,26 @@ impl DrasiQuery {
     }
 }
 
-#[cfg(test)]
-impl DrasiQuery {
-    /// Count active subscription forwarder tasks (testing helper)
-    pub async fn subscription_task_count(&self) -> usize {
-        self.subscription_tasks.read().await.len()
-    }
+/// Type alias for a boxed, pinned stream of source events tagged with their source ID.
+type SourceStream = std::pin::Pin<
+    Box<dyn futures::stream::Stream<Item = (String, Arc<SourceEventWrapper>)> + Send>,
+>;
+
+/// Wrap a `ChangeReceiver` into a tagged `Stream` suitable for use with `SelectAll`.
+///
+/// Each item yielded is `(source_id, event)`. When the receiver's channel closes
+/// (returns an error from `recv()`), the stream terminates.
+fn receiver_into_stream(
+    source_id: String,
+    receiver: Box<dyn ChangeReceiver<SourceEventWrapper>>,
+) -> SourceStream {
+    stream::unfold((source_id, receiver), |(sid, mut rx)| async move {
+        match rx.recv().await {
+            Ok(event) => Some(((sid.clone(), event), (sid, rx))),
+            Err(_) => None,
+        }
+    })
+    .boxed()
 }
 
 #[async_trait]
@@ -426,7 +430,7 @@ impl Query for DrasiQuery {
         );
 
         let mut bootstrap_channels = Vec::new();
-        let mut subscription_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+        let mut source_streams: SelectAll<SourceStream> = SelectAll::new();
 
         // Build list of sources to subscribe to (regular sources + FutureQueueSource)
         let mut sources_to_subscribe: Vec<(String, Arc<dyn Source>, SourceSubscriptionSettings)> =
@@ -448,11 +452,8 @@ impl Query for DrasiQuery {
                         "Query '{}' failed to find source '{}' in SourceManager",
                         self.base.config.id, source_id
                     );
-                    // Cleanup already-spawned tasks before returning error
-                    for handle in subscription_tasks.drain(..) {
-                        handle.abort();
-                        let _ = handle.await;
-                    }
+                    // source_streams is dropped implicitly on error return,
+                    // closing all receivers collected so far.
                     *self.base.status.write().await = ComponentStatus::Error;
                     return Err(anyhow::anyhow!("Source '{source_id}' not found"));
                 }
@@ -480,11 +481,8 @@ impl Query for DrasiQuery {
                         "Query '{}' failed to subscribe to source '{}': {}",
                         self.base.config.id, source_id, e
                     );
-                    // Cleanup already-spawned tasks before returning error
-                    for handle in subscription_tasks.drain(..) {
-                        handle.abort();
-                        let _ = handle.await;
-                    }
+                    // source_streams is dropped implicitly on error return,
+                    // closing all receivers collected so far.
                     *self.base.status.write().await = ComponentStatus::Error;
                     return Err(anyhow::anyhow!(
                         "Failed to subscribe to source '{source_id}': {e}"
@@ -507,76 +505,16 @@ impl Query for DrasiQuery {
                     .insert(source_id.to_string(), BootstrapPhase::NotStarted);
             }
 
-            // Spawn task to forward events from receiver to priority queue
-            let mut receiver = subscription_response.receiver;
-            let priority_queue = self.priority_queue.clone();
-            let query_id = self.base.config.id.clone();
-            let source_id_clone = source_id.clone();
-            let instance_id = self.instance_id.clone();
-
-            // Get source dispatch mode to determine enqueue strategy
-            let dispatch_mode = source.dispatch_mode();
-            let use_blocking_enqueue =
-                matches!(dispatch_mode, crate::channels::DispatchMode::Channel);
-
-            let span = tracing::info_span!(
-                "query_source_forwarder",
-                instance_id = %instance_id,
-                component_id = %query_id,
-                component_type = "query"
-            );
-            let task = tokio::spawn(
-                async move {
-                    debug!(
-                        "Query '{query_id}' started event forwarder for source '{source_id_clone}' (dispatch_mode: {dispatch_mode:?}, blocking_enqueue: {use_blocking_enqueue})"
-                    );
-
-                    loop {
-                        match receiver.recv().await {
-                            Ok(arc_event) => {
-                                // Use appropriate enqueue method based on dispatch mode
-                                if use_blocking_enqueue {
-                                    // Channel mode: Use blocking enqueue to prevent message loss
-                                    // This creates backpressure when the priority queue is full
-                                    priority_queue.enqueue_wait(arc_event).await;
-                                } else {
-                                    // Broadcast mode: Use non-blocking enqueue to prevent deadlock
-                                    // Messages may be dropped when priority queue is full
-                                    if !priority_queue.enqueue(arc_event).await {
-                                        warn!(
-                                            "Query '{query_id}' priority queue at capacity, dropping event from source '{source_id_clone}' (broadcast mode)"
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                error!(
-                                    "Query '{query_id}' receiver error for source '{source_id_clone}': {e}"
-                                );
-                                info!(
-                                    "Query '{query_id}' channel closed for source '{source_id_clone}'"
-                                );
-                                break;
-                            }
-                        }
-                    }
-
-                    debug!("Query '{query_id}' event forwarder exited for source '{source_id_clone}'");
-                }
-                .instrument(span),
-            );
-
-            subscription_tasks.push(task);
+            // Convert the receiver into a tagged stream and add to SelectAll
+            let receiver = subscription_response.receiver;
+            source_streams.push(receiver_into_stream(source_id.clone(), receiver));
         }
-
-        // Store subscription tasks
-        *self.subscription_tasks.write().await = subscription_tasks;
 
         // Wrap continuous_query in Arc for sharing across tasks
         let continuous_query = Arc::new(continuous_query);
 
         // Gate that blocks the streaming event processor until bootstrap completes.
-        // Events buffer safely in the priority queue during bootstrap.
+        // During bootstrap, events buffer in the per-source MPSC channels.
         let bootstrap_gate = Arc::new(Notify::new());
 
         // NEW: Handle bootstrap channels
@@ -830,13 +768,12 @@ impl Query for DrasiQuery {
             bootstrap_gate.notify_one();
         }
 
-        // NEW: Spawn event processor task that reads from priority queue
+        // Spawn event processor task that reads from per-source streams via SelectAll
         let continuous_query_for_processor = continuous_query.clone();
         let base_dispatchers = self.base.dispatchers.clone();
         let query_id = self.base.config.id.clone();
         let current_results = self.current_results.clone();
         let task_handle_clone = self.base.task_handle.clone();
-        let priority_queue = self.priority_queue.clone();
         let status = self.base.status.clone();
         let instance_id = self.instance_id.clone();
         let event_tx_for_processor = self.base.event_tx.clone();
@@ -905,7 +842,7 @@ impl Query for DrasiQuery {
                     }
                 }
 
-                info!("Query '{query_id}' starting priority queue event processor");
+                info!("Query '{query_id}' starting source stream event processor");
 
                 loop {
                     // Check if query is still running
@@ -916,7 +853,7 @@ impl Query for DrasiQuery {
                         break;
                     }
 
-                    // Use select to wait for either an event OR shutdown signal
+                    // Use select to wait for either an event from any source stream OR shutdown signal
                     let arc_event = tokio::select! {
                         // Check for shutdown signal first (biased)
                         biased;
@@ -928,8 +865,16 @@ impl Query for DrasiQuery {
                             break;
                         }
 
-                        // Dequeue events from priority queue (blocks until available)
-                        event = priority_queue.dequeue() => event,
+                        // Read next event from merged source streams (round-robin fairness)
+                        item = source_streams.next() => {
+                            match item {
+                                Some((_stream_source_id, event)) => event,
+                                None => {
+                                    info!("Query '{query_id}' all source streams ended");
+                                    break;
+                                }
+                            }
+                        },
                     };
 
                     // Try to extract without cloning if we have sole ownership (zero-copy path).
@@ -1138,16 +1083,9 @@ impl Query for DrasiQuery {
             handle.abort();
         }
 
-        // Drain and abort source subscription forwarders so they don't leak across restarts
-        let subscription_handles: Vec<_> = {
-            let mut tasks = self.subscription_tasks.write().await;
-            tasks.drain(..).collect()
-        };
-
-        for handle in subscription_handles {
-            handle.abort();
-            let _ = handle.await;
-        }
+        // The consumer task owns the SelectAll of source streams. Shutting down
+        // the consumer task (via stop_common) drops the SelectAll, which drops all
+        // receivers, cleanly closing source channels.
 
         // Use QueryBase common stop behavior to finish shutting down the processor task
         self.base.stop_common().await?;

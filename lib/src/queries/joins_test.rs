@@ -65,7 +65,6 @@ mod query_joins_tests {
             joins: Some(joins),
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
-            priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
