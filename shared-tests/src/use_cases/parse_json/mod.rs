@@ -32,6 +32,7 @@ use drasi_core::{
 use drasi_functions_cypher::CypherFunctionSet;
 use drasi_query_cypher::CypherParser;
 
+use super::{contains_data, IGNORED_ROW_SIGNATURE};
 use crate::QueryTestConfig;
 
 mod queries;
@@ -134,14 +135,18 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
         "key" => VariableValue::String("value".to_string()),
         "num" => VariableValue::Integer(Integer::from(123))
     );
-    assert!(result1.contains(&QueryPartEvaluationContext::Adding {
-        after: variablemap!(
-            "id" => VariableValue::String("node:1".to_string()),
-            "target_prop" => VariableValue::Object(expected_vv_map1),
-            "output_prop" => null_vv(),
-            "other_prop" => null_vv()
-        )
-    }));
+    assert!(contains_data(
+        &result1,
+        &QueryPartEvaluationContext::Adding {
+            after: variablemap!(
+                "id" => VariableValue::String("node:1".to_string()),
+                "target_prop" => VariableValue::Object(expected_vv_map1),
+                "output_prop" => null_vv(),
+                "other_prop" => null_vv()
+            ),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }
+    ));
 
     // --- Test Case 2: Parse & Output Property ---
     println!("\n--- Test Case 2: Parse & Output Property ---");
@@ -180,14 +185,18 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
         null_vv(),
         VariableValue::Float(Float::from(1.234)),
     ];
-    assert!(result2.contains(&QueryPartEvaluationContext::Adding {
-        after: variablemap!(
-            "id" => VariableValue::String("node:2".to_string()),
-            "target_prop" => VariableValue::String(r#"[1, "two", true, null, 1.234]"#.to_string()),
-            "output_prop" => VariableValue::List(expected_vv_list2),
-            "other_prop" => null_vv()
-        )
-    }));
+    assert!(contains_data(
+        &result2,
+        &QueryPartEvaluationContext::Adding {
+            after: variablemap!(
+                "id" => VariableValue::String("node:2".to_string()),
+                "target_prop" => VariableValue::String(r#"[1, "two", true, null, 1.234]"#.to_string()),
+                "output_prop" => VariableValue::List(expected_vv_list2),
+                "other_prop" => null_vv()
+            ),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }
+    ));
 
     // --- Test Case 3: Output Property Collision ---
     println!("\n--- Test Case 3: Output Property Collision ---");
@@ -206,14 +215,18 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
     let expected_vv_map3 = variablemap!(
         "new" => VariableValue::Bool(true)
     );
-    assert!(result3.contains(&QueryPartEvaluationContext::Adding {
-        after: variablemap!(
-            "id" => VariableValue::String("node:3".to_string()),
-            "target_prop" => VariableValue::String(r#"{"new": true}"#.to_string()),
-            "output_prop" => VariableValue::Object(expected_vv_map3),
-            "other_prop" => null_vv()
-        )
-    }));
+    assert!(contains_data(
+        &result3,
+        &QueryPartEvaluationContext::Adding {
+            after: variablemap!(
+                "id" => VariableValue::String("node:3".to_string()),
+                "target_prop" => VariableValue::String(r#"{"new": true}"#.to_string()),
+                "output_prop" => VariableValue::Object(expected_vv_map3),
+                "other_prop" => null_vv()
+            ),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }
+    ));
 
     // --- Test Case 4: Update Change ---
     println!("\n--- Test Case 4: Update Change ---");
@@ -226,16 +239,18 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
     let initial_vv_map4 = variablemap!(
         "status" => VariableValue::String("initial".to_string())
     );
-    assert!(
-        result4_initial.contains(&QueryPartEvaluationContext::Adding {
+    assert!(contains_data(
+        &result4_initial,
+        &QueryPartEvaluationContext::Adding {
             after: variablemap!(
                 "id" => VariableValue::String("node:4".to_string()),
                 "target_prop" => VariableValue::Object(initial_vv_map4.clone()),
                 "output_prop" => null_vv(),
                 "other_prop" => null_vv()
-            )
-        })
-    );
+            ),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }
+    ));
 
     let update4 = create_node_update_change(
         "node:4",
@@ -247,8 +262,9 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
     let updated_vv_map4 = variablemap!(
         "status" => VariableValue::String("updated".to_string())
     );
-    assert!(
-        result4_update.contains(&QueryPartEvaluationContext::Updating {
+    assert!(contains_data(
+        &result4_update,
+        &QueryPartEvaluationContext::Updating {
             before: variablemap!(
                 "id" => VariableValue::String("node:4".to_string()),
                 "target_prop" => VariableValue::Object(initial_vv_map4),
@@ -260,9 +276,10 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
                 "target_prop" => VariableValue::Object(updated_vv_map4.clone()),
                 "output_prop" => null_vv(),
                 "other_prop" => null_vv()
-            )
-        })
-    );
+            ),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }
+    ));
 
     // --- Test Case 5: Delete Change ---
     println!("\n--- Test Case 5: Delete Change ---");
@@ -272,16 +289,18 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
     println!("Result 5 (Delete): {result5_delete:?}");
     assert_eq!(result5_delete.len(), 1);
     let deleted_vv_map5 = updated_vv_map4;
-    assert!(
-        result5_delete.contains(&QueryPartEvaluationContext::Removing {
+    assert!(contains_data(
+        &result5_delete,
+        &QueryPartEvaluationContext::Removing {
             before: variablemap!(
                 "id" => VariableValue::String("node:4".to_string()),
                 "target_prop" => VariableValue::Object(deleted_vv_map5),
                 "output_prop" => null_vv(),
                 "other_prop" => null_vv()
             ),
-        })
-    );
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }
+    ));
 
     // --- Test Case 6: Error Handling - Skip (Invalid JSON) ---
     println!("\n--- Test Case 6: Error Handling - Skip (Invalid JSON) ---");
@@ -312,14 +331,18 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
     let result6 = query6.process_source_change(insert6).await.unwrap();
     println!("Result 6 (Skip Invalid): {result6:?}");
     assert_eq!(result6.len(), 1);
-    assert!(result6.contains(&QueryPartEvaluationContext::Adding {
-        after: variablemap!(
-            "id" => VariableValue::String("node:6".to_string()),
-            "target_prop" => VariableValue::String(r#"{"key": "value""#.to_string()),
-            "output_prop" => null_vv(),
-            "other_prop" => null_vv()
-        )
-    }));
+    assert!(contains_data(
+        &result6,
+        &QueryPartEvaluationContext::Adding {
+            after: variablemap!(
+                "id" => VariableValue::String("node:6".to_string()),
+                "target_prop" => VariableValue::String(r#"{"key": "value""#.to_string()),
+                "output_prop" => null_vv(),
+                "other_prop" => null_vv()
+            ),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }
+    ));
 
     // --- Test Case 7: Error Handling - Fail (Invalid JSON) ---
     println!("\n--- Test Case 7: Error Handling - Fail (Invalid JSON) ---");
@@ -362,14 +385,18 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
     let result8 = query6.process_source_change(insert8).await.unwrap();
     println!("Result 8 (Skip Missing): {result8:?}");
     assert_eq!(result8.len(), 1);
-    assert!(result8.contains(&QueryPartEvaluationContext::Adding {
-        after: variablemap!(
-            "id" => VariableValue::String("node:8".to_string()),
-            "target_prop" => null_vv(),
-            "output_prop" => null_vv(),
-            "other_prop" => VariableValue::String("some_value".to_string())
-        )
-    }));
+    assert!(contains_data(
+        &result8,
+        &QueryPartEvaluationContext::Adding {
+            after: variablemap!(
+                "id" => VariableValue::String("node:8".to_string()),
+                "target_prop" => null_vv(),
+                "output_prop" => null_vv(),
+                "other_prop" => VariableValue::String("some_value".to_string())
+            ),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }
+    ));
 
     // --- Test Case 9: Error Handling - Fail (Missing Property) ---
     println!("\n--- Test Case 9: Error Handling - Fail (Missing Property) ---");
@@ -413,14 +440,18 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
     let result10 = query10.process_source_change(insert10).await.unwrap();
     println!("Result 10 (Skip Size): {result10:?}");
     assert_eq!(result10.len(), 1);
-    assert!(result10.contains(&QueryPartEvaluationContext::Adding {
-        after: variablemap!(
-            "id" => VariableValue::String("node:10".to_string()),
-            "target_prop" => VariableValue::String(large_json_str.to_string()),
-            "output_prop" => null_vv(),
-            "other_prop" => null_vv()
-        )
-    }));
+    assert!(contains_data(
+        &result10,
+        &QueryPartEvaluationContext::Adding {
+            after: variablemap!(
+                "id" => VariableValue::String("node:10".to_string()),
+                "target_prop" => VariableValue::String(large_json_str.to_string()),
+                "output_prop" => null_vv(),
+                "other_prop" => null_vv()
+            ),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }
+    ));
 
     // --- Test Case 11: Size Limit - Fail ---
     println!("\n--- Test Case 11: Size Limit - Fail ---");
@@ -483,14 +514,18 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
     let result12 = query12.process_source_change(insert12).await.unwrap();
     println!("Result 12 (Skip Depth): {result12:?}");
     assert_eq!(result12.len(), 1);
-    assert!(result12.contains(&QueryPartEvaluationContext::Adding {
-        after: variablemap!(
-            "id" => VariableValue::String("node:12".to_string()),
-            "target_prop" => VariableValue::String(deep_json_str.to_string()),
-            "output_prop" => null_vv(),
-            "other_prop" => null_vv()
-        )
-    }));
+    assert!(contains_data(
+        &result12,
+        &QueryPartEvaluationContext::Adding {
+            after: variablemap!(
+                "id" => VariableValue::String("node:12".to_string()),
+                "target_prop" => VariableValue::String(deep_json_str.to_string()),
+                "output_prop" => null_vv(),
+                "other_prop" => null_vv()
+            ),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }
+    ));
 
     // --- Test Case 13: Nesting Depth - Fail ---
     println!("\n--- Test Case 13: Nesting Depth - Fail ---");

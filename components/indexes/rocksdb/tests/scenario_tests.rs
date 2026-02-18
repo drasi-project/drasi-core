@@ -24,8 +24,9 @@ use shared_tests::QueryTestConfig;
 use uuid::Uuid;
 
 use drasi_index_rocksdb::{
-    element_index::{self, RocksDbElementIndex},
+    element_index::{self, RocksDbElementIndex, RocksIndexOptions},
     future_queue::RocksDbFutureQueue,
+    open_unified_db,
     result_index::RocksDbResultIndex,
 };
 
@@ -47,7 +48,12 @@ impl RocksDbQueryConfig {
 
     #[allow(clippy::unwrap_used)]
     pub fn build_future_queue(&self, query_id: &str) -> RocksDbFutureQueue {
-        RocksDbFutureQueue::new(query_id, &self.url).unwrap()
+        let options = RocksIndexOptions {
+            archive_enabled: true,
+            direct_io: false,
+        };
+        let db = open_unified_db(&self.url, query_id, &options).unwrap();
+        RocksDbFutureQueue::new(db)
     }
 }
 
@@ -65,14 +71,16 @@ impl QueryTestConfig for RocksDbQueryConfig {
         log::info!("using in RocksDb indexes");
         let query_id = format!("test-{}", Uuid::new_v4());
 
-        let options = element_index::RocksIndexOptions {
+        let options = RocksIndexOptions {
             archive_enabled: true,
             direct_io: false,
         };
 
-        let element_index = RocksDbElementIndex::new(&query_id, &self.url, options).unwrap();
-        let ari = RocksDbResultIndex::new(&query_id, &self.url).unwrap();
-        let fqi = RocksDbFutureQueue::new(&query_id, &self.url).unwrap();
+        let db = open_unified_db(&self.url, &query_id, &options).unwrap();
+
+        let element_index = RocksDbElementIndex::new(db.clone(), options);
+        let ari = RocksDbResultIndex::new(db.clone());
+        let fqi = RocksDbFutureQueue::new(db);
 
         element_index.clear().await.unwrap();
         ari.clear().await.unwrap();
@@ -278,6 +286,14 @@ mod index {
         let fqi = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
         fqi.clear().await.unwrap();
         shared_tests::index::future_queue::push_not_exists(&fqi).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn future_queue_clear_removes_all() {
+        let test_config = RocksDbQueryConfig::new();
+        let fqi = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
+        shared_tests::index::future_queue::clear_removes_all(&fqi).await;
     }
 
     #[tokio::test]

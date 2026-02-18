@@ -29,6 +29,7 @@ use drasi_query_cypher::CypherParser;
 
 use self::data::get_bootstrap_data;
 
+use super::{contains_data, IGNORED_ROW_SIGNATURE};
 use crate::QueryTestConfig;
 
 mod data;
@@ -179,93 +180,117 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 2);
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Claire")),
-              "EmployeeEmail" => VariableValue::from(json!("claire@contoso.com")),
-              "ManagerName" => VariableValue::from(json!("Allen")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "ManagerEmail" => VariableValue::from(json!("allen@contoso.com")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("extreme"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Claire")),
+                  "EmployeeEmail" => VariableValue::from(json!("claire@contoso.com")),
+                  "ManagerName" => VariableValue::from(json!("Allen")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "ManagerEmail" => VariableValue::from(json!("allen@contoso.com")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("extreme"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Bob")),
-              "EmployeeEmail" => VariableValue::from(json!("bob@contoso.com")),
-              "ManagerName" => VariableValue::from(json!("Allen")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "ManagerEmail" => VariableValue::from(json!("allen@contoso.com")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("extreme"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Bob")),
+                  "EmployeeEmail" => VariableValue::from(json!("bob@contoso.com")),
+                  "ManagerName" => VariableValue::from(json!("Allen")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "ManagerEmail" => VariableValue::from(json!("allen@contoso.com")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("extreme"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
         let result = employee_incident_alert_query
             .process_source_change(change.clone())
             .await
             .unwrap();
         assert_eq!(result.len(), 3);
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Claire")),
-              "EmployeeEmail" => VariableValue::from(json!("claire@contoso.com")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("extreme"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Claire")),
+                  "EmployeeEmail" => VariableValue::from(json!("claire@contoso.com")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("extreme"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Bob")),
-              "EmployeeEmail" => VariableValue::from(json!("bob@contoso.com")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("extreme"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Bob")),
+                  "EmployeeEmail" => VariableValue::from(json!("bob@contoso.com")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("extreme"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Allen")),
-              "EmployeeEmail" => VariableValue::from(json!("allen@contoso.com")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("extreme"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Allen")),
+                  "EmployeeEmail" => VariableValue::from(json!("allen@contoso.com")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("extreme"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
         let result = employees_at_risk_count_query
             .process_source_change(change.clone())
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
-            default_before: false,
-            default_after: false,
-            grouping_keys: vec![
-                "RegionName".into(),
-                "IncidentId".into(),
-                "IncidentSeverity".into(),
-                "IncidentDescription".into()
-            ],
-            before: None,
-            after: variablemap!(
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("extreme")),
-              "EmployeeCount" => VariableValue::from(json!(3))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Aggregation {
+                default_before: false,
+                default_after: false,
+                grouping_keys: vec![
+                    "RegionName".into(),
+                    "IncidentId".into(),
+                    "IncidentSeverity".into(),
+                    "IncidentDescription".into()
+                ],
+                before: None,
+                after: variablemap!(
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("extreme")),
+                  "EmployeeCount" => VariableValue::from(json!(3))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //Remove LOCATED_IN relation between danny and b040
@@ -321,34 +346,42 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Danny")),
-              "EmployeeEmail" => VariableValue::from(json!("danny@contoso.com")),
-              "ManagerName" => VariableValue::from(json!("Allen")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "ManagerEmail" => VariableValue::from(json!("allen@contoso.com")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("extreme"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Danny")),
+                  "EmployeeEmail" => VariableValue::from(json!("danny@contoso.com")),
+                  "ManagerName" => VariableValue::from(json!("Allen")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "ManagerEmail" => VariableValue::from(json!("allen@contoso.com")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("extreme"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
         let result = employee_incident_alert_query
             .process_source_change(change.clone())
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Danny")),
-              "EmployeeEmail" => VariableValue::from(json!("danny@contoso.com")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("extreme"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Danny")),
+                  "EmployeeEmail" => VariableValue::from(json!("danny@contoso.com")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("extreme"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
         let result = employees_at_risk_count_query
             .process_source_change(change.clone())
@@ -356,30 +389,34 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
         println!("getting result {result:?}");
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
-            default_before: true,
-            default_after: false,
-            grouping_keys: vec![
-                "RegionName".into(),
-                "IncidentId".into(),
-                "IncidentSeverity".into(),
-                "IncidentDescription".into()
-            ],
-            before: Some(variablemap!(
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("extreme")),
-              "EmployeeCount" => VariableValue::from(json!(3))
-            )),
-            after: variablemap!(
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("extreme")),
-              "EmployeeCount" => VariableValue::from(json!(4))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Aggregation {
+                default_before: true,
+                default_after: false,
+                grouping_keys: vec![
+                    "RegionName".into(),
+                    "IncidentId".into(),
+                    "IncidentSeverity".into(),
+                    "IncidentDescription".into()
+                ],
+                before: Some(variablemap!(
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("extreme")),
+                  "EmployeeCount" => VariableValue::from(json!(3))
+                )),
+                after: variablemap!(
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("extreme")),
+                  "EmployeeCount" => VariableValue::from(json!(4))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //Incident becomes critical severity
@@ -402,155 +439,183 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 3);
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {
-            before: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Claire")),
-              "EmployeeEmail" => VariableValue::from(json!("claire@contoso.com")),
-              "ManagerName" => VariableValue::from(json!("Allen")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "ManagerEmail" => VariableValue::from(json!("allen@contoso.com")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("extreme"))
-            ),
-            after: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Claire")),
-              "EmployeeEmail" => VariableValue::from(json!("claire@contoso.com")),
-              "ManagerName" => VariableValue::from(json!("Allen")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "ManagerEmail" => VariableValue::from(json!("allen@contoso.com")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("critical"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Claire")),
+                  "EmployeeEmail" => VariableValue::from(json!("claire@contoso.com")),
+                  "ManagerName" => VariableValue::from(json!("Allen")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "ManagerEmail" => VariableValue::from(json!("allen@contoso.com")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("extreme"))
+                ),
+                after: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Claire")),
+                  "EmployeeEmail" => VariableValue::from(json!("claire@contoso.com")),
+                  "ManagerName" => VariableValue::from(json!("Allen")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "ManagerEmail" => VariableValue::from(json!("allen@contoso.com")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("critical"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {
-            before: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Bob")),
-              "EmployeeEmail" => VariableValue::from(json!("bob@contoso.com")),
-              "ManagerName" => VariableValue::from(json!("Allen")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "ManagerEmail" => VariableValue::from(json!("allen@contoso.com")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("extreme"))
-            ),
-            after: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Bob")),
-              "EmployeeEmail" => VariableValue::from(json!("bob@contoso.com")),
-              "ManagerName" => VariableValue::from(json!("Allen")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "ManagerEmail" => VariableValue::from(json!("allen@contoso.com")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("critical"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Bob")),
+                  "EmployeeEmail" => VariableValue::from(json!("bob@contoso.com")),
+                  "ManagerName" => VariableValue::from(json!("Allen")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "ManagerEmail" => VariableValue::from(json!("allen@contoso.com")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("extreme"))
+                ),
+                after: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Bob")),
+                  "EmployeeEmail" => VariableValue::from(json!("bob@contoso.com")),
+                  "ManagerName" => VariableValue::from(json!("Allen")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "ManagerEmail" => VariableValue::from(json!("allen@contoso.com")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("critical"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {
-            before: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Danny")),
-              "EmployeeEmail" => VariableValue::from(json!("danny@contoso.com")),
-              "ManagerName" => VariableValue::from(json!("Allen")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "ManagerEmail" => VariableValue::from(json!("allen@contoso.com")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("extreme"))
-            ),
-            after: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Danny")),
-              "EmployeeEmail" => VariableValue::from(json!("danny@contoso.com")),
-              "ManagerName" => VariableValue::from(json!("Allen")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "ManagerEmail" => VariableValue::from(json!("allen@contoso.com")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("critical"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Danny")),
+                  "EmployeeEmail" => VariableValue::from(json!("danny@contoso.com")),
+                  "ManagerName" => VariableValue::from(json!("Allen")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "ManagerEmail" => VariableValue::from(json!("allen@contoso.com")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("extreme"))
+                ),
+                after: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Danny")),
+                  "EmployeeEmail" => VariableValue::from(json!("danny@contoso.com")),
+                  "ManagerName" => VariableValue::from(json!("Allen")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "ManagerEmail" => VariableValue::from(json!("allen@contoso.com")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("critical"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
         let result = employee_incident_alert_query
             .process_source_change(change.clone())
             .await
             .unwrap();
         assert_eq!(result.len(), 4);
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {
-            before: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Claire")),
-              "EmployeeEmail" => VariableValue::from(json!("claire@contoso.com")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("extreme"))
-            ),
-            after: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Claire")),
-              "EmployeeEmail" => VariableValue::from(json!("claire@contoso.com")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("critical"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Claire")),
+                  "EmployeeEmail" => VariableValue::from(json!("claire@contoso.com")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("extreme"))
+                ),
+                after: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Claire")),
+                  "EmployeeEmail" => VariableValue::from(json!("claire@contoso.com")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("critical"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {
-            before: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Bob")),
-              "EmployeeEmail" => VariableValue::from(json!("bob@contoso.com")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("extreme"))
-            ),
-            after: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Bob")),
-              "EmployeeEmail" => VariableValue::from(json!("bob@contoso.com")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("critical"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Bob")),
+                  "EmployeeEmail" => VariableValue::from(json!("bob@contoso.com")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("extreme"))
+                ),
+                after: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Bob")),
+                  "EmployeeEmail" => VariableValue::from(json!("bob@contoso.com")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("critical"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {
-            before: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Danny")),
-              "EmployeeEmail" => VariableValue::from(json!("danny@contoso.com")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("extreme"))
-            ),
-            after: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Danny")),
-              "EmployeeEmail" => VariableValue::from(json!("danny@contoso.com")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("critical"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Danny")),
+                  "EmployeeEmail" => VariableValue::from(json!("danny@contoso.com")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("extreme"))
+                ),
+                after: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Danny")),
+                  "EmployeeEmail" => VariableValue::from(json!("danny@contoso.com")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("critical"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {
-            before: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Allen")),
-              "EmployeeEmail" => VariableValue::from(json!("allen@contoso.com")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("extreme"))
-            ),
-            after: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Allen")),
-              "EmployeeEmail" => VariableValue::from(json!("allen@contoso.com")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("critical"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Allen")),
+                  "EmployeeEmail" => VariableValue::from(json!("allen@contoso.com")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("extreme"))
+                ),
+                after: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Allen")),
+                  "EmployeeEmail" => VariableValue::from(json!("allen@contoso.com")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("critical"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
         let result = employees_at_risk_count_query
             .process_source_change(change.clone())
@@ -558,54 +623,62 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 2);
         println!("getting result {result:?}");
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
-            default_before: false,
-            default_after: false,
-            grouping_keys: vec![
-                "RegionName".into(),
-                "IncidentId".into(),
-                "IncidentSeverity".into(),
-                "IncidentDescription".into()
-            ],
-            before: Some(variablemap!(
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("critical")),
-              "EmployeeCount" => VariableValue::from(json!(0))
-            )),
-            after: variablemap!(
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("critical")),
-              "EmployeeCount" => VariableValue::from(json!(4))
-            ),
-        }));
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
-            default_before: false,
-            default_after: false,
-            grouping_keys: vec![
-                "RegionName".into(),
-                "IncidentId".into(),
-                "IncidentSeverity".into(),
-                "IncidentDescription".into()
-            ],
-            before: Some(variablemap!(
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("critical")),
-              "EmployeeCount" => VariableValue::from(json!(0))
-            )),
-            after: variablemap!(
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("critical")),
-              "EmployeeCount" => VariableValue::from(json!(4))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Aggregation {
+                default_before: false,
+                default_after: false,
+                grouping_keys: vec![
+                    "RegionName".into(),
+                    "IncidentId".into(),
+                    "IncidentSeverity".into(),
+                    "IncidentDescription".into()
+                ],
+                before: Some(variablemap!(
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("critical")),
+                  "EmployeeCount" => VariableValue::from(json!(0))
+                )),
+                after: variablemap!(
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("critical")),
+                  "EmployeeCount" => VariableValue::from(json!(4))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Aggregation {
+                default_before: false,
+                default_after: false,
+                grouping_keys: vec![
+                    "RegionName".into(),
+                    "IncidentId".into(),
+                    "IncidentSeverity".into(),
+                    "IncidentDescription".into()
+                ],
+                before: Some(variablemap!(
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("critical")),
+                  "EmployeeCount" => VariableValue::from(json!(0))
+                )),
+                after: variablemap!(
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("critical")),
+                  "EmployeeCount" => VariableValue::from(json!(4))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //Resolve Incident
@@ -634,122 +707,154 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 3);
-        assert!(result.contains(&QueryPartEvaluationContext::Removing {
-            before: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Claire")),
-              "EmployeeEmail" => VariableValue::from(json!("claire@contoso.com")),
-              "ManagerName" => VariableValue::from(json!("Allen")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "ManagerEmail" => VariableValue::from(json!("allen@contoso.com")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("critical"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Claire")),
+                  "EmployeeEmail" => VariableValue::from(json!("claire@contoso.com")),
+                  "ManagerName" => VariableValue::from(json!("Allen")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "ManagerEmail" => VariableValue::from(json!("allen@contoso.com")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("critical"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
-        assert!(result.contains(&QueryPartEvaluationContext::Removing {
-            before: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Bob")),
-              "EmployeeEmail" => VariableValue::from(json!("bob@contoso.com")),
-              "ManagerName" => VariableValue::from(json!("Allen")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "ManagerEmail" => VariableValue::from(json!("allen@contoso.com")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("critical"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Bob")),
+                  "EmployeeEmail" => VariableValue::from(json!("bob@contoso.com")),
+                  "ManagerName" => VariableValue::from(json!("Allen")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "ManagerEmail" => VariableValue::from(json!("allen@contoso.com")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("critical"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
-        assert!(result.contains(&QueryPartEvaluationContext::Removing {
-            before: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Danny")),
-              "EmployeeEmail" => VariableValue::from(json!("danny@contoso.com")),
-              "ManagerName" => VariableValue::from(json!("Allen")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "ManagerEmail" => VariableValue::from(json!("allen@contoso.com")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("critical"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Danny")),
+                  "EmployeeEmail" => VariableValue::from(json!("danny@contoso.com")),
+                  "ManagerName" => VariableValue::from(json!("Allen")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "ManagerEmail" => VariableValue::from(json!("allen@contoso.com")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("critical"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
         let result = employee_incident_alert_query
             .process_source_change(change.clone())
             .await
             .unwrap();
         assert_eq!(result.len(), 4);
-        assert!(result.contains(&QueryPartEvaluationContext::Removing {
-            before: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Claire")),
-              "EmployeeEmail" => VariableValue::from(json!("claire@contoso.com")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("critical"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Claire")),
+                  "EmployeeEmail" => VariableValue::from(json!("claire@contoso.com")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("critical"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
-        assert!(result.contains(&QueryPartEvaluationContext::Removing {
-            before: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Bob")),
-              "EmployeeEmail" => VariableValue::from(json!("bob@contoso.com")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("critical"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Bob")),
+                  "EmployeeEmail" => VariableValue::from(json!("bob@contoso.com")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("critical"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
-        assert!(result.contains(&QueryPartEvaluationContext::Removing {
-            before: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Danny")),
-              "EmployeeEmail" => VariableValue::from(json!("danny@contoso.com")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("critical"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Danny")),
+                  "EmployeeEmail" => VariableValue::from(json!("danny@contoso.com")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("critical"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
-        assert!(result.contains(&QueryPartEvaluationContext::Removing {
-            before: variablemap!(
-              "EmployeeName" => VariableValue::from(json!("Allen")),
-              "EmployeeEmail" => VariableValue::from(json!("allen@contoso.com")),
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("critical"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
+                  "EmployeeName" => VariableValue::from(json!("Allen")),
+                  "EmployeeEmail" => VariableValue::from(json!("allen@contoso.com")),
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("critical"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
         let result = employees_at_risk_count_query
             .process_source_change(change.clone())
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
-            default_before: false,
-            default_after: false,
-            grouping_keys: vec![
-                "RegionName".into(),
-                "IncidentId".into(),
-                "IncidentSeverity".into(),
-                "IncidentDescription".into()
-            ],
-            before: Some(variablemap!(
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("critical")),
-              "EmployeeCount" => VariableValue::from(json!(4))
-            )),
-            after: variablemap!(
-              "IncidentId" => VariableValue::from(json!("in1000")),
-              "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-              "RegionName" => VariableValue::from(json!("SoCal")),
-              "IncidentSeverity" => VariableValue::from(json!("critical")),
-              "EmployeeCount" => VariableValue::from(json!(0))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Aggregation {
+                default_before: false,
+                default_after: false,
+                grouping_keys: vec![
+                    "RegionName".into(),
+                    "IncidentId".into(),
+                    "IncidentSeverity".into(),
+                    "IncidentDescription".into()
+                ],
+                before: Some(variablemap!(
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("critical")),
+                  "EmployeeCount" => VariableValue::from(json!(4))
+                )),
+                after: variablemap!(
+                  "IncidentId" => VariableValue::from(json!("in1000")),
+                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
+                  "RegionName" => VariableValue::from(json!("SoCal")),
+                  "IncidentSeverity" => VariableValue::from(json!("critical")),
+                  "EmployeeCount" => VariableValue::from(json!(0))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }
