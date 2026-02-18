@@ -1212,14 +1212,13 @@ impl Source for PlatformSource {
 }
 
 impl PlatformSource {
-    /// Create a test subscription to this source (synchronous)
+    /// Create a test subscription to this source
     ///
     /// This method delegates to SourceBase and is provided for convenience in tests.
-    /// Note: Use test_subscribe_async() in async contexts to avoid runtime issues.
-    pub fn test_subscribe(
+    pub async fn test_subscribe(
         &self,
     ) -> Box<dyn drasi_lib::channels::ChangeReceiver<drasi_lib::channels::SourceEventWrapper>> {
-        self.base.test_subscribe()
+        self.base.test_subscribe().await
     }
 
     /// Create a test subscription to this source (async)

@@ -25,8 +25,6 @@ You can use either runtime flavor:
 - `#[tokio::main]` - Defaults to multi-threaded
 - `#[tokio::main(flavor = "current_thread")]` - Single-threaded
 
-See the [Tokio Runtime Compatibility](docs/tokio-runtime-compatibility.md) documentation for implementation details.
-
 ## Example
 
 In this scenario, we have a set of `Vehicles` and a set of `Zones` where vehicles can be.  The conceptual data model in Drasi is a labeled property graph, so we will add the vehicles and zones as nodes in the graph and we will connect them with a `LOCATED_IN` relationship.

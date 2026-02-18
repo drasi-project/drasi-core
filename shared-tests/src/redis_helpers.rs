@@ -134,20 +134,19 @@ impl Drop for RedisGuardInner {
             if let Some(container) = container_guard.take() {
                 let container_id = container.id().to_string();
 
-                // Block on cleanup to ensure it completes
-                let cleanup_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    // Try to get current runtime, if we're in one
-                    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                        // Spawn blocking task to stop container
-                        handle.block_on(async move {
+                // Use a separate thread with its own runtime for cleanup,
+                // since we may be inside an async context where block_on panics.
+                let cleanup_result = std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build();
+                    if let Ok(rt) = rt {
+                        let _ = rt.block_on(async move {
                             let _ = container.stop().await;
-                            drop(container);
                         });
-                    } else {
-                        // We're not in a runtime, just drop it
-                        drop(container);
                     }
-                }));
+                })
+                .join();
 
                 if cleanup_result.is_ok() {
                     log::debug!("Redis container {container_id} cleaned up in Drop");
