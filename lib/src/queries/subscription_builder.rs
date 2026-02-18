@@ -72,11 +72,21 @@ impl SubscriptionSettingsBuilder {
 
             match matching_indices.len() {
                 0 => {
-                    // Not found in any source config - add to first source (default)
-                    if let Some(first_settings) = settings_vec.first_mut() {
-                        first_settings.nodes.insert(node_label.clone());
-                    } else {
+                    if settings_vec.is_empty() {
                         bail!("No sources configured for query");
+                    }
+                    if settings_vec.len() == 1 {
+                        // Single source - assign to it (original behavior)
+                        settings_vec[0].nodes.insert(node_label.clone());
+                    } else {
+                        // Multiple sources and no explicit assignment - broadcast to ALL sources.
+                        // This is critical for cross-source joins: each source will receive the
+                        // subscription and return only the data it has for this label.
+                        // Without this, unassigned labels only go to the first source, breaking
+                        // joins where different labels come from different sources.
+                        for settings in settings_vec.iter_mut() {
+                            settings.nodes.insert(node_label.clone());
+                        }
                     }
                 }
                 1 => {
@@ -135,11 +145,17 @@ impl SubscriptionSettingsBuilder {
                         }
                     }
 
-                    // Not a join relation - add to first source (default)
-                    if let Some(first_settings) = settings_vec.first_mut() {
-                        first_settings.relations.insert(relation_label.clone());
-                    } else {
+                    // Not a join relation - broadcast to sources
+                    if settings_vec.is_empty() {
                         bail!("No sources configured for query");
+                    }
+                    if settings_vec.len() == 1 {
+                        settings_vec[0].relations.insert(relation_label.clone());
+                    } else {
+                        // Multiple sources - broadcast to all (same rationale as node labels)
+                        for settings in settings_vec.iter_mut() {
+                            settings.relations.insert(relation_label.clone());
+                        }
                     }
                 }
                 1 => {
@@ -209,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn test_node_label_not_in_any_source_goes_to_first() {
+    fn test_node_label_not_in_any_source_broadcasts_to_all() {
         let sources = vec![
             SourceSubscriptionConfig {
                 source_id: "source1".to_string(),
@@ -237,8 +253,9 @@ mod tests {
 
         let settings = result.unwrap();
         assert_eq!(settings.len(), 2);
+        // With multiple sources and no explicit assignment, label is broadcast to ALL sources
         assert!(settings[0].nodes.contains("Person"));
-        assert!(!settings[1].nodes.contains("Person"));
+        assert!(settings[1].nodes.contains("Person"));
     }
 
     #[test]
@@ -475,14 +492,103 @@ mod tests {
         assert!(settings[0].nodes.contains("Order"));
         // Customer should be in second source
         assert!(settings[1].nodes.contains("Customer"));
-        // Product not in any source config, should go to first
+        // Product not in any source config - broadcast to ALL sources
         assert!(settings[0].nodes.contains("Product"));
+        assert!(settings[1].nodes.contains("Product"));
 
         // PLACED_BY is a join, should not be in any relations
         assert!(!settings[0].relations.contains("PLACED_BY"));
         assert!(!settings[1].relations.contains("PLACED_BY"));
 
-        // CONTAINS is not in any config and not a join, should go to first
+        // CONTAINS is not in any config and not a join - broadcast to ALL sources
         assert!(settings[0].relations.contains("CONTAINS"));
+        assert!(settings[1].relations.contains("CONTAINS"));
+    }
+
+    #[test]
+    fn test_cross_source_join_without_explicit_nodes() {
+        // This tests the exact scenario from the getting-started guide:
+        // Two sources, no explicit node assignments, with a join between them.
+        // Both labels should be broadcast to both sources so each can return
+        // the data it has.
+        let sources = vec![
+            SourceSubscriptionConfig {
+                source_id: "my-postgres".to_string(),
+                nodes: vec![],
+                relations: vec![],
+                pipeline: vec![],
+            },
+            SourceSubscriptionConfig {
+                source_id: "location-tracker".to_string(),
+                nodes: vec![],
+                relations: vec![],
+                pipeline: vec![],
+            },
+        ];
+
+        let mut query_config = create_test_query_config(sources);
+        query_config.query = "MATCH (m:Message)-[:FROM_USER]->(u:UserLocation) RETURN m.MessageId AS Id, m.From AS Sender, u.location AS Location".to_string();
+        query_config.joins = Some(vec![QueryJoinConfig {
+            id: "FROM_USER".to_string(),
+            keys: vec![
+                QueryJoinKeyConfig {
+                    label: "Message".to_string(),
+                    property: "From".to_string(),
+                },
+                QueryJoinKeyConfig {
+                    label: "UserLocation".to_string(),
+                    property: "name".to_string(),
+                },
+            ],
+        }]);
+
+        let query_labels = QueryLabels {
+            node_labels: vec!["Message".to_string(), "UserLocation".to_string()],
+            relation_labels: vec!["FROM_USER".to_string()],
+        };
+
+        let result =
+            SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
+        assert!(result.is_ok());
+
+        let settings = result.unwrap();
+        assert_eq!(settings.len(), 2);
+
+        // Both labels should be broadcast to BOTH sources
+        // (each source returns only the data it actually has)
+        assert!(settings[0].nodes.contains("Message"));
+        assert!(settings[0].nodes.contains("UserLocation"));
+        assert!(settings[1].nodes.contains("Message"));
+        assert!(settings[1].nodes.contains("UserLocation"));
+
+        // FROM_USER is a join relation - should not be in any source's relations
+        assert!(!settings[0].relations.contains("FROM_USER"));
+        assert!(!settings[1].relations.contains("FROM_USER"));
+    }
+
+    #[test]
+    fn test_single_source_unassigned_label_still_works() {
+        // With a single source, unassigned labels should still go to that source
+        let sources = vec![SourceSubscriptionConfig {
+            source_id: "source1".to_string(),
+            nodes: vec![],
+            relations: vec![],
+            pipeline: vec![],
+        }];
+
+        let query_config = create_test_query_config(sources);
+        let query_labels = QueryLabels {
+            node_labels: vec!["Person".to_string()],
+            relation_labels: vec!["KNOWS".to_string()],
+        };
+
+        let result =
+            SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
+        assert!(result.is_ok());
+
+        let settings = result.unwrap();
+        assert_eq!(settings.len(), 1);
+        assert!(settings[0].nodes.contains("Person"));
+        assert!(settings[0].relations.contains("KNOWS"));
     }
 }
