@@ -19,6 +19,7 @@ use drasi_bootstrap_postgres::{
     PostgresBootstrapConfig, PostgresBootstrapProvider, SslMode as BootstrapSslMode,
     TableKeyConfig as BootstrapTableKeyConfig,
 };
+use drasi_core::evaluation::context::QueryVariables;
 use drasi_lib::{DrasiLib, Query};
 use drasi_reaction_application::ApplicationReaction;
 use drasi_source_postgres::{
@@ -49,7 +50,7 @@ fn slot_name() -> String {
 async fn wait_for_query_results(
     core: &Arc<DrasiLib>,
     query_id: &str,
-    predicate: impl Fn(&[serde_json::Value]) -> bool,
+    predicate: impl Fn(&[QueryVariables]) -> bool,
 ) -> Result<()> {
     let start = Instant::now();
     let timeout = Duration::from_secs(20);
