@@ -158,6 +158,34 @@ pub async fn push_not_exists(subject: &impl FutureQueue) {
     assert_eq!(pop4, None);
 }
 
+pub async fn clear_removes_all(subject: &impl FutureQueue) {
+    let element1 = ElementReference::new("source1", "element1");
+
+    // Push items to populate both the main sorted set and secondary index keys
+    subject
+        .push(PushType::Always, 1, 1, &element1, 10, 20)
+        .await
+        .expect("push failed");
+    subject
+        .push(PushType::Always, 2, 2, &element1, 10, 30)
+        .await
+        .expect("push failed");
+
+    // Verify items are present
+    let peek = subject.peek_due_time().await.expect("peek failed");
+    assert_eq!(peek, Some(20));
+
+    // Clear everything
+    subject.clear().await.expect("clear failed");
+
+    // Verify queue is empty
+    let peek = subject.peek_due_time().await.expect("peek failed");
+    assert_eq!(peek, None);
+
+    let pop = subject.pop().await.expect("pop failed");
+    assert_eq!(pop, None);
+}
+
 pub async fn push_overwrite(subject: &impl FutureQueue) {
     let func1 = 1;
     let func2 = 2;

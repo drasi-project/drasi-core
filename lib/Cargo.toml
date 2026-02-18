@@ -29,6 +29,9 @@ workspace = true
 
 [features]
 default = []
+azure-identity = ["dep:azure_identity", "dep:azure_core", "dep:reqwest"]
+aws-identity = ["dep:aws-config", "dep:aws-sdk-rds", "dep:aws-sdk-sts"]
+all-identity = ["azure-identity", "aws-identity"]
 
 # Middleware features (passed through to drasi-middleware)
 middleware-jq = ["drasi-middleware/jq"]
@@ -81,6 +84,14 @@ async-trait = "0.1"
 ordered-float = "3.7"
 rand = "0.8"
 futures = "0.3"
+
+azure_identity = { version = "0.31", optional = true, default-features = false, features = ["tokio"] }
+azure_core = { version = "0.31", optional = true, default-features = false, features = ["tokio", "reqwest"] }
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls"] }
+
+aws-config = { version = "1.5", optional = true }
+aws-sdk-rds = { version = "1.77", optional = true }
+aws-sdk-sts = { version = "1.50", optional = true }
 
 [dev-dependencies]
 # Testing utilities

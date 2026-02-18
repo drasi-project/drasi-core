@@ -17,7 +17,7 @@ use crate::indexes::IndexBackendPlugin;
 use drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex;
 use drasi_core::in_memory_index::in_memory_future_queue::InMemoryFutureQueue;
 use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
-use drasi_core::interface::{ElementArchiveIndex, ElementIndex, FutureQueue, ResultIndex};
+use drasi_core::interface::IndexSet;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -64,29 +64,6 @@ impl std::error::Error for IndexError {}
 impl From<drasi_core::interface::IndexError> for IndexError {
     fn from(err: drasi_core::interface::IndexError) -> Self {
         IndexError::InitializationFailed(err.to_string())
-    }
-}
-
-/// Set of indexes for a query
-pub struct IndexSet {
-    /// Element index for storing graph elements
-    pub element_index: Arc<dyn ElementIndex>,
-    /// Archive index for storing historical elements (for past() function)
-    pub archive_index: Arc<dyn ElementArchiveIndex>,
-    /// Result index for storing query results
-    pub result_index: Arc<dyn ResultIndex>,
-    /// Future queue for temporal queries
-    pub future_queue: Arc<dyn FutureQueue>,
-}
-
-impl fmt::Debug for IndexSet {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("IndexSet")
-            .field("element_index", &"<trait object>")
-            .field("archive_index", &"<trait object>")
-            .field("result_index", &"<trait object>")
-            .field("future_queue", &"<trait object>")
-            .finish()
     }
 }
 
@@ -221,39 +198,11 @@ impl IndexFactory {
         plugin: &Arc<dyn IndexBackendPlugin>,
         query_id: &str,
     ) -> Result<IndexSet, IndexError> {
-        let element_index = plugin.create_element_index(query_id).await.map_err(|e| {
-            log::error!("Failed to create element index for query '{query_id}': {e}");
+        plugin.create_index_set(query_id).await.map_err(|e| {
+            log::error!("Failed to create index set for query '{query_id}': {e}");
             IndexError::InitializationFailed(format!(
-                "Failed to create element index for query '{query_id}': {e}"
+                "Failed to create index set for query '{query_id}': {e}"
             ))
-        })?;
-
-        let archive_index = plugin.create_archive_index(query_id).await.map_err(|e| {
-            log::error!("Failed to create archive index for query '{query_id}': {e}");
-            IndexError::InitializationFailed(format!(
-                "Failed to create archive index for query '{query_id}': {e}"
-            ))
-        })?;
-
-        let result_index = plugin.create_result_index(query_id).await.map_err(|e| {
-            log::error!("Failed to create result index for query '{query_id}': {e}");
-            IndexError::InitializationFailed(format!(
-                "Failed to create result index for query '{query_id}': {e}"
-            ))
-        })?;
-
-        let future_queue = plugin.create_future_queue(query_id).await.map_err(|e| {
-            log::error!("Failed to create future queue for query '{query_id}': {e}");
-            IndexError::InitializationFailed(format!(
-                "Failed to create future queue for query '{query_id}': {e}"
-            ))
-        })?;
-
-        Ok(IndexSet {
-            element_index,
-            archive_index,
-            result_index,
-            future_queue,
         })
     }
 
@@ -563,43 +512,11 @@ mod tests {
 
         #[async_trait]
         impl IndexBackendPlugin for MockPlugin {
-            async fn create_element_index(
+            async fn create_index_set(
                 &self,
                 _query_id: &str,
-            ) -> Result<
-                Arc<dyn drasi_core::interface::ElementIndex>,
-                drasi_core::interface::IndexError,
-            > {
-                unimplemented!()
-            }
-
-            async fn create_archive_index(
-                &self,
-                _query_id: &str,
-            ) -> Result<
-                Arc<dyn drasi_core::interface::ElementArchiveIndex>,
-                drasi_core::interface::IndexError,
-            > {
-                unimplemented!()
-            }
-
-            async fn create_result_index(
-                &self,
-                _query_id: &str,
-            ) -> Result<
-                Arc<dyn drasi_core::interface::ResultIndex>,
-                drasi_core::interface::IndexError,
-            > {
-                unimplemented!()
-            }
-
-            async fn create_future_queue(
-                &self,
-                _query_id: &str,
-            ) -> Result<
-                Arc<dyn drasi_core::interface::FutureQueue>,
-                drasi_core::interface::IndexError,
-            > {
+            ) -> Result<drasi_core::interface::IndexSet, drasi_core::interface::IndexError>
+            {
                 unimplemented!()
             }
 

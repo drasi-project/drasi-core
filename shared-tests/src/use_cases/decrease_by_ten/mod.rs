@@ -29,6 +29,7 @@ use drasi_functions_cypher::CypherFunctionSet;
 use drasi_query_cypher::CypherParser;
 
 use self::data::get_bootstrap_data;
+use super::{contains_data, IGNORED_ROW_SIGNATURE};
 use crate::QueryTestConfig;
 
 mod data;
@@ -164,14 +165,18 @@ pub async fn decrease_by_ten(config: &(impl QueryTestConfig + Send)) {
         // println!("Node Result - Decrease daily revenue amount to $90K ({}): {:?}", timestamp, result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "productId" => VariableValue::from(json!("prod_01")),
-              "productManagerId" => VariableValue::from(json!("emp_01")),
-              "previousDailyRevenue" => VariableValue::from(json!(101000.0)),
-              "dailyRevenue" => VariableValue::from(json!(90000.0))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "productId" => VariableValue::from(json!("prod_01")),
+                  "productManagerId" => VariableValue::from(json!("emp_01")),
+                  "previousDailyRevenue" => VariableValue::from(json!(101000.0)),
+                  "dailyRevenue" => VariableValue::from(json!(90000.0))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
         timestamp += 24 * 60 * 60;
     }
@@ -198,20 +203,24 @@ pub async fn decrease_by_ten(config: &(impl QueryTestConfig + Send)) {
         // println!("Node Result - Decrease daily revenue amount to $80k ({}): {:?}", timestamp, result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {
-            before: variablemap!(
-              "productId" => VariableValue::from(json!("prod_01")),
-              "productManagerId" => VariableValue::from(json!("emp_01")),
-              "previousDailyRevenue" => VariableValue::from(json!(101000.0)),
-              "dailyRevenue" => VariableValue::from(json!(90000.0))
-            ),
-            after: variablemap!(
-              "productId" => VariableValue::from(json!("prod_01")),
-              "productManagerId" => VariableValue::from(json!("emp_01")),
-              "previousDailyRevenue" => VariableValue::from(json!(90000.0)),
-              "dailyRevenue" => VariableValue::from(json!(75000.0))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                  "productId" => VariableValue::from(json!("prod_01")),
+                  "productManagerId" => VariableValue::from(json!("emp_01")),
+                  "previousDailyRevenue" => VariableValue::from(json!(101000.0)),
+                  "dailyRevenue" => VariableValue::from(json!(90000.0))
+                ),
+                after: variablemap!(
+                  "productId" => VariableValue::from(json!("prod_01")),
+                  "productManagerId" => VariableValue::from(json!("emp_01")),
+                  "previousDailyRevenue" => VariableValue::from(json!(90000.0)),
+                  "dailyRevenue" => VariableValue::from(json!(75000.0))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
         timestamp += 24 * 60 * 60;
     }
@@ -238,14 +247,18 @@ pub async fn decrease_by_ten(config: &(impl QueryTestConfig + Send)) {
         // println!("Node Result - Update with same daily revenue amount of $80k ({}): {:?}", timestamp, result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Removing {
-            before: variablemap!(
-              "productId" => VariableValue::from(json!("prod_01")),
-              "productManagerId" => VariableValue::from(json!("emp_01")),
-              "previousDailyRevenue" => VariableValue::from(json!(90000.0)),
-              "dailyRevenue" => VariableValue::from(json!(75000.0))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
+                  "productId" => VariableValue::from(json!("prod_01")),
+                  "productManagerId" => VariableValue::from(json!("emp_01")),
+                  "previousDailyRevenue" => VariableValue::from(json!(90000.0)),
+                  "dailyRevenue" => VariableValue::from(json!(75000.0))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }
 
@@ -360,14 +373,18 @@ pub async fn decrease_by_ten_percent(config: &(impl QueryTestConfig + Send)) {
         // println!("Node Result - Decrease daily revenue amount to $90K ({}): {:?}", timestamp, result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "productId" => VariableValue::from(json!("prod_01")),
-              "productManagerId" => VariableValue::from(json!("emp_01")),
-              "previousDailyRevenue" => VariableValue::from(json!(101000.0)),
-              "dailyRevenue" => VariableValue::from(json!(90000.0))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "productId" => VariableValue::from(json!("prod_01")),
+                  "productManagerId" => VariableValue::from(json!("emp_01")),
+                  "previousDailyRevenue" => VariableValue::from(json!(101000.0)),
+                  "dailyRevenue" => VariableValue::from(json!(90000.0))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
         timestamp += 24 * 60 * 60;
     }
@@ -394,20 +411,24 @@ pub async fn decrease_by_ten_percent(config: &(impl QueryTestConfig + Send)) {
         // println!("Node Result - Decrease daily revenue amount to $80k ({}): {:?}", timestamp, result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {
-            before: variablemap!(
-              "productId" => VariableValue::from(json!("prod_01")),
-              "productManagerId" => VariableValue::from(json!("emp_01")),
-              "previousDailyRevenue" => VariableValue::from(json!(101000.0)),
-              "dailyRevenue" => VariableValue::from(json!(90000.0))
-            ),
-            after: variablemap!(
-              "productId" => VariableValue::from(json!("prod_01")),
-              "productManagerId" => VariableValue::from(json!("emp_01")),
-              "previousDailyRevenue" => VariableValue::from(json!(90000.0)),
-              "dailyRevenue" => VariableValue::from(json!(75000.0))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                  "productId" => VariableValue::from(json!("prod_01")),
+                  "productManagerId" => VariableValue::from(json!("emp_01")),
+                  "previousDailyRevenue" => VariableValue::from(json!(101000.0)),
+                  "dailyRevenue" => VariableValue::from(json!(90000.0))
+                ),
+                after: variablemap!(
+                  "productId" => VariableValue::from(json!("prod_01")),
+                  "productManagerId" => VariableValue::from(json!("emp_01")),
+                  "previousDailyRevenue" => VariableValue::from(json!(90000.0)),
+                  "dailyRevenue" => VariableValue::from(json!(75000.0))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
         timestamp += 24 * 60 * 60;
     }
@@ -434,13 +455,17 @@ pub async fn decrease_by_ten_percent(config: &(impl QueryTestConfig + Send)) {
         // println!("Node Result - Update with same daily revenue amount of $80k ({}): {:?}", timestamp, result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Removing {
-            before: variablemap!(
-              "productId" => VariableValue::from(json!("prod_01")),
-              "productManagerId" => VariableValue::from(json!("emp_01")),
-              "previousDailyRevenue" => VariableValue::from(json!(90000.0)),
-              "dailyRevenue" => VariableValue::from(json!(75000.0))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
+                  "productId" => VariableValue::from(json!("prod_01")),
+                  "productManagerId" => VariableValue::from(json!("emp_01")),
+                  "previousDailyRevenue" => VariableValue::from(json!(90000.0)),
+                  "dailyRevenue" => VariableValue::from(json!(75000.0))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }
