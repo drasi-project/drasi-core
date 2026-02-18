@@ -72,8 +72,7 @@ impl ScalarFunction for ChangeDateTime {
                 let ts = e.get_effective_from();
                 debug_assert!(
                     validate_effective_from(ts).is_ok(),
-                    "effective_from value {} appears to be in the wrong unit (expected milliseconds)",
-                    ts
+                    "effective_from value {ts} appears to be in the wrong unit (expected milliseconds)",
                 );
                 Ok(VariableValue::ZonedDateTime(
                     ZonedDateTime::from_epoch_millis(ts as i64),
