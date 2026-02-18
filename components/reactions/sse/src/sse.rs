@@ -362,14 +362,22 @@ impl Reaction for SseReaction {
 
                             match result {
                                 ResultDiff::Add { data } => {
-                                    context.insert("after".to_string(), data.clone());
+                                    let data_json = serde_json::to_value(data)
+                                        .expect("QueryVariables serialization should succeed");
+                                    context.insert("after".to_string(), data_json);
                                 }
                                 ResultDiff::Update { before, after, .. } => {
-                                    context.insert("before".to_string(), before.clone());
-                                    context.insert("after".to_string(), after.clone());
+                                    let before_json = serde_json::to_value(before)
+                                        .expect("QueryVariables serialization should succeed");
+                                    let after_json = serde_json::to_value(after)
+                                        .expect("QueryVariables serialization should succeed");
+                                    context.insert("before".to_string(), before_json);
+                                    context.insert("after".to_string(), after_json);
                                 }
                                 ResultDiff::Delete { data } => {
-                                    context.insert("before".to_string(), data.clone());
+                                    let data_json = serde_json::to_value(data)
+                                        .expect("QueryVariables serialization should succeed");
+                                    context.insert("before".to_string(), data_json);
                                 }
                                 ResultDiff::Aggregation { .. } | ResultDiff::Noop => {}
                             }

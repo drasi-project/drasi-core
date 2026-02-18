@@ -356,9 +356,9 @@ impl AdaptiveGrpcReaction {
 
                 // Convert results to proto format
                 for result in &query_result.results {
-                    let (result_type, data, before, after) = match result {
-                        ResultDiff::Add { data } => ("ADD", data.clone(), None, None),
-                        ResultDiff::Delete { data } => ("DELETE", data.clone(), None, None),
+                    let (result_type, data, before, after): (&str, serde_json::Value, Option<serde_json::Value>, Option<serde_json::Value>) = match result {
+                        ResultDiff::Add { data } => ("ADD", serde_json::to_value(data).expect("QueryVariables serialization should succeed"), None, None),
+                        ResultDiff::Delete { data } => ("DELETE", serde_json::to_value(data).expect("QueryVariables serialization should succeed"), None, None),
                         ResultDiff::Update {
                             data,
                             before,
@@ -366,16 +366,16 @@ impl AdaptiveGrpcReaction {
                             ..
                         } => (
                             "UPDATE",
-                            data.clone(),
-                            Some(before.clone()),
-                            Some(after.clone()),
+                            serde_json::to_value(data).expect("QueryVariables serialization should succeed"),
+                            Some(serde_json::to_value(before).expect("QueryVariables serialization should succeed")),
+                            Some(serde_json::to_value(after).expect("QueryVariables serialization should succeed")),
                         ),
                         ResultDiff::Aggregation { before, after } => (
                             "aggregation",
                             serde_json::to_value(result)
                                 .expect("ResultDiff serialization should succeed"),
-                            before.clone(),
-                            Some(after.clone()),
+                            before.as_ref().map(|b| serde_json::to_value(b).expect("QueryVariables serialization should succeed")),
+                            Some(serde_json::to_value(after).expect("QueryVariables serialization should succeed")),
                         ),
                         ResultDiff::Noop => (
                             "noop",

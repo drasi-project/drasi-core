@@ -190,9 +190,9 @@ impl MsSqlStoredProcReaction {
                 // Process each result item in the batch
                 for result_item in &query_result.results {
                     let (operation, data_value, result_type) = match result_item {
-                        ResultDiff::Add { data } => (OperationType::Add, data, "ADD"),
-                        ResultDiff::Update { data, .. } => (OperationType::Update, data, "UPDATE"),
-                        ResultDiff::Delete { data } => (OperationType::Delete, data, "DELETE"),
+                        ResultDiff::Add { data } => (OperationType::Add, serde_json::to_value(data).expect("QueryVariables serialization should succeed"), "ADD"),
+                        ResultDiff::Update { data, .. } => (OperationType::Update, serde_json::to_value(data).expect("QueryVariables serialization should succeed"), "UPDATE"),
+                        ResultDiff::Delete { data } => (OperationType::Delete, serde_json::to_value(data).expect("QueryVariables serialization should succeed"), "DELETE"),
                         ResultDiff::Aggregation { .. } | ResultDiff::Noop => {
                             debug!(
                                 "[{reaction_id}] Unknown operation type: aggregation/noop, skipping"
@@ -207,7 +207,7 @@ impl MsSqlStoredProcReaction {
                     // Execute the stored procedure if a command is configured
                     if let Some(cmd) = command {
                         // Prepare context with after/before fields based on operation type
-                        let context = Self::prepare_context(operation, data_value);
+                        let context = Self::prepare_context(operation, &data_value);
                         debug!(
                             "[{reaction_id}] Context data: {}",
                             serde_json::to_string_pretty(&context)

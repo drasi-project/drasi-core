@@ -16,7 +16,7 @@
 
 use super::types::{ResultChangeEvent, ResultEvent, UpdatePayload};
 use anyhow::{anyhow, Result};
-use drasi_lib::channels::{QueryResult, ResultDiff};
+use drasi_lib::channels::{json_to_query_variables, QueryResult, ResultDiff};
 use drasi_lib::profiling::ProfilingMetadata;
 use serde_json::{json, Map, Value};
 
@@ -118,11 +118,13 @@ pub fn transform_query_result(
     for result_item in query_result.results {
         match result_item {
             ResultDiff::Add { data } => {
-                let data = data
+                let json_value = serde_json::to_value(&data)
+                    .map_err(|e| anyhow!("Failed to serialize data: {e}"))?;
+                let map = json_value
                     .as_object()
                     .ok_or_else(|| anyhow!("'data' field must be an object"))?
                     .clone();
-                added_results.push(data);
+                added_results.push(map);
             }
             ResultDiff::Update {
                 before,
@@ -130,27 +132,33 @@ pub fn transform_query_result(
                 grouping_keys,
                 ..
             } => {
-                let before = before
+                let before_json = serde_json::to_value(&before)
+                    .map_err(|e| anyhow!("Failed to serialize before: {e}"))?;
+                let after_json = serde_json::to_value(&after)
+                    .map_err(|e| anyhow!("Failed to serialize after: {e}"))?;
+                let before_map = before_json
                     .as_object()
                     .ok_or_else(|| anyhow!("'before' field must be an object"))?
                     .clone();
-                let after = after
+                let after_map = after_json
                     .as_object()
                     .ok_or_else(|| anyhow!("'after' field must be an object"))?
                     .clone();
 
                 updated_results.push(UpdatePayload {
-                    before: Some(before),
-                    after: Some(after),
+                    before: Some(before_map),
+                    after: Some(after_map),
                     grouping_keys,
                 });
             }
             ResultDiff::Delete { data } => {
-                let data = data
+                let json_value = serde_json::to_value(&data)
+                    .map_err(|e| anyhow!("Failed to serialize data: {e}"))?;
+                let map = json_value
                     .as_object()
                     .ok_or_else(|| anyhow!("'data' field must be an object"))?
                     .clone();
-                deleted_results.push(data);
+                deleted_results.push(map);
             }
             ResultDiff::Aggregation { .. } | ResultDiff::Noop => {
                 log::warn!("Unknown result type: aggregation/noop, skipping");
@@ -218,10 +226,10 @@ mod tests {
             timestamp,
             results: vec![
                 ResultDiff::Add {
-                    data: json!({"id": "1", "value": "test1"}),
+                    data: json_to_query_variables(json!({"id": "1", "value": "test1"})),
                 },
                 ResultDiff::Add {
-                    data: json!({"id": "2", "value": "test2"}),
+                    data: json_to_query_variables(json!({"id": "2", "value": "test2"})),
                 },
             ],
             metadata: HashMap::new(),
@@ -252,9 +260,9 @@ mod tests {
             query_id: "test-query".to_string(),
             timestamp,
             results: vec![ResultDiff::Update {
-                data: json!({"id": "1", "value": 20}),
-                before: json!({"id": "1", "value": 10}),
-                after: json!({"id": "1", "value": 20}),
+                data: json_to_query_variables(json!({"id": "1", "value": 20})),
+                before: json_to_query_variables(json!({"id": "1", "value": 10})),
+                after: json_to_query_variables(json!({"id": "1", "value": 20})),
                 grouping_keys: None,
             }],
             metadata: HashMap::new(),
@@ -286,9 +294,9 @@ mod tests {
             query_id: "test-query".to_string(),
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![ResultDiff::Update {
-                data: json!({"id": "1", "value": 20}),
-                before: json!({"id": "1", "value": 10}),
-                after: json!({"id": "1", "value": 20}),
+                data: json_to_query_variables(json!({"id": "1", "value": 20})),
+                before: json_to_query_variables(json!({"id": "1", "value": 10})),
+                after: json_to_query_variables(json!({"id": "1", "value": 20})),
                 grouping_keys: Some(vec!["key1".to_string(), "key2".to_string()]),
             }],
             metadata: HashMap::new(),
@@ -315,7 +323,7 @@ mod tests {
             query_id: "test-query".to_string(),
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![ResultDiff::Delete {
-                data: json!({"id": "1"}),
+                data: json_to_query_variables(json!({"id": "1"})),
             }],
             metadata: HashMap::new(),
             profiling: None,
@@ -339,16 +347,16 @@ mod tests {
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![
                 ResultDiff::Add {
-                    data: json!({"id": "1"}),
+                    data: json_to_query_variables(json!({"id": "1"})),
                 },
                 ResultDiff::Update {
-                    data: json!({"id": "2", "value": 20}),
-                    before: json!({"id": "2", "value": 10}),
-                    after: json!({"id": "2", "value": 20}),
+                    data: json_to_query_variables(json!({"id": "2", "value": 20})),
+                    before: json_to_query_variables(json!({"id": "2", "value": 10})),
+                    after: json_to_query_variables(json!({"id": "2", "value": 20})),
                     grouping_keys: None,
                 },
                 ResultDiff::Delete {
-                    data: json!({"id": "3"}),
+                    data: json_to_query_variables(json!({"id": "3"})),
                 },
             ],
             metadata: HashMap::new(),
@@ -378,7 +386,7 @@ mod tests {
             query_id: "test-query".to_string(),
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![ResultDiff::Add {
-                data: json!({"id": "1"}),
+                data: json_to_query_variables(json!({"id": "1"})),
             }],
             metadata,
             profiling: None,
@@ -400,83 +408,17 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_invalid_add_data_field() {
-        let query_result = QueryResult {
-            query_id: "test-query".to_string(),
-            timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
-            results: vec![ResultDiff::Add {
-                data: json!(["not-an-object"]),
-            }],
-            metadata: HashMap::new(),
-            profiling: None,
-        };
-
-        let result = transform_query_result(query_result, 1, 1);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("'data' field must be an object"));
-    }
-
-    #[test]
-    fn test_transform_invalid_update_before_field() {
-        let query_result = QueryResult {
-            query_id: "test-query".to_string(),
-            timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
-            results: vec![ResultDiff::Update {
-                data: json!({"id": "1", "value": 20}),
-                before: json!(true),
-                after: json!({"id": "1", "value": 20}),
-                grouping_keys: None,
-            }],
-            metadata: HashMap::new(),
-            profiling: None,
-        };
-
-        let result = transform_query_result(query_result, 1, 1);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("'before' field must be an object"));
-    }
-
-    #[test]
-    fn test_transform_invalid_update_after_field() {
-        let query_result = QueryResult {
-            query_id: "test-query".to_string(),
-            timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
-            results: vec![ResultDiff::Update {
-                data: json!({"id": "1", "value": 20}),
-                before: json!({"id": "1", "value": 10}),
-                after: json!(42),
-                grouping_keys: None,
-            }],
-            metadata: HashMap::new(),
-            profiling: None,
-        };
-
-        let result = transform_query_result(query_result, 1, 1);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("'after' field must be an object"));
-    }
-
-    #[test]
     fn test_transform_unknown_type_skipped() {
         let query_result = QueryResult {
             query_id: "test-query".to_string(),
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![
                 ResultDiff::Add {
-                    data: json!({"id": "1"}),
+                    data: json_to_query_variables(json!({"id": "1"})),
                 },
                 ResultDiff::Noop,
                 ResultDiff::Delete {
-                    data: json!({"id": "3"}),
+                    data: json_to_query_variables(json!({"id": "3"})),
                 },
             ],
             metadata: HashMap::new(),
@@ -501,7 +443,7 @@ mod tests {
             query_id: "test-query".to_string(),
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![ResultDiff::Add {
-                data: json!({"id": "1"}),
+                data: json_to_query_variables(json!({"id": "1"})),
             }],
             metadata: HashMap::new(), // Empty metadata
             profiling: None,
@@ -648,7 +590,7 @@ mod tests {
             query_id: "test-query".to_string(),
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![ResultDiff::Add {
-                data: json!({"id": "1"}),
+                data: json_to_query_variables(json!({"id": "1"})),
             }],
             metadata: HashMap::new(),
             profiling: Some(profiling),
@@ -708,7 +650,7 @@ mod tests {
             query_id: "test-query".to_string(),
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![ResultDiff::Add {
-                data: json!({"id": "1"}),
+                data: json_to_query_variables(json!({"id": "1"})),
             }],
             metadata,
             profiling: Some(profiling),

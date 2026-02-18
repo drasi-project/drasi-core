@@ -20,7 +20,7 @@
 #[cfg(test)]
 use super::*;
 #[cfg(test)]
-use drasi_lib::channels::{QueryResult, ResultDiff};
+use drasi_lib::channels::{json_to_query_variables, QueryResult, ResultDiff};
 #[cfg(test)]
 use serde_json::json;
 #[cfg(test)]
@@ -70,7 +70,7 @@ mod transformer_integration_tests {
         let query_result = create_test_query_result(
             "test-query",
             vec![ResultDiff::Add {
-                data: json!({"id": "1", "value": "test"}),
+                data: json_to_query_variables(json!({"id": "1", "value": "test"})),
             }],
         );
 
@@ -101,16 +101,16 @@ mod transformer_integration_tests {
             "mixed-ops-query",
             vec![
                 ResultDiff::Add {
-                    data: json!({"id": "1"}),
+                    data: json_to_query_variables(json!({"id": "1"})),
                 },
                 ResultDiff::Update {
-                    data: json!({"id": "2", "value": 20}),
-                    before: json!({"id": "2", "value": 10}),
-                    after: json!({"id": "2", "value": 20}),
+                    data: json_to_query_variables(json!({"id": "2", "value": 20})),
+                    before: json_to_query_variables(json!({"id": "2", "value": 10})),
+                    after: json_to_query_variables(json!({"id": "2", "value": 20})),
                     grouping_keys: None,
                 },
                 ResultDiff::Delete {
-                    data: json!({"id": "3"}),
+                    data: json_to_query_variables(json!({"id": "3"})),
                 },
             ],
         );
@@ -136,7 +136,7 @@ mod transformer_integration_tests {
             query_id: "metadata-query".to_string(),
             timestamp: chrono::Utc::now(),
             results: vec![ResultDiff::Add {
-                data: json!({"id": "1"}),
+                data: json_to_query_variables(json!({"id": "1"})),
             }],
             metadata,
             profiling: None,
@@ -490,7 +490,7 @@ mod profiling_metadata_tests {
             query_id: "profiling-test".to_string(),
             timestamp: chrono::Utc::now(),
             results: vec![ResultDiff::Add {
-                data: json!({"id": "1"}),
+                data: json_to_query_variables(json!({"id": "1"})),
             }],
             metadata: HashMap::new(),
             profiling: Some(profiling),
@@ -530,7 +530,7 @@ mod profiling_metadata_tests {
             query_id: "no-profiling-test".to_string(),
             timestamp: chrono::Utc::now(),
             results: vec![ResultDiff::Add {
-                data: json!({"id": "1"}),
+                data: json_to_query_variables(json!({"id": "1"})),
             }],
             metadata: HashMap::new(),
             profiling: None, // No profiling data

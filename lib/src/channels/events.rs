@@ -353,6 +353,21 @@ pub enum ResultDiff {
     Noop,
 }
 
+/// Convert a `serde_json::Value` (expected to be an Object) to `QueryVariables`.
+///
+/// This is useful when constructing `ResultDiff` values from JSON in tests
+/// or when interfacing with code that produces `serde_json::Value`.
+pub fn json_to_query_variables(value: serde_json::Value) -> QueryVariables {
+    use drasi_core::evaluation::variable_value::VariableValue;
+    match value {
+        serde_json::Value::Object(map) => map
+            .into_iter()
+            .map(|(k, v)| (k.into_boxed_str(), VariableValue::from(v)))
+            .collect(),
+        _ => QueryVariables::new(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResult {
     pub query_id: String,

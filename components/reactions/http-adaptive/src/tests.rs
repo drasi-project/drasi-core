@@ -14,7 +14,7 @@
 
 #[cfg(test)]
 mod tests {
-    use drasi_lib::channels::{ComponentStatus, ResultDiff};
+    use drasi_lib::channels::{json_to_query_variables, ComponentStatus, ResultDiff};
     use drasi_lib::config::{ReactionConfig, ReactionSpecificConfig};
     use drasi_lib::reactions::common::AdaptiveBatchConfig as ConfigAdaptiveBatchConfig;
     use drasi_lib::reactions::http_adaptive::HttpAdaptiveReactionConfig;
@@ -117,12 +117,12 @@ mod tests {
             query_id: "test-query".to_string(),
             results: vec![
                 ResultDiff::Add {
-                    data: json!({"id": 1, "name": "Alice"}),
+                    data: json_to_query_variables(json!({"id": 1, "name": "Alice"})),
                 },
                 ResultDiff::Update {
-                    data: json!({"id": 2, "name": "Bob Updated"}),
-                    before: json!({"id": 2, "name": "Bob"}),
-                    after: json!({"id": 2, "name": "Bob Updated"}),
+                    data: json_to_query_variables(json!({"id": 2, "name": "Bob Updated"})),
+                    before: json_to_query_variables(json!({"id": 2, "name": "Bob"})),
+                    after: json_to_query_variables(json!({"id": 2, "name": "Bob Updated"})),
                     grouping_keys: None,
                 },
             ],
@@ -149,7 +149,7 @@ mod tests {
             BatchResult {
                 query_id: "query1".to_string(),
                 results: vec![ResultDiff::Add {
-                    data: json!({"id": 1}),
+                    data: json_to_query_variables(json!({"id": 1})),
                 }],
                 timestamp: "2025-10-19T12:34:56Z".to_string(),
                 count: 1,
@@ -158,13 +158,13 @@ mod tests {
                 query_id: "query2".to_string(),
                 results: vec![
                     ResultDiff::Update {
-                        data: json!({"id": 2}),
-                        before: json!({"id": 2}),
-                        after: json!({"id": 2}),
+                        data: json_to_query_variables(json!({"id": 2})),
+                        before: json_to_query_variables(json!({"id": 2})),
+                        after: json_to_query_variables(json!({"id": 2})),
                         grouping_keys: None,
                     },
                     ResultDiff::Delete {
-                        data: json!({"id": 3}),
+                        data: json_to_query_variables(json!({"id": 3})),
                     },
                 ],
                 timestamp: "2025-10-19T12:34:57Z".to_string(),
@@ -191,16 +191,16 @@ mod tests {
             query_id: "user-changes".to_string(),
             results: vec![
                 ResultDiff::Add {
-                    data: json!({"id": "user_123", "name": "John Doe"}),
+                    data: json_to_query_variables(json!({"id": "user_123", "name": "John Doe"})),
                 },
                 ResultDiff::Update {
-                    data: json!({"id": "user_456", "name": "Jane Smith"}),
-                    before: json!({"id": "user_456", "name": "Jane Doe"}),
-                    after: json!({"id": "user_456", "name": "Jane Smith"}),
+                    data: json_to_query_variables(json!({"id": "user_456", "name": "Jane Smith"})),
+                    before: json_to_query_variables(json!({"id": "user_456", "name": "Jane Doe"})),
+                    after: json_to_query_variables(json!({"id": "user_456", "name": "Jane Smith"})),
                     grouping_keys: None,
                 },
                 ResultDiff::Delete {
-                    data: json!({"id": "user_789", "name": "Bob Wilson"}),
+                    data: json_to_query_variables(json!({"id": "user_789", "name": "Bob Wilson"})),
                 },
             ],
             timestamp: "2025-10-19T12:34:56.789Z".to_string(),
@@ -215,7 +215,7 @@ mod tests {
 
         // Verify result types and structures
         match &batch_result.results[0] {
-            ResultDiff::Add { data } => assert!(data.is_object()),
+            ResultDiff::Add { data } => assert!(!data.is_empty()),
             _ => panic!("Expected add result"),
         }
         match &batch_result.results[1] {
@@ -225,14 +225,14 @@ mod tests {
                 after,
                 ..
             } => {
-                assert!(data.is_object());
-                assert!(before.is_object());
-                assert!(after.is_object());
+                assert!(!data.is_empty());
+                assert!(!before.is_empty());
+                assert!(!after.is_empty());
             }
             _ => panic!("Expected update result"),
         }
         match &batch_result.results[2] {
-            ResultDiff::Delete { data } => assert!(data.is_object()),
+            ResultDiff::Delete { data } => assert!(!data.is_empty()),
             _ => panic!("Expected delete result"),
         }
     }
@@ -265,13 +265,13 @@ mod tests {
         // Test that count field matches the actual number of results
         let results = vec![
             ResultDiff::Add {
-                data: json!({"id": 1}),
+                data: json_to_query_variables(json!({"id": 1})),
             },
             ResultDiff::Add {
-                data: json!({"id": 2}),
+                data: json_to_query_variables(json!({"id": 2})),
             },
             ResultDiff::Add {
-                data: json!({"id": 3}),
+                data: json_to_query_variables(json!({"id": 3})),
             },
         ];
 
@@ -397,7 +397,7 @@ mod tests {
         let mut results = Vec::new();
         for i in 0..1000 {
             results.push(ResultDiff::Add {
-                data: json!({"id": i, "value": format!("item_{}", i)}),
+                data: json_to_query_variables(json!({"id": i, "value": format!("item_{}", i)})),
             });
         }
 
