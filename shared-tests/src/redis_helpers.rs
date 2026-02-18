@@ -141,7 +141,7 @@ impl Drop for RedisGuardInner {
                         .enable_all()
                         .build();
                     if let Ok(rt) = rt {
-                        let _ = rt.block_on(async move {
+                        rt.block_on(async move {
                             let _ = container.stop().await;
                         });
                     }

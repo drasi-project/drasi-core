@@ -30,8 +30,10 @@ async fn test_spawn_blocking_on_current_thread() {
         // Simulate synchronous database operation (like RocksDB)
         std::thread::sleep(std::time::Duration::from_millis(10));
         42
-    }).await.expect("spawn_blocking should work on current_thread runtime");
-    
+    })
+    .await
+    .expect("spawn_blocking should work on current_thread runtime");
+
     assert_eq!(result, 42);
 }
 
@@ -43,8 +45,10 @@ async fn test_spawn_blocking_on_multi_thread() {
     let result = tokio::task::spawn_blocking(|| {
         std::thread::sleep(std::time::Duration::from_millis(10));
         42
-    }).await.expect("spawn_blocking should work on multi_thread runtime");
-    
+    })
+    .await
+    .expect("spawn_blocking should work on multi_thread runtime");
+
     assert_eq!(result, 42);
 }
 
@@ -54,12 +58,14 @@ async fn test_spawn_blocking_on_multi_thread() {
 /// even when the async executor is single-threaded.
 #[tokio::test(flavor = "current_thread")]
 async fn test_concurrent_spawn_blocking_current_thread() {
-    let handles: Vec<_> = (0..5).map(|i| {
-        tokio::task::spawn_blocking(move || {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            i * 2
+    let handles: Vec<_> = (0..5)
+        .map(|i| {
+            tokio::task::spawn_blocking(move || {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                i * 2
+            })
         })
-    }).collect();
+        .collect();
 
     let mut results = Vec::new();
     for handle in handles {
@@ -74,12 +80,14 @@ async fn test_concurrent_spawn_blocking_current_thread() {
 /// Verifies concurrent blocking operations work on multi-threaded runtime.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_concurrent_spawn_blocking_multi_thread() {
-    let handles: Vec<_> = (0..5).map(|i| {
-        tokio::task::spawn_blocking(move || {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            i * 2
+    let handles: Vec<_> = (0..5)
+        .map(|i| {
+            tokio::task::spawn_blocking(move || {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                i * 2
+            })
         })
-    }).collect();
+        .collect();
 
     let mut results = Vec::new();
     for handle in handles {
@@ -98,18 +106,20 @@ async fn test_cooperative_multitasking_current_thread() {
     use std::sync::Arc;
 
     let counter = Arc::new(AtomicU32::new(0));
-    
+
     // Spawn multiple tasks that will cooperatively yield
-    let handles: Vec<_> = (0..5).map(|_| {
-        let counter = counter.clone();
-        tokio::spawn(async move {
-            for _ in 0..10 {
-                counter.fetch_add(1, Ordering::Relaxed);
-                // Yield point - allows other tasks to run
-                tokio::time::sleep(std::time::Duration::from_micros(1)).await;
-            }
+    let handles: Vec<_> = (0..5)
+        .map(|_| {
+            let counter = counter.clone();
+            tokio::spawn(async move {
+                for _ in 0..10 {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    // Yield point - allows other tasks to run
+                    tokio::time::sleep(std::time::Duration::from_micros(1)).await;
+                }
+            })
         })
-    }).collect();
+        .collect();
 
     // Wait for all tasks
     for handle in handles {
@@ -128,17 +138,19 @@ async fn test_cooperative_multitasking_multi_thread() {
     use std::sync::Arc;
 
     let counter = Arc::new(AtomicU32::new(0));
-    
+
     // Spawn multiple tasks
-    let handles: Vec<_> = (0..5).map(|_| {
-        let counter = counter.clone();
-        tokio::spawn(async move {
-            for _ in 0..10 {
-                counter.fetch_add(1, Ordering::Relaxed);
-                tokio::time::sleep(std::time::Duration::from_micros(1)).await;
-            }
+    let handles: Vec<_> = (0..5)
+        .map(|_| {
+            let counter = counter.clone();
+            tokio::spawn(async move {
+                for _ in 0..10 {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    tokio::time::sleep(std::time::Duration::from_micros(1)).await;
+                }
+            })
         })
-    }).collect();
+        .collect();
 
     // Wait for all tasks
     for handle in handles {
