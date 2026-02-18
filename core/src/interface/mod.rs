@@ -32,6 +32,7 @@ pub use future_queue::FutureQueue;
 pub use future_queue::FutureQueueConsumer;
 pub use future_queue::PushType;
 pub use index_backend::IndexBackendPlugin;
+pub use index_backend::IndexSet;
 pub use query_clock::QueryClock;
 pub use result_index::AccumulatorIndex;
 pub use result_index::LazySortedSetStore;

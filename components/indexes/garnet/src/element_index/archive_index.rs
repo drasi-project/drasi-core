@@ -30,9 +30,9 @@ use crate::{
 
 use super::GarnetElementIndex;
 
-/// Redis key structure:
+/// Redis key structure (hash-tagged for cluster compatibility):
 ///
-/// archive:{query_id}:{source_id}:{element_id} -> [element (sorted by ts)]
+/// archive:{<query_id>}:{source_id}:{element_id} -> [element (sorted by ts)]
 #[async_trait]
 impl ElementArchiveIndex for GarnetElementIndex {
     async fn get_element_as_at(
@@ -130,7 +130,7 @@ impl ElementArchiveIndex for GarnetElementIndex {
 
     async fn clear(&self) -> Result<(), IndexError> {
         self.connection
-            .clear(format!("archive:{}:*", self.query_id))
+            .clear(format!("archive:{{{}}}:*", self.query_id))
             .await
     }
 }

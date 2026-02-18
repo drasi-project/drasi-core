@@ -27,14 +27,42 @@
 //! - **Applications** optionally inject plugins; if none provided, the in-memory default is used
 
 use async_trait::async_trait;
+use std::fmt;
 use std::sync::Arc;
 
 use super::{ElementArchiveIndex, ElementIndex, FutureQueue, IndexError, ResultIndex};
 
+/// Set of indexes for a query.
+///
+/// Groups the four index types needed for query evaluation into a single unit.
+/// This enables backends to create all indexes from a shared underlying resource
+/// (e.g., a single RocksDB instance or Redis connection).
+pub struct IndexSet {
+    /// Element index for storing graph elements
+    pub element_index: Arc<dyn ElementIndex>,
+    /// Archive index for storing historical elements (for past() function)
+    pub archive_index: Arc<dyn ElementArchiveIndex>,
+    /// Result index for storing query results
+    pub result_index: Arc<dyn ResultIndex>,
+    /// Future queue for temporal queries
+    pub future_queue: Arc<dyn FutureQueue>,
+}
+
+impl fmt::Debug for IndexSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IndexSet")
+            .field("element_index", &"<trait object>")
+            .field("archive_index", &"<trait object>")
+            .field("result_index", &"<trait object>")
+            .field("future_queue", &"<trait object>")
+            .finish()
+    }
+}
+
 /// Plugin trait for external index storage backends.
 ///
 /// Each storage backend (RocksDB, Garnet, etc.) implements this trait to provide
-/// the four index types needed for query evaluation.
+/// all index types needed for query evaluation from a single shared backend instance.
 ///
 /// # Thread Safety
 ///
@@ -43,7 +71,7 @@ use super::{ElementArchiveIndex, ElementIndex, FutureQueue, IndexError, ResultIn
 /// # Example
 ///
 /// ```ignore
-/// use drasi_core::interface::IndexBackendPlugin;
+/// use drasi_core::interface::{IndexBackendPlugin, IndexSet};
 ///
 /// pub struct MyIndexProvider {
 ///     // configuration fields
@@ -51,45 +79,21 @@ use super::{ElementArchiveIndex, ElementIndex, FutureQueue, IndexError, ResultIn
 ///
 /// #[async_trait]
 /// impl IndexBackendPlugin for MyIndexProvider {
-///     async fn create_element_index(&self, query_id: &str) -> Result<Arc<dyn ElementIndex>, IndexError> {
-///         // Create and return your element index implementation
+///     async fn create_index_set(&self, query_id: &str) -> Result<IndexSet, IndexError> {
+///         // Create and return all indexes from a shared backend instance
 ///     }
-///     // ... other methods
+///     fn is_volatile(&self) -> bool { false }
 /// }
 /// ```
 #[async_trait]
 pub trait IndexBackendPlugin: Send + Sync {
-    /// Create an ElementIndex instance for the given query.
+    /// Create all indexes for a query from a single shared backend instance.
     ///
-    /// The element index manages the current graph elements (nodes and relationships)
-    /// for a specific query. Each query gets its own isolated index instance.
-    async fn create_element_index(
-        &self,
-        query_id: &str,
-    ) -> Result<Arc<dyn ElementIndex>, IndexError>;
-
-    /// Create an ElementArchiveIndex instance for the given query.
-    ///
-    /// The archive index supports point-in-time queries and version history,
-    /// enabling the `past()` function in Cypher queries.
-    async fn create_archive_index(
-        &self,
-        query_id: &str,
-    ) -> Result<Arc<dyn ElementArchiveIndex>, IndexError>;
-
-    /// Create a ResultIndex instance for the given query.
-    ///
-    /// The result index stores accumulated query results and aggregations,
-    /// supporting efficient incremental computation.
-    async fn create_result_index(&self, query_id: &str)
-        -> Result<Arc<dyn ResultIndex>, IndexError>;
-
-    /// Create a FutureQueue instance for the given query.
-    ///
-    /// The future queue manages temporal queries and scheduled operations,
-    /// enabling time-based query features.
-    async fn create_future_queue(&self, query_id: &str)
-        -> Result<Arc<dyn FutureQueue>, IndexError>;
+    /// This method creates the element index, archive index, result index, and
+    /// future queue backed by a shared storage resource (e.g., a single RocksDB
+    /// database or Redis connection). This reduces resource overhead and enables
+    /// cross-index atomic transactions.
+    async fn create_index_set(&self, query_id: &str) -> Result<IndexSet, IndexError>;
 
     /// Returns true if this backend is volatile (data lost on restart).
     ///
