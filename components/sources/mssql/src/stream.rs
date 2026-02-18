@@ -453,7 +453,7 @@ async fn query_table_changes(
 
     // Tiberius uses @P1, @P2, etc. for positional parameters
     let query = format!(
-        "SELECT * FROM cdc.fn_cdc_get_all_changes_{capture_instance}(@P1, @P2, 'all') ORDER BY __$start_lsn, __$seqval"
+        "SELECT * FROM cdc.fn_cdc_get_all_changes_{capture_instance}(@P1, @P2, 'all') ORDER BY __$start_lsn, __$seqval, __$operation"
     );
 
     debug!("CDC query: {query}");
