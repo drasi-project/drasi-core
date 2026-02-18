@@ -710,7 +710,7 @@ impl PostgresBootstrapHandler {
         let metadata = ElementMetadata {
             reference: ElementReference::new(&self.source_id, &elem_id),
             labels: Arc::from(vec![Arc::from(table)]),
-            effective_from: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64,
+            effective_from: chrono::Utc::now().timestamp_millis() as u64,
         };
 
         let element = Element::Node {
