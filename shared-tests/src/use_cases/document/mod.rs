@@ -27,6 +27,7 @@ use drasi_core::{
 use drasi_functions_cypher::CypherFunctionSet;
 use drasi_query_cypher::CypherParser;
 
+use super::{contains_data, IGNORED_ROW_SIGNATURE};
 use crate::QueryTestConfig;
 
 mod queries;
@@ -146,17 +147,21 @@ pub async fn document(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
         println!("Node Result - Add t1: {result:?}");
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-                "name" => VariableValue::from(json!("pod-1")),
-                "namespace" => VariableValue::from(json!("default")),
-                "app" => VariableValue::from(json!("nginx")),
-                "app_id" => VariableValue::from(json!("my-app")),
-                "app_id2" => VariableValue::from(json!("my-app")),
-                "container_0_image" => VariableValue::from(json!("nginx:latest")),
-                "total_restart_count" => VariableValue::from(json!(5)),
-                "sidecar_container_id" => VariableValue::from(json!("docker://0987654321"))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                    "name" => VariableValue::from(json!("pod-1")),
+                    "namespace" => VariableValue::from(json!("default")),
+                    "app" => VariableValue::from(json!("nginx")),
+                    "app_id" => VariableValue::from(json!("my-app")),
+                    "app_id2" => VariableValue::from(json!("my-app")),
+                    "container_0_image" => VariableValue::from(json!("nginx:latest")),
+                    "total_restart_count" => VariableValue::from(json!(5)),
+                    "sidecar_container_id" => VariableValue::from(json!("docker://0987654321"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }

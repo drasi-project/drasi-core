@@ -31,6 +31,7 @@ use drasi_core::{
 use drasi_functions_cypher::CypherFunctionSet;
 use drasi_query_cypher::CypherParser;
 
+use super::{contains_data, IGNORED_ROW_SIGNATURE};
 use crate::QueryTestConfig;
 
 mod queries;
@@ -94,12 +95,16 @@ pub async fn overdue_invoice(config: &(impl QueryTestConfig + Send)) {
         let result = fqc.recv(std::time::Duration::from_secs(5)).await.unwrap();
 
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-                "invoiceNumber" => VariableValue::String("INV1".into()),
-                "invoiceDate" => VariableValue::String("2020-01-01".into())
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                    "invoiceNumber" => VariableValue::String("INV1".into()),
+                    "invoiceDate" => VariableValue::String("2020-01-01".into())
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //pay invoice
@@ -120,12 +125,16 @@ pub async fn overdue_invoice(config: &(impl QueryTestConfig + Send)) {
         let result = cq.process_source_change(change.clone()).await.unwrap();
 
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Removing {
-            before: variablemap!(
-                "invoiceNumber" => VariableValue::String("INV1".into()),
-                "invoiceDate" => VariableValue::String("2020-01-01".into())
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
+                    "invoiceNumber" => VariableValue::String("INV1".into()),
+                    "invoiceDate" => VariableValue::String("2020-01-01".into())
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }
 
@@ -221,11 +230,15 @@ pub async fn overdue_count_persistent(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
         println!("later: {result:?}");
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-                "count" => VariableValue::Integer(3.into())
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                    "count" => VariableValue::Integer(3.into())
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //pay invoice
@@ -246,10 +259,14 @@ pub async fn overdue_count_persistent(config: &(impl QueryTestConfig + Send)) {
         let result = cq.process_source_change(change.clone()).await.unwrap();
 
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Removing {
-            before: variablemap!(
-                "count" => VariableValue::Integer(3.into())
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
+                    "count" => VariableValue::Integer(3.into())
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }

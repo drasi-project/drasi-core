@@ -20,6 +20,9 @@ use crate::evaluation::{functions::FunctionRegistry, InstantQueryClock};
 
 use super::*;
 
+/// Placeholder for `row_signature` in test assertions — ignored during comparison.
+const IGNORED_ROW_SIGNATURE: u64 = 0;
+
 macro_rules! variablemap {
   ($( $key: expr => $val: expr ),*) => {{
        let mut map = ::std::collections::BTreeMap::new();

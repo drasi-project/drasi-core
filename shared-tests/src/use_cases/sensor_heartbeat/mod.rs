@@ -33,6 +33,7 @@ use drasi_core::{
 use drasi_functions_cypher::CypherFunctionSet;
 use drasi_query_cypher::CypherParser;
 
+use super::{contains_data, IGNORED_ROW_SIGNATURE};
 use crate::QueryTestConfig;
 
 use self::data::get_bootstrap_data;
@@ -132,29 +133,41 @@ pub async fn not_reported(config: &(impl QueryTestConfig + Send)) {
         assert_eq!(fqc.recv(std::time::Duration::from_millis(100)).await, None); // no more results
         assert_eq!(results.len(), 3);
 
-        assert!(results.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-                "equipment" => VariableValue::String("Turbine 1".into()),
-                "sensor" => VariableValue::String("Temp".into()),
-                "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(time0 as i64))
-            ),
-        }));
+        assert!(contains_data(
+            &results,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                    "equipment" => VariableValue::String("Turbine 1".into()),
+                    "sensor" => VariableValue::String("Temp".into()),
+                    "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(time0 as i64))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
-        assert!(results.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-                "equipment" => VariableValue::String("Turbine 2".into()),
-                "sensor" => VariableValue::String("Temp".into()),
-                "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(time0 as i64))
-            ),
-        }));
+        assert!(contains_data(
+            &results,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                    "equipment" => VariableValue::String("Turbine 2".into()),
+                    "sensor" => VariableValue::String("Temp".into()),
+                    "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(time0 as i64))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
-        assert!(results.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-                "equipment" => VariableValue::String("Turbine 2".into()),
-                "sensor" => VariableValue::String("RPM".into()),
-                "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(time0 as i64))
-            ),
-        }));
+        assert!(contains_data(
+            &results,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                    "equipment" => VariableValue::String("Turbine 2".into()),
+                    "sensor" => VariableValue::String("RPM".into()),
+                    "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(time0 as i64))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //add sensor value for Turbine 2 / RPM
@@ -191,13 +204,17 @@ pub async fn not_reported(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Removing {
-            before: variablemap!(
-                "equipment" => VariableValue::String("Turbine 2".into()),
-                "sensor" => VariableValue::String("RPM".into()),
-                "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(init_time.and_utc().timestamp_millis()))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
+                    "equipment" => VariableValue::String("Turbine 2".into()),
+                    "sensor" => VariableValue::String("RPM".into()),
+                    "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(init_time.and_utc().timestamp_millis()))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //jump forward another 30 minutes
@@ -207,13 +224,17 @@ pub async fn not_reported(config: &(impl QueryTestConfig + Send)) {
         assert_eq!(fqc.recv(std::time::Duration::from_millis(100)).await, None); // no additional results
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-                "equipment" => VariableValue::String("Turbine 1".into()),
-                "sensor" => VariableValue::String("RPM".into()),
-                "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(time1 as i64))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                    "equipment" => VariableValue::String("Turbine 1".into()),
+                    "sensor" => VariableValue::String("RPM".into()),
+                    "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(time1 as i64))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //add sensor value for for each sensor
@@ -404,29 +425,41 @@ pub async fn not_reported_with_true_now_or_later(config: &(impl QueryTestConfig 
         assert_eq!(fqc.recv(std::time::Duration::from_millis(100)).await, None); // no more results
         assert_eq!(results.len(), 3);
 
-        assert!(results.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-                "equipment" => VariableValue::String("Turbine 1".into()),
-                "sensor" => VariableValue::String("Temp".into()),
-                "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(time0 as i64))
-            ),
-        }));
+        assert!(contains_data(
+            &results,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                    "equipment" => VariableValue::String("Turbine 1".into()),
+                    "sensor" => VariableValue::String("Temp".into()),
+                    "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(time0 as i64))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
-        assert!(results.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-                "equipment" => VariableValue::String("Turbine 2".into()),
-                "sensor" => VariableValue::String("Temp".into()),
-                "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(time0 as i64))
-            ),
-        }));
+        assert!(contains_data(
+            &results,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                    "equipment" => VariableValue::String("Turbine 2".into()),
+                    "sensor" => VariableValue::String("Temp".into()),
+                    "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(time0 as i64))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
-        assert!(results.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-                "equipment" => VariableValue::String("Turbine 2".into()),
-                "sensor" => VariableValue::String("RPM".into()),
-                "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(time0 as i64))
-            ),
-        }));
+        assert!(contains_data(
+            &results,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                    "equipment" => VariableValue::String("Turbine 2".into()),
+                    "sensor" => VariableValue::String("RPM".into()),
+                    "last_ts" => VariableValue::ZonedDateTime(ZonedDateTime::from_epoch_millis(time0 as i64))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }
 
@@ -472,27 +505,25 @@ pub async fn percent_not_reported(config: &(impl QueryTestConfig + Send)) {
         }
 
         assert_eq!(fqc.recv(std::time::Duration::from_millis(100)).await, None); // no more results
-        assert_eq!(
-            results,
-            vec![
-                QueryPartEvaluationContext::Updating {
-                    before: variablemap!(
-                        "percent_not_reporting" => VariableValue::from(json!(0.0))
-                    ),
-                    after: variablemap!(
-                        "percent_not_reporting" => VariableValue::from(json!(50.0))
-                    )
-                },
-                QueryPartEvaluationContext::Updating {
-                    before: variablemap!(
-                        "percent_not_reporting" => VariableValue::from(json!(50.0))
-                    ),
-                    after: variablemap!(
-                        "percent_not_reporting" => VariableValue::from(json!(100.0))
-                    )
-                },
-            ]
-        );
+        assert_eq!(results.len(), 2);
+        assert!(results[0].data_eq(&QueryPartEvaluationContext::Updating {
+            before: variablemap!(
+                "percent_not_reporting" => VariableValue::from(json!(0.0))
+            ),
+            after: variablemap!(
+                "percent_not_reporting" => VariableValue::from(json!(50.0))
+            ),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }));
+        assert!(results[1].data_eq(&QueryPartEvaluationContext::Updating {
+            before: variablemap!(
+                "percent_not_reporting" => VariableValue::from(json!(50.0))
+            ),
+            after: variablemap!(
+                "percent_not_reporting" => VariableValue::from(json!(100.0))
+            ),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }));
     }
 
     //add sensor value for Turbine 1 - RPM
@@ -528,14 +559,18 @@ pub async fn percent_not_reported(config: &(impl QueryTestConfig + Send)) {
         let result = cq.process_source_change(value_rel.clone()).await.unwrap();
 
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {
-            before: variablemap!(
-                "percent_not_reporting" => VariableValue::from(json!(100.0))
-            ),
-            after: variablemap!(
-                "percent_not_reporting" => VariableValue::from(json!(50.0))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                    "percent_not_reporting" => VariableValue::from(json!(100.0))
+                ),
+                after: variablemap!(
+                    "percent_not_reporting" => VariableValue::from(json!(50.0))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //add sensor value for Turbine 1 - Temp
@@ -613,17 +648,16 @@ pub async fn percent_not_reported(config: &(impl QueryTestConfig + Send)) {
 
         let result = cq.process_source_change(value_rel.clone()).await.unwrap();
 
-        assert_eq!(
-            result,
-            vec![QueryPartEvaluationContext::Updating {
-                before: variablemap!(
-                    "percent_not_reporting" => VariableValue::from(json!(50.0))
-                ),
-                after: variablemap!(
-                    "percent_not_reporting" => VariableValue::from(json!(0.0))
-                )
-            }]
-        );
+        assert_eq!(result.len(), 1);
+        assert!(result[0].data_eq(&QueryPartEvaluationContext::Updating {
+            before: variablemap!(
+                "percent_not_reporting" => VariableValue::from(json!(50.0))
+            ),
+            after: variablemap!(
+                "percent_not_reporting" => VariableValue::from(json!(0.0))
+            ),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }));
     }
 
     //jump forward another 30 minutes
@@ -632,17 +666,16 @@ pub async fn percent_not_reported(config: &(impl QueryTestConfig + Send)) {
         let result = fqc.recv(std::time::Duration::from_secs(5)).await.unwrap();
         assert_eq!(fqc.recv(std::time::Duration::from_millis(100)).await, None); // no additional results
 
-        assert_eq!(
-            result,
-            vec![QueryPartEvaluationContext::Updating {
-                before: variablemap!(
-                    "percent_not_reporting" => VariableValue::from(json!(0.0))
-                ),
-                after: variablemap!(
-                    "percent_not_reporting" => VariableValue::from(json!(50.0))
-                )
-            }]
-        );
+        assert_eq!(result.len(), 1);
+        assert!(result[0].data_eq(&QueryPartEvaluationContext::Updating {
+            before: variablemap!(
+                "percent_not_reporting" => VariableValue::from(json!(0.0))
+            ),
+            after: variablemap!(
+                "percent_not_reporting" => VariableValue::from(json!(50.0))
+            ),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }));
     }
 
     //jump forward another 30 minutes
@@ -651,17 +684,16 @@ pub async fn percent_not_reported(config: &(impl QueryTestConfig + Send)) {
         let result = fqc.recv(std::time::Duration::from_secs(5)).await.unwrap();
         assert_eq!(fqc.recv(std::time::Duration::from_millis(100)).await, None); // no additional results
 
-        assert_eq!(
-            result,
-            vec![QueryPartEvaluationContext::Updating {
-                before: variablemap!(
-                    "percent_not_reporting" => VariableValue::from(json!(50.0))
-                ),
-                after: variablemap!(
-                    "percent_not_reporting" => VariableValue::from(json!(100.0))
-                )
-            }]
-        );
+        assert_eq!(result.len(), 1);
+        assert!(result[0].data_eq(&QueryPartEvaluationContext::Updating {
+            before: variablemap!(
+                "percent_not_reporting" => VariableValue::from(json!(50.0))
+            ),
+            after: variablemap!(
+                "percent_not_reporting" => VariableValue::from(json!(100.0))
+            ),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }));
     }
 
     println!("-----------------------------------");
@@ -730,16 +762,15 @@ pub async fn percent_not_reported(config: &(impl QueryTestConfig + Send)) {
 
         let result = cq.process_source_change(value_rel.clone()).await.unwrap();
 
-        assert_eq!(
-            result,
-            vec![QueryPartEvaluationContext::Updating {
-                before: variablemap!(
-                    "percent_not_reporting" => VariableValue::from(json!(100.0))
-                ),
-                after: variablemap!(
-                    "percent_not_reporting" => VariableValue::from(json!(50.0))
-                )
-            }]
-        );
+        assert_eq!(result.len(), 1);
+        assert!(result[0].data_eq(&QueryPartEvaluationContext::Updating {
+            before: variablemap!(
+                "percent_not_reporting" => VariableValue::from(json!(100.0))
+            ),
+            after: variablemap!(
+                "percent_not_reporting" => VariableValue::from(json!(50.0))
+            ),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }));
     }
 }
