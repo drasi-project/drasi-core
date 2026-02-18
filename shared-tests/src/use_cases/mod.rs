@@ -13,7 +13,19 @@
 // limitations under the License.
 
 use async_trait::async_trait;
-use drasi_core::query::QueryBuilder;
+use drasi_core::{evaluation::context::QueryPartEvaluationContext, query::QueryBuilder};
+
+/// Placeholder for `row_signature` in test assertions. The `data_eq()` method
+/// and `contains_data()` helper ignore this field when comparing results.
+pub const IGNORED_ROW_SIGNATURE: u64 = 0;
+
+/// Checks if any result context matches the expected data, ignoring `row_signature`.
+pub fn contains_data(
+    results: &[QueryPartEvaluationContext],
+    expected: &QueryPartEvaluationContext,
+) -> bool {
+    results.iter().any(|ctx| ctx.data_eq(expected))
+}
 
 pub mod building_comfort;
 pub mod collect_aggregation;
