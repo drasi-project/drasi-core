@@ -701,14 +701,14 @@ impl Query for DrasiQuery {
                                         let mut result_set = current_results_clone.write().await;
                                         for ctx in &results {
                                             match ctx {
-                                                QueryPartEvaluationContext::Adding { after } => {
+                                                QueryPartEvaluationContext::Adding { after, .. } => {
                                                     result_set.push(convert_query_variables_to_json(after));
                                                 }
-                                                QueryPartEvaluationContext::Removing { before } => {
+                                                QueryPartEvaluationContext::Removing { before, .. } => {
                                                     let data = convert_query_variables_to_json(before);
                                                     result_set.retain(|item| item != &data);
                                                 }
-                                                QueryPartEvaluationContext::Updating { before, after } => {
+                                                QueryPartEvaluationContext::Updating { before, after, .. } => {
                                                     let before_json = convert_query_variables_to_json(before);
                                                     let after_json = convert_query_variables_to_json(after);
                                                     if let Some(pos) = result_set.iter().position(|item| item == &before_json) {
@@ -1029,13 +1029,13 @@ impl Query for DrasiQuery {
                                 let converted_results: Vec<ResultDiff> = results
                                     .iter()
                                     .map(|ctx| match ctx {
-                                        QueryPartEvaluationContext::Adding { after } => {
+                                        QueryPartEvaluationContext::Adding { after, .. } => {
                                             debug!("Query '{query_id}' got Adding context");
                                             ResultDiff::Add {
                                                 data: convert_query_variables_to_json(after),
                                             }
                                         }
-                                    QueryPartEvaluationContext::Removing { before } => {
+                                    QueryPartEvaluationContext::Removing { before, .. } => {
                                         debug!(
                                             "Query '{query_id}' got Removing context"
                                         );
@@ -1043,7 +1043,7 @@ impl Query for DrasiQuery {
                                             data: convert_query_variables_to_json(before),
                                         }
                                     }
-                                    QueryPartEvaluationContext::Updating { before, after } => {
+                                    QueryPartEvaluationContext::Updating { before, after, .. } => {
                                         debug!("Query '{query_id}' got Updating context");
                                         ResultDiff::Update {
                                             data: convert_query_variables_to_json(after),
