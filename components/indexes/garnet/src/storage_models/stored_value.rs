@@ -188,9 +188,7 @@ impl From<&ElementValue> for StoredValueContainer {
                 value: Some(StoredValue::Object(o.into())),
             },
             ElementValue::LocalDateTime(dt) => StoredValueContainer {
-                value: Some(StoredValue::LocalDateTime(
-                    dt.and_utc().timestamp_micros(),
-                )),
+                value: Some(StoredValue::LocalDateTime(dt.and_utc().timestamp_micros())),
             },
             ElementValue::ZonedDateTime(dt) => StoredValueContainer {
                 value: Some(StoredValue::ZonedDateTime(StoredZonedDateTime {
@@ -223,8 +221,8 @@ impl From<StoredValueContainer> for ElementValue {
             Some(StoredValue::ZonedDateTime(zdt)) => {
                 let offset = FixedOffset::east_opt(zdt.offset_seconds)
                     .unwrap_or_else(|| FixedOffset::east_opt(0).unwrap());
-                let utc_dt = DateTime::from_timestamp_micros(zdt.timestamp_micros)
-                    .unwrap_or_default();
+                let utc_dt =
+                    DateTime::from_timestamp_micros(zdt.timestamp_micros).unwrap_or_default();
                 let dt = offset.from_utc_datetime(&utc_dt.naive_utc());
                 ElementValue::ZonedDateTime(dt)
             }
@@ -268,9 +266,7 @@ mod tests {
     #[test]
     fn roundtrip_zoned_datetime() {
         let offset = FixedOffset::east_opt(5 * 3600 + 1800).unwrap(); // +05:30
-        let dt = offset
-            .with_ymd_and_hms(2024, 1, 15, 14, 30, 0)
-            .unwrap();
+        let dt = offset.with_ymd_and_hms(2024, 1, 15, 14, 30, 0).unwrap();
         let original = ElementValue::ZonedDateTime(dt);
 
         // Serialize to StoredValueContainer
@@ -297,9 +293,7 @@ mod tests {
     #[test]
     fn roundtrip_zoned_datetime_negative_offset() {
         let offset = FixedOffset::west_opt(8 * 3600).unwrap(); // -08:00 (PST)
-        let dt = offset
-            .with_ymd_and_hms(2024, 12, 25, 0, 0, 0)
-            .unwrap();
+        let dt = offset.with_ymd_and_hms(2024, 12, 25, 0, 0, 0).unwrap();
         let original = ElementValue::ZonedDateTime(dt);
 
         let stored: StoredValueContainer = (&original).into();
@@ -320,9 +314,7 @@ mod tests {
     #[test]
     fn roundtrip_zoned_datetime_utc() {
         let offset = FixedOffset::east_opt(0).unwrap(); // UTC
-        let dt = offset
-            .with_ymd_and_hms(2024, 3, 1, 12, 0, 0)
-            .unwrap();
+        let dt = offset.with_ymd_and_hms(2024, 3, 1, 12, 0, 0).unwrap();
         let original = ElementValue::ZonedDateTime(dt);
 
         let stored: StoredValueContainer = (&original).into();
@@ -356,9 +348,7 @@ mod tests {
     #[test]
     fn zoned_datetime_not_stored_as_string() {
         let offset = FixedOffset::east_opt(3600).unwrap();
-        let dt = offset
-            .with_ymd_and_hms(2024, 6, 15, 10, 30, 45)
-            .unwrap();
+        let dt = offset.with_ymd_and_hms(2024, 6, 15, 10, 30, 45).unwrap();
         let original = ElementValue::ZonedDateTime(dt);
         let stored: StoredValueContainer = (&original).into();
 

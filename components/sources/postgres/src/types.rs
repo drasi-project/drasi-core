@@ -460,7 +460,10 @@ mod tests {
             .unwrap();
         let cdc = PostgresValue::Timestamp(dt).to_element_value();
         let bootstrap = decode_column_value_text("2024-06-15 10:30:45", 1114).unwrap();
-        assert_eq!(cdc, bootstrap, "timestamp (no frac): CDC vs bootstrap mismatch");
+        assert_eq!(
+            cdc, bootstrap,
+            "timestamp (no frac): CDC vs bootstrap mismatch"
+        );
     }
 
     #[test]
@@ -486,8 +489,7 @@ mod tests {
         let cdc = PostgresValue::TimestampTz(utc_dt).to_element_value();
 
         // Same instant expressed as +02:00 → 10:30:45+02:00
-        let bootstrap =
-            decode_column_value_text("2024-06-15T10:30:45+02:00", 1184).unwrap();
+        let bootstrap = decode_column_value_text("2024-06-15T10:30:45+02:00", 1184).unwrap();
 
         // Both are ZonedDateTime
         match (&cdc, &bootstrap) {
@@ -507,8 +509,8 @@ mod tests {
 
     #[test]
     fn parity_date() {
-        let cdc = PostgresValue::Date(NaiveDate::from_ymd_opt(2024, 6, 15).unwrap())
-            .to_element_value();
+        let cdc =
+            PostgresValue::Date(NaiveDate::from_ymd_opt(2024, 6, 15).unwrap()).to_element_value();
         let bootstrap = decode_column_value_text("2024-06-15", 1082).unwrap();
         assert_eq!(cdc, bootstrap, "date: CDC vs bootstrap mismatch");
     }

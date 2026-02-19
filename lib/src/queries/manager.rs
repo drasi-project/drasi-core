@@ -722,7 +722,7 @@ impl Query for DrasiQuery {
                                                     let after_json = convert_query_variables_to_json(after);
                                                     if let Some(before) = before {
                                                         let before_json = convert_query_variables_to_json(before);
-                                                        if let Some(pos) = find_by_grouping_keys(&result_set, &before_json, &grouping_keys) {
+                                                        if let Some(pos) = find_by_grouping_keys(&result_set, &before_json, grouping_keys) {
                                                             result_set[pos] = after_json;
                                                         } else {
                                                             result_set.push(after_json);
@@ -1693,11 +1693,7 @@ mod aggregation_result_tests {
         ];
         let target = json!({"region": "us-west", "count": 999});
 
-        let pos = find_by_grouping_keys(
-            &result_set,
-            &target,
-            &["region".to_string()],
-        );
+        let pos = find_by_grouping_keys(&result_set, &target, &["region".to_string()]);
         assert_eq!(pos, Some(1), "Should match on region key, ignoring count");
     }
 
@@ -1726,20 +1722,13 @@ mod aggregation_result_tests {
         ];
         let target = json!({"region": "eu-west", "count": 5});
 
-        let pos = find_by_grouping_keys(
-            &result_set,
-            &target,
-            &["region".to_string()],
-        );
+        let pos = find_by_grouping_keys(&result_set, &target, &["region".to_string()]);
         assert_eq!(pos, None);
     }
 
     #[test]
     fn find_by_grouping_keys_empty_keys_uses_exact_match() {
-        let result_set = vec![
-            json!({"count": 10}),
-            json!({"count": 20}),
-        ];
+        let result_set = vec![json!({"count": 10}), json!({"count": 20})];
 
         // Exact match succeeds
         let pos = find_by_grouping_keys(&result_set, &json!({"count": 20}), &[]);
@@ -1768,11 +1757,7 @@ mod aggregation_result_tests {
         ];
         let target = json!({"region": "us-east", "count": 50});
 
-        let pos = find_by_grouping_keys(
-            &result_set,
-            &target,
-            &["region".to_string()],
-        );
+        let pos = find_by_grouping_keys(&result_set, &target, &["region".to_string()]);
         assert_eq!(pos, Some(0), "Should return the first matching row");
     }
 
@@ -1782,11 +1767,7 @@ mod aggregation_result_tests {
         let target = json!({"count": 10}); // no "region" key
 
         // Both item.get("region")=Some and target.get("region")=None → not equal → no match
-        let pos = find_by_grouping_keys(
-            &result_set,
-            &target,
-            &["region".to_string()],
-        );
+        let pos = find_by_grouping_keys(&result_set, &target, &["region".to_string()]);
         assert_eq!(pos, None);
     }
 
@@ -1796,11 +1777,7 @@ mod aggregation_result_tests {
         let target = json!({"count": 20}); // no "region"
 
         // Both return None for "region" → None == None → match
-        let pos = find_by_grouping_keys(
-            &result_set,
-            &target,
-            &["region".to_string()],
-        );
+        let pos = find_by_grouping_keys(&result_set, &target, &["region".to_string()]);
         assert_eq!(pos, Some(0));
     }
 
@@ -1810,10 +1787,7 @@ mod aggregation_result_tests {
     // ========================================================================
 
     /// Apply an aggregation result to a result_set using the same logic as the CDC path
-    fn apply_aggregation(
-        result_set: &mut Vec<serde_json::Value>,
-        diff: &ResultDiff,
-    ) {
+    fn apply_aggregation(result_set: &mut Vec<serde_json::Value>, diff: &ResultDiff) {
         if let ResultDiff::Aggregation {
             before,
             after,
@@ -1876,9 +1850,7 @@ mod aggregation_result_tests {
         // The stored total differs from the before total (simulating
         // float rounding or serialization difference). With grouping_keys,
         // matching should still succeed on "region".
-        let mut result_set = vec![
-            json!({"region": "us-east", "total": 5.000000001}),
-        ];
+        let mut result_set = vec![json!({"region": "us-east", "total": 5.000000001})];
 
         apply_aggregation(
             &mut result_set,
@@ -1896,9 +1868,7 @@ mod aggregation_result_tests {
 
     #[test]
     fn aggregation_new_group_is_appended() {
-        let mut result_set = vec![
-            json!({"region": "us-east", "total": 5}),
-        ];
+        let mut result_set = vec![json!({"region": "us-east", "total": 5})];
 
         // A new group appears (eu-west not in result_set)
         apply_aggregation(
@@ -1916,9 +1886,7 @@ mod aggregation_result_tests {
 
     #[test]
     fn aggregation_without_grouping_keys_uses_exact_match() {
-        let mut result_set = vec![
-            json!({"total": 5}),
-        ];
+        let mut result_set = vec![json!({"total": 5})];
 
         // No grouping keys → exact match behavior
         apply_aggregation(
@@ -1936,9 +1904,7 @@ mod aggregation_result_tests {
 
     #[test]
     fn aggregation_without_grouping_keys_no_exact_match_adds_new() {
-        let mut result_set = vec![
-            json!({"total": 5}),
-        ];
+        let mut result_set = vec![json!({"total": 5})];
 
         // No grouping keys and before doesn't match → append
         apply_aggregation(
