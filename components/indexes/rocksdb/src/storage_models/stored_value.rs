@@ -220,7 +220,7 @@ impl From<StoredValueContainer> for ElementValue {
             }
             Some(StoredValue::ZonedDateTime(zdt)) => {
                 let offset = FixedOffset::east_opt(zdt.offset_seconds)
-                    .unwrap_or_else(|| FixedOffset::east_opt(0).unwrap());
+                    .unwrap_or_else(|| FixedOffset::east_opt(0).expect("zero offset is always valid"));
                 let utc_dt =
                     DateTime::from_timestamp_micros(zdt.timestamp_micros).unwrap_or_default();
                 let dt = offset.from_utc_datetime(&utc_dt.naive_utc());
@@ -250,7 +250,7 @@ mod tests {
         // Verify it uses the LocalDateTime variant, not String
         match &stored.value {
             Some(StoredValue::LocalDateTime(_)) => {} // correct
-            other => panic!("Expected LocalDateTime variant, got {:?}", other),
+            other => panic!("Expected LocalDateTime variant, got {other:?}"),
         }
 
         // Encode to protobuf bytes and decode back
@@ -277,7 +277,7 @@ mod tests {
             Some(StoredValue::ZonedDateTime(zdt)) => {
                 assert_eq!(zdt.offset_seconds, 5 * 3600 + 1800);
             }
-            other => panic!("Expected ZonedDateTime variant, got {:?}", other),
+            other => panic!("Expected ZonedDateTime variant, got {other:?}"),
         }
 
         // Encode to protobuf bytes and decode back
@@ -341,7 +341,7 @@ mod tests {
                 panic!("LocalDateTime should not be stored as String")
             }
             Some(StoredValue::LocalDateTime(_)) => {} // correct
-            other => panic!("Unexpected variant: {:?}", other),
+            other => panic!("Unexpected variant: {other:?}"),
         }
     }
 
@@ -358,7 +358,7 @@ mod tests {
                 panic!("ZonedDateTime should not be stored as String")
             }
             Some(StoredValue::ZonedDateTime(_)) => {} // correct
-            other => panic!("Unexpected variant: {:?}", other),
+            other => panic!("Unexpected variant: {other:?}"),
         }
     }
 }
