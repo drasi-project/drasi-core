@@ -79,6 +79,15 @@ jobs:
       env:
         REDIS_URL: redis://localhost:6379
       run: |
+        # Runs all tests in workspace including:
+        # - Unit tests (in-memory)
+        # - Integration tests with testcontainers (PostgreSQL, MySQL, MS SQL Server reactions)
+        # - Integration tests with Redis service container (Garnet/Redis indexes)
+        # - Integration tests with embedded storage (RocksDB indexes)
+        # - End-to-end integration tests (SSE reaction, etc.)
+        # 
+        # Note: Tests marked with #[ignore] are NOT run (e.g., PostgreSQL source tests).
+        # These require running with --ignored flag or via Makefile integration-test targets.
         cargo install junitify
         cargo test -- --format=json -Z unstable-options --report-time | junitify --ignore-parse-errors --out ./test-results
         ls
