@@ -45,8 +45,8 @@ anyhow = "1.0"
 tokio-test = "0.4"
 env_logger = "0.10.0"
 serial_test = "3.0"
-testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["mssql_server"] }
+testcontainers = "0.26"
+testcontainers-modules = { version = "0.14", features = ["mssql_server"] }
 
 [lints]
 workspace = true
