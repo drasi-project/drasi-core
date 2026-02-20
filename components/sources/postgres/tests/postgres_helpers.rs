@@ -15,6 +15,8 @@
 //! PostgreSQL test helpers for replication integration tests.
 
 use anyhow::{anyhow, Result};
+use rust_decimal::Decimal;
+use std::str::FromStr;
 use std::sync::Arc;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio_postgres::{Client, NoTls};
@@ -255,5 +257,42 @@ pub async fn grant_table_access(client: &Client, table: &str, user: &str) -> Res
 pub async fn create_logical_replication_slot(client: &Client, slot_name: &str) -> Result<()> {
     let sql = "SELECT pg_create_logical_replication_slot($1, 'pgoutput')";
     let _ = client.query_one(sql, &[&slot_name]).await?;
+    Ok(())
+}
+
+pub async fn create_decimal_test_table(client: &Client, table_name: &str) -> Result<()> {
+    let create_sql = format!(
+        "CREATE TABLE IF NOT EXISTS {table_name} (\n    id INTEGER PRIMARY KEY,\n    price NUMERIC(10, 2),\n    quantity NUMERIC(15, 4),\n    total NUMERIC(20, 6)\n)"
+    );
+    execute_sql(client, &create_sql).await?;
+
+    let replica_sql = format!("ALTER TABLE {table_name} REPLICA IDENTITY FULL");
+    execute_sql(client, &replica_sql).await?;
+
+    Ok(())
+}
+
+pub async fn insert_decimal_test_row(
+    client: &Client,
+    table: &str,
+    id: i32,
+    price: &str,
+    quantity: &str,
+    total: &str,
+) -> Result<()> {
+    let price_decimal = Decimal::from_str(price)?;
+    let quantity_decimal = Decimal::from_str(quantity)?;
+    let total_decimal = Decimal::from_str(total)?;
+
+    let sql = format!(
+        "INSERT INTO {} (id, price, quantity, total) VALUES ($1, $2, $3, $4)",
+        quote_ident(table)
+    );
+    client
+        .execute(
+            &sql,
+            &[&id, &price_decimal, &quantity_decimal, &total_decimal],
+        )
+        .await?;
     Ok(())
 }
