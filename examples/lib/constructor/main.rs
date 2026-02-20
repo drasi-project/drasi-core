@@ -43,7 +43,8 @@
 //! ```
 
 use anyhow::Result;
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::{path::PathBuf, vec};
 use std::sync::Arc;
 
 use axum::{
@@ -57,8 +58,8 @@ use drasi_lib::{
     DrasiLib, QueryConfig, QueryLanguage,
     // SourceSubscriptionConfig is in config module
     config::SourceSubscriptionConfig,
-    // Import SourceTrait to access set_bootstrap_provider method
-    SourceTrait,
+    // Import Source Trait to access set_bootstrap_provider method
+    Source
 };
 
 // Component types and configs - using constructors instead of builders
@@ -131,6 +132,7 @@ async fn main() -> Result<()> {
         adaptive_max_wait_ms: Some(50),
         adaptive_min_wait_ms: Some(10),
         adaptive_window_secs: None,
+        webhooks: None
     };
 
     // Create source using constructor
@@ -169,6 +171,8 @@ async fn main() -> Result<()> {
             SourceSubscriptionConfig {
                 source_id: "stock-prices".to_string(),
                 pipeline: vec![],
+                nodes: vec!["stock_prices".to_string()],
+                relations: Vec::new()
             }
         ],
         auto_start: true,
@@ -196,10 +200,22 @@ async fn main() -> Result<()> {
     // LogReaction::new() constructor instead of LogReaction::builder().
 
     // Create reaction config struct
+
+    let default_template = drasi_reaction_log::QueryConfig {
+        added: Some(drasi_reaction_log::TemplateSpec::new(
+            "[+] {{after.symbol}}: ${{after.price}} (prev: ${{after.previous_close}}, vol: {{after.volume}})",
+        )),
+        updated: Some(drasi_reaction_log::TemplateSpec::new(
+            "[~] {{after.symbol}}: ${{before.price}} -> ${{after.price}} (vol: {{after.volume}})",
+        )),
+        deleted: Some(drasi_reaction_log::TemplateSpec::new(
+            "[-] {{before.symbol}} removed",
+        )),
+    };
+
     let log_config = LogReactionConfig {
-        added_template: Some("[+] {{after.symbol}}: ${{after.price}} (prev: ${{after.previous_close}}, vol: {{after.volume}})".to_string()),
-        updated_template: Some("[~] {{after.symbol}}: ${{before.price}} -> ${{after.price}} (vol: {{after.volume}})".to_string()),
-        deleted_template: Some("[-] {{before.symbol}} removed".to_string()),
+        default_template: Some(default_template),
+        routes: HashMap::new()
     };
 
     // Create reaction using constructor with:
@@ -210,7 +226,7 @@ async fn main() -> Result<()> {
         "console-logger",
         vec!["all-prices".to_string()],
         log_config,
-    );
+    )?;
 
     // =========================================================================
     // Step 8: Add Reaction to DrasiLib Dynamically
