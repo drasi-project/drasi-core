@@ -1,0 +1,32 @@
+[package]
+name = "drasi-reaction-loki"
+version = "0.1.0"
+edition = "2021"
+authors = ["Drasi Project"]
+description = "Grafana Loki reaction plugin for Drasi"
+license = "Apache-2.0"
+repository = "https://github.com/drasi-project/drasi-core"
+keywords = ["drasi", "plugin", "reaction", "loki", "logging"]
+categories = ["network-programming"]
+
+[lints]
+workspace = true
+
+[dependencies]
+drasi-lib.workspace = true
+drasi-core.workspace = true
+anyhow = "1.0"
+async-trait = "0.1"
+chrono = "0.4"
+handlebars = "5.1"
+log = "0.4"
+reqwest = { version = "0.11", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+
+[dev-dependencies]
+drasi-source-application = { path = "../../../components/sources/application" }
+env_logger = "0.10.0"
+testcontainers = "0.23"
+tokio-test = "0.4"
