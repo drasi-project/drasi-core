@@ -124,9 +124,7 @@ pub fn extract_column_value(row: &Row, col_idx: usize) -> Result<ElementValue> {
                 Ok(ElementValue::String(Arc::from(
                     val.format("%Y-%m-%dT%H:%M:%S%.3f").to_string(),
                 )))
-            } else if let Ok(Some(val)) =
-                row.try_get::<chrono::DateTime<chrono::Utc>, _>(col_idx)
-            {
+            } else if let Ok(Some(val)) = row.try_get::<chrono::DateTime<chrono::Utc>, _>(col_idx) {
                 Ok(ElementValue::String(Arc::from(val.to_rfc3339())))
             } else {
                 Ok(ElementValue::Null)
