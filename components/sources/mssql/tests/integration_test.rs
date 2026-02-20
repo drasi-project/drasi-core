@@ -420,7 +420,7 @@ async fn test_mssql_column_type_mapping() -> Result<()> {
         execute_sql(
             &mut client,
             "INSERT INTO dbo.TypesTest (Id, IntVal, BigIntVal, SmallIntVal, TinyIntVal, BitVal, FloatVal, RealVal, DecimalVal, VarcharVal, NVarcharVal) \
-             VALUES (1, 42, 9876543210, 256, 7, 1, 3.14, 2.5, 99.95, 'hello', N'world');",
+             VALUES (1, 42, 9876543210, 256, 7, 1, 3.15, 2.5, 99.95, 'hello', N'world');",
         )
         .await?;
 
@@ -479,8 +479,8 @@ async fn test_mssql_column_type_mapping() -> Result<()> {
             );
             let float_val = data.get("float_val").unwrap().as_f64().unwrap();
             assert!(
-                (float_val - 3.14).abs() < 0.001,
-                "FLOAT value should be ~3.14, got: {float_val}"
+                (float_val - 3.15).abs() < 0.001,
+                "FLOAT value should be ~3.15, got: {float_val}"
             );
 
             assert!(
