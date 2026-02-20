@@ -17,14 +17,13 @@ use async_trait::async_trait;
 use log::{debug, error, info, trace, warn};
 use rand::Rng;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 use tonic::transport::Channel;
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ResultDiff};
+use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::{QueryProvider, Reaction};
+use drasi_lib::Reaction;
 
 pub use super::config::GrpcReactionConfig;
 use super::GrpcReactionBuilder;
