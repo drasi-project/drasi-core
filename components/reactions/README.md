@@ -1056,3 +1056,18 @@ See `http-adaptive/` and `grpc-adaptive/` for examples.
 - Check `lib/CLAUDE.md` for library architecture details
 - Review `components/sources/README.md` for source development patterns
 - Review the parent `drasi-core/CLAUDE.md` for query engine information
+
+## AI Generated Reactions (experimental)
+
+We have experimental AI agents for developing new reactions. These agents work as a planner/executor pair where the `reaction-planner` will generate a comprehensive plan for building a reaction that the user must then review and refine. Once the user is satisfied with the plan, switch to the `reaction-plan-executor` agent to implement it.
+
+For local usage with the Copilot CLI:
+
+- Start Copilot CLI
+- Select the `reaction-planner` agent using `/agent`
+- Select the `claude-sonnet-4.5` or `claude-opus-4.5` model using `/model` (CLI does not use the model defined in the frontmatter)
+- Run a prompt like `Please write a plan for an XXXX reaction and save it to file in my workspace`
+- Once the plan is complete, review it and tweak it in the generated file
+- Switch to the `gpt-5.2-codex` model using `/model`
+- Switch to the `reaction-plan-executor` agent using `/agent`
+- Run the prompt: `please implement the plan`
