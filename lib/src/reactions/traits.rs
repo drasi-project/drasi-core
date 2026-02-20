@@ -184,6 +184,20 @@ pub trait Reaction: Send + Sync {
 
     /// Get the current status of the reaction
     async fn status(&self) -> ComponentStatus;
+
+    /// Permanently clean up internal state when the reaction is being removed.
+    ///
+    /// This is called when `remove_reaction(id, cleanup: true)` is used.
+    /// Use this to release external resources that should not persist after
+    /// the reaction is deleted (e.g., delete output topics, remove external subscriptions).
+    ///
+    /// The default implementation is a no-op. Override only if your reaction
+    /// manages external state that needs explicit teardown.
+    ///
+    /// Errors are logged but do not prevent the reaction from being removed.
+    async fn deprovision(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Blanket implementation of Reaction for `Box<dyn Reaction>`
@@ -225,5 +239,9 @@ impl Reaction for Box<dyn Reaction + 'static> {
 
     async fn status(&self) -> ComponentStatus {
         (**self).status().await
+    }
+
+    async fn deprovision(&self) -> Result<()> {
+        (**self).deprovision().await
     }
 }

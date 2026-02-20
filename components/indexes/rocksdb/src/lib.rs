@@ -35,5 +35,6 @@ mod plugin;
 pub mod result_index;
 mod storage_models;
 
-// Re-export the plugin provider for easy access
+// Re-export the plugin provider and unified DB opener for easy access
+pub use plugin::open_unified_db;
 pub use plugin::RocksDbIndexProvider;

@@ -349,6 +349,12 @@ mod index {
     }
 
     #[tokio::test]
+    async fn future_queue_clear_removes_all() {
+        let fqi = InMemoryFutureQueue::new();
+        index::future_queue::clear_removes_all(&fqi).await;
+    }
+
+    #[tokio::test]
     async fn future_queue_push_overwrite() {
         let fqi = InMemoryFutureQueue::new();
         fqi.clear().await.unwrap();

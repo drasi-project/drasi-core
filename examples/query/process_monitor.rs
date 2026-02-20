@@ -65,13 +65,13 @@ async fn process_change(query: &ContinuousQuery, change: SourceChange) {
     let result = query.process_source_change(change).await.unwrap();
     for context in result {
         match context {
-            QueryPartEvaluationContext::Adding { after } => {
+            QueryPartEvaluationContext::Adding { after, .. } => {
                 println!("Adding: {after:?}");
             }
-            QueryPartEvaluationContext::Removing { before } => {
+            QueryPartEvaluationContext::Removing { before, .. } => {
                 println!("Removing: {before:?}");
             }
-            QueryPartEvaluationContext::Updating { before, after } => {
+            QueryPartEvaluationContext::Updating { before, after, .. } => {
                 println!("Updating: {before:?} -> {after:?}");
             }
             _ => {}
