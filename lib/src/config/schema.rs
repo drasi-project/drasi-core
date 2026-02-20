@@ -184,8 +184,8 @@ pub struct SourceSubscriptionSettings {
 /// # Capacity Settings
 ///
 /// - **priority_queue_capacity**: Default capacity for timestamp-ordered event queues in
-///   queries and reactions. Higher values support more out-of-order events but consume
-///   more memory. Default: 10000
+///   reactions. Higher values support more out-of-order events but consume more memory.
+///   Default: 10000
 ///
 /// - **dispatch_buffer_capacity**: Default capacity for event dispatch channels between
 ///   components (sources → queries, queries → reactions). Higher values improve throughput
@@ -296,7 +296,6 @@ impl Default for DrasiLibConfig {
 /// - **joins**: Optional synthetic join definitions
 /// - **enableBootstrap**: Process initial data (default: true)
 /// - **bootstrapBufferSize**: Buffer size during bootstrap (default: 10000)
-/// - **priority_queue_capacity**: Out-of-order event queue size (overrides global)
 /// - **dispatch_buffer_capacity**: Output buffer size (overrides global)
 /// - **dispatch_mode**: Broadcast or Channel routing
 ///
@@ -352,7 +351,6 @@ impl Default for DrasiLibConfig {
 ///   - id: high_volume_processing
 ///     query: "MATCH (n:Event) WHERE n.timestamp > timestamp() - 60000 RETURN n"
 ///     sources: [event_stream]
-///     priority_queue_capacity: 100000  # Large queue for many out-of-order events
 ///     dispatch_buffer_capacity: 10000  # Large output buffer
 ///     bootstrapBufferSize: 50000       # Large bootstrap buffer
 /// ```
@@ -403,9 +401,6 @@ pub struct QueryConfig {
         rename = "bootstrapBufferSize"
     )]
     pub bootstrap_buffer_size: usize,
-    /// Priority queue capacity for this query (default: server global, or 10000 if not specified)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub priority_queue_capacity: Option<usize>,
     /// Dispatch buffer capacity for this query (default: server global, or 1000 if not specified)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_buffer_capacity: Option<usize>,

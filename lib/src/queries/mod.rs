@@ -15,7 +15,6 @@
 pub mod base;
 pub mod label_extractor;
 pub mod manager;
-pub mod priority_queue;
 pub mod subscription_builder;
 
 #[cfg(test)]
@@ -27,5 +26,4 @@ mod joins_test;
 pub use base::QueryBase;
 pub use label_extractor::*;
 pub use manager::*;
-pub use priority_queue::*;
 pub use subscription_builder::*;

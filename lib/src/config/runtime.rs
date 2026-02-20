@@ -209,27 +209,20 @@ impl From<QueryConfig> for QueryRuntime {
 /// When converting from `DrasiLibConfig` to `RuntimeConfig`, global capacity
 /// settings are applied to queries that don't specify their own values:
 ///
-/// - **priority_queue_capacity**: Applied to queries (default: 10000)
 /// - **dispatch_buffer_capacity**: Applied to queries (default: 1000)
 ///
 /// # Examples
 ///
 /// ```yaml
 /// id: my-server
-/// priority_queue_capacity: 50000  # Global default
+/// dispatch_buffer_capacity: 5000  # Global default
 ///
 /// queries:
 ///   - id: q1
 ///     query: "MATCH (n) RETURN n"
 ///     source_subscriptions:
 ///       - source_id: s1
-///     # priority_queue_capacity will be 50000 (inherited)
-///
-///   - id: q2
-///     query: "MATCH (m) RETURN m"
-///     source_subscriptions:
-///       - source_id: s1
-///     priority_queue_capacity: 100000  # Override global
+///     # dispatch_buffer_capacity will be 5000 (inherited)
 /// ```
 #[derive(Clone)]
 pub struct RuntimeConfig {
@@ -275,7 +268,6 @@ impl RuntimeConfig {
         state_store_provider: Option<Arc<dyn StateStoreProvider>>,
     ) -> Self {
         // Get the global defaults (or hardcoded fallbacks)
-        let global_priority_queue = config.priority_queue_capacity.unwrap_or(10000);
         let global_dispatch_capacity = config.dispatch_buffer_capacity.unwrap_or(1000);
 
         // Create IndexFactory from storage backend configurations with optional plugin
@@ -290,9 +282,6 @@ impl RuntimeConfig {
             .queries
             .into_iter()
             .map(|mut q| {
-                if q.priority_queue_capacity.is_none() {
-                    q.priority_queue_capacity = Some(global_priority_queue);
-                }
                 if q.dispatch_buffer_capacity.is_none() {
                     q.dispatch_buffer_capacity = Some(global_dispatch_capacity);
                 }

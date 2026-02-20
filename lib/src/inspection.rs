@@ -355,7 +355,7 @@ impl InspectionAPI {
 
         Ok(DrasiLibConfig {
             id: self.config.id.clone(),
-            priority_queue_capacity: None, // Already applied to queries
+            priority_queue_capacity: None, // Reactions use their own capacity via ReactionBaseParams
             dispatch_buffer_capacity: None, // Already applied to queries
             storage_backends: vec![],
             queries,

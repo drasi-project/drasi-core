@@ -155,7 +155,7 @@ impl DrasiLibBuilder {
         self
     }
 
-    /// Set the default priority queue capacity for components.
+    /// Set the default priority queue capacity for reactions.
     pub fn with_priority_queue_capacity(mut self, capacity: usize) -> Self {
         self.priority_queue_capacity = Some(capacity);
         self
@@ -351,7 +351,6 @@ pub struct Query {
     joins: Option<Vec<QueryJoinConfig>>,
     enable_bootstrap: bool,
     bootstrap_buffer_size: usize,
-    priority_queue_capacity: Option<usize>,
     dispatch_buffer_capacity: Option<usize>,
     dispatch_mode: Option<DispatchMode>,
     storage_backend: Option<crate::indexes::StorageBackendRef>,
@@ -370,7 +369,6 @@ impl Query {
             joins: None,
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
-            priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
@@ -389,7 +387,6 @@ impl Query {
             joins: None,
             enable_bootstrap: true,
             bootstrap_buffer_size: 10000,
-            priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
@@ -461,12 +458,6 @@ impl Query {
         self
     }
 
-    /// Set the priority queue capacity.
-    pub fn with_priority_queue_capacity(mut self, capacity: usize) -> Self {
-        self.priority_queue_capacity = Some(capacity);
-        self
-    }
-
     /// Set the dispatch buffer capacity.
     pub fn with_dispatch_buffer_capacity(mut self, capacity: usize) -> Self {
         self.dispatch_buffer_capacity = Some(capacity);
@@ -497,7 +488,6 @@ impl Query {
             joins: self.joins,
             enable_bootstrap: self.enable_bootstrap,
             bootstrap_buffer_size: self.bootstrap_buffer_size,
-            priority_queue_capacity: self.priority_queue_capacity,
             dispatch_buffer_capacity: self.dispatch_buffer_capacity,
             dispatch_mode: self.dispatch_mode,
             storage_backend: self.storage_backend,
