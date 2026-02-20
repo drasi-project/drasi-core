@@ -43,8 +43,8 @@
 //! ```
 
 use anyhow::Result;
-use std::path::PathBuf;
 use std::sync::Arc;
+use std::{collections::HashMap, path::PathBuf};
 
 use axum::{
     extract::{Path, State},
@@ -54,24 +54,26 @@ use axum::{
 
 // DrasiLib core types - using config structs instead of builders
 use drasi_lib::{
-    DrasiLib, QueryConfig, QueryLanguage,
     // SourceSubscriptionConfig is in config module
     config::SourceSubscriptionConfig,
-    // Import SourceTrait to access set_bootstrap_provider method
-    SourceTrait,
+    DrasiLib,
+    QueryConfig,
+    QueryLanguage,
+    // Import Source Trait to access set_bootstrap_provider method
+    Source,
 };
 
 // Component types and configs - using constructors instead of builders
+use drasi_bootstrap_scriptfile::{ScriptFileBootstrapConfig, ScriptFileBootstrapProvider};
+use drasi_reaction_log::{
+    LogReaction, LogReactionConfig, QueryConfig as LogQueryConfig, TemplateSpec,
+};
 use drasi_source_http::{HttpSource, HttpSourceConfig};
-use drasi_bootstrap_scriptfile::{ScriptFileBootstrapProvider, ScriptFileBootstrapConfig};
-use drasi_reaction_log::{LogReaction, LogReactionConfig};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging - set RUST_LOG=debug for more detail
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info")
-    ).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     println!("========================================");
     println!("  DrasiLib Constructor Example");
@@ -88,7 +90,7 @@ async fn main() -> Result<()> {
         DrasiLib::builder()
             .with_id("http-source-api-example")
             .build()
-            .await?
+            .await?,
     );
 
     println!("Created DrasiLib instance: http-source-api-example\n");
@@ -99,8 +101,7 @@ async fn main() -> Result<()> {
     // The ScriptFile bootstrap provider loads initial stock data from a JSONL
     // file. Here we use the config struct directly instead of a builder.
 
-    let bootstrap_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("bootstrap_data.jsonl");
+    let bootstrap_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bootstrap_data.jsonl");
 
     println!("Loading bootstrap data from: {}", bootstrap_path.display());
 
@@ -138,7 +139,9 @@ async fn main() -> Result<()> {
 
     // Set the bootstrap provider on the source
     // Note: This must be done before adding the source to DrasiLib
-    http_source.set_bootstrap_provider(Box::new(bootstrap_provider)).await;
+    http_source
+        .set_bootstrap_provider(Box::new(bootstrap_provider))
+        .await;
 
     // =========================================================================
     // Step 4: Add Source to DrasiLib Dynamically
@@ -162,15 +165,16 @@ async fn main() -> Result<()> {
                    sp.price AS price,
                    sp.previous_close AS previous_close,
                    sp.volume AS volume
-        "#.to_string(),
+        "#
+        .to_string(),
         query_language: QueryLanguage::Cypher,
         middleware: vec![],
-        sources: vec![
-            SourceSubscriptionConfig {
-                source_id: "stock-prices".to_string(),
-                pipeline: vec![],
-            }
-        ],
+        sources: vec![SourceSubscriptionConfig {
+            source_id: "stock-prices".to_string(),
+            nodes: vec![],
+            relations: vec![],
+            pipeline: vec![],
+        }],
         auto_start: true,
         joins: None,
         enable_bootstrap: true,
@@ -196,21 +200,25 @@ async fn main() -> Result<()> {
     // LogReaction::new() constructor instead of LogReaction::builder().
 
     // Create reaction config struct
+    //
+
+    let mut routes = HashMap::new();
+    routes.insert("all-prices".to_string(), LogQueryConfig {
+        added: Some(TemplateSpec::new("[+] {{after.symbol}}: ${{after.price}} (prev: ${{after.previous_close}}, vol: {{after.volume}})")),
+        updated: Some(TemplateSpec::new("[~] {{after.symbol}}: ${{before.price}} -> ${{after.price}} (vol: {{after.volume}})".to_string())),
+        deleted: Some(TemplateSpec::new("[-] {{before.symbol}} removed".to_string())),
+    });
     let log_config = LogReactionConfig {
-        added_template: Some("[+] {{after.symbol}}: ${{after.price}} (prev: ${{after.previous_close}}, vol: {{after.volume}})".to_string()),
-        updated_template: Some("[~] {{after.symbol}}: ${{before.price}} -> ${{after.price}} (vol: {{after.volume}})".to_string()),
-        deleted_template: Some("[-] {{before.symbol}} removed".to_string()),
+        routes,
+        default_template: None,
     };
 
     // Create reaction using constructor with:
     // - id: unique identifier
     // - queries: list of query IDs to subscribe to
     // - config: reaction-specific configuration
-    let log_reaction = LogReaction::new(
-        "console-logger",
-        vec!["all-prices".to_string()],
-        log_config,
-    );
+    let log_reaction =
+        LogReaction::new("console-logger", vec!["all-prices".to_string()], log_config)?;
 
     // =========================================================================
     // Step 8: Add Reaction to DrasiLib Dynamically
