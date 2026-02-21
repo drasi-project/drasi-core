@@ -306,7 +306,8 @@ impl Query for DrasiQuery {
                 .with_element_index(index_set.element_index)
                 .with_archive_index(index_set.archive_index)
                 .with_result_index(index_set.result_index)
-                .with_future_queue(index_set.future_queue);
+                .with_future_queue(index_set.future_queue)
+                .with_session_control(index_set.session_control);
 
             future_queue
         } else {

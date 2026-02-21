@@ -17,6 +17,7 @@ mod future_queue;
 mod index_backend;
 mod query_clock;
 mod result_index;
+mod session_control;
 mod source_middleware;
 
 use std::error::Error;
@@ -41,6 +42,9 @@ pub use result_index::ResultKey;
 pub use result_index::ResultOwner;
 pub use result_index::ResultSequence;
 pub use result_index::ResultSequenceCounter;
+pub use session_control::NoOpSessionControl;
+pub use session_control::SessionControl;
+pub use session_control::SessionGuard;
 pub use source_middleware::MiddlewareError;
 pub use source_middleware::MiddlewareSetupError;
 pub use source_middleware::SourceMiddleware;
