@@ -24,10 +24,11 @@ use shared_tests::QueryTestConfig;
 use uuid::Uuid;
 
 use drasi_index_rocksdb::{
-    element_index::{self, RocksDbElementIndex, RocksIndexOptions},
+    element_index::{RocksDbElementIndex, RocksIndexOptions},
     future_queue::RocksDbFutureQueue,
     open_unified_db,
     result_index::RocksDbResultIndex,
+    RocksDbSessionState,
 };
 
 struct RocksDbQueryConfig {
@@ -53,7 +54,8 @@ impl RocksDbQueryConfig {
             direct_io: false,
         };
         let db = open_unified_db(&self.url, query_id, &options).unwrap();
-        RocksDbFutureQueue::new(db)
+        let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+        RocksDbFutureQueue::new(db, session_state)
     }
 }
 
@@ -77,10 +79,11 @@ impl QueryTestConfig for RocksDbQueryConfig {
         };
 
         let db = open_unified_db(&self.url, &query_id, &options).unwrap();
+        let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
 
-        let element_index = RocksDbElementIndex::new(db.clone(), options);
-        let ari = RocksDbResultIndex::new(db.clone());
-        let fqi = RocksDbFutureQueue::new(db);
+        let element_index = RocksDbElementIndex::new(db.clone(), options, session_state.clone());
+        let ari = RocksDbResultIndex::new(db.clone(), session_state.clone());
+        let fqi = RocksDbFutureQueue::new(db, session_state);
 
         element_index.clear().await.unwrap();
         ari.clear().await.unwrap();
