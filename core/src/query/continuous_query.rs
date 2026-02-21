@@ -35,7 +35,8 @@ use crate::{
         QueryPartEvaluator,
     },
     interface::{
-        ElementIndex, FutureQueue, FutureQueueConsumer, MiddlewareError, QueryClock, SessionControl,
+        ElementIndex, FutureQueue, FutureQueueConsumer, MiddlewareError, QueryClock,
+        SessionControl, SessionGuard,
     },
     middleware::SourceMiddlewarePipelineCollection,
     models::{Element, SourceChange},
@@ -58,7 +59,6 @@ pub struct ContinuousQuery {
     future_queue_task: Mutex<Option<JoinHandle<()>>>,
     change_lock: Mutex<()>,
     source_pipelines: SourceMiddlewarePipelineCollection,
-    #[allow(dead_code)]
     session_control: Arc<dyn SessionControl>,
 }
 
@@ -98,6 +98,7 @@ impl ContinuousQuery {
     ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
         //println!("-> process_source_change {:?}", change);
         let _lock = self.change_lock.lock().await;
+        let guard = SessionGuard::begin(self.session_control.clone()).await?;
         let mut result = Vec::new();
 
         let changes = self.execute_source_middleware(change).await?;
@@ -164,6 +165,7 @@ impl ContinuousQuery {
             }
         }
         //println!("--> process_source_change result {:?}", result);
+        guard.commit().await?;
         Ok(result)
     }
 
