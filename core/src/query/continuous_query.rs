@@ -34,7 +34,9 @@ use crate::{
         EvaluationError, ExpressionEvaluationContext, ExpressionEvaluator, InstantQueryClock,
         QueryPartEvaluator,
     },
-    interface::{ElementIndex, FutureQueue, FutureQueueConsumer, MiddlewareError, QueryClock},
+    interface::{
+        ElementIndex, FutureQueue, FutureQueueConsumer, MiddlewareError, QueryClock, SessionControl,
+    },
     middleware::SourceMiddlewarePipelineCollection,
     models::{Element, SourceChange},
     path_solver::{
@@ -56,6 +58,8 @@ pub struct ContinuousQuery {
     future_queue_task: Mutex<Option<JoinHandle<()>>>,
     change_lock: Mutex<()>,
     source_pipelines: SourceMiddlewarePipelineCollection,
+    #[allow(dead_code)]
+    session_control: Arc<dyn SessionControl>,
 }
 
 impl ContinuousQuery {
@@ -69,6 +73,7 @@ impl ContinuousQuery {
         part_evaluator: Arc<QueryPartEvaluator>,
         future_queue: Arc<dyn FutureQueue>,
         source_pipelines: SourceMiddlewarePipelineCollection,
+        session_control: Arc<dyn SessionControl>,
     ) -> Self {
         Self {
             expression_evaluator,
@@ -82,6 +87,7 @@ impl ContinuousQuery {
             future_queue_task: Mutex::new(None),
             change_lock: Mutex::new(()),
             source_pipelines,
+            session_control,
         }
     }
 

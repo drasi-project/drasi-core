@@ -30,7 +30,9 @@ use async_trait::async_trait;
 use std::fmt;
 use std::sync::Arc;
 
-use super::{ElementArchiveIndex, ElementIndex, FutureQueue, IndexError, ResultIndex};
+use super::{
+    ElementArchiveIndex, ElementIndex, FutureQueue, IndexError, ResultIndex, SessionControl,
+};
 
 /// Set of indexes for a query.
 ///
@@ -46,6 +48,8 @@ pub struct IndexSet {
     pub result_index: Arc<dyn ResultIndex>,
     /// Future queue for temporal queries
     pub future_queue: Arc<dyn FutureQueue>,
+    /// Session control for atomic transaction lifecycle
+    pub session_control: Arc<dyn SessionControl>,
 }
 
 impl fmt::Debug for IndexSet {
@@ -55,6 +59,7 @@ impl fmt::Debug for IndexSet {
             .field("archive_index", &"<trait object>")
             .field("result_index", &"<trait object>")
             .field("future_queue", &"<trait object>")
+            .field("session_control", &"<trait object>")
             .finish()
     }
 }
