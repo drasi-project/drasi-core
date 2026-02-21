@@ -32,7 +32,20 @@
           "color": {
             "mode": "thresholds"
           },
-          "mappings": [],
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "COLD"
+                },
+                "1": {
+                  "text": "HOT"
+                }
+              }
+            }
+          ],
+          "noValue": "COLD",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -41,16 +54,11 @@
                 "value": null
               },
               {
-                "color": "orange",
-                "value": 28
-              },
-              {
                 "color": "red",
-                "value": 30
+                "value": 0.5
               }
             ]
-          },
-          "unit": "celsius"
+          }
         },
         "overrides": []
       },
@@ -62,6 +70,9 @@
       },
       "id": 10,
       "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
@@ -70,8 +81,8 @@
           "fields": "",
           "values": false
         },
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true
+        "textMode": "value",
+        "wideLayout": true
       },
       "targets": [
         {
@@ -80,13 +91,13 @@
             "uid": "loki"
           },
           "editorMode": "code",
-          "expr": "last_over_time({job=\"drasi-example\"} | json | __error__=\"\" | event=~\"ADD|UPDATE\" | sensor=\"sensor_1\" | unwrap temperature [5m])",
+          "expr": "last_over_time({job=\"drasi-example\",query_id=\"persistent-hot-sensors\"} | json | __error__=\"\" | sensor=\"sensor_1\" | keep sensor,active | unwrap active [5m])",
           "queryType": "range",
           "refId": "A"
         }
       ],
-      "title": "sensor_1 Temperature",
-      "type": "gauge"
+      "title": "sensor_1 Hot Alert",
+      "type": "stat"
     },
     {
       "datasource": {
@@ -98,7 +109,20 @@
           "color": {
             "mode": "thresholds"
           },
-          "mappings": [],
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "COLD"
+                },
+                "1": {
+                  "text": "HOT"
+                }
+              }
+            }
+          ],
+          "noValue": "COLD",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -107,16 +131,11 @@
                 "value": null
               },
               {
-                "color": "orange",
-                "value": 28
-              },
-              {
                 "color": "red",
-                "value": 30
+                "value": 0.5
               }
             ]
-          },
-          "unit": "celsius"
+          }
         },
         "overrides": []
       },
@@ -128,6 +147,9 @@
       },
       "id": 11,
       "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
@@ -136,8 +158,8 @@
           "fields": "",
           "values": false
         },
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true
+        "textMode": "value",
+        "wideLayout": true
       },
       "targets": [
         {
@@ -146,13 +168,13 @@
             "uid": "loki"
           },
           "editorMode": "code",
-          "expr": "last_over_time({job=\"drasi-example\"} | json | __error__=\"\" | event=~\"ADD|UPDATE\" | sensor=\"sensor_2\" | unwrap temperature [5m])",
+          "expr": "last_over_time({job=\"drasi-example\",query_id=\"persistent-hot-sensors\"} | json | __error__=\"\" | sensor=\"sensor_2\" | keep sensor,active | unwrap active [5m])",
           "queryType": "range",
           "refId": "A"
         }
       ],
-      "title": "sensor_2 Temperature",
-      "type": "gauge"
+      "title": "sensor_2 Hot Alert",
+      "type": "stat"
     },
     {
       "datasource": {
@@ -164,7 +186,20 @@
           "color": {
             "mode": "thresholds"
           },
-          "mappings": [],
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "COLD"
+                },
+                "1": {
+                  "text": "HOT"
+                }
+              }
+            }
+          ],
+          "noValue": "COLD",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -173,16 +208,11 @@
                 "value": null
               },
               {
-                "color": "orange",
-                "value": 28
-              },
-              {
                 "color": "red",
-                "value": 30
+                "value": 0.5
               }
             ]
-          },
-          "unit": "celsius"
+          }
         },
         "overrides": []
       },
@@ -194,6 +224,9 @@
       },
       "id": 12,
       "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
@@ -202,8 +235,8 @@
           "fields": "",
           "values": false
         },
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true
+        "textMode": "value",
+        "wideLayout": true
       },
       "targets": [
         {
@@ -212,13 +245,13 @@
             "uid": "loki"
           },
           "editorMode": "code",
-          "expr": "last_over_time({job=\"drasi-example\"} | json | __error__=\"\" | event=~\"ADD|UPDATE\" | sensor=\"sensor_3\" | unwrap temperature [5m])",
+          "expr": "last_over_time({job=\"drasi-example\",query_id=\"persistent-hot-sensors\"} | json | __error__=\"\" | sensor=\"sensor_3\" | keep sensor,active | unwrap active [5m])",
           "queryType": "range",
           "refId": "A"
         }
       ],
-      "title": "sensor_3 Temperature",
-      "type": "gauge"
+      "title": "sensor_3 Hot Alert",
+      "type": "stat"
     },
     {
       "datasource": {
@@ -230,7 +263,20 @@
           "color": {
             "mode": "thresholds"
           },
-          "mappings": [],
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "COLD"
+                },
+                "1": {
+                  "text": "HOT"
+                }
+              }
+            }
+          ],
+          "noValue": "COLD",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -239,16 +285,11 @@
                 "value": null
               },
               {
-                "color": "orange",
-                "value": 28
-              },
-              {
                 "color": "red",
-                "value": 30
+                "value": 0.5
               }
             ]
-          },
-          "unit": "celsius"
+          }
         },
         "overrides": []
       },
@@ -260,6 +301,9 @@
       },
       "id": 13,
       "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
@@ -268,8 +312,8 @@
           "fields": "",
           "values": false
         },
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true
+        "textMode": "value",
+        "wideLayout": true
       },
       "targets": [
         {
@@ -278,13 +322,13 @@
             "uid": "loki"
           },
           "editorMode": "code",
-          "expr": "last_over_time({job=\"drasi-example\"} | json | __error__=\"\" | event=~\"ADD|UPDATE\" | sensor=\"sensor_4\" | unwrap temperature [5m])",
+          "expr": "last_over_time({job=\"drasi-example\",query_id=\"persistent-hot-sensors\"} | json | __error__=\"\" | sensor=\"sensor_4\" | keep sensor,active | unwrap active [5m])",
           "queryType": "range",
           "refId": "A"
         }
       ],
-      "title": "sensor_4 Temperature",
-      "type": "gauge"
+      "title": "sensor_4 Hot Alert",
+      "type": "stat"
     },
     {
       "datasource": {
@@ -296,7 +340,20 @@
           "color": {
             "mode": "thresholds"
           },
-          "mappings": [],
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "COLD"
+                },
+                "1": {
+                  "text": "HOT"
+                }
+              }
+            }
+          ],
+          "noValue": "COLD",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -305,16 +362,11 @@
                 "value": null
               },
               {
-                "color": "orange",
-                "value": 28
-              },
-              {
                 "color": "red",
-                "value": 30
+                "value": 0.5
               }
             ]
-          },
-          "unit": "celsius"
+          }
         },
         "overrides": []
       },
@@ -326,6 +378,9 @@
       },
       "id": 14,
       "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
@@ -334,8 +389,8 @@
           "fields": "",
           "values": false
         },
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true
+        "textMode": "value",
+        "wideLayout": true
       },
       "targets": [
         {
@@ -344,13 +399,13 @@
             "uid": "loki"
           },
           "editorMode": "code",
-          "expr": "last_over_time({job=\"drasi-example\"} | json | __error__=\"\" | event=~\"ADD|UPDATE\" | sensor=\"sensor_5\" | unwrap temperature [5m])",
+          "expr": "last_over_time({job=\"drasi-example\",query_id=\"persistent-hot-sensors\"} | json | __error__=\"\" | sensor=\"sensor_5\" | keep sensor,active | unwrap active [5m])",
           "queryType": "range",
           "refId": "A"
         }
       ],
-      "title": "sensor_5 Temperature",
-      "type": "gauge"
+      "title": "sensor_5 Hot Alert",
+      "type": "stat"
     },
     {
       "datasource": {
@@ -436,7 +491,7 @@
             "uid": "loki"
           },
           "editorMode": "code",
-          "expr": "avg_over_time({job=\"drasi-example\"} | json | __error__=\"\" | event=~\"ADD|UPDATE\" | unwrap temperature [1m]) by (sensor)",
+          "expr": "last_over_time({job=\"drasi-example\",query_id=\"all-sensors\"} | json | __error__=\"\" | event=~\"ADD|UPDATE\" | unwrap temperature [1m]) by (sensor)",
           "queryType": "range",
           "refId": "A"
         }

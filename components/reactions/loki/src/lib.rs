@@ -65,10 +65,6 @@ impl LokiReactionBuilder {
         self
     }
 
-    pub fn from_query(self, query_id: impl Into<String>) -> Self {
-        self.with_query(query_id)
-    }
-
     pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.endpoint = endpoint.into();
         self
