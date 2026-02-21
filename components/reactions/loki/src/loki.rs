@@ -450,6 +450,7 @@ impl Reaction for LokiReaction {
                 Ok(c) => c,
                 Err(e) => {
                     error!("[{reaction_name}] failed to create HTTP client: {e}");
+                    *status.write().await = ComponentStatus::Error;
                     return;
                 }
             };

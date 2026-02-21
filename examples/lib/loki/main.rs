@@ -25,11 +25,25 @@ async fn main() -> Result<()> {
         .with_bootstrap_provider(bootstrap_provider)
         .build()?;
 
-    let query = Query::cypher("hot-sensors")
+    let persistent_hot_query = Query::cypher("persistent-hot-sensors")
         .query(
             r#"
             MATCH (s:SensorReading)
-            WHERE s.temperature > 24
+            WHERE drasi.trueFor(s.temperature > 24, duration({ seconds: 5 }))
+            RETURN s.sensor_id AS sensor_id,
+                   s.temperature AS temperature,
+                   s.humidity AS humidity
+            "#,
+        )
+        .from_source("sensor-source")
+        .enable_bootstrap(true)
+        .auto_start(true)
+        .build();
+
+    let all_sensors_query = Query::cypher("all-sensors")
+        .query(
+            r#"
+            MATCH (s:SensorReading)
             RETURN s.sensor_id AS sensor_id,
                    s.temperature AS temperature,
                    s.humidity AS humidity
@@ -41,19 +55,20 @@ async fn main() -> Result<()> {
         .build();
 
     let reaction = LokiReaction::builder("loki-logger")
-        .from_query("hot-sensors")
+        .with_query("persistent-hot-sensors")
+        .with_query("all-sensors")
         .with_endpoint(&loki_endpoint)
         .with_label("job", "drasi-example")
         .with_label("source", "sensor-source")
         .with_default_template(QueryConfig {
             added: Some(TemplateSpec::new(
-                r#"{"event":"ADD","sensor":"{{after.sensor_id}}","temperature":{{after.temperature}}}"#,
+                r#"{"event":"ADD","sensor":"{{after.sensor_id}}","temperature":{{after.temperature}},"active":1}"#,
             )),
             updated: Some(TemplateSpec::new(
-                r#"{"event":"UPDATE","sensor":"{{after.sensor_id}}","temperature_before":{{before.temperature}},"temperature_after":{{after.temperature}}}"#,
+                r#"{"event":"UPDATE","sensor":"{{after.sensor_id}}","temperature":{{after.temperature}},"temperature_before":{{before.temperature}},"temperature_after":{{after.temperature}},"active":1}"#,
             )),
             deleted: Some(TemplateSpec::new(
-                r#"{"event":"DELETE","sensor":"{{before.sensor_id}}"}"#,
+                r#"{"event":"DELETE","sensor":"{{before.sensor_id}}","active":0}"#,
             )),
         })
         .build()?;
@@ -62,7 +77,8 @@ async fn main() -> Result<()> {
         DrasiLib::builder()
             .with_id("loki-example")
             .with_source(source)
-            .with_query(query)
+            .with_query(persistent_hot_query)
+            .with_query(all_sensors_query)
             .with_reaction(reaction)
             .build()
             .await?,
@@ -75,7 +91,7 @@ async fn main() -> Result<()> {
     println!("----------------------------------------");
     println!("Loki endpoint: {loki_endpoint}");
     println!("Grafana: http://localhost:3000 (admin/admin)");
-    println!("Query: hot-sensors");
+    println!("Queries: persistent-hot-sensors, all-sensors");
     println!("Source: sensor-source (MockSource, 2s interval)");
     println!("Try querying Loki directly:");
     println!(
