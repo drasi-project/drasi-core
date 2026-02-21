@@ -15,6 +15,7 @@
 //! MySQL executor for stored procedure invocation.
 
 use anyhow::{anyhow, Result};
+use drasi_lib::identity::Credentials;
 use log::{debug, info};
 use mysql_async::prelude::*;
 use mysql_async::{OptsBuilder, Pool, SslOpts};
@@ -36,6 +37,23 @@ impl MySqlExecutor {
     pub async fn new(config: &MySqlStoredProcReactionConfig) -> Result<Self> {
         let port = config.get_port();
 
+        // Get credentials from identity provider or fall back to user/password
+        let (username, password) = if let Some(provider) = &config.identity_provider {
+            debug!("Using identity provider for authentication");
+            let credentials = provider.get_credentials().await?;
+            if credentials.is_certificate() {
+                anyhow::bail!(
+                    "Certificate-based authentication is not supported for MySQL. \
+                     The mysql_async driver requires PKCS12 format which is incompatible \
+                     with PEM-based credentials. Use token or password authentication instead."
+                );
+            }
+            credentials.into_auth_pair()
+        } else {
+            debug!("Using username/password for authentication");
+            (config.user.clone(), config.password.clone())
+        };
+
         info!(
             "Connecting to MySQL: {}:{}/{}",
             config.hostname, port, config.database
@@ -45,11 +63,13 @@ impl MySqlExecutor {
         let mut opts_builder = OptsBuilder::default()
             .ip_or_hostname(&config.hostname)
             .tcp_port(port)
-            .user(Some(&config.user))
-            .pass(Some(&config.password))
+            .user(Some(&username))
+            .pass(Some(&password))
             .db_name(Some(&config.database));
 
         // Configure SSL if enabled
+        // Uses system trust store for certificate validation
+        // For AWS RDS on macOS: sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/rds-ca-bundle.pem
         if config.ssl {
             opts_builder = opts_builder.ssl_opts(Some(SslOpts::default()));
         }

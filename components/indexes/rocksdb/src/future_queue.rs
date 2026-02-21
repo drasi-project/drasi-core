@@ -44,31 +44,12 @@ const QUEUE_CF: &str = "fqueue";
 const INDEX_CF: &str = "findex";
 
 impl RocksDbFutureQueue {
-    pub fn new(query_id: &str, path: &str) -> Result<Self, IndexError> {
-        let mut opts = Options::default();
-        opts.create_if_missing(true);
-        opts.create_missing_column_families(true);
-        opts.set_db_write_buffer_size(1024 * 1024);
-
-        let path = std::path::PathBuf::from(path).join(query_id).join("fqi");
-        let path = match path.to_str() {
-            Some(path) => path,
-            None => return Err(IndexError::NotSupported),
-        };
-
-        let db = match OptimisticTransactionDB::open_cf_descriptors(
-            &opts,
-            path,
-            vec![
-                rocksdb::ColumnFamilyDescriptor::new(QUEUE_CF, get_fqueue_cf_options()),
-                rocksdb::ColumnFamilyDescriptor::new(INDEX_CF, get_findex_cf_options()),
-            ],
-        ) {
-            Ok(db) => db,
-            Err(e) => return Err(IndexError::other(e)),
-        };
-
-        Ok(Self { db: Arc::new(db) })
+    /// Create a new RocksDbFutureQueue from a shared database handle.
+    ///
+    /// The database must already have the required column families created.
+    /// Use `open_unified_db()` to open a database with all required CFs.
+    pub fn new(db: Arc<OptimisticTransactionDB>) -> Self {
+        Self { db }
     }
 }
 
@@ -375,14 +356,22 @@ fn encode_index_prefix(position_in_query: u32, group_signature: u64) -> [u8; 12]
     buf
 }
 
-fn get_fqueue_cf_options() -> Options {
+pub(crate) fn get_fqueue_cf_options() -> Options {
     let mut opts = Options::default();
     opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
     opts
 }
 
-fn get_findex_cf_options() -> Options {
+pub(crate) fn get_findex_cf_options() -> Options {
     let mut opts = Options::default();
     opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(12));
     opts
+}
+
+/// Collect all column family descriptors needed by the future queue.
+pub(crate) fn future_queue_cf_descriptors() -> Vec<rocksdb::ColumnFamilyDescriptor> {
+    vec![
+        rocksdb::ColumnFamilyDescriptor::new(QUEUE_CF, get_fqueue_cf_options()),
+        rocksdb::ColumnFamilyDescriptor::new(INDEX_CF, get_findex_cf_options()),
+    ]
 }

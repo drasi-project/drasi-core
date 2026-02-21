@@ -15,6 +15,7 @@
 //! MS SQL Server executor for stored procedure invocation.
 
 use anyhow::{anyhow, Result};
+use drasi_lib::identity::Credentials;
 use log::{debug, info};
 use serde_json::Value;
 use std::sync::Arc;
@@ -41,6 +42,23 @@ impl MsSqlExecutor {
     pub async fn new(config: &MsSqlStoredProcReactionConfig) -> Result<Self> {
         let port = config.get_port();
 
+        // Get credentials from identity provider or fall back to user/password
+        let (username, password) = if let Some(provider) = &config.identity_provider {
+            debug!("Using identity provider for authentication");
+            let credentials = provider.get_credentials().await?;
+            if credentials.is_certificate() {
+                anyhow::bail!(
+                    "Certificate-based authentication is not supported for MS SQL Server. \
+                     The tiberius driver does not expose client certificate configuration. \
+                     Use token or password authentication instead."
+                );
+            }
+            credentials.into_auth_pair()
+        } else {
+            debug!("Using username/password for authentication");
+            (config.user.clone(), config.password.clone())
+        };
+
         info!(
             "Connecting to MS SQL Server: {}:{}/{}",
             config.hostname, port, config.database
@@ -50,7 +68,7 @@ impl MsSqlExecutor {
         let mut tiberius_config = TiberiusConfig::new();
         tiberius_config.host(&config.hostname);
         tiberius_config.port(port);
-        tiberius_config.authentication(AuthMethod::sql_server(&config.user, &config.password));
+        tiberius_config.authentication(AuthMethod::sql_server(&username, &password));
         tiberius_config.database(&config.database);
         tiberius_config.trust_cert(); // For self-signed certificates
 
