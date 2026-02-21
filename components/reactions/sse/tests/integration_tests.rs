@@ -14,12 +14,13 @@
 
 //! Integration tests for SSE reaction with full DrasiLib setup
 
+mod mock_source;
+
 use anyhow::Result;
 use drasi_lib::{DrasiLib, Query};
 use drasi_reaction_sse::{QueryConfig, SseExtension, SseReaction, TemplateSpec};
-use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
 use futures_util::StreamExt;
-use std::collections::HashMap;
+use mock_source::{MockSource, PropertyMapBuilder};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -32,11 +33,8 @@ async fn test_sse_basic_integration() -> Result<()> {
         .is_test(true)
         .try_init();
 
-    // Create Application source and handle
-    let config = ApplicationSourceConfig {
-        properties: HashMap::new(),
-    };
-    let (app_source, handle) = ApplicationSource::new("test-source", config)?;
+    // Create mock source and handle
+    let (mock_source, handle) = MockSource::new("test-source")?;
 
     // Create a simple query
     let query = Query::cypher("test-query")
@@ -60,7 +58,7 @@ async fn test_sse_basic_integration() -> Result<()> {
     let core = Arc::new(
         DrasiLib::builder()
             .with_id("test-core")
-            .with_source(app_source)
+            .with_source(mock_source)
             .with_query(query)
             .with_reaction(sse_reaction)
             .build()
@@ -136,11 +134,8 @@ async fn test_sse_custom_templates_integration() -> Result<()> {
         .is_test(true)
         .try_init();
 
-    // Create Application source
-    let config = ApplicationSourceConfig {
-        properties: HashMap::new(),
-    };
-    let (app_source, handle) = ApplicationSource::new("test-source", config)?;
+    // Create mock source
+    let (mock_source, handle) = MockSource::new("test-source")?;
 
     // Create query
     let query = Query::cypher("test-query")
@@ -177,7 +172,7 @@ async fn test_sse_custom_templates_integration() -> Result<()> {
     let core = Arc::new(
         DrasiLib::builder()
             .with_id("test-core")
-            .with_source(app_source)
+            .with_source(mock_source)
             .with_query(query)
             .with_reaction(sse_reaction)
             .build()
@@ -236,11 +231,8 @@ async fn test_sse_multi_path_integration() -> Result<()> {
         .is_test(true)
         .try_init();
 
-    // Create Application source
-    let config = ApplicationSourceConfig {
-        properties: HashMap::new(),
-    };
-    let (app_source, handle) = ApplicationSource::new("test-source", config)?;
+    // Create mock source
+    let (mock_source, handle) = MockSource::new("test-source")?;
 
     // Create two queries
     let person_query = Query::cypher("person-query")
@@ -300,7 +292,7 @@ async fn test_sse_multi_path_integration() -> Result<()> {
     let core = Arc::new(
         DrasiLib::builder()
             .with_id("test-core")
-            .with_source(app_source)
+            .with_source(mock_source)
             .with_query(person_query)
             .with_query(company_query)
             .with_reaction(sse_reaction)

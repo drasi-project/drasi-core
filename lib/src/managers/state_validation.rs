@@ -75,6 +75,21 @@ pub fn is_operation_valid(status: &ComponentStatus, operation: &Operation) -> Re
             Err("Cannot delete a component while it is stopping".to_string())
         }
 
+        // Reconfiguring state: only get is allowed (same as Stopping)
+        (ComponentStatus::Reconfiguring, Operation::Get) => Ok(()),
+        (ComponentStatus::Reconfiguring, Operation::Start) => {
+            Err("Cannot start a component while it is reconfiguring".to_string())
+        }
+        (ComponentStatus::Reconfiguring, Operation::Stop) => {
+            Err("Cannot stop a component while it is reconfiguring".to_string())
+        }
+        (ComponentStatus::Reconfiguring, Operation::Update) => {
+            Err("Cannot update a component while it is already reconfiguring".to_string())
+        }
+        (ComponentStatus::Reconfiguring, Operation::Delete) => {
+            Err("Cannot delete a component while it is reconfiguring".to_string())
+        }
+
         // Error state: same as Stopped (allows recovery)
         (ComponentStatus::Error, Operation::Get) => Ok(()),
         (ComponentStatus::Error, Operation::Start) => Ok(()),
@@ -93,6 +108,7 @@ pub fn get_allowed_operations(status: &ComponentStatus) -> Vec<&'static str> {
         ComponentStatus::Starting => vec!["get", "stop"],
         ComponentStatus::Running => vec!["get", "stop"],
         ComponentStatus::Stopping => vec!["get"],
+        ComponentStatus::Reconfiguring => vec!["get"],
         ComponentStatus::Error => vec!["get", "start", "update", "delete"],
     }
 }

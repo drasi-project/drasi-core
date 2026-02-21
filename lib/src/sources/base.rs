@@ -33,6 +33,7 @@ use anyhow::Result;
 use log::{debug, error, info};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::Instrument;
 
 use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 use crate::channels::*;
@@ -411,27 +412,44 @@ impl SourceBase {
 
             // Clone settings for the async task
             let settings_clone = settings.clone();
+            let source_id = self.id.clone();
 
-            // Spawn bootstrap task
-            tokio::spawn(async move {
-                match provider
-                    .bootstrap(request, &context, bootstrap_tx, Some(&settings_clone))
-                    .await
-                {
-                    Ok(count) => {
-                        info!(
-                            "Bootstrap completed successfully for query '{}', sent {count} events",
-                            settings_clone.query_id
-                        );
-                    }
-                    Err(e) => {
-                        error!(
-                            "Bootstrap failed for query '{}': {e}",
-                            settings_clone.query_id
-                        );
+            // Get instance_id from context for log routing isolation
+            let instance_id = self
+                .context()
+                .await
+                .map(|c| c.instance_id.clone())
+                .unwrap_or_default();
+
+            // Spawn bootstrap task with tracing span for proper log routing
+            let span = tracing::info_span!(
+                "source_bootstrap",
+                instance_id = %instance_id,
+                component_id = %source_id,
+                component_type = "source"
+            );
+            tokio::spawn(
+                async move {
+                    match provider
+                        .bootstrap(request, &context, bootstrap_tx, Some(&settings_clone))
+                        .await
+                    {
+                        Ok(count) => {
+                            info!(
+                                "Bootstrap completed successfully for query '{}', sent {count} events",
+                                settings_clone.query_id
+                            );
+                        }
+                        Err(e) => {
+                            error!(
+                                "Bootstrap failed for query '{}': {e}",
+                                settings_clone.query_id
+                            );
+                        }
                     }
                 }
-            });
+                .instrument(span),
+            );
 
             Ok(Some(bootstrap_rx))
         } else {
@@ -582,6 +600,29 @@ impl SourceBase {
 
         *self.status.write().await = ComponentStatus::Stopped;
         info!("Source '{}' stopped", self.id);
+        Ok(())
+    }
+
+    /// Clear the source's state store partition.
+    ///
+    /// This is called during deprovision to remove all persisted state
+    /// associated with this source. Sources that override `deprovision()`
+    /// can call this to clean up their state store.
+    pub async fn deprovision_common(&self) -> Result<()> {
+        info!("Deprovisioning source '{}'", self.id);
+        if let Some(store) = self.state_store().await {
+            let count = store.clear_store(&self.id).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to clear state store for source '{}': {}",
+                    self.id,
+                    e
+                )
+            })?;
+            info!(
+                "Cleared {} keys from state store for source '{}'",
+                count, self.id
+            );
+        }
         Ok(())
     }
 

@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-source-grpc"
-version = "0.1.3"
+version = "0.1.7"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "gRPC source plugin for Drasi"
@@ -32,6 +32,7 @@ drasi-core.workspace = true
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
+tracing = "0.1"
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

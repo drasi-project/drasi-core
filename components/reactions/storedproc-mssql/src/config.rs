@@ -14,6 +14,7 @@
 
 //! Configuration for the MS SQL Server Stored Procedure reaction.
 
+use drasi_lib::identity::IdentityProvider;
 use drasi_lib::reactions::common::{self, TemplateRouting};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -77,7 +78,7 @@ pub use common::{OperationType, QueryConfig, TemplateSpec};
 ///     ..Default::default()
 /// };
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MsSqlStoredProcReactionConfig {
     /// Database hostname or IP address
     #[serde(default = "default_hostname")]
@@ -87,10 +88,16 @@ pub struct MsSqlStoredProcReactionConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
 
-    /// Database user
+    /// Identity provider for authentication (takes precedence over user/password)
+    #[serde(skip)]
+    pub identity_provider: Option<Box<dyn IdentityProvider>>,
+
+    /// Database user (deprecated: use identity_provider instead)
+    #[serde(default)]
     pub user: String,
 
-    /// Database password
+    /// Database password (deprecated: use identity_provider instead)
+    #[serde(default)]
     pub password: String,
 
     /// Database name
@@ -117,11 +124,31 @@ pub struct MsSqlStoredProcReactionConfig {
     pub retry_attempts: u32,
 }
 
+// Manual Debug implementation to avoid trait object issues
+impl std::fmt::Debug for MsSqlStoredProcReactionConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MsSqlStoredProcReactionConfig")
+            .field("hostname", &self.hostname)
+            .field("port", &self.port)
+            .field("identity_provider", &self.identity_provider.is_some())
+            .field("user", &self.user)
+            .field("password", &"***")
+            .field("database", &self.database)
+            .field("ssl", &self.ssl)
+            .field("routes", &self.routes)
+            .field("default_template", &self.default_template)
+            .field("command_timeout_ms", &self.command_timeout_ms)
+            .field("retry_attempts", &self.retry_attempts)
+            .finish()
+    }
+}
+
 impl Default for MsSqlStoredProcReactionConfig {
     fn default() -> Self {
         Self {
             hostname: default_hostname(),
             port: None,
+            identity_provider: None,
             user: String::new(),
             password: String::new(),
             database: String::new(),

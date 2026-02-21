@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-reaction-sse"
-version = "0.2.2"
+version = "0.2.6"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "SSE reaction plugin for Drasi"
@@ -47,8 +47,10 @@ handlebars = "5.1"
 
 [dev-dependencies]
 reqwest = { version = "0.11", features = ["stream"] }
-drasi-source-application.workspace = true
+drasi-core.workspace = true
 eventsource-stream = "0.2"
 futures-util = "0.3"
 env_logger = "0.11"
+ordered-float = "3.0"
+chrono = "0.4"
 

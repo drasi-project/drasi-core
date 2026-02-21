@@ -168,6 +168,7 @@ async fn test_default_template_applies_to_all_queries() {
     let config = MySqlStoredProcReactionConfig {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
+        identity_provider: None,
         user: mysql_config.user.clone(),
         password: mysql_config.password.clone(),
         database: mysql_config.database.clone(),
@@ -284,6 +285,7 @@ async fn test_route_overrides_default_template() {
     let config = MySqlStoredProcReactionConfig {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
+        identity_provider: None,
         user: mysql_config.user.clone(),
         password: mysql_config.password.clone(),
         database: mysql_config.database.clone(),
@@ -362,6 +364,7 @@ async fn test_route_with_none_falls_back_to_default() {
     let config = MySqlStoredProcReactionConfig {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
+        identity_provider: None,
         user: mysql_config.user.clone(),
         password: mysql_config.password.clone(),
         database: mysql_config.database.clone(),
@@ -449,6 +452,7 @@ async fn test_multiple_queries_with_different_routes() {
     let config = MySqlStoredProcReactionConfig {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
+        identity_provider: None,
         user: mysql_config.user.clone(),
         password: mysql_config.password.clone(),
         database: mysql_config.database.clone(),
@@ -633,6 +637,7 @@ async fn test_executor_with_various_data_types() {
     let config = MySqlStoredProcReactionConfig {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
+        identity_provider: None,
         user: mysql_config.user.clone(),
         password: mysql_config.password.clone(),
         database: mysql_config.database.clone(),
@@ -745,6 +750,7 @@ async fn test_executor_with_string_numbers() {
     let config = MySqlStoredProcReactionConfig {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
+        identity_provider: None,
         user: mysql_config.user.clone(),
         password: mysql_config.password.clone(),
         database: mysql_config.database.clone(),
@@ -887,6 +893,7 @@ async fn test_parser_and_executor_with_nested_parameters() {
     let config = MySqlStoredProcReactionConfig {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
+        identity_provider: None,
         user: mysql_config.user.clone(),
         password: mysql_config.password.clone(),
         database: mysql_config.database.clone(),
@@ -1122,6 +1129,7 @@ async fn test_parser_with_deeply_nested_fields() {
     let config = MySqlStoredProcReactionConfig {
         hostname: mysql_config.host.clone(),
         port: Some(mysql_config.port),
+        identity_provider: None,
         user: mysql_config.user.clone(),
         password: mysql_config.password.clone(),
         database: mysql_config.database.clone(),
