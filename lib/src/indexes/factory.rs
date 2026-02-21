@@ -17,7 +17,7 @@ use crate::indexes::IndexBackendPlugin;
 use drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex;
 use drasi_core::in_memory_index::in_memory_future_queue::InMemoryFutureQueue;
 use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
-use drasi_core::interface::IndexSet;
+use drasi_core::interface::{IndexSet, NoOpSessionControl};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -189,6 +189,7 @@ impl IndexFactory {
             archive_index: element_index,
             result_index: Arc::new(result_index),
             future_queue: Arc::new(future_queue),
+            session_control: Arc::new(NoOpSessionControl),
         })
     }
 
