@@ -589,6 +589,41 @@ mod collect_aggregation {
     }
 }
 
+mod collect_list_aggregation {
+    use super::InMemoryQueryConfig;
+    use crate::use_cases::*;
+
+    #[tokio::test]
+    async fn collect_based_aggregation_test() {
+        let test_config = InMemoryQueryConfig::new();
+        collect_list_aggregation::collect_based_aggregation_test(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn collect_with_filter() {
+        let test_config = InMemoryQueryConfig::new();
+        collect_list_aggregation::collect_with_filter_test(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn collect_objects() {
+        let test_config = InMemoryQueryConfig::new();
+        collect_list_aggregation::collect_objects_test(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn collect_mixed_types() {
+        let test_config = InMemoryQueryConfig::new();
+        collect_list_aggregation::collect_mixed_types_test(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn multiple_collects() {
+        let test_config = InMemoryQueryConfig::new();
+        collect_list_aggregation::multiple_collects_test(&test_config).await;
+    }
+}
+
 mod source_update_upsert {
     use super::InMemoryQueryConfig;
     use crate::use_cases::*;
