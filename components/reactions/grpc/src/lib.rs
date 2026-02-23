@@ -31,6 +31,7 @@
 
 pub mod config;
 pub mod connection;
+pub mod descriptor;
 pub mod grpc;
 pub mod helpers;
 pub mod proto;

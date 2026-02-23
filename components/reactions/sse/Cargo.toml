@@ -44,6 +44,8 @@ uuid = { version = "1.0", features = ["v4"] }
 prost-types = "0.12"
 ordered-float = "3.0"
 handlebars = "5.1"
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
 
 [dev-dependencies]
 reqwest = { version = "0.11", features = ["stream"] }

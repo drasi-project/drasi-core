@@ -33,6 +33,7 @@
 
 mod adaptive_batcher;
 pub mod config;
+pub mod descriptor;
 pub mod http_adaptive;
 
 pub use config::HttpAdaptiveReactionConfig;

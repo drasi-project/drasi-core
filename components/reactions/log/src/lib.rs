@@ -37,6 +37,7 @@
 //! ```
 
 mod config;
+pub mod descriptor;
 mod log;
 
 #[cfg(test)]

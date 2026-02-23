@@ -29,6 +29,7 @@
 //! ```
 
 pub mod config;
+pub mod descriptor;
 pub mod profiler;
 
 pub use config::ProfilerReactionConfig;

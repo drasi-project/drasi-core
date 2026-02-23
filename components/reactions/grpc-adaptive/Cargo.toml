@@ -44,5 +44,8 @@ uuid = { version = "1.0", features = ["v4"] }
 prost-types = "0.12"
 ordered-float = "3.0"
 
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
+
 [build-dependencies]
 tonic-build = "0.11"

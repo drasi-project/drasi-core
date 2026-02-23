@@ -44,6 +44,8 @@ regex = "1.10"
 log = "0.4"
 anyhow = "1.0"
 chrono = "0.4"
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

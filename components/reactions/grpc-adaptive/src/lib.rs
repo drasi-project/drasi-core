@@ -30,6 +30,7 @@
 
 mod adaptive_batcher;
 pub mod config;
+pub mod descriptor;
 pub mod grpc_adaptive;
 
 pub use config::GrpcAdaptiveReactionConfig;

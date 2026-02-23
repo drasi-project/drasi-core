@@ -43,6 +43,7 @@
 //! ```
 
 pub mod config;
+pub mod descriptor;
 pub mod http;
 
 pub use config::{CallSpec, HttpReactionConfig, QueryConfig};

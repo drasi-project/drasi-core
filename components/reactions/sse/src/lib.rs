@@ -31,6 +31,7 @@
 use std::collections::HashMap;
 
 pub mod config;
+pub mod descriptor;
 pub mod sse;
 
 pub use config::{QueryConfig, SseExtension, SseReactionConfig, TemplateSpec};

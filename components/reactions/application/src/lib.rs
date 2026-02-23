@@ -34,6 +34,7 @@
 
 pub mod application;
 pub mod config;
+pub mod descriptor;
 pub mod subscription;
 
 pub use application::ApplicationReaction;

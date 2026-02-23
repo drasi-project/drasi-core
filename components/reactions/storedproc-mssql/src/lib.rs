@@ -43,6 +43,7 @@
 //! ```
 
 pub mod config;
+pub mod descriptor;
 pub mod executor;
 pub mod parser;
 pub mod reaction;
