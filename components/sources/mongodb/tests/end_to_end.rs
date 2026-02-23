@@ -158,11 +158,9 @@ async fn test_end_to_end_basic_pipeline() -> Result<()> {
     let collection = db.collection::<Document>(collection_name);
 
     // 2. Create Source
-    #[allow(deprecated)]
     let config = MongoSourceConfig {
         connection_string: connection_string.clone(),
         database: db_name.to_string(),
-        collection: None,
         collections: vec![collection_name.to_string()],
         pipeline: None,
         username: None,
@@ -284,11 +282,9 @@ async fn test_end_to_end_resume_persistence() -> Result<()> {
     let collection = db.collection::<Document>(collection_name);
 
     // 2. Create Source
-    #[allow(deprecated)]
     let config = MongoSourceConfig {
         connection_string: connection_string.clone(),
         database: db_name.to_string(),
-        collection: None,
         collections: vec![collection_name.to_string()],
         pipeline: None,
         username: None,
@@ -337,11 +333,9 @@ async fn test_end_to_end_resume_persistence() -> Result<()> {
 
     // 8. Recreate and restart
     println!("Restarting DrasiLib...");
-    #[allow(deprecated)]
     let config2 = MongoSourceConfig {
         connection_string: connection_string.clone(),
         database: db_name.to_string(),
-        collection: None,
         collections: vec![collection_name.to_string()],
         pipeline: None,
         username: None,
@@ -416,7 +410,6 @@ async fn test_end_to_end_multi_collection() -> Result<()> {
     let config = MongoSourceConfig {
         connection_string: connection_string.clone(),
         database: db_name.to_string(),
-        collection: None,
         collections: vec!["col1".to_string(), "col2".to_string()],
         pipeline: None,
         username: None,
@@ -525,11 +518,9 @@ async fn test_end_to_end_authentication() -> Result<()> {
     }, None).await?;
 
     // 2. Create Source with auth
-    #[allow(deprecated)]
     let config = MongoSourceConfig {
         connection_string: connection_string_no_auth.clone(),
         database: db_name.to_string(),
-        collection: None,
         collections: vec![collection_name.to_string()],
         pipeline: None,
         username: Some("drasi".to_string()),

@@ -103,8 +103,7 @@ async fn test_mongo_source_integration() -> Result<()> {
     let config = MongoSourceConfig {
         connection_string: connection_string.clone(),
         database: db_name.to_string(),
-        collection: Some(collection_name.to_string()),
-        collections: vec![],
+        collections: vec![collection_name.to_string()],
         pipeline: None,
         username: None,
         password: None,
@@ -358,8 +357,7 @@ async fn test_mongo_source_with_auth() -> Result<()> {
     let config_fail = MongoSourceConfig {
         connection_string: connection_string_no_auth.clone(),
         database: db_name.to_string(),
-        collection: Some(collection_name.to_string()),
-        collections: vec![],
+        collections: vec![collection_name.to_string()],
         pipeline: None,
         username: None,
         password: None,
@@ -381,8 +379,7 @@ async fn test_mongo_source_with_auth() -> Result<()> {
     let config_success = MongoSourceConfig {
         connection_string: connection_string_no_auth.clone(),
         database: db_name.to_string(),
-        collection: Some(collection_name.to_string()),
-        collections: vec![],
+        collections: vec![collection_name.to_string()],
         pipeline: None,
         username: Some("drasi".to_string()),
         password: Some("drasi_password".to_string()),
@@ -471,7 +468,6 @@ async fn test_mongo_source_multi_collection() -> Result<()> {
     let config = MongoSourceConfig {
         connection_string: connection_string.clone(),
         database: db_name.to_string(),
-        collection: None,
         collections: vec!["col1".to_string(), "col2".to_string()],
         pipeline: None,
         username: None,

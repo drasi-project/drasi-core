@@ -179,11 +179,9 @@ pub struct MongoSourceBuilder {
 
 impl MongoSourceBuilder {
     pub fn new(id: impl Into<String>) -> Self {
-        #[allow(deprecated)]
         let config = MongoSourceConfig {
             connection_string: String::new(),
             database: String::new(),
-            collection: None,
             collections: Vec::new(),
             pipeline: None,
             username: None,
@@ -205,13 +203,6 @@ impl MongoSourceBuilder {
         self
     }
 
-    /// DEPRECATED: Use `with_collections(vec![col])` instead.
-    /// This method will be removed in a future version.
-    #[deprecated(since = "0.2.0", note = "use `with_collections(vec![col])` instead")]
-    pub fn with_collection(self, col: impl Into<String>) -> Self {
-        self.with_collections(vec![col.into()])
-    }
-    
     pub fn with_collections(mut self, cols: Vec<String>) -> Self {
         self.config.collections = cols;
         self
