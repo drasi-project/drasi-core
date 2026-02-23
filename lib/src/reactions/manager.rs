@@ -131,6 +131,19 @@ impl ReactionManager {
         }
 
         info!("Added reaction: {reaction_id}");
+
+        // Emit Added event for introspection
+        let _ = self
+            .event_tx
+            .send(ComponentEvent {
+                component_id: reaction_id,
+                component_type: ComponentType::Reaction,
+                status: ComponentStatus::Added,
+                timestamp: chrono::Utc::now(),
+                message: Some("Reaction added".to_string()),
+            })
+            .await;
+
         Ok(())
     }
 
@@ -262,6 +275,18 @@ impl ReactionManager {
             let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Reaction, &id);
             self.log_registry.remove_component_by_key(&log_key).await;
             info!("Deleted reaction: {id}");
+
+            // Emit Removed event for introspection
+            let _ = self
+                .event_tx
+                .send(ComponentEvent {
+                    component_id: id,
+                    component_type: ComponentType::Reaction,
+                    status: ComponentStatus::Removed,
+                    timestamp: chrono::Utc::now(),
+                    message: Some("Reaction removed".to_string()),
+                })
+                .await;
 
             Ok(())
         } else {

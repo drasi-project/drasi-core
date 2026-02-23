@@ -295,6 +295,29 @@ impl DrasiLibBuilder {
         // Initialize the server
         core.initialize().await?;
 
+        // Register the introspection source before user sources.
+        // This built-in source models Drasi's component state as a graph
+        // so queries can reactively observe topology and lifecycle changes.
+        {
+            use crate::sources::introspection::IntrospectionSource;
+            let introspection = IntrospectionSource::new(
+                core.component_event_broadcast_tx.clone(),
+                core.config.id.clone(),
+                core.source_manager.clone(),
+                core.query_manager.clone(),
+                core.reaction_manager.clone(),
+            ).map_err(|e| {
+                DrasiError::provisioning(format!(
+                    "Failed to create introspection source: {e}"
+                ))
+            })?;
+            core.source_manager.add_source(introspection).await.map_err(|e| {
+                DrasiError::provisioning(format!(
+                    "Failed to register introspection source: {e}"
+                ))
+            })?;
+        }
+
         // Inject pre-built source instances
         for source in self.source_instances {
             let source_id = source.id().to_string();

@@ -165,6 +165,8 @@ pub struct DrasiLib {
     pub(crate) middleware_registry: Arc<MiddlewareTypeRegistry>,
     // Component log registry for live log streaming
     pub(crate) log_registry: Arc<ComponentLogRegistry>,
+    // Broadcast sender for component events (used by introspection source)
+    pub(crate) component_event_broadcast_tx: ComponentEventBroadcastSender,
 }
 
 impl Clone for DrasiLib {
@@ -180,6 +182,7 @@ impl Clone for DrasiLib {
             lifecycle: Arc::clone(&self.lifecycle),
             middleware_registry: Arc::clone(&self.middleware_registry),
             log_registry: Arc::clone(&self.log_registry),
+            component_event_broadcast_tx: self.component_event_broadcast_tx.clone(),
         }
     }
 }
@@ -196,6 +199,15 @@ impl DrasiLib {
     /// and provides a single place to document this pattern.
     pub(crate) fn as_arc(&self) -> Arc<Self> {
         Arc::new(self.clone())
+    }
+
+    /// Subscribe to all component events (status changes, additions, removals).
+    ///
+    /// Returns a broadcast receiver that gets a copy of every `ComponentEvent` across
+    /// all sources, queries, and reactions. Used by the introspection source to
+    /// detect component lifecycle changes in real-time.
+    pub fn subscribe_all_component_events(&self) -> ComponentEventBroadcastReceiver {
+        self.component_event_broadcast_tx.subscribe()
     }
 
     /// Internal constructor - creates uninitialized server
@@ -281,6 +293,7 @@ impl DrasiLib {
             query_manager.clone(),
             reaction_manager.clone(),
             Some(receivers),
+            Some(channels.component_event_broadcast_tx.clone()),
         )));
 
         Self {
@@ -294,6 +307,7 @@ impl DrasiLib {
             lifecycle,
             middleware_registry,
             log_registry,
+            component_event_broadcast_tx: channels.component_event_broadcast_tx,
         }
     }
 

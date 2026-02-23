@@ -164,6 +164,10 @@ pub enum ComponentStatus {
     Stopped,
     Reconfiguring,
     Error,
+    /// Component was added to the system
+    Added,
+    /// Component was removed from the system
+    Removed,
 }
 
 #[derive(Debug, Clone)]
@@ -427,6 +431,8 @@ pub enum ControlMessage {
 
 pub type ComponentEventReceiver = mpsc::Receiver<ComponentEvent>;
 pub type ComponentEventSender = mpsc::Sender<ComponentEvent>;
+pub type ComponentEventBroadcastSender = broadcast::Sender<ComponentEvent>;
+pub type ComponentEventBroadcastReceiver = broadcast::Receiver<ComponentEvent>;
 pub type ControlMessageReceiver = mpsc::Receiver<ControlMessage>;
 pub type ControlMessageSender = mpsc::Sender<ControlMessage>;
 
@@ -486,6 +492,7 @@ pub type ControlSignalSender = mpsc::Sender<ControlSignalWrapper>;
 
 pub struct EventChannels {
     pub component_event_tx: ComponentEventSender,
+    pub component_event_broadcast_tx: ComponentEventBroadcastSender,
     pub _control_tx: ControlMessageSender,
     pub control_signal_tx: ControlSignalSender,
 }
@@ -499,11 +506,13 @@ pub struct EventReceivers {
 impl EventChannels {
     pub fn new() -> (Self, EventReceivers) {
         let (component_event_tx, component_event_rx) = mpsc::channel(1000);
+        let (component_event_broadcast_tx, _) = broadcast::channel(1000);
         let (control_tx, control_rx) = mpsc::channel(100);
         let (control_signal_tx, control_signal_rx) = mpsc::channel(100);
 
         let channels = Self {
             component_event_tx,
+            component_event_broadcast_tx,
             _control_tx: control_tx,
             control_signal_tx,
         };
@@ -515,6 +524,12 @@ impl EventChannels {
         };
 
         (channels, receivers)
+    }
+
+    /// Subscribe to all component events (status changes, additions, removals).
+    /// Returns a broadcast receiver that gets a copy of every ComponentEvent.
+    pub fn subscribe_all_component_events(&self) -> ComponentEventBroadcastReceiver {
+        self.component_event_broadcast_tx.subscribe()
     }
 }
 

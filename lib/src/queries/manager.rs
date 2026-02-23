@@ -1284,6 +1284,18 @@ impl QueryManager {
 
         info!("Added query: {} with bootstrap support", config.id);
 
+        // Emit Added event for introspection
+        let _ = self
+            .event_tx
+            .send(ComponentEvent {
+                component_id: config.id.clone(),
+                component_type: ComponentType::Query,
+                status: ComponentStatus::Added,
+                timestamp: chrono::Utc::now(),
+                message: Some("Query added".to_string()),
+            })
+            .await;
+
         // Note: Auto-start is handled by the caller (server.add_query)
         // which has access to the data router for subscriptions
         if should_auto_start {
@@ -1463,6 +1475,18 @@ impl QueryManager {
             let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Query, &id);
             self.log_registry.remove_component_by_key(&log_key).await;
             info!("Deleted query: {id}");
+
+            // Emit Removed event for introspection
+            let _ = self
+                .event_tx
+                .send(ComponentEvent {
+                    component_id: id,
+                    component_type: ComponentType::Query,
+                    status: ComponentStatus::Removed,
+                    timestamp: chrono::Utc::now(),
+                    message: Some("Query removed".to_string()),
+                })
+                .await;
 
             Ok(())
         } else {

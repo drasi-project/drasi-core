@@ -161,6 +161,19 @@ impl SourceManager {
         }
 
         info!("Added source: {source_id}");
+
+        // Emit Added event for introspection
+        let _ = self
+            .event_tx
+            .send(ComponentEvent {
+                component_id: source_id,
+                component_type: ComponentType::Source,
+                status: ComponentStatus::Added,
+                timestamp: chrono::Utc::now(),
+                message: Some("Source added".to_string()),
+            })
+            .await;
+
         Ok(())
     }
 
@@ -302,6 +315,18 @@ impl SourceManager {
             let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Source, &id);
             self.log_registry.remove_component_by_key(&log_key).await;
             info!("Deleted source: {id}");
+
+            // Emit Removed event for introspection
+            let _ = self
+                .event_tx
+                .send(ComponentEvent {
+                    component_id: id,
+                    component_type: ComponentType::Source,
+                    status: ComponentStatus::Removed,
+                    timestamp: chrono::Utc::now(),
+                    message: Some("Source removed".to_string()),
+                })
+                .await;
 
             Ok(())
         } else {

@@ -185,6 +185,10 @@ mod manager_tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while let Some(event) = event_rx.recv().await {
                 if event.component_id == "test-query" {
+                    // Skip Added events emitted by add_query/add_source
+                    if matches!(event.status, ComponentStatus::Added) {
+                        continue;
+                    }
                     assert!(
                         matches!(event.status, ComponentStatus::Starting)
                             || matches!(event.status, ComponentStatus::Running)
@@ -343,6 +347,10 @@ mod manager_tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while let Some(event) = event_rx.recv().await {
                 if event.component_id == "test-gql-query" {
+                    // Skip Added events emitted by add_query/add_source
+                    if matches!(event.status, ComponentStatus::Added) {
+                        continue;
+                    }
                     assert!(
                         matches!(event.status, ComponentStatus::Starting)
                             || matches!(event.status, ComponentStatus::Running)

@@ -16,7 +16,9 @@ use anyhow::Result;
 use log::info;
 use std::sync::Arc;
 
-use crate::channels::{ComponentStatus, ComponentType, EventReceivers};
+use crate::channels::{
+    ComponentEventBroadcastSender, ComponentStatus, ComponentType, EventReceivers,
+};
 use crate::config::RuntimeConfig;
 use crate::queries::QueryManager;
 use crate::reactions::ReactionManager;
@@ -36,6 +38,8 @@ pub(crate) struct LifecycleManager {
     reaction_manager: Arc<ReactionManager>,
     // Event receivers - taken and consumed during initialization
     event_receivers: Option<EventReceivers>,
+    // Broadcast sender for introspection — forwards all component events
+    component_event_broadcast_tx: Option<ComponentEventBroadcastSender>,
 }
 
 impl LifecycleManager {
@@ -46,6 +50,7 @@ impl LifecycleManager {
         query_manager: Arc<QueryManager>,
         reaction_manager: Arc<ReactionManager>,
         event_receivers: Option<EventReceivers>,
+        component_event_broadcast_tx: Option<ComponentEventBroadcastSender>,
     ) -> Self {
         Self {
             config,
@@ -53,6 +58,7 @@ impl LifecycleManager {
             query_manager,
             reaction_manager,
             event_receivers,
+            component_event_broadcast_tx,
         }
     }
 
@@ -83,6 +89,7 @@ impl LifecycleManager {
             let source_manager = self.source_manager.clone();
             let query_manager = self.query_manager.clone();
             let reaction_manager = self.reaction_manager.clone();
+            let broadcast_tx = self.component_event_broadcast_tx.take();
 
             // Start component event processor
             let component_rx = receivers.component_event_rx;
@@ -96,6 +103,11 @@ impl LifecycleManager {
                         event.status,
                         event.message.clone().unwrap_or_default()
                     );
+
+                    // Forward to introspection broadcast (ignore if no subscribers)
+                    if let Some(ref tx) = broadcast_tx {
+                        let _ = tx.send(event.clone());
+                    }
 
                     // Record the event in the appropriate manager's history
                     match event.component_type {
