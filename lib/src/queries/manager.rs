@@ -36,8 +36,8 @@ use drasi_query_gql::GQLParser;
 
 use crate::channels::*;
 use crate::component_graph::{
-    ComponentGraph, ComponentKind, ComponentNode, ComponentStatusHandle, ComponentUpdate,
-    ComponentUpdateSender, RelationshipKind,
+    ComponentGraph, ComponentKind, ComponentNode, ComponentUpdate, ComponentUpdateSender,
+    RelationshipKind,
 };
 use crate::config::SourceSubscriptionSettings;
 use crate::config::{QueryConfig, QueryLanguage, QueryRuntime};
@@ -176,15 +176,13 @@ impl DrasiQuery {
         source_manager: Arc<SourceManager>,
         index_factory: Arc<crate::indexes::IndexFactory>,
         middleware_registry: Arc<MiddlewareTypeRegistry>,
-        update_tx: ComponentUpdateSender,
     ) -> Result<Self> {
         // Create priority queue with configured capacity (fallback to 10000 if not set)
         let priority_capacity = config.priority_queue_capacity.unwrap_or(10000);
         let priority_queue = PriorityQueue::new(priority_capacity);
 
         // Create QueryBase for common functionality
-        let mut base = QueryBase::new(config).context("Failed to create QueryBase")?;
-        base.status_handle = ComponentStatusHandle::new_wired(&base.config.id, update_tx);
+        let base = QueryBase::new(config).context("Failed to create QueryBase")?;
 
         Ok(Self {
             instance_id: instance_id.into(),
@@ -200,6 +198,14 @@ impl DrasiQuery {
             middleware_registry,
             future_queue_source: Arc::new(RwLock::new(None)),
         })
+    }
+
+    /// Initialize the query with runtime context.
+    ///
+    /// Wires the status handle to the component graph, following the same
+    /// pattern as Source and Reaction initialization.
+    pub async fn initialize(&self, context: crate::context::QueryRuntimeContext) {
+        self.base.initialize(context).await;
     }
 
     pub async fn get_current_results(&self) -> Vec<serde_json::Value> {
@@ -1268,7 +1274,7 @@ impl QueryManager {
         }
         // Graph emits ComponentEvent(Added) automatically
 
-        // Create the query instance (with update channel for status event routing)
+        // Create the query instance
         let update_tx = {
             let graph = self.graph.read().await;
             graph.update_sender()
@@ -1279,8 +1285,12 @@ impl QueryManager {
             self.source_manager.clone(),
             self.index_factory.clone(),
             self.middleware_registry.clone(),
-            update_tx,
         )?;
+
+        // Wire status handle to graph via context (same pattern as Source/Reaction)
+        let context =
+            crate::context::QueryRuntimeContext::new(&self.instance_id, &config.id, update_tx);
+        query.initialize(context).await;
 
         let query: Arc<dyn Query> = Arc::new(query);
 
@@ -1315,11 +1325,14 @@ impl QueryManager {
             is_operation_valid(&status, &Operation::Start).map_err(|e| anyhow::anyhow!(e))?;
 
             // Route transitional state through the graph update loop
-            let _ = self.update_tx.send(ComponentUpdate::Status {
-                component_id: id.clone(),
-                status: ComponentStatus::Starting,
-                message: Some("Starting query".to_string()),
-            }).await;
+            let _ = self
+                .update_tx
+                .send(ComponentUpdate::Status {
+                    component_id: id.clone(),
+                    status: ComponentStatus::Starting,
+                    message: Some("Starting query".to_string()),
+                })
+                .await;
 
             query.start().await?;
         } else {
@@ -1340,11 +1353,14 @@ impl QueryManager {
             is_operation_valid(&status, &Operation::Stop).map_err(|e| anyhow::anyhow!(e))?;
 
             // Route transitional state through the graph update loop
-            let _ = self.update_tx.send(ComponentUpdate::Status {
-                component_id: id.clone(),
-                status: ComponentStatus::Stopping,
-                message: Some("Stopping query".to_string()),
-            }).await;
+            let _ = self
+                .update_tx
+                .send(ComponentUpdate::Status {
+                    component_id: id.clone(),
+                    status: ComponentStatus::Stopping,
+                    message: Some("Stopping query".to_string()),
+                })
+                .await;
 
             query.stop().await?;
         } else {

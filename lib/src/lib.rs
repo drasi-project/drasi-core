@@ -156,7 +156,7 @@ pub use state_store::{
 };
 
 /// Runtime context types for plugin initialization
-pub use context::{ReactionRuntimeContext, SourceRuntimeContext};
+pub use context::{QueryRuntimeContext, ReactionRuntimeContext, SourceRuntimeContext};
 
 pub use reactions::{ReactionBase, ReactionBaseParams};
 /// Base implementations for source and reaction plugins

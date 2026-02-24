@@ -210,11 +210,14 @@ impl SourceManager {
             is_operation_valid(&status, &Operation::Start).map_err(|e| anyhow::anyhow!(e))?;
 
             // Route transitional state through the graph update loop
-            let _ = self.update_tx.send(ComponentUpdate::Status {
-                component_id: id.clone(),
-                status: ComponentStatus::Starting,
-                message: Some("Starting source".to_string()),
-            }).await;
+            let _ = self
+                .update_tx
+                .send(ComponentUpdate::Status {
+                    component_id: id.clone(),
+                    status: ComponentStatus::Starting,
+                    message: Some("Starting source".to_string()),
+                })
+                .await;
 
             source.start().await?;
         } else {
@@ -235,11 +238,14 @@ impl SourceManager {
             is_operation_valid(&status, &Operation::Stop).map_err(|e| anyhow::anyhow!(e))?;
 
             // Route transitional state through the graph update loop
-            let _ = self.update_tx.send(ComponentUpdate::Status {
-                component_id: id.clone(),
-                status: ComponentStatus::Stopping,
-                message: Some("Stopping source".to_string()),
-            }).await;
+            let _ = self
+                .update_tx
+                .send(ComponentUpdate::Status {
+                    component_id: id.clone(),
+                    status: ComponentStatus::Stopping,
+                    message: Some("Stopping source".to_string()),
+                })
+                .await;
 
             source.stop().await?;
         } else {
@@ -399,11 +405,14 @@ impl SourceManager {
             }
 
             // Route transitional state through the graph update loop
-            let _ = self.update_tx.send(ComponentUpdate::Status {
-                component_id: id.clone(),
-                status: ComponentStatus::Reconfiguring,
-                message: Some("Reconfiguring source".to_string()),
-            }).await;
+            let _ = self
+                .update_tx
+                .send(ComponentUpdate::Status {
+                    component_id: id.clone(),
+                    status: ComponentStatus::Reconfiguring,
+                    message: Some("Reconfiguring source".to_string()),
+                })
+                .await;
 
             // If running or starting, stop first then validate
             if was_running {

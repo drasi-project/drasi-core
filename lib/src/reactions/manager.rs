@@ -192,11 +192,14 @@ impl ReactionManager {
             is_operation_valid(&status, &Operation::Start).map_err(|e| anyhow::anyhow!(e))?;
 
             // Route transitional state through the graph update loop
-            let _ = self.update_tx.send(ComponentUpdate::Status {
-                component_id: id.clone(),
-                status: ComponentStatus::Starting,
-                message: Some("Starting reaction".to_string()),
-            }).await;
+            let _ = self
+                .update_tx
+                .send(ComponentUpdate::Status {
+                    component_id: id.clone(),
+                    status: ComponentStatus::Starting,
+                    message: Some("Starting reaction".to_string()),
+                })
+                .await;
 
             reaction.start().await?;
         } else {
@@ -217,11 +220,14 @@ impl ReactionManager {
             is_operation_valid(&status, &Operation::Stop).map_err(|e| anyhow::anyhow!(e))?;
 
             // Route transitional state through the graph update loop
-            let _ = self.update_tx.send(ComponentUpdate::Status {
-                component_id: id.clone(),
-                status: ComponentStatus::Stopping,
-                message: Some("Stopping reaction".to_string()),
-            }).await;
+            let _ = self
+                .update_tx
+                .send(ComponentUpdate::Status {
+                    component_id: id.clone(),
+                    status: ComponentStatus::Stopping,
+                    message: Some("Stopping reaction".to_string()),
+                })
+                .await;
 
             reaction.stop().await?;
         } else {
@@ -368,11 +374,14 @@ impl ReactionManager {
             }
 
             // Route transitional state through the graph update loop
-            let _ = self.update_tx.send(ComponentUpdate::Status {
-                component_id: id.clone(),
-                status: ComponentStatus::Reconfiguring,
-                message: Some("Reconfiguring reaction".to_string()),
-            }).await;
+            let _ = self
+                .update_tx
+                .send(ComponentUpdate::Status {
+                    component_id: id.clone(),
+                    status: ComponentStatus::Reconfiguring,
+                    message: Some("Reconfiguring reaction".to_string()),
+                })
+                .await;
 
             // If running or starting, stop first then validate
             if was_running {

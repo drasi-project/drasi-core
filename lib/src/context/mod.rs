@@ -275,6 +275,76 @@ impl std::fmt::Debug for ReactionRuntimeContext {
     }
 }
 
+/// Context provided to Query components during initialization.
+///
+/// Contains the DrasiLib instance ID and update channel for status reporting.
+/// Constructed by `QueryManager` when a query is added via `add_query()`.
+///
+/// Unlike sources and reactions, queries are internal to drasi-lib (not plugins),
+/// but still follow the same context-based initialization pattern for consistency.
+///
+/// # Clone
+///
+/// This struct implements `Clone` and uses `Arc` internally for the update channel,
+/// making cloning cheap (just reference count increments).
+#[derive(Clone)]
+pub struct QueryRuntimeContext {
+    /// DrasiLib instance ID (for log routing isolation)
+    pub instance_id: String,
+
+    /// Unique identifier for this query instance
+    pub query_id: String,
+
+    /// mpsc sender for fire-and-forget component status updates.
+    ///
+    /// Status changes sent here are applied to the component graph by the
+    /// graph update loop, which emits broadcast events to all subscribers.
+    pub update_tx: ComponentUpdateSender,
+}
+
+impl QueryRuntimeContext {
+    /// Create a new query runtime context.
+    ///
+    /// This is typically called by `QueryManager` when adding a query to DrasiLib.
+    ///
+    /// # Arguments
+    ///
+    /// * `instance_id` - The DrasiLib instance ID
+    /// * `query_id` - The unique identifier for this query
+    /// * `update_tx` - mpsc sender for status updates to the component graph
+    pub fn new(
+        instance_id: impl Into<String>,
+        query_id: impl Into<String>,
+        update_tx: ComponentUpdateSender,
+    ) -> Self {
+        Self {
+            instance_id: instance_id.into(),
+            query_id: query_id.into(),
+            update_tx,
+        }
+    }
+
+    /// Get the DrasiLib instance ID.
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    /// Get the query's unique identifier.
+    pub fn query_id(&self) -> &str {
+        &self.query_id
+    }
+}
+
+impl std::fmt::Debug for QueryRuntimeContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QueryRuntimeContext")
+            .field("instance_id", &self.instance_id)
+            .field("query_id", &self.query_id)
+            .field("update_tx", &"<ComponentUpdateSender>")
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,5 +477,33 @@ mod tests {
         let debug_str = format!("{context:?}");
         assert!(debug_str.contains("ReactionRuntimeContext"));
         assert!(debug_str.contains("test"));
+    }
+
+    #[tokio::test]
+    async fn test_query_runtime_context_creation() {
+        let update_tx = test_update_tx();
+        let context = QueryRuntimeContext::new("test-instance", "test-query", update_tx);
+
+        assert_eq!(context.instance_id(), "test-instance");
+        assert_eq!(context.query_id(), "test-query");
+    }
+
+    #[tokio::test]
+    async fn test_query_runtime_context_clone() {
+        let update_tx = test_update_tx();
+        let context = QueryRuntimeContext::new("test-instance", "test-query", update_tx);
+
+        let cloned = context.clone();
+        assert_eq!(cloned.query_id(), context.query_id());
+        assert_eq!(cloned.instance_id(), context.instance_id());
+    }
+
+    #[test]
+    fn test_query_runtime_context_debug() {
+        let update_tx = test_update_tx();
+        let context = QueryRuntimeContext::new("test-instance", "test-query", update_tx);
+        let debug_str = format!("{context:?}");
+        assert!(debug_str.contains("QueryRuntimeContext"));
+        assert!(debug_str.contains("test-query"));
     }
 }

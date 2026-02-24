@@ -54,6 +54,7 @@ use crate::channels::{
 };
 use crate::component_graph::ComponentStatusHandle;
 use crate::config::QueryConfig;
+use crate::context::QueryRuntimeContext;
 // Profiling will be used when implementing performance tracking
 use chrono::Utc;
 
@@ -61,8 +62,8 @@ use chrono::Utc;
 pub struct QueryBase {
     /// Query configuration
     pub config: QueryConfig,
-    /// Component status handle — always available, wired to graph by QueryManager.
-    pub status_handle: ComponentStatusHandle,
+    /// Component status handle — wired to graph via initialize().
+    status_handle: ComponentStatusHandle,
     /// Dispatchers for sending query results to subscribers
     pub dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>>>>,
     /// Handle to the query's main task
@@ -102,6 +103,15 @@ impl QueryBase {
     /// Returns a clone of the [`ComponentStatusHandle`] for use in spawned tasks.
     pub fn status_handle(&self) -> ComponentStatusHandle {
         self.status_handle.clone()
+    }
+
+    /// Initialize the query base with runtime context.
+    ///
+    /// Wires the status handle to the component graph update channel,
+    /// following the same pattern as `SourceBase::initialize()` and
+    /// `ReactionBase::initialize()`.
+    pub async fn initialize(&self, context: QueryRuntimeContext) {
+        self.status_handle.wire(context.update_tx).await;
     }
 
     /// Set the component's status — updates local state AND notifies the graph.
